@@ -1,0 +1,44 @@
+# World Model strategy configurations
+# Each strategy defines how the world model is trained and used
+
+none:
+  trains_wm: false
+  lambda_wm: 0.0
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "No world model — DexPBT baseline without WM"
+
+aux_low:
+  trains_wm: true
+  lambda_wm: 0.01
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "Low auxiliary WM loss — pretrain dynamics model"
+
+aux_mid:
+  trains_wm: true
+  lambda_wm: 0.05
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "Medium auxiliary WM loss — better dynamics model"
+
+value_imag_h1:
+  trains_wm: true
+  lambda_wm: 0.05
+  use_value_imag: true
+  imag_horizon: 1
+  uncertainty_gate: false
+  uncertainty_gate_ratio: 0.5
+  description: "Value imagination with horizon=1 — aux_value_head on PPO shared encoder"
+
+value_imag_h3:
+  trains_wm: true
+  lambda_wm: 0.05
+  use_value_imag: true
+  imag_horizon: 3
+  uncertainty_gate: true
+  uncertainty_gate_ratio: 0.5
+  description: "Value imagination with horizon=3 — aux_value_head on PPO shared encoder"
