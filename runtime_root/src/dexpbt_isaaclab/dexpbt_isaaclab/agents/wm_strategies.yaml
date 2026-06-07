@@ -42,3 +42,41 @@ value_imag_h3:
   uncertainty_gate: true
   uncertainty_gate_ratio: 0.5
   description: "Value imagination with horizon=3 — aux_value_head on PPO shared encoder"
+
+# --- Sequence WM family (Phase A4) -----------------------------------------
+# These are auxiliary-only RSSM-lite / Transformer-lite world models trained
+# by SeqWMTrainer (not the legacy WMTrainer). The legacy keys here are kept
+# at trains_wm=false / lambda_wm=0.0 so the legacy trainer no-ops; SeqWMTrainer
+# reads its own --seq_wm_* CLI flags for hyperparameters.
+
+rssm_aux:
+  trains_wm: false
+  lambda_wm: 0.0
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "RSSM-lite: prediction auxiliary losses only (no value head). Sequence trainer."
+
+rssm_belief_value:
+  trains_wm: false
+  lambda_wm: 0.0
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "RSSM-lite: prediction auxiliary losses + V_seq(b_t) head trained against PPO returns. Sequence trainer."
+
+trans_aux:
+  trains_wm: false
+  lambda_wm: 0.0
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "Transformer-lite: prediction auxiliary losses only. Sequence trainer."
+
+trans_belief_value:
+  trains_wm: false
+  lambda_wm: 0.0
+  use_value_imag: false
+  imag_horizon: null
+  uncertainty_gate: false
+  description: "Transformer-lite: prediction auxiliary losses + V_seq(b_t) head. Sequence trainer."

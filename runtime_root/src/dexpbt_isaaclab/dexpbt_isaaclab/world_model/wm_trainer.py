@@ -27,7 +27,31 @@ from .wm_loss import WMLoss
 # Strategy definitions
 # ----------------------------------------------------------------------
 
-STRATEGIES = ["none", "aux_low", "aux_mid", "value_imag_h1", "value_imag_h3"]
+STRATEGIES = [
+    "none",
+    "aux_low",
+    "aux_mid",
+    "value_imag_h1",
+    "value_imag_h3",
+    # Phase A4: sequence WM family. legacy WMTrainer skips them (trains_wm=False);
+    # SeqWMTrainer (seq_wm_trainer.py) trains them via PPO ExperienceBuffer.
+    "rssm_aux",
+    "rssm_belief_value",
+    "trans_aux",
+    "trans_belief_value",
+]
+
+# Strategies whose training path is the SeqWMTrainer rather than the legacy
+# single-step WMTrainer. Imported by train.py / pbt_observer.py for dispatch.
+SEQUENCE_STRATEGIES: frozenset[str] = frozenset({
+    "rssm_aux",
+    "rssm_belief_value",
+    "trans_aux",
+    "trans_belief_value",
+})
+
+RSSM_FAMILY: frozenset[str] = frozenset({"rssm_aux", "rssm_belief_value"})
+TRANS_FAMILY: frozenset[str] = frozenset({"trans_aux", "trans_belief_value"})
 
 # Paper obs layout: 86 + 6 * num_keypoints (92 for regrasping, 110 for reorientation).
 _PAPER_OBS_BASE = 86
@@ -78,6 +102,14 @@ def get_strategy(name: str) -> WMStrategy:
         "aux_mid":      WMStrategy("aux_mid",      trains_wm=True,   lambda_wm=0.05,  use_value_imag=False),
         "value_imag_h1": WMStrategy("value_imag_h1", trains_wm=True,  lambda_wm=0.05,  use_value_imag=True, imag_horizon=1, uncertainty_gate=False, uncertainty_gate_ratio=0.5),
         "value_imag_h3": WMStrategy("value_imag_h3", trains_wm=True,  lambda_wm=0.05,  use_value_imag=True, imag_horizon=3, uncertainty_gate=True, uncertainty_gate_ratio=0.5),
+        # Sequence WM family (Phase A4): the legacy WMTrainer treats them as
+        # no-ops (trains_wm=False, lambda_wm=0); the SeqWMTrainer is what
+        # actually drives the loss. Keeping `name` consistent here is what
+        # lets fixed mode + bayesian pool dispatch through `--wm_strategy`.
+        "rssm_aux":           WMStrategy("rssm_aux",           trains_wm=False, lambda_wm=0.0, use_value_imag=False),
+        "rssm_belief_value":  WMStrategy("rssm_belief_value",  trains_wm=False, lambda_wm=0.0, use_value_imag=False),
+        "trans_aux":          WMStrategy("trans_aux",          trains_wm=False, lambda_wm=0.0, use_value_imag=False),
+        "trans_belief_value": WMStrategy("trans_belief_value", trains_wm=False, lambda_wm=0.0, use_value_imag=False),
     }
     if name in defaults:
         return defaults[name]

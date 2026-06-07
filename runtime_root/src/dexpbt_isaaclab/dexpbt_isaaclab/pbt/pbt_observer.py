@@ -389,8 +389,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Track C (2026-06-06): parse + validate the explicit strategy pool.
         # Accept either a list or a comma-separated string. None / empty
         # falls back to the canonical 5-strategy default.
+        # Phase A4 (2026-06-08): canonical pool widened to include the new
+        # sequence WM family. Ordering kept: legacy single-step strategies
+        # first, then RSSM, then Transformer.
         _canonical_pool = [
             "none", "aux_low", "aux_mid", "value_imag_h1", "value_imag_h3",
+            "rssm_aux", "rssm_belief_value",
+            "trans_aux", "trans_belief_value",
         ]
         if wm_strategy_pool is None or wm_strategy_pool == "":
             _pool = list(_canonical_pool)
