@@ -60,16 +60,19 @@ def _mlp(in_dim: int, hidden: int, out_dim: int, n_hidden: int = 1) -> nn.Sequen
 
 
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Mean of `value` weighted by `mask`. Robust to all-zero masks (returns 0).
+    """Element-wise mean of ``value`` weighted by ``mask``.
 
-    `value` may be (..., K); broadcasting is handled.
+    ``mask`` may have fewer trailing dimensions than ``value`` — those are
+    broadcast and counted in the denominator (so MSE on a (N, K) vector
+    target with a (N,) mask is scaled by N*K, NOT N). Robust to all-zero
+    masks: returns 0.
     """
     if mask.ndim < value.ndim:
-        # add trailing 1s so mask broadcasts.
         for _ in range(value.ndim - mask.ndim):
             mask = mask.unsqueeze(-1)
-    denom = mask.sum().clamp_min(torch.tensor(1.0, device=value.device))
-    return (value * mask).sum() / denom
+    expanded = mask.expand_as(value)
+    denom = expanded.sum().clamp_min(torch.tensor(1.0, device=value.device))
+    return (value * expanded).sum() / denom
 
 
 def _kl_diag_gauss(mu_q: torch.Tensor, std_q: torch.Tensor,

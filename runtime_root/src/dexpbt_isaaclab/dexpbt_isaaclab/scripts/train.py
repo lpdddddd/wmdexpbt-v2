@@ -969,11 +969,16 @@ def _patch_actor_train_for_seq_wm(
 ):
     """Wire SeqWMTrainer into the rl_games agent.
 
-    Patches:
-      1. agent.experience_buffer aux_tensor_dict (registers
-         aux_d_hat / aux_failure / aux_lifted / aux_success_cnt fields).
+    Patches (the experience buffer doesn't yet exist when this is called —
+    rl_games allocates it inside ``init_tensors()`` which runs at the top
+    of ``agent.train()``. We therefore wrap ``init_tensors`` to register
+    the aux fields right after the buffer is built):
+
+      1. agent.init_tensors → wraps to register aux_d_hat / aux_failure /
+         aux_lifted / aux_success_cnt fields on the freshly-created
+         experience_buffer.
       2. agent.play_steps_rnn → wraps to capture batch_dict (used to read
-         GAE returns + ensure aux fields are populated from the collector).
+         GAE returns) and reset_window() at rollout start.
       3. agent.train_epoch → wraps to call seq_wm_trainer.step() each PPO
          epoch using the just-collected (T, N) tensors and the captured
          batch_dict["returns"].
@@ -981,22 +986,32 @@ def _patch_actor_train_for_seq_wm(
     The legacy WMTrainer paths (model.get_aux_loss patch, _patch_actor_train_for_wm)
     are NOT applied for sequence strategies — see _WmEnabledRunner.run_train.
     """
-    # 1) Register aux fields on the buffer (idempotent; safe to call once).
-    register_seq_aux_fields(actor.experience_buffer)
+    # 1) Defer aux-field registration to right after init_tensors().
+    original_init_tensors = actor.init_tensors
+
+    def patched_init_tensors(*args, **kwargs):
+        original_init_tensors(*args, **kwargs)
+        register_seq_aux_fields(actor.experience_buffer)
+        # Re-bind play_steps_rnn here — init_tensors does not rebind it,
+        # but defensive: ensure our patched version stays installed even
+        # after any rl_games hooks reset it.
+        actor.play_steps_rnn = patched_play_steps_rnn
 
     # 2) Capture latest batch_dict from play_steps_rnn so train_epoch tail
-    #    can read GAE returns. Use a list-based one-element store to avoid
-    #    rebinding closure.
+    #    can read GAE returns.
     capture: dict = {"batch_dict": None}
+    # NOTE: we must read the live play_steps_rnn at first invocation because
+    # ContinuousA2CBase.play_steps_rnn is a method on the class; binding
+    # before init_tensors is fine.
     original_play_steps_rnn = actor.play_steps_rnn
 
     def patched_play_steps_rnn(*args, **kwargs):
-        # Reset the aux-window at the START of each PPO epoch's rollout.
         seq_aux_collector.reset_window()
         bd = original_play_steps_rnn(*args, **kwargs)
         capture["batch_dict"] = bd
         return bd
 
+    actor.init_tensors = patched_init_tensors
     actor.play_steps_rnn = patched_play_steps_rnn
 
     # 3) Patch train_epoch to (a) copy collector window into the buffer's

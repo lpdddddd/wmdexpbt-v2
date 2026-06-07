@@ -41,11 +41,13 @@ from .seq_wm_heads import PredictionHeads
 
 
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Element-wise mean over broadcast (mask, value); see rssm_lite version."""
     if mask.ndim < value.ndim:
         for _ in range(value.ndim - mask.ndim):
             mask = mask.unsqueeze(-1)
-    denom = mask.sum().clamp_min(torch.tensor(1.0, device=value.device))
-    return (value * mask).sum() / denom
+    expanded = mask.expand_as(value)
+    denom = expanded.sum().clamp_min(torch.tensor(1.0, device=value.device))
+    return (value * expanded).sum() / denom
 
 
 def _build_attn_mask(
