@@ -469,7 +469,13 @@ parser.add_argument("--test", action="store_true", default=False, help="Run in p
 parser.add_argument("--enable_wm", action="store_true", default=False,
                     help="Enable world model training.")
 parser.add_argument("--wm_strategy", type=str, default="none",
-                    choices=["none", "aux_low", "aux_mid", "value_imag_h1", "value_imag_h3"],
+                    choices=[
+                        "none", "aux_low", "aux_mid",
+                        "value_imag_h1", "value_imag_h3",
+                        # Phase A4: sequence WM family.
+                        "rssm_aux", "rssm_belief_value",
+                        "trans_aux", "trans_belief_value",
+                    ],
                     help="WM strategy for this policy.")
 parser.add_argument("--wm_checkpoint_path", type=str, default=None,
                     help="Optional source WM checkpoint path for warm start.")
@@ -619,10 +625,74 @@ parser.add_argument(
     default="none,aux_low,aux_mid,value_imag_h1,value_imag_h3",
     help="Comma-separated list of WM strategies the bayesian selector / "
     "CF runner are allowed to pick from. Must be a non-empty subset of "
-    "{none,aux_low,aux_mid,value_imag_h1,value_imag_h3}. Default keeps "
-    "all 5 strategies (legacy behaviour). Track C uses "
-    "`none,aux_mid,value_imag_h1`.",
+    "{none,aux_low,aux_mid,value_imag_h1,value_imag_h3,"
+    "rssm_aux,rssm_belief_value,trans_aux,trans_belief_value}. Default keeps "
+    "the legacy 5-strategy set; Track C used `none,aux_mid,value_imag_h1`; "
+    "Phase A4 sequence runs use e.g. "
+    "`none,aux_mid,rssm_belief_value,trans_belief_value`.",
 )
+# --- Phase A4: stage-aware Bayesian selector + sequence WM family ---
+parser.add_argument(
+    "--wm_selector_context",
+    type=str,
+    choices=["global", "stage"],
+    default="global",
+    help="Posterior context for Thompson sampling. `global` (default; "
+    "matches existing runs) uses one posterior over the entire training "
+    "history. `stage` partitions the posterior by stage "
+    "(recovery/early/acquisition/mastery) and falls back to global on a "
+    "per-strategy basis when the stage entry has fewer than min_stage_n "
+    "samples.",
+)
+parser.add_argument(
+    "--wm_selector_min_stage_n",
+    type=int, default=3,
+    help="Per-strategy threshold below which sample_stage falls back to "
+    "the global posterior for that strategy.",
+)
+parser.add_argument("--seq_wm_seq_len", type=int, default=16,
+                    help="Sequence length T for the SeqWM sampler. Must be <= "
+                    "PPO horizon_length (default 16). Drop to 8 to halve cost.")
+parser.add_argument("--seq_wm_seq_batch_size", type=int, default=1024,
+                    help="Per-update sequence batch size B.")
+parser.add_argument("--seq_wm_updates_per_ppo", type=int, default=1,
+                    help="Number of SeqWM gradient steps per PPO epoch.")
+parser.add_argument("--seq_wm_lr", type=float, default=1e-3,
+                    help="AdamW learning rate for SeqWM.")
+parser.add_argument("--seq_wm_grad_clip", type=float, default=100.0,
+                    help="Grad-norm clip for SeqWM optimizer step.")
+parser.add_argument("--seq_wm_lambda_total", type=float, default=0.05,
+                    help="Outer scale on the SeqWM total loss before backward.")
+parser.add_argument("--seq_wm_lambda_state", type=float, default=1.0,
+                    help="Per-term weight: state_delta MSE.")
+parser.add_argument("--seq_wm_lambda_reward", type=float, default=1.0,
+                    help="Per-term weight: reward MSE.")
+parser.add_argument("--seq_wm_lambda_done", type=float, default=0.2,
+                    help="Per-term weight: done BCE.")
+parser.add_argument("--seq_wm_lambda_success", type=float, default=1.0,
+                    help="Per-term weight: success BCE.")
+parser.add_argument("--seq_wm_lambda_task_error", type=float, default=1.0,
+                    help="Per-term weight: task_error_delta MSE.")
+parser.add_argument("--seq_wm_lambda_value", type=float, default=0.1,
+                    help="Per-term weight: V_seq(b_t) MSE for *_belief_value.")
+parser.add_argument(
+    "--seq_wm_value_detach_belief",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="If true, the SeqWM value head is trained on b_t.detach(), "
+    "decoupling its gradient from the SeqWM backbone. Default false.",
+)
+parser.add_argument("--seq_wm_beta_kl_start", type=float, default=0.05,
+                    help="RSSM KL coefficient at frame 0 (warmup start).")
+parser.add_argument("--seq_wm_beta_kl_end", type=float, default=0.20,
+                    help="RSSM KL coefficient after warmup.")
+parser.add_argument("--seq_wm_beta_kl_warmup_frames", type=int,
+                    default=200_000_000,
+                    help="Linear warmup duration for beta_kl.")
+parser.add_argument("--seq_wm_free_nats", type=float, default=1.0,
+                    help="RSSM free-nats floor on per-step KL.")
+parser.add_argument("--seq_wm_max_seq_len", type=int, default=32,
+                    help="Transformer-lite positional embedding capacity.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -662,6 +732,19 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 # register our envs so gym.make can find them
 import dexpbt_isaaclab  # noqa: F401
 from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
+# Phase A4: sequence WM (RSSM-lite, Transformer-lite) — kept import-light
+# so legacy strategies do not pay the cost.
+from dexpbt_isaaclab.world_model.wm_trainer import (
+    SEQUENCE_STRATEGIES, RSSM_FAMILY, TRANS_FAMILY,
+)
+from dexpbt_isaaclab.world_model.seq_wm_trainer import SeqWMConfig, SeqWMTrainer
+from dexpbt_isaaclab.world_model.seq_aux_collector import (
+    SeqAuxCollector, SeqAuxInterceptorEnv,
+)
+from dexpbt_isaaclab.world_model.wm_aux_buffer import register_seq_aux_fields
+from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
+from dexpbt_isaaclab.world_model.transformer_lite import TransformerLiteWorldModel
 
 
 # ----------------------------------------------------------------------
@@ -873,6 +956,150 @@ def _patch_actor_train_for_wm(actor, wm_trainer, wm_ckpt_manager, wm_strategy):
     actor.train_epoch = patched_train_epoch
 
 
+# ----------------------------------------------------------------------
+# Sequence WM Actor Training Patch (Phase A4)
+# ----------------------------------------------------------------------
+
+def _patch_actor_train_for_seq_wm(
+    actor,
+    seq_wm_trainer: SeqWMTrainer,
+    seq_aux_collector: SeqAuxCollector,
+    seq_wm_save_dir,
+    save_every_epochs: int = 50,
+):
+    """Wire SeqWMTrainer into the rl_games agent.
+
+    Patches:
+      1. agent.experience_buffer aux_tensor_dict (registers
+         aux_d_hat / aux_failure / aux_lifted / aux_success_cnt fields).
+      2. agent.play_steps_rnn → wraps to capture batch_dict (used to read
+         GAE returns + ensure aux fields are populated from the collector).
+      3. agent.train_epoch → wraps to call seq_wm_trainer.step() each PPO
+         epoch using the just-collected (T, N) tensors and the captured
+         batch_dict["returns"].
+
+    The legacy WMTrainer paths (model.get_aux_loss patch, _patch_actor_train_for_wm)
+    are NOT applied for sequence strategies — see _WmEnabledRunner.run_train.
+    """
+    # 1) Register aux fields on the buffer (idempotent; safe to call once).
+    register_seq_aux_fields(actor.experience_buffer)
+
+    # 2) Capture latest batch_dict from play_steps_rnn so train_epoch tail
+    #    can read GAE returns. Use a list-based one-element store to avoid
+    #    rebinding closure.
+    capture: dict = {"batch_dict": None}
+    original_play_steps_rnn = actor.play_steps_rnn
+
+    def patched_play_steps_rnn(*args, **kwargs):
+        # Reset the aux-window at the START of each PPO epoch's rollout.
+        seq_aux_collector.reset_window()
+        bd = original_play_steps_rnn(*args, **kwargs)
+        capture["batch_dict"] = bd
+        return bd
+
+    actor.play_steps_rnn = patched_play_steps_rnn
+
+    # 3) Patch train_epoch to (a) copy collector window into the buffer's
+    #    aux fields, (b) call SeqWMTrainer.step() with returns from
+    #    capture["batch_dict"], (c) periodically save a SeqWM checkpoint.
+    original_train_epoch = actor.train_epoch
+    seq_wm_trainer._epochs_since_save = 0
+
+    def patched_train_epoch(*args, **kwargs):
+        result = original_train_epoch(*args, **kwargs)
+        try:
+            full_aux = seq_aux_collector.full_window()
+            for name, tensor in full_aux.items():
+                store = actor.experience_buffer.tensor_dict.get(name)
+                if store is None:
+                    continue
+                store.copy_(tensor)
+
+            bd = capture["batch_dict"]
+            if bd is None:
+                return result
+            T = int(actor.horizon_length)
+            N = int(actor.num_actors * actor.num_agents)
+            returns_flat = bd.get("returns")
+            if returns_flat is None:
+                return result
+            # rl_games swap_and_flatten01: shape (T*N, value_size). Reshape
+            # back to (T, N) — value_size is 1 for our tasks.
+            value_size = (
+                returns_flat.shape[-1] if returns_flat.ndim == 2 else 1
+            )
+            try:
+                returns_full = returns_flat.view(N, T, value_size).transpose(0, 1).contiguous()
+            except Exception:
+                # Fall back: assume already (T, N, *) layout.
+                returns_full = returns_flat.view(T, N, value_size)
+
+            obs_full = actor.experience_buffer.tensor_dict["obses"]
+            last_obs = actor.obs["obs"] if isinstance(actor.obs, dict) else actor.obs
+            last_obs_t = (
+                last_obs if hasattr(last_obs, "shape")
+                else torch.zeros(N, obs_full.shape[-1], device=obs_full.device)
+            )
+
+            last_aux = seq_aux_collector.last_step()
+            last_d_hat = last_aux.get("aux_d_hat")
+            last_success_count = last_aux.get("aux_success_cnt")
+            if last_d_hat is not None:
+                last_d_hat = last_d_hat.squeeze(-1)
+            if last_success_count is not None:
+                last_success_count = last_success_count.squeeze(-1)
+
+            frames = int(getattr(actor, "frame", 0) or 0)
+            metrics = seq_wm_trainer.step(
+                experience_buffer=actor.experience_buffer,
+                frames=frames,
+                last_obs=last_obs_t,
+                returns_full=returns_full.squeeze(-1) if returns_full.shape[-1] == 1 else returns_full,
+                last_d_hat=last_d_hat,
+                last_success_count=last_success_count,
+            )
+
+            # TB logging.
+            tb_writer = getattr(actor, "writer", None) or getattr(actor, "tensorboard_writer", None)
+            if tb_writer is not None and metrics:
+                for k, v in metrics.items():
+                    if isinstance(v, (int, float)):
+                        prefix = (
+                            "wm_rssm/" if isinstance(seq_wm_trainer.model, RSSMLiteWorldModel)
+                            else ("wm_trans/" if isinstance(seq_wm_trainer.model, TransformerLiteWorldModel)
+                                  else "wm_seq/")
+                        )
+                        tag = (
+                            f"wm_seq/{k}" if k.startswith("loss_")
+                            else f"{prefix}{k}"
+                        )
+                        try:
+                            tb_writer.add_scalar(tag, float(v), frames)
+                        except Exception:
+                            pass
+
+            seq_wm_trainer._epochs_since_save += 1
+            if (seq_wm_save_dir is not None
+                    and seq_wm_trainer._epochs_since_save >= save_every_epochs):
+                seq_wm_trainer._epochs_since_save = 0
+                try:
+                    save_dir = Path(seq_wm_save_dir)
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    payload = seq_wm_trainer.state_dict()
+                    payload["frames"] = frames
+                    tmp = save_dir / "wm_seq_latest.pt.tmp"
+                    final = save_dir / "wm_seq_latest.pt"
+                    torch.save(payload, tmp)
+                    tmp.replace(final)
+                except Exception as exc:
+                    print(f"[SeqWM] checkpoint save failed: {exc}")
+        except Exception as exc:
+            print(f"[SeqWM] train_epoch tail failed: {exc}")
+        return result
+
+    actor.train_epoch = patched_train_epoch
+
+
 def _load_rl_checkpoint(checkpoint_path: str) -> dict | None:
     import torch
 
@@ -1011,11 +1238,19 @@ def _is_wm_strategy_compatible(src_strategy: str | None, dst_strategy: str) -> t
         return True, "same_strategy"
 
     compatible_pairs = {
+        # Legacy single-step family.
         ("aux_low", "value_imag_h1"),
         ("aux_mid", "value_imag_h1"),
         ("aux_low", "value_imag_h3"),
         ("aux_mid", "value_imag_h3"),
         ("value_imag_h1", "value_imag_h3"),
+        # Phase A4 sequence WM: within-family swaps OK; everything else
+        # forces a reset (the SeqWMTrainer's checkpoint schema differs
+        # from the legacy WMTrainer's single-step ensemble).
+        ("rssm_aux", "rssm_belief_value"),
+        ("rssm_belief_value", "rssm_aux"),
+        ("trans_aux", "trans_belief_value"),
+        ("trans_belief_value", "trans_aux"),
     }
     if (src, dst) in compatible_pairs:
         return True, "compatible_upgrade_path"
@@ -1146,7 +1381,9 @@ class _WmEnabledRunner(Runner):
 
     def __init__(self, observer, wm_trainer, wm_ckpt_manager, wm_strategy,
                  tensorboard_writer=None, cf_tracker=None, raw_env=None,
-                 cf_reset_epoch_counter: bool = False):
+                 cf_reset_epoch_counter: bool = False,
+                 seq_wm_trainer=None, seq_aux_collector=None,
+                 seq_wm_save_dir=None):
         super().__init__(observer)
         self.wm_trainer = wm_trainer
         self.wm_ckpt_manager = wm_ckpt_manager
@@ -1154,6 +1391,13 @@ class _WmEnabledRunner(Runner):
         self.tensorboard_writer = tensorboard_writer
         self.cf_tracker = cf_tracker
         self.raw_env = raw_env
+        # Phase A4: sequence WM (RSSM/Transformer) is wired in mutually
+        # exclusive to wm_trainer (legacy single-step). When seq_wm_trainer
+        # is provided, run_train uses _patch_actor_train_for_seq_wm and
+        # SKIPS _patch_model_get_aux_loss / _patch_actor_train_for_wm.
+        self.seq_wm_trainer = seq_wm_trainer
+        self.seq_aux_collector = seq_aux_collector
+        self.seq_wm_save_dir = seq_wm_save_dir
         # Patch 3 (rev 2, 2026-05-30): CF child needs to reset rl_games
         # `agent.frame` / `agent.epoch_num` / `last_mean_rewards` after
         # restoring the source checkpoint, otherwise the agent's recorded
@@ -1236,6 +1480,21 @@ class _WmEnabledRunner(Runner):
 
             # Monkey-patch agent.train() for WM dynamics training
             _patch_actor_train_for_wm(agent, wm_trainer, self.wm_ckpt_manager, self.wm_strategy)
+
+        # Phase A4: sequence WM path (mutually exclusive with legacy WMTrainer).
+        if self.seq_wm_trainer is not None:
+            _patch_actor_train_for_seq_wm(
+                agent,
+                self.seq_wm_trainer,
+                self.seq_aux_collector,
+                self.seq_wm_save_dir,
+            )
+            print(
+                f"[SeqWM] Connected to A2CAgent: strategy={self.wm_strategy}, "
+                f"backbone={type(self.seq_wm_trainer.model).__name__}, "
+                f"seq_len={self.seq_wm_trainer.cfg.seq_len}, "
+                f"seq_batch_size={self.seq_wm_trainer.cfg.seq_batch_size}"
+            )
 
         _patch_actor_train_for_cf_meta(agent, self.raw_env, self.cf_tracker)
 
@@ -1493,8 +1752,125 @@ def main():
     # ------------------------------------------------------------------
     wm_trainer = None
     wm_ckpt_manager = None
+    seq_wm_trainer = None
+    seq_aux_collector = None
+    seq_wm_save_dir = None
+    is_sequence_strategy = (
+        args_cli.enable_wm and args_cli.wm_strategy in SEQUENCE_STRATEGIES
+    )
 
-    if args_cli.enable_wm:
+    if is_sequence_strategy:
+        # ---------- Phase A4 sequence WM path ----------
+        # Resolve obs_dim / action_dim from the live env (paper-mode obs is 92
+        # for regrasping, 110 for reorientation; action_dim is 23 for KukaAllegro).
+        try:
+            obs_space = env.unwrapped.single_observation_space["policy"]
+            obs_dim = int(obs_space.shape[0])
+        except Exception:
+            obs_dim = 92
+        try:
+            action_space = env.unwrapped.single_action_space
+            action_dim = int(action_space.shape[0])
+        except Exception:
+            action_dim = 23
+
+        seq_cfg = SeqWMConfig(
+            seq_len=int(args_cli.seq_wm_seq_len),
+            seq_batch_size=int(args_cli.seq_wm_seq_batch_size),
+            updates_per_ppo_epoch=int(args_cli.seq_wm_updates_per_ppo),
+            lr=float(args_cli.seq_wm_lr),
+            grad_clip=float(args_cli.seq_wm_grad_clip),
+            lambda_total=float(args_cli.seq_wm_lambda_total),
+            lambda_state=float(args_cli.seq_wm_lambda_state),
+            lambda_reward=float(args_cli.seq_wm_lambda_reward),
+            lambda_done=float(args_cli.seq_wm_lambda_done),
+            lambda_success=float(args_cli.seq_wm_lambda_success),
+            lambda_task_error=float(args_cli.seq_wm_lambda_task_error),
+            lambda_value=float(args_cli.seq_wm_lambda_value),
+            value_detach_belief=bool(args_cli.seq_wm_value_detach_belief),
+            beta_kl_start=float(args_cli.seq_wm_beta_kl_start),
+            beta_kl_end=float(args_cli.seq_wm_beta_kl_end),
+            beta_kl_warmup_frames=int(args_cli.seq_wm_beta_kl_warmup_frames),
+            free_nats=float(args_cli.seq_wm_free_nats),
+        )
+        with_value = args_cli.wm_strategy in ("rssm_belief_value", "trans_belief_value")
+        if args_cli.wm_strategy in RSSM_FAMILY:
+            seq_model = RSSMLiteWorldModel(
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                free_nats=seq_cfg.free_nats,
+                with_value_head=with_value,
+            )
+        elif args_cli.wm_strategy in TRANS_FAMILY:
+            seq_model = TransformerLiteWorldModel(
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                max_seq_len=int(args_cli.seq_wm_max_seq_len),
+                with_value_head=with_value,
+            )
+        else:
+            raise ValueError(
+                f"unreachable: sequence strategy {args_cli.wm_strategy} not "
+                "in RSSM_FAMILY ∪ TRANS_FAMILY"
+            )
+
+        seq_wm_trainer = SeqWMTrainer(
+            model=seq_model,
+            cfg=seq_cfg,
+            device=rl_device,
+            strategy=args_cli.wm_strategy,
+        )
+
+        # Aux collector + env wrap (must happen BEFORE RlGamesVecEnvWrapper).
+        seq_aux_collector = SeqAuxCollector(
+            num_envs=env.unwrapped.num_envs,
+            horizon_length=int(agent_cfg["params"]["config"].get("horizon_length", 16)),
+            device=rl_device,
+        )
+
+        def _seq_env_attrs(e):
+            # Used by SeqAuxInterceptorEnv to read per-env env attributes
+            # (lifted_object, successes) that are not exposed via infos.
+            inner = getattr(e, "unwrapped", e)
+            d: dict = {}
+            for name in ("lifted_object", "successes"):
+                v = getattr(inner, name, None)
+                if v is not None:
+                    d[name] = v
+            return d
+
+        env = SeqAuxInterceptorEnv(env, seq_aux_collector,
+                                    env_attrs_provider=_seq_env_attrs)
+
+        # Path used by patched_train_epoch to dump wm_seq_latest.pt.
+        seq_wm_save_dir = Path(args_cli.workspace) / f"{args_cli.policy_idx:03d}" / "wm_seq_checkpoints"
+
+        # Optional warm-start from prior wm_seq_latest.pt (within-family only;
+        # cross-family load is a reset by --wm_load_mode contract).
+        wm_seq_ckpt_path = args_cli.wm_checkpoint_path or ""
+        if (wm_seq_ckpt_path
+                and args_cli.wm_load_mode != "reset"
+                and Path(wm_seq_ckpt_path).is_file()):
+            try:
+                payload = torch.load(wm_seq_ckpt_path, map_location=rl_device,
+                                      weights_only=False)
+                if "model_state_dict" in payload and payload.get("strategy") in (
+                        args_cli.wm_strategy,
+                ):
+                    seq_wm_trainer.load_state_dict(payload, strict=False)
+                    print(f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path}")
+            except Exception as exc:
+                print(f"[SeqWM] failed to warm-start from {wm_seq_ckpt_path}: {exc}")
+
+        print(
+            f"[SeqWM] enabled: strategy={args_cli.wm_strategy}, obs_dim={obs_dim}, "
+            f"action_dim={action_dim}, seq_len={seq_cfg.seq_len}, "
+            f"seq_batch_size={seq_cfg.seq_batch_size}, "
+            f"lambda_total={seq_cfg.lambda_total}, "
+            f"value_detach={seq_cfg.value_detach_belief}"
+        )
+
+    if args_cli.enable_wm and not is_sequence_strategy:
         from dexpbt_isaaclab.world_model import (
             WMConfig, WorldModel, WMBuffer, WMTrainer,
             get_strategy, WMDataCollector, WMInterceptorEnv,
@@ -1822,8 +2198,10 @@ def main():
 
     cf_tracker = _CfMetaTracker() if args_cli.status_output_path else None
 
-    # Use _WmEnabledRunner when WM is enabled (for proper A2CAgent integration)
-    if wm_trainer is not None:
+    # Use _WmEnabledRunner when EITHER legacy WM trainer OR sequence WM
+    # trainer is wired (Phase A4: sequence path uses _WmEnabledRunner with
+    # seq_wm_trainer so train_epoch / play_steps_rnn patches still apply).
+    if wm_trainer is not None or seq_wm_trainer is not None:
         tb_writer = getattr(observer, "writer", None)
         runner = _WmEnabledRunner(
             observer=observer,
@@ -1835,6 +2213,9 @@ def main():
             raw_env=raw_env,
             # Patch 3 (rev 2, 2026-05-30): only flips on for CF children.
             cf_reset_epoch_counter=args_cli.cf_reset_epoch_counter,
+            seq_wm_trainer=seq_wm_trainer,
+            seq_aux_collector=seq_aux_collector,
+            seq_wm_save_dir=seq_wm_save_dir,
         )
     else:
         runner = Runner(observer)
