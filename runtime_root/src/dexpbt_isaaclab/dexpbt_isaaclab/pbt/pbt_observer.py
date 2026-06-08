@@ -310,6 +310,22 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Patch P2-A (2026-06-01): single-shot shrink token per PBT window.
         pbt_single_shrink_per_window: bool = True,
         post_shrink_consolidation_env_frames: int = 100_000_000,
+        # Phase A4 P2 (2026-06-08): adaptive-fast curriculum (RSSM coupling=
+        # none fastcurr 800M). All defaults below are inert when
+        # curriculum_speed_mode='normal' (the default), so existing runs
+        # are bit-for-bit unchanged.
+        curriculum_speed_mode: str = "normal",
+        curriculum_fast_strong_mean: float = 30.0,
+        curriculum_fast_mid_mean: float = 20.0,
+        curriculum_fast_low_mean: float = 10.0,
+        curriculum_fast_retention_threshold: float = 0.8,
+        curriculum_fast_retention_window: int = 4,
+        curriculum_fast_shrink_strong: float = 0.90,
+        curriculum_fast_shrink_mid: float = 0.925,
+        curriculum_fast_shrink_low: float = 0.95,
+        curriculum_fast_consolidation_frames: int = 50_000_000,
+        curriculum_fast_recovery_consolidation_frames: int = 100_000_000,
+        curriculum_fast_target_tolerance_800m: float = 0.04,
         # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
         pbt_early_collapse_detect: bool = True,
         early_collapse_drop_ratio: float = 0.3,
@@ -569,6 +585,72 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.post_shrink_consolidation_env_frames = int(
             post_shrink_consolidation_env_frames
         )
+        # Phase A4 P2 (2026-06-08): adaptive-fast curriculum.
+        if curriculum_speed_mode not in ("normal", "adaptive_fast"):
+            raise RuntimeError(
+                f"Unknown curriculum_speed_mode={curriculum_speed_mode!r} "
+                f"(expected 'normal' | 'adaptive_fast')"
+            )
+        self.curriculum_speed_mode = str(curriculum_speed_mode)
+        self.curriculum_fast_strong_mean = float(curriculum_fast_strong_mean)
+        self.curriculum_fast_mid_mean = float(curriculum_fast_mid_mean)
+        self.curriculum_fast_low_mean = float(curriculum_fast_low_mean)
+        self.curriculum_fast_retention_threshold = float(
+            curriculum_fast_retention_threshold
+        )
+        self.curriculum_fast_retention_window = max(
+            1, int(curriculum_fast_retention_window)
+        )
+        self.curriculum_fast_shrink_strong = float(curriculum_fast_shrink_strong)
+        self.curriculum_fast_shrink_mid = float(curriculum_fast_shrink_mid)
+        self.curriculum_fast_shrink_low = float(curriculum_fast_shrink_low)
+        self.curriculum_fast_consolidation_frames = int(
+            curriculum_fast_consolidation_frames
+        )
+        self.curriculum_fast_recovery_consolidation_frames = int(
+            curriculum_fast_recovery_consolidation_frames
+        )
+        self.curriculum_fast_target_tolerance_800m = float(
+            curriculum_fast_target_tolerance_800m
+        )
+        if self.curriculum_speed_mode == "adaptive_fast":
+            # Fail-fast: tier thresholds must be strictly decreasing
+            # (strong > mid > low) and shrink factors must be in (0, 1].
+            if not (
+                self.curriculum_fast_strong_mean
+                > self.curriculum_fast_mid_mean
+                > self.curriculum_fast_low_mean
+                > 0.0
+            ):
+                raise RuntimeError(
+                    "adaptive_fast tier thresholds must satisfy "
+                    "strong_mean > mid_mean > low_mean > 0; got "
+                    f"strong={self.curriculum_fast_strong_mean} "
+                    f"mid={self.curriculum_fast_mid_mean} "
+                    f"low={self.curriculum_fast_low_mean}"
+                )
+            for name, val in (
+                ("shrink_strong", self.curriculum_fast_shrink_strong),
+                ("shrink_mid", self.curriculum_fast_shrink_mid),
+                ("shrink_low", self.curriculum_fast_shrink_low),
+            ):
+                if not (0.0 < float(val) <= 1.0):
+                    raise RuntimeError(
+                        f"adaptive_fast {name}={val} must be in (0, 1]"
+                    )
+            if self.curriculum_fast_consolidation_frames <= 0:
+                raise RuntimeError(
+                    "adaptive_fast consolidation_frames must be > 0"
+                )
+            if self.curriculum_fast_recovery_consolidation_frames <= 0:
+                raise RuntimeError(
+                    "adaptive_fast recovery_consolidation_frames must be > 0"
+                )
+            if self.curriculum_mode != "mastery":
+                raise RuntimeError(
+                    "adaptive_fast requires --curriculum_mode=mastery; "
+                    f"got {self.curriculum_mode!r}"
+                )
         self._policy_nsucc_windows: dict[int, RollingNsuccWindow] = {}
         self._recent_peak_nsucc_mean: dict[int, float] = {}
         self._collapse_freeze_until: dict[int, int] = {}
@@ -918,6 +1000,128 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             shrink_token = True
             shrink_blocked_reason = ""
 
+        # Phase A4 P2 (2026-06-08): adaptive-fast curriculum tier evaluation.
+        # Runs only AFTER the existing chain (mastery / collapse / consolidation /
+        # post-restart-freeze / single-shot token) has decided shrink_token.
+        # If shrink_token is already False, adaptive_fast does not flip it on;
+        # it only:
+        #   * picks a tier-specific shrink factor + consolidation length to
+        #     write into the control JSON (consumed env-side), OR
+        #   * blocks an otherwise-allowed shrink when nsucc_mean < low_mean.
+        adaptive_shrink_factor: float = 0.0
+        adaptive_consolidation_frames: int = 0
+        shrink_reason: str = ""
+        nsucc_mean_used = 0.0
+        retention_used = 0.0
+        blocked_by_recovery = False
+        blocked_by_collapse = bool(collapse_freeze_active)
+        blocked_by_consolidation = bool(in_consolidation)
+        blocked_by_mastery_gate = bool(
+            self.curriculum_mode == "mastery"
+            and not gate_pass
+            and not blocked_by_collapse
+            and not blocked_by_consolidation
+        )
+        blocked_by_adaptive_fast_low_nsucc = False
+
+        if self.curriculum_speed_mode == "adaptive_fast":
+            # In recovery stage we still allow shrink but force the legacy
+            # factor and use a longer consolidation window.
+            in_recovery = (
+                int(env_frames) - int(self._frames_at_restart)
+                < int(self.curriculum_freeze_frames)
+            ) or bool(rollback_cooldown_active)
+            blocked_by_recovery = bool(in_recovery)
+
+            # Retention proxy: nsucc_mean_now / max(nsucc_mean over last N
+            # samples). Defaults to 1.0 when there is no signal yet so a
+            # cold-start window is not penalised.
+            ret_window = window.last_n(self.curriculum_fast_retention_window)
+            if ret_window:
+                nsucc_mean_used = float(ret_window[-1].nsucc_mean)
+                peak_in_window = max(float(s.nsucc_mean) for s in ret_window)
+                if peak_in_window > 1e-9:
+                    retention_used = nsucc_mean_used / peak_in_window
+                else:
+                    retention_used = 1.0
+            else:
+                nsucc_mean_used = 0.0
+                retention_used = 1.0
+
+            if shrink_token:
+                if in_recovery:
+                    adaptive_shrink_factor = float(self.curriculum_shrink_factor)
+                    adaptive_consolidation_frames = int(
+                        self.curriculum_fast_recovery_consolidation_frames
+                    )
+                    shrink_reason = "recovery_legacy"
+                elif (
+                    nsucc_mean_used >= self.curriculum_fast_strong_mean
+                    and retention_used >= self.curriculum_fast_retention_threshold
+                ):
+                    adaptive_shrink_factor = float(
+                        self.curriculum_fast_shrink_strong
+                    )
+                    adaptive_consolidation_frames = int(
+                        self.curriculum_fast_consolidation_frames
+                    )
+                    shrink_reason = "strong"
+                elif nsucc_mean_used >= self.curriculum_fast_mid_mean:
+                    adaptive_shrink_factor = float(
+                        self.curriculum_fast_shrink_mid
+                    )
+                    adaptive_consolidation_frames = int(
+                        self.curriculum_fast_consolidation_frames
+                    )
+                    shrink_reason = "mid"
+                elif nsucc_mean_used >= self.curriculum_fast_low_mean:
+                    adaptive_shrink_factor = float(
+                        self.curriculum_fast_shrink_low
+                    )
+                    adaptive_consolidation_frames = int(
+                        self.curriculum_fast_consolidation_frames
+                    )
+                    shrink_reason = "low"
+                else:
+                    # nsucc < low_mean -> block this shrink. Roll back the
+                    # single-shot bookkeeping so a future tick (with higher
+                    # nsucc_mean) can still shrink in this PBT iteration.
+                    shrink_token = False
+                    allow_shrink = False
+                    shrink_blocked_reason = "adaptive_fast_low_nsucc_mean"
+                    blocked_by_adaptive_fast_low_nsucc = True
+                    if (
+                        self.pbt_single_shrink_per_window
+                        and self._shrink_issued_this_window.get(policy_idx, False)
+                    ):
+                        self._shrink_issued_this_window[policy_idx] = False
+                        cur = int(
+                            self._shrinks_since_rollback.get(policy_idx, 0)
+                        )
+                        if cur > 0:
+                            self._shrinks_since_rollback[policy_idx] = cur - 1
+                    shrinks_in_window = 0
+                    shrink_reason = "blocked_low_nsucc"
+            else:
+                # Token already cleared by an upstream gate; reflect why for
+                # logging consumers.
+                if blocked_by_recovery and not (
+                    blocked_by_collapse
+                    or blocked_by_consolidation
+                    or blocked_by_mastery_gate
+                ):
+                    shrink_reason = "blocked_recovery"
+                elif blocked_by_collapse:
+                    shrink_reason = "blocked_collapse"
+                elif blocked_by_consolidation:
+                    shrink_reason = "blocked_consolidation"
+                elif blocked_by_mastery_gate:
+                    shrink_reason = "blocked_mastery_gate"
+                else:
+                    shrink_reason = "blocked_other"
+        else:
+            shrink_reason = "normal_mode"
+
         tol_stable = window.tolerance_stable_for_intervals(1)
         last_tol = self._last_mastered_tolerance.get(policy_idx, 0.075)
         if gate_pass and window.samples:
@@ -947,6 +1151,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         ):
             rollback_reason = "restart_reset"
 
+        # Carry pre/post-shrink tolerance forward from the previous control
+        # tick so analyzer scripts can read the most recent shrink event
+        # without scanning every JSONL row. The env writes these via
+        # mark_shrink_consumed() when an actual shrink happens.
+        prev_pre_shrink = float(prev_control.pre_shrink_tolerance) if prev_control else 0.0
+        prev_post_shrink = float(prev_control.post_shrink_tolerance) if prev_control else 0.0
+
         return CurriculumControlState(
             curriculum_mode=self.curriculum_mode,
             allow_shrink=allow_shrink,
@@ -972,6 +1183,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             rollback_count=rollback_count,
             last_rollback_frame=last_rollback_frame,
             rollback_reason=rollback_reason,
+            # Phase A4 P2 (2026-06-08): adaptive-fast bookkeeping.
+            speed_mode=self.curriculum_speed_mode,
+            adaptive_shrink_factor=adaptive_shrink_factor,
+            adaptive_consolidation_frames=adaptive_consolidation_frames,
+            shrink_reason=shrink_reason,
+            nsucc_mean_used_for_shrink=nsucc_mean_used,
+            retention_used_for_shrink=retention_used,
+            blocked_by_recovery=blocked_by_recovery,
+            blocked_by_collapse=blocked_by_collapse,
+            blocked_by_consolidation=blocked_by_consolidation,
+            blocked_by_mastery_gate=blocked_by_mastery_gate,
+            blocked_by_adaptive_fast_low_nsucc=blocked_by_adaptive_fast_low_nsucc,
+            pre_shrink_tolerance=prev_pre_shrink,
+            post_shrink_tolerance=prev_post_shrink,
         )
 
     def _log_curriculum_control_scalars(
@@ -1094,6 +1319,76 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.writer.add_scalar(
             "dexpbt/rollback_count",
             float(control.rollback_count),
+            env_frames,
+        )
+        # Phase A4 P2 (2026-06-08): adaptive-fast TB scalars.
+        speed_mode_id = 1.0 if control.speed_mode == "adaptive_fast" else 0.0
+        self.writer.add_scalar(
+            "curriculum/speed_mode", speed_mode_id, env_frames
+        )
+        self.writer.add_scalar(
+            "curriculum/adaptive_fast_enabled",
+            1.0 if self.curriculum_speed_mode == "adaptive_fast" else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/adaptive_shrink_factor",
+            float(control.adaptive_shrink_factor),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/post_shrink_consolidation_frames",
+            float(control.adaptive_consolidation_frames),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/retention_used_for_shrink",
+            float(control.retention_used_for_shrink),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/nsucc_mean_used_for_shrink",
+            float(control.nsucc_mean_used_for_shrink),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/blocked_by_recovery",
+            1.0 if control.blocked_by_recovery else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/blocked_by_collapse",
+            1.0 if control.blocked_by_collapse else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/blocked_by_consolidation",
+            1.0 if control.blocked_by_consolidation else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/blocked_by_mastery_gate",
+            1.0 if control.blocked_by_mastery_gate else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/blocked_by_adaptive_fast_low_nsucc",
+            1.0 if control.blocked_by_adaptive_fast_low_nsucc else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_shrink_tolerance",
+            float(control.pre_shrink_tolerance),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/post_shrink_tolerance",
+            float(control.post_shrink_tolerance),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/fast_target_tolerance_800m",
+            float(self.curriculum_fast_target_tolerance_800m),
             env_frames,
         )
 
@@ -2080,6 +2375,55 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 ),
                 "curriculum_freeze_frames_after_restart_env": int(
                     curriculum.get("curriculum_freeze_frames_after_restart", 0)
+                ),
+                # Phase A4 P2 (2026-06-08): adaptive-fast curriculum
+                # diagnostics. All fields are present for both 'normal' and
+                # 'adaptive_fast' modes; in normal mode adaptive_shrink_factor
+                # is 0.0 and shrink_reason is "normal_mode".
+                "curriculum_speed_mode": str(self.curriculum_speed_mode),
+                "curriculum_adaptive_fast_enabled": bool(
+                    self.curriculum_speed_mode == "adaptive_fast"
+                ),
+                "curriculum_adaptive_shrink_factor": float(
+                    own_ctrl.adaptive_shrink_factor if own_ctrl else 0.0
+                ),
+                "curriculum_adaptive_consolidation_frames": int(
+                    own_ctrl.adaptive_consolidation_frames if own_ctrl else 0
+                ),
+                "curriculum_shrink_reason": str(
+                    own_ctrl.shrink_reason if own_ctrl else ""
+                ),
+                "curriculum_nsucc_mean_used_for_shrink": float(
+                    own_ctrl.nsucc_mean_used_for_shrink if own_ctrl else 0.0
+                ),
+                "curriculum_retention_used_for_shrink": float(
+                    own_ctrl.retention_used_for_shrink if own_ctrl else 0.0
+                ),
+                "curriculum_blocked_by_recovery": bool(
+                    own_ctrl.blocked_by_recovery if own_ctrl else False
+                ),
+                "curriculum_blocked_by_collapse": bool(
+                    own_ctrl.blocked_by_collapse if own_ctrl else False
+                ),
+                "curriculum_blocked_by_consolidation": bool(
+                    own_ctrl.blocked_by_consolidation if own_ctrl else False
+                ),
+                "curriculum_blocked_by_mastery_gate": bool(
+                    own_ctrl.blocked_by_mastery_gate if own_ctrl else False
+                ),
+                "curriculum_blocked_by_adaptive_fast_low_nsucc": bool(
+                    own_ctrl.blocked_by_adaptive_fast_low_nsucc
+                    if own_ctrl
+                    else False
+                ),
+                "curriculum_pre_shrink_tolerance": float(
+                    own_ctrl.pre_shrink_tolerance if own_ctrl else 0.0
+                ),
+                "curriculum_post_shrink_tolerance": float(
+                    own_ctrl.post_shrink_tolerance if own_ctrl else 0.0
+                ),
+                "curriculum_fast_target_tolerance_800m": float(
+                    self.curriculum_fast_target_tolerance_800m
                 ),
                 "tier": str(tier),
                 "checkpoint": own_state.get("checkpoint", ""),

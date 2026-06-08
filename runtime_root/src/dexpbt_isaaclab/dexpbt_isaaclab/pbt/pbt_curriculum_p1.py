@@ -86,6 +86,24 @@ class CurriculumControlState:
     rollback_count: int = 0
     last_rollback_frame: int = -10**18
     rollback_reason: str = ""
+    # Phase A4 P2 (2026-06-08): adaptive-fast curriculum -- optional fields
+    # written by the observer when --curriculum_speed_mode=adaptive_fast.
+    # Defaults are inert: zero values fall back to the legacy single global
+    # shrink_factor / consolidation_env_frames so existing runs are
+    # bit-for-bit unchanged.
+    speed_mode: str = "normal"
+    adaptive_shrink_factor: float = 0.0
+    adaptive_consolidation_frames: int = 0
+    shrink_reason: str = ""
+    nsucc_mean_used_for_shrink: float = 0.0
+    retention_used_for_shrink: float = 0.0
+    blocked_by_recovery: bool = False
+    blocked_by_collapse: bool = False
+    blocked_by_consolidation: bool = False
+    blocked_by_mastery_gate: bool = False
+    blocked_by_adaptive_fast_low_nsucc: bool = False
+    pre_shrink_tolerance: float = 0.0
+    post_shrink_tolerance: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,6 +141,8 @@ def mark_shrink_consumed(
     frames_since_restart: int,
     consolidation_env_frames: int,
     num_envs: int,
+    pre_shrink_tolerance: float = 0.0,
+    post_shrink_tolerance: float = 0.0,
 ) -> None:
     """Env-side: consume shrink_token and start post-shrink consolidation."""
     from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
@@ -136,6 +156,10 @@ def mark_shrink_consumed(
     control.post_shrink_consolidation_until_restart_step = int(frames_since_restart) + int(
         freeze_steps
     )
+    if pre_shrink_tolerance > 0.0:
+        control.pre_shrink_tolerance = float(pre_shrink_tolerance)
+    if post_shrink_tolerance > 0.0:
+        control.post_shrink_tolerance = float(post_shrink_tolerance)
     write_curriculum_control(path, control)
 
 
@@ -231,6 +255,17 @@ def apply_env_tolerance_curriculum(
 
     use_token = bool(pbt_single_shrink_per_window)
     may_shrink = control.shrink_token if use_token else control.allow_shrink
+
+    # Phase A4 P2 (2026-06-08): adaptive-fast may override the shrink factor
+    # and consolidation length per-tick via the observer-written control
+    # state. A zero/empty value preserves legacy behavior.
+    effective_shrink_factor = float(curriculum_shrink_factor)
+    if float(control.adaptive_shrink_factor or 0.0) > 0.0:
+        effective_shrink_factor = float(control.adaptive_shrink_factor)
+    effective_consolidation_frames = int(post_shrink_consolidation_env_frames)
+    if int(control.adaptive_consolidation_frames or 0) > 0:
+        effective_consolidation_frames = int(control.adaptive_consolidation_frames)
+
     new_tol, lcu, did_shrink, _ = dexpbt_tolerance_curriculum_mastery(
         last_curriculum_update,
         frames_since_restart,
@@ -241,7 +276,7 @@ def apply_env_tolerance_curriculum(
         target_tolerance,
         curriculum_freeze_frames_after_restart=curriculum_freeze_frames_after_restart,
         allow_shrink=may_shrink,
-        shrink_factor=curriculum_shrink_factor,
+        shrink_factor=effective_shrink_factor,
         collapse_freeze_active=control.collapse_freeze_active,
         post_shrink_consolidation_until_restart_step=int(
             control.post_shrink_consolidation_until_restart_step
@@ -251,8 +286,10 @@ def apply_env_tolerance_curriculum(
         mark_shrink_consumed(
             curriculum_control_path,
             frames_since_restart=frames_since_restart,
-            consolidation_env_frames=post_shrink_consolidation_env_frames,
+            consolidation_env_frames=effective_consolidation_frames,
             num_envs=num_envs,
+            pre_shrink_tolerance=float(success_tolerance),
+            post_shrink_tolerance=float(new_tol),
         )
     return new_tol, lcu
 

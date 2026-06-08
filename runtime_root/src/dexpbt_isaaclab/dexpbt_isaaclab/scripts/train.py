@@ -325,6 +325,102 @@ parser.add_argument(
     default=100_000_000,
     help="Env frames to hold tolerance after a shrink (consolidation).",
 )
+# Phase A4 P2 (2026-06-08): adaptive-fast curriculum (RSSM coupling=none
+# fastcurr 800M). Default `normal` preserves legacy single-factor shrink
+# behaviour bit-for-bit; `adaptive_fast` picks shrink factor + consolidation
+# length per-tick from a tier table once the existing mastery / collapse /
+# consolidation / post-restart-freeze gates have already permitted shrink.
+parser.add_argument(
+    "--curriculum_speed_mode",
+    type=str,
+    default="normal",
+    choices=["normal", "adaptive_fast"],
+    help="Curriculum speed mode. 'normal' uses --curriculum_shrink_factor "
+    "for every shrink (legacy). 'adaptive_fast' selects shrink_factor "
+    "0.90 / 0.925 / 0.95 by tier of recent nsucc_mean and retention.",
+)
+parser.add_argument(
+    "--curriculum_fast_strong_mean",
+    type=float,
+    default=30.0,
+    help="adaptive_fast: nsucc_mean threshold for the 'strong' tier "
+    "(shrink_factor=--curriculum_fast_shrink_strong) when retention "
+    ">= --curriculum_fast_retention_threshold.",
+)
+parser.add_argument(
+    "--curriculum_fast_mid_mean",
+    type=float,
+    default=20.0,
+    help="adaptive_fast: nsucc_mean threshold for the 'mid' tier "
+    "(shrink_factor=--curriculum_fast_shrink_mid).",
+)
+parser.add_argument(
+    "--curriculum_fast_low_mean",
+    type=float,
+    default=10.0,
+    help="adaptive_fast: nsucc_mean threshold for the 'low' tier "
+    "(shrink_factor=--curriculum_fast_shrink_low). Below this the tick "
+    "is blocked with reason adaptive_fast_low_nsucc_mean.",
+)
+parser.add_argument(
+    "--curriculum_fast_retention_threshold",
+    type=float,
+    default=0.8,
+    help="adaptive_fast: minimum retention_proxy (=last/peak over the "
+    "last --curriculum_fast_retention_window samples) to qualify for "
+    "the 'strong' tier.",
+)
+parser.add_argument(
+    "--curriculum_fast_retention_window",
+    type=int,
+    default=4,
+    help="adaptive_fast: number of trailing PBT samples used for the "
+    "retention_proxy denominator (default 4 ~= 80M env frames).",
+)
+parser.add_argument(
+    "--curriculum_fast_shrink_strong",
+    type=float,
+    default=0.90,
+    help="adaptive_fast: shrink factor used when (nsucc_mean >= strong_mean "
+    "AND retention >= retention_threshold).",
+)
+parser.add_argument(
+    "--curriculum_fast_shrink_mid",
+    type=float,
+    default=0.925,
+    help="adaptive_fast: shrink factor used when nsucc_mean >= mid_mean.",
+)
+parser.add_argument(
+    "--curriculum_fast_shrink_low",
+    type=float,
+    default=0.95,
+    help="adaptive_fast: shrink factor used when nsucc_mean >= low_mean. "
+    "Same as legacy default.",
+)
+parser.add_argument(
+    "--curriculum_fast_consolidation_frames",
+    type=int,
+    default=50_000_000,
+    help="adaptive_fast: post-shrink consolidation length (env frames) "
+    "applied for strong/mid/low shrinks. Defaults to 50M for the fast "
+    "schedule.",
+)
+parser.add_argument(
+    "--curriculum_fast_recovery_consolidation_frames",
+    type=int,
+    default=100_000_000,
+    help="adaptive_fast: longer consolidation (env frames) used when the "
+    "policy is in recovery stage (post-restart freeze window or rollback "
+    "cooldown). Defaults to 100M to be conservative.",
+)
+parser.add_argument(
+    "--curriculum_fast_target_tolerance_800m",
+    type=float,
+    default=0.04,
+    help="adaptive_fast: report-only target tolerance at 800M env frames; "
+    "logged but does NOT change the runtime floor (which stays at "
+    "target_success_tolerance, typically 0.01).",
+)
 # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
 parser.add_argument(
     "--pbt_early_collapse_detect",
@@ -697,15 +793,25 @@ parser.add_argument("--seq_wm_max_seq_len", type=int, default=32,
 parser.add_argument(
     "--seq_wm_policy_coupling",
     type=str,
-    choices=["none", "distill_value", "distill_value_success"],
+    choices=[
+        "none",
+        "distill_value",
+        "distill_value_success",
+        "critic_distill_value_norm",
+        "shared_aux_critic_distill_value_norm",
+    ],
     default="none",
     help="How the sequence WM influences the PPO actor-critic. "
-    "`none` (default; backwards-compatible — reproduces pre-patch "
+    "`none` (default; backwards-compatible -- reproduces pre-patch "
     "behaviour where the seq WM has zero gradient effect on PPO). "
-    "`distill_value` registers a seq_aux_value_head on the PPO model "
-    "and adds an MSE loss against the (detached) seq value teacher "
-    "via rl_games' get_aux_loss hook. `distill_value_success` adds "
-    "a parallel success-prediction BCE head.",
+    "Legacy negative ablations: `distill_value` and "
+    "`distill_value_success` use the actor-direct path and require "
+    "feature_source=actor (P0; the 200M sanity AB showed this hurts "
+    "policy learning). v2: `critic_distill_value_norm` (alias "
+    "`shared_aux_critic_distill_value_norm`) routes the distill loss "
+    "through a private seq_aux_critic_mlp sub-tower; requires "
+    "feature_source=shared_to_aux_critic and "
+    "teacher_value_norm=rollout_zscore.",
 )
 parser.add_argument(
     "--seq_wm_policy_coupling_weight",
@@ -730,6 +836,59 @@ parser.add_argument(
     "is enabled. During warmup the seq WM still trains on its own "
     "optimizer; only the PPO distill head and gradient flow are "
     "suppressed (get_aux_loss returns {}). Default 100M.",
+)
+parser.add_argument(
+    "--seq_wm_distill_feature_source",
+    type=str, choices=["actor", "shared_to_aux_critic"],
+    default="actor",
+    help="Feature path for the distill loss. `actor` is the P0 "
+    "actor-direct path used by legacy `distill_value`. "
+    "`shared_to_aux_critic` is the v2 path: shared actor_mlp_out "
+    "is consumed exclusively by a private seq_aux_critic_mlp "
+    "sub-tower (NOT the rl_games critic_mlp; that module is empty "
+    "under network.separate=false). Required for "
+    "mode=critic_distill_value_norm.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_value_norm",
+    type=str, choices=["none", "rollout_zscore"], default="none",
+    help="Per-rollout teacher value normalization. `none` keeps raw "
+    "teacher targets. `rollout_zscore` standardizes the (T, N) "
+    "teacher tensor to mean 0 std 1 over the entire rollout before "
+    "flattening. Required for mode=critic_distill_value_norm.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_value_norm_min_std",
+    type=float, default=1e-3,
+    help="Below this rollout-level std, the gate blocks distill rather "
+    "than producing exploding zscore targets.",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_gate",
+    type=str, choices=["none", "teacher_corr"], default="none",
+    help="Quality gate evaluated once per rollout. `none` always "
+    "lets distill through. `teacher_corr` blocks the rollout when "
+    "Pearson(teacher_value, returns) is below "
+    "--seq_wm_teacher_corr_threshold or undefined.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_corr_threshold",
+    type=float, default=0.2,
+    help="Threshold for the teacher_corr gate. Default 0.2.",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_ramp_frames",
+    type=int, default=0,
+    help="After warmup, linearly ramp the effective weight from 0 to "
+    "--seq_wm_policy_coupling_weight over this many frames. Default 0 "
+    "(no ramp -- weight jumps to its target value immediately).",
+)
+parser.add_argument(
+    "--seq_wm_aux_critic_subtower_hidden",
+    type=int, default=256,
+    help="Hidden width for the v2 seq_aux_critic_mlp sub-tower. "
+    "Default 256 (matches actor_mlp_out width; sub-tower output "
+    "stays at 256 so seq_aux_value_head requires no change).",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -781,12 +940,15 @@ from dexpbt_isaaclab.world_model.seq_aux_collector import (
     SeqAuxCollector, SeqAuxInterceptorEnv,
 )
 from dexpbt_isaaclab.world_model.seq_policy_aux import (
+    COUPLING_MODE_ID,
+    FEATURE_SOURCE_ID,
     CapturedFeature,
     SeqDistillBridge,
     SeqPolicyCouplingConfig,
     attach_seq_aux_heads,
     compute_seq_distill_aux_loss,
     register_actor_mlp_capture,
+    register_shared_to_aux_critic_capture,
 )
 from dexpbt_isaaclab.world_model.wm_aux_buffer import register_seq_aux_fields
 from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
@@ -1169,6 +1331,8 @@ def _patch_actor_train_for_seq_wm(
                             actor.obs["obs"] if isinstance(actor.obs, dict)
                             else actor.obs
                         )
+                        bridge_cfg = seq_distill_bridge.cfg
+                        compute_corr = bridge_cfg.gate != "none"
                         cache = seq_wm_trainer.compute_teacher_cache(
                             experience_buffer=actor.experience_buffer,
                             last_obs=last_obs,
@@ -1179,6 +1343,11 @@ def _patch_actor_train_for_seq_wm(
                             last_d_hat=last_d_hat_t,
                             last_success_count=last_success_t,
                             generation=rollout_state["generation"],
+                            teacher_value_norm=bridge_cfg.teacher_value_norm,
+                            teacher_value_norm_min_std=(
+                                bridge_cfg.teacher_value_norm_min_std
+                            ),
+                            compute_teacher_return_corr=compute_corr,
                         )
                         seq_distill_bridge.cache = cache
                         seq_distill_bridge.last_frames = int(
@@ -1272,6 +1441,28 @@ def _patch_actor_train_for_seq_wm(
                         pass
                 if seq_distill_bridge is not None:
                     cfg = seq_distill_bridge.cfg
+                    cache_meta = (
+                        seq_distill_bridge.cache.meta
+                        if seq_distill_bridge.cache is not None else {}
+                    )
+                    inner_model = (
+                        actor.model.model
+                        if hasattr(actor.model, "model") else actor.model
+                    )
+                    aux_critic = getattr(inner_model, "seq_aux_critic_mlp", None)
+                    aux_critic_grad_norm = 0.0
+                    if aux_critic is not None:
+                        with torch.no_grad():
+                            grad_sq = 0.0
+                            for p in aux_critic.parameters():
+                                if p.grad is not None:
+                                    grad_sq += float(
+                                        p.grad.detach().norm().item() ** 2
+                                    )
+                            aux_critic_grad_norm = float(grad_sq) ** 0.5
+                    seq_distill_bridge.last_aux_critic_subtower_grad_norm = (
+                        aux_critic_grad_norm
+                    )
                     try:
                         tb_writer.add_scalar(
                             "seq_policy_aux/active",
@@ -1294,24 +1485,113 @@ def _patch_actor_train_for_seq_wm(
                             frames,
                         )
                         tb_writer.add_scalar(
+                            "seq_policy_aux/base_weight",
+                            float(seq_distill_bridge.last_base_weight),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
                             "seq_policy_aux/effective_weight",
                             float(seq_distill_bridge.last_effective_weight),
                             frames,
                         )
                         tb_writer.add_scalar(
+                            "seq_policy_aux/ramp_factor",
+                            float(seq_distill_bridge.last_ramp_factor),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
                             "seq_policy_aux/teacher_value_mean",
-                            float(seq_distill_bridge.last_teacher_value_mean),
+                            float(cache_meta.get("teacher_value_mean", 0.0)),
                             frames,
                         )
                         tb_writer.add_scalar(
                             "seq_policy_aux/teacher_value_std",
-                            float(seq_distill_bridge.last_teacher_value_std),
+                            float(cache_meta.get("teacher_value_std", 0.0)),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_value_norm_enabled",
+                            float(bool(
+                                cache_meta.get("teacher_value_norm_enabled", False)
+                            )),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_value_norm_std_too_small",
+                            float(bool(
+                                cache_meta.get(
+                                    "teacher_value_norm_std_too_small", False
+                                )
+                            )),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_return_corr",
+                            float(cache_meta.get("teacher_return_corr", 0.0)),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_return_corr_valid",
+                            float(bool(
+                                cache_meta.get("teacher_return_corr_valid", False)
+                            )),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/gate_pass",
+                            float(seq_distill_bridge.last_gate_pass),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/gate_blocked",
+                            float(seq_distill_bridge.last_gate_blocked),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/gate_blocked_count",
+                            float(seq_distill_bridge.gate_blocked_count),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/gate_threshold",
+                            float(cfg.teacher_corr_threshold),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/gate_user_overridden",
+                            float(bool(cfg.gate_user_overridden)),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/feature_source",
+                            float(FEATURE_SOURCE_ID.get(cfg.feature_source, -1)),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/feature_dim",
+                            256.0,
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/actor_feature_captured",
+                            float(seq_distill_bridge.last_actor_feature_captured),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/shared_to_aux_critic_feature_captured",
+                            float(
+                                seq_distill_bridge.last_shared_to_aux_critic_feature_captured
+                            ),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/aux_critic_subtower_grad_norm",
+                            float(aux_critic_grad_norm),
                             frames,
                         )
                         tb_writer.add_scalar(
                             "seq_policy_aux/coupling_mode_id",
-                            float({"none": 0, "distill_value": 1,
-                                    "distill_value_success": 2}.get(cfg.mode, -1)),
+                            float(COUPLING_MODE_ID.get(cfg.mode, -1)),
                             frames,
                         )
                     except Exception:
@@ -1327,11 +1607,37 @@ def _patch_actor_train_for_seq_wm(
                     seq_distill_bridge.cfg.warmup_frames
                 )
             ):
-                print(
-                    f"[SeqWM] policy coupling={seq_distill_bridge.cfg.mode}: "
-                    "PPO model params updated by seq aux head: yes"
-                )
-                seq_wm_trainer._first_distill_assert_done = True
+                # Sanity check: in v2 the sub-tower must have observed
+                # gradient at least once before we declare grad-flow OK.
+                if seq_distill_bridge.cfg.is_v2:
+                    inner_model = (
+                        actor.model.model
+                        if hasattr(actor.model, "model") else actor.model
+                    )
+                    sub = getattr(inner_model, "seq_aux_critic_mlp", None)
+                    has_sub_grad = sub is not None and any(
+                        (p.grad is not None and p.grad.abs().sum().item() > 0.0)
+                        for p in sub.parameters()
+                    )
+                    if not has_sub_grad:
+                        # Defer the assertion to the next epoch instead of
+                        # raising; the very first active epoch may run
+                        # before the optimizer has seen the new param group.
+                        pass
+                    else:
+                        print(
+                            f"[SeqWM] policy coupling={seq_distill_bridge.cfg.mode} "
+                            f"feature_source={seq_distill_bridge.cfg.feature_source}: "
+                            "PPO model params updated by seq_aux_critic_mlp + "
+                            "seq_aux_value_head: yes"
+                        )
+                        seq_wm_trainer._first_distill_assert_done = True
+                else:
+                    print(
+                        f"[SeqWM] policy coupling={seq_distill_bridge.cfg.mode}: "
+                        "PPO model params updated by seq aux head: yes"
+                    )
+                    seq_wm_trainer._first_distill_assert_done = True
 
             seq_wm_trainer._epochs_since_save += 1
             if (seq_wm_save_dir is not None
@@ -1797,14 +2103,34 @@ class _WmEnabledRunner(Runner):
                 seq_distill_bridge.seq_aux_success_head = heads.get(
                     "seq_aux_success_head"
                 )
-                # Install the actor_mlp_out forward hook. Captures fire on
-                # every model forward pass (PPO calc_gradients + any other
-                # forward); the bridge resets the capture at rollout start
-                # so a stale tensor cannot be silently reused.
-                self._seq_distill_hook_handle = register_actor_mlp_capture(
-                    agent.model,
-                    seq_distill_bridge.feature_capture,
+                seq_distill_bridge.seq_aux_critic_mlp = heads.get(
+                    "seq_aux_critic_mlp"
                 )
+                if seq_policy_cfg.is_v2 and seq_distill_bridge.seq_aux_critic_mlp is None:
+                    raise RuntimeError(
+                        "[SeqDistill] mode=critic_distill_value_norm requires "
+                        "seq_aux_critic_mlp to be attached, but attach_seq_aux_heads "
+                        "did not return one (refusing silent fallback to "
+                        "actor-direct path)."
+                    )
+                # Install the shared-encoder forward hook. Both legacy and
+                # v2 paths target a2c_network.actor_mlp (the only populated
+                # feature module under network.separate=false), but the
+                # captured tensor is consumed differently downstream:
+                # legacy feeds seq_aux_value_head directly, v2 feeds
+                # seq_aux_critic_mlp -> seq_aux_value_head. The bridge
+                # resets the capture at rollout start so a stale tensor
+                # cannot be silently reused.
+                if seq_policy_cfg.uses_shared_to_aux_critic:
+                    self._seq_distill_hook_handle = register_shared_to_aux_critic_capture(
+                        agent.model,
+                        seq_distill_bridge.feature_capture,
+                    )
+                else:
+                    self._seq_distill_hook_handle = register_actor_mlp_capture(
+                        agent.model,
+                        seq_distill_bridge.feature_capture,
+                    )
                 # Install the get_aux_loss patch BEFORE _restore so any
                 # checkpoint restore that happens later sees the head
                 # weights / param groups already wired up.
@@ -1814,7 +2140,12 @@ class _WmEnabledRunner(Runner):
                     f"weight={seq_policy_cfg.weight} "
                     f"value_w={seq_policy_cfg.value_weight} "
                     f"success_w={seq_policy_cfg.success_weight} "
-                    f"warmup_frames={seq_policy_cfg.warmup_frames}"
+                    f"warmup_frames={seq_policy_cfg.warmup_frames} "
+                    f"feature_source={seq_policy_cfg.feature_source} "
+                    f"value_norm={seq_policy_cfg.teacher_value_norm} "
+                    f"gate={seq_policy_cfg.gate} "
+                    f"corr_threshold={seq_policy_cfg.teacher_corr_threshold} "
+                    f"ramp_frames={seq_policy_cfg.ramp_frames}"
                 )
             _patch_actor_train_for_seq_wm(
                 agent,
@@ -2097,6 +2428,17 @@ def main():
         value_weight=float(args_cli.seq_wm_policy_coupling_value_weight),
         success_weight=float(args_cli.seq_wm_policy_coupling_success_weight),
         warmup_frames=int(args_cli.seq_wm_policy_coupling_warmup_frames),
+        feature_source=str(args_cli.seq_wm_distill_feature_source),
+        teacher_value_norm=str(args_cli.seq_wm_teacher_value_norm),
+        teacher_value_norm_min_std=float(
+            args_cli.seq_wm_teacher_value_norm_min_std
+        ),
+        gate=str(args_cli.seq_wm_policy_coupling_gate),
+        teacher_corr_threshold=float(args_cli.seq_wm_teacher_corr_threshold),
+        ramp_frames=int(args_cli.seq_wm_policy_coupling_ramp_frames),
+        aux_critic_subtower_hidden=int(
+            args_cli.seq_wm_aux_critic_subtower_hidden
+        ),
     )
     is_sequence_strategy = (
         args_cli.enable_wm and args_cli.wm_strategy in SEQUENCE_STRATEGIES
@@ -2497,6 +2839,29 @@ def main():
             pbt_single_shrink_per_window=args_cli.pbt_single_shrink_per_window,
             post_shrink_consolidation_env_frames=(
                 args_cli.post_shrink_consolidation_env_frames
+            ),
+            # Phase A4 P2 (2026-06-08): adaptive-fast curriculum kwargs.
+            curriculum_speed_mode=args_cli.curriculum_speed_mode,
+            curriculum_fast_strong_mean=args_cli.curriculum_fast_strong_mean,
+            curriculum_fast_mid_mean=args_cli.curriculum_fast_mid_mean,
+            curriculum_fast_low_mean=args_cli.curriculum_fast_low_mean,
+            curriculum_fast_retention_threshold=(
+                args_cli.curriculum_fast_retention_threshold
+            ),
+            curriculum_fast_retention_window=(
+                args_cli.curriculum_fast_retention_window
+            ),
+            curriculum_fast_shrink_strong=args_cli.curriculum_fast_shrink_strong,
+            curriculum_fast_shrink_mid=args_cli.curriculum_fast_shrink_mid,
+            curriculum_fast_shrink_low=args_cli.curriculum_fast_shrink_low,
+            curriculum_fast_consolidation_frames=(
+                args_cli.curriculum_fast_consolidation_frames
+            ),
+            curriculum_fast_recovery_consolidation_frames=(
+                args_cli.curriculum_fast_recovery_consolidation_frames
+            ),
+            curriculum_fast_target_tolerance_800m=(
+                args_cli.curriculum_fast_target_tolerance_800m
             ),
             pbt_early_collapse_detect=args_cli.pbt_early_collapse_detect,
             early_collapse_drop_ratio=args_cli.early_collapse_drop_ratio,

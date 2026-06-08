@@ -637,10 +637,16 @@ def main() -> None:
             # Phase A4 sequence WM toggles.
             "--seq_wm_value_detach_belief",
             "--no-seq_wm_value_detach_belief",
-            # Phase A4 P0: PPO-facing distillation has only value flags
-            # (--seq_wm_policy_coupling=...) so no boolean entries here;
-            # the generic `--key value` -> `--key=value` normalisation
-            # below handles them automatically.
+            # Phase A4 P0/v2: all PPO-facing distillation flags are value
+            # flags (--seq_wm_policy_coupling=..., --seq_wm_distill_feature
+            # _source=..., --seq_wm_teacher_value_norm=..., --seq_wm_policy
+            # _coupling_gate=..., etc.). No boolean entries here; the
+            # generic `--key value` -> `--key=value` normalisation below
+            # handles them automatically.
+            # Phase A4 P2 (2026-06-08): adaptive-fast curriculum flags
+            # (--curriculum_speed_mode=..., --curriculum_fast_*=...) are
+            # all value flags handled by the generic normalisation below.
+            # No boolean entries needed.
         }
         extra = list(args.extra)
         i = 0

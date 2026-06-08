@@ -234,6 +234,9 @@ class SeqWMTrainer:
         last_d_hat: Optional[torch.Tensor] = None,
         last_success_count: Optional[torch.Tensor] = None,
         generation: int,
+        teacher_value_norm: str = "none",
+        teacher_value_norm_min_std: float = 1e-3,
+        compute_teacher_return_corr: bool = False,
     ) -> SeqDistillCache:
         """Build a frozen ``(T*N,)`` teacher target cache for the current rollout.
 
@@ -342,12 +345,21 @@ class SeqWMTrainer:
         teacher_value = preds.get("value")
         teacher_success_logit = preds.get("success_logit")
 
+        returns_for_corr = (
+            returns_2d
+            if (compute_teacher_return_corr and teacher_value is not None)
+            else None
+        )
+
         cache = build_teacher_cache_from_predictions(
             teacher_value=teacher_value,
             teacher_success_logit=teacher_success_logit,
             T=T,
             N=N,
             generation=int(generation),
+            teacher_value_norm=str(teacher_value_norm),
+            teacher_value_norm_min_std=float(teacher_value_norm_min_std),
+            returns_for_corr=returns_for_corr,
         )
         return cache
 
