@@ -163,6 +163,58 @@ class SequenceWorldModelBase(torch.nn.Module, ABC):
         """Public accessor for belief; default just calls encode_sequence."""
         return self.encode_sequence(batch)
 
+    @torch.no_grad()
+    def encode_belief(
+        self, batch: SequenceBatch
+    ) -> dict[str, Optional[torch.Tensor]]:
+        """Detached teacher forward used by the PPO distillation bridge.
+
+        Runs ``encode_sequence`` under ``no_grad``, then runs the
+        ``value_head`` / ``success_head`` (when present) on the resulting
+        belief and returns detached predictions. The result is suitable as
+        a frozen distillation target for a PPO-side student head.
+
+        Returns a dict with:
+            ``belief``        Tensor[T, B, belief_dim] (detached)
+            ``value``         Tensor[T, B] or None     (only if has_value_head)
+            ``success_logit`` Tensor[T, B] or None     (only if has_success_head)
+        Subclasses may override (e.g. to skip reparameterisation noise) but
+        the default implementation is correct for both RSSM-lite and
+        Transformer-lite because their ``encode_sequence`` signatures match
+        the base contract and their ``heads`` bundle exposes the same
+        ``predict_value`` / ``success_head`` accessors.
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            belief = self.encode_sequence(batch)
+        finally:
+            if was_training:
+                self.train()
+        belief = belief.detach()
+
+        T, B = belief.shape[0], belief.shape[1]
+        belief_flat = belief.reshape(T * B, -1)
+        value = None
+        success_logit = None
+        heads = getattr(self, "heads", None)
+        if heads is not None:
+            if getattr(heads, "has_value_head", False):
+                v = heads.predict_value(belief_flat)
+                if v is not None:
+                    value = v.reshape(T, B).detach()
+            success_head = getattr(heads, "success_head", None)
+            if success_head is not None:
+                action_flat = batch.action.reshape(T * B, -1)
+                ba = torch.cat([belief_flat, action_flat], dim=-1)
+                logits = success_head(ba).squeeze(-1)
+                success_logit = logits.reshape(T, B).detach()
+        return {
+            "belief": belief,
+            "value": value,
+            "success_logit": success_logit,
+        }
+
     @abstractmethod
     def report_metrics(self) -> dict[str, float]:
         """Return scalar metrics to log under wm_rssm/* or wm_trans/*.

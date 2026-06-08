@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional
 import torch
 import torch.nn.utils as nn_utils
 
+from .seq_policy_aux import SeqDistillCache, build_teacher_cache_from_predictions
 from .seq_wm_base import SequenceBatch, SequenceWorldModelBase
 from .seq_wm_sampler import SequenceSampler
 from .wm_aux_buffer import read_aux_full
@@ -221,6 +222,134 @@ class SeqWMTrainer:
 
         self.last_metrics = cumulative_metrics
         return cumulative_metrics
+
+    # ----- teacher cache for PPO distillation (Phase A4 P0) -----
+
+    def compute_teacher_cache(
+        self,
+        *,
+        experience_buffer: Any,
+        last_obs: torch.Tensor,
+        returns_full: torch.Tensor,
+        last_d_hat: Optional[torch.Tensor] = None,
+        last_success_count: Optional[torch.Tensor] = None,
+        generation: int,
+    ) -> SeqDistillCache:
+        """Build a frozen ``(T*N,)`` teacher target cache for the current rollout.
+
+        Runs ``self.model.encode_belief`` on a deterministic ``(T, N)``
+        ``SequenceBatch`` covering the entire rollout (no random sampling).
+        Output values are detached and laid out to match rl_games'
+        ``swap_and_flatten01``: ``flat[n * T + t] == teacher[t, n]``.
+
+        Returns a ``SeqDistillCache`` whose ``generation`` field equals
+        the supplied ``generation`` argument; the bridge cross-checks it
+        against the live rollout generation in ``compute_seq_distill_aux_loss``
+        and raises if they disagree.
+
+        Caller must ensure ``returns_full`` is shaped ``(T, N)`` (squeezed)
+        so the SequenceBatch contract holds.
+        """
+        td = experience_buffer.tensor_dict
+        obs_full = td["obses"]
+        action_full = td["actions"]
+        reward_full = td["rewards"]
+        done_full = td["dones"].to(obs_full.dtype)
+        T = int(obs_full.shape[0])
+        N = int(obs_full.shape[1])
+
+        d_hat_full = read_aux_full(experience_buffer, "aux_d_hat")
+        failure_full = read_aux_full(experience_buffer, "aux_failure")
+        lifted_full = read_aux_full(experience_buffer, "aux_lifted")
+        success_count_full = read_aux_full(experience_buffer, "aux_success_cnt")
+
+        def _squeeze(t):
+            if t is None:
+                return None
+            if t.ndim >= 1 and t.shape[-1] == 1:
+                return t.squeeze(-1)
+            return t
+
+        reward_2d = _squeeze(reward_full)
+        done_2d = _squeeze(done_full)
+        returns_2d = _squeeze(returns_full)
+        d_hat_2d = _squeeze(d_hat_full)
+        failure_2d = _squeeze(failure_full)
+        lifted_2d = _squeeze(lifted_full)
+        success_2d = _squeeze(success_count_full)
+        last_d_hat_1d = _squeeze(last_d_hat) if last_d_hat is not None else None
+        last_success_1d = (
+            _squeeze(last_success_count) if last_success_count is not None else None
+        )
+
+        # next_* fields for the deterministic full-rollout batch.
+        # next_obs[T-1] uses last_obs (post-rollout step H), exactly like
+        # the random sampler when start_t + T == H. For t < T-1, next_obs[t]
+        # = obs_full[t+1].
+        next_obs = torch.empty_like(obs_full)
+        next_obs[:-1] = obs_full[1:]
+        next_obs[-1] = last_obs.to(obs_full.dtype)
+
+        def _build_next_scalar(full, last_val):
+            if full is None:
+                return None
+            out = torch.empty_like(full)
+            out[:-1] = full[1:]
+            if last_val is not None:
+                out[-1] = last_val.to(full.dtype)
+            else:
+                out[-1] = full[-1]
+            return out
+
+        next_d_hat = _build_next_scalar(d_hat_2d, last_d_hat_1d)
+        next_success = _build_next_scalar(success_2d, last_success_1d)
+
+        # Per-step valid_mask / segment_id for the full rollout.
+        valid_mask = torch.ones(T, N, dtype=obs_full.dtype, device=obs_full.device)
+        if T >= 2:
+            cum = torch.cumsum(done_2d[:-1], dim=0)
+            valid_mask[1:] = (cum < 0.5).to(obs_full.dtype)
+        segment_id = torch.zeros(T, N, dtype=torch.long, device=obs_full.device)
+        if T >= 2:
+            segment_id[1:] = torch.cumsum(done_2d[:-1], dim=0).long()
+
+        batch = SequenceBatch(
+            obs=obs_full,
+            action=action_full,
+            reward=reward_2d,
+            done=done_2d,
+            next_obs=next_obs,
+            returns=returns_2d,
+            d_hat=d_hat_2d,
+            next_d_hat=next_d_hat,
+            failure=failure_2d,
+            success_count=success_2d,
+            next_success_count=next_success,
+            lifted=lifted_2d,
+            valid_mask=valid_mask,
+            segment_id=segment_id,
+            meta={
+                "horizon_length": T,
+                "num_actors": N,
+                "obs_dim": int(obs_full.shape[-1]),
+                "seq_len": T,
+                "seq_batch_size": N,
+            },
+        ).to(self.device)
+
+        with torch.no_grad():
+            preds = self.model.encode_belief(batch)
+        teacher_value = preds.get("value")
+        teacher_success_logit = preds.get("success_logit")
+
+        cache = build_teacher_cache_from_predictions(
+            teacher_value=teacher_value,
+            teacher_success_logit=teacher_success_logit,
+            T=T,
+            N=N,
+            generation=int(generation),
+        )
+        return cache
 
     # ----- save / load -----
 

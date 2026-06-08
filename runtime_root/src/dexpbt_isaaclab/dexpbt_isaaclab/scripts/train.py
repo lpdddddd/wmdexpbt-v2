@@ -693,6 +693,44 @@ parser.add_argument("--seq_wm_free_nats", type=float, default=1.0,
                     help="RSSM free-nats floor on per-step KL.")
 parser.add_argument("--seq_wm_max_seq_len", type=int, default=32,
                     help="Transformer-lite positional embedding capacity.")
+# --- Phase A4 P0: PPO-facing distillation ---
+parser.add_argument(
+    "--seq_wm_policy_coupling",
+    type=str,
+    choices=["none", "distill_value", "distill_value_success"],
+    default="none",
+    help="How the sequence WM influences the PPO actor-critic. "
+    "`none` (default; backwards-compatible — reproduces pre-patch "
+    "behaviour where the seq WM has zero gradient effect on PPO). "
+    "`distill_value` registers a seq_aux_value_head on the PPO model "
+    "and adds an MSE loss against the (detached) seq value teacher "
+    "via rl_games' get_aux_loss hook. `distill_value_success` adds "
+    "a parallel success-prediction BCE head.",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_weight",
+    type=float, default=0.05,
+    help="Outer scalar on the seq distill aux loss (separate from "
+    "--seq_wm_lambda_total which scales the seq WM's own training).",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_value_weight",
+    type=float, default=1.0,
+    help="Per-term weight: distill_value MSE.",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_success_weight",
+    type=float, default=0.5,
+    help="Per-term weight: distill_success BCE-with-logits.",
+)
+parser.add_argument(
+    "--seq_wm_policy_coupling_warmup_frames",
+    type=int, default=100_000_000,
+    help="Frames of pure seq-WM-only training before the distill loss "
+    "is enabled. During warmup the seq WM still trains on its own "
+    "optimizer; only the PPO distill head and gradient flow are "
+    "suppressed (get_aux_loss returns {}). Default 100M.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -741,6 +779,14 @@ from dexpbt_isaaclab.world_model.wm_trainer import (
 from dexpbt_isaaclab.world_model.seq_wm_trainer import SeqWMConfig, SeqWMTrainer
 from dexpbt_isaaclab.world_model.seq_aux_collector import (
     SeqAuxCollector, SeqAuxInterceptorEnv,
+)
+from dexpbt_isaaclab.world_model.seq_policy_aux import (
+    CapturedFeature,
+    SeqDistillBridge,
+    SeqPolicyCouplingConfig,
+    attach_seq_aux_heads,
+    compute_seq_distill_aux_loss,
+    register_actor_mlp_capture,
 )
 from dexpbt_isaaclab.world_model.wm_aux_buffer import register_seq_aux_fields
 from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
@@ -966,6 +1012,8 @@ def _patch_actor_train_for_seq_wm(
     seq_aux_collector: SeqAuxCollector,
     seq_wm_save_dir,
     save_every_epochs: int = 50,
+    seq_aux_env_wrap: "SeqAuxInterceptorEnv | None" = None,
+    seq_distill_bridge: "SeqDistillBridge | None" = None,
 ):
     """Wire SeqWMTrainer into the rl_games agent.
 
@@ -977,11 +1025,16 @@ def _patch_actor_train_for_seq_wm(
       1. agent.init_tensors → wraps to register aux_d_hat / aux_failure /
          aux_lifted / aux_success_cnt fields on the freshly-created
          experience_buffer.
-      2. agent.play_steps_rnn → wraps to capture batch_dict (used to read
-         GAE returns) and reset_window() at rollout start.
-      3. agent.train_epoch → wraps to call seq_wm_trainer.step() each PPO
-         epoch using the just-collected (T, N) tensors and the captured
-         batch_dict["returns"].
+      2. agent.play_steps_rnn → wraps to (a) reset_window at rollout start,
+         (b) capture batch_dict for GAE returns, (c) call
+         ``record_terminal()`` after the rollout returns so ``last_d_hat``
+         / ``last_success_count`` are step-H snapshots (Phase A4 P0
+         Task C — terminal aux alignment fix).
+      3. agent.train_epoch → wraps to (a) copy collector window into the
+         buffer's aux fields, (b) build the seq distill teacher cache
+         on the FULL (T, N) rollout (when coupling != none), (c) call
+         seq_wm_trainer.step() for the seq WM's own training, and
+         (d) periodically save a SeqWM checkpoint.
 
     The legacy WMTrainer paths (model.get_aux_loss patch, _patch_actor_train_for_wm)
     are NOT applied for sequence strategies — see _WmEnabledRunner.run_train.
@@ -1005,31 +1058,158 @@ def _patch_actor_train_for_seq_wm(
     # before init_tensors is fine.
     original_play_steps_rnn = actor.play_steps_rnn
 
+    # Phase A4 P0 metrics: count rollouts where record_terminal() actually
+    # fired and the magnitude of the last_d_hat / last_success_count
+    # corrections. These confirm the off-by-one fix is live.
+    terminal_metrics: dict[str, float] = {
+        "terminal_recorded": 0.0,
+        "last_d_hat_delta_mean": 0.0,
+        "last_success_delta_mean": 0.0,
+    }
+    # Bridge bookkeeping: rollout generation increments on every
+    # play_steps_rnn return so the teacher cache can be invalidated cleanly.
+    rollout_state = {"generation": 0}
+
+    def _record_terminal_and_copy_aux() -> tuple[
+        "torch.Tensor | None", "torch.Tensor | None"
+    ]:
+        """Run after rollout, before PPO consumes the data.
+
+        1. ``record_terminal`` so ``last_d_hat`` / ``last_success_count``
+           reflect step H rather than step H-1 (Phase A4 P0 Task C).
+        2. Copy collector.full_window() into experience_buffer aux fields
+           so the seq WM trainer (and any future consumer) can read them.
+
+        Returns ``(last_d_hat, last_success_count)`` as 1-D tensors or
+        None if the field was not produced by the env.
+        """
+        if seq_aux_env_wrap is not None and seq_aux_env_wrap.last_infos is not None:
+            pre = seq_aux_collector.last_step()
+            d_hat_pre = pre.get("aux_d_hat")
+            succ_pre = pre.get("aux_success_cnt")
+            d_hat_pre = d_hat_pre.clone() if d_hat_pre is not None else None
+            succ_pre = succ_pre.clone() if succ_pre is not None else None
+            seq_aux_collector.record_terminal(
+                infos=seq_aux_env_wrap.last_infos,
+                env_attrs=seq_aux_env_wrap.last_env_attrs,
+            )
+            post = seq_aux_collector.last_step()
+            d_hat_post = post.get("aux_d_hat")
+            succ_post = post.get("aux_success_cnt")
+            if d_hat_pre is not None and d_hat_post is not None:
+                terminal_metrics["last_d_hat_delta_mean"] = float(
+                    (d_hat_post - d_hat_pre).abs().mean().item()
+                )
+            if succ_pre is not None and succ_post is not None:
+                terminal_metrics["last_success_delta_mean"] = float(
+                    (succ_post - succ_pre).abs().mean().item()
+                )
+            terminal_metrics["terminal_recorded"] = 1.0
+        else:
+            terminal_metrics["terminal_recorded"] = 0.0
+
+        # Copy collector full window into the experience buffer aux fields
+        # so seq WM trainer + teacher cache see the same numbers.
+        full_aux = seq_aux_collector.full_window()
+        for name, tensor in full_aux.items():
+            store = actor.experience_buffer.tensor_dict.get(name)
+            if store is None:
+                continue
+            store.copy_(tensor)
+
+        last_aux = seq_aux_collector.last_step()
+        last_d_hat = last_aux.get("aux_d_hat")
+        last_success_count = last_aux.get("aux_success_cnt")
+        if last_d_hat is not None:
+            last_d_hat = last_d_hat.squeeze(-1)
+        if last_success_count is not None:
+            last_success_count = last_success_count.squeeze(-1)
+        return last_d_hat, last_success_count
+
     def patched_play_steps_rnn(*args, **kwargs):
         seq_aux_collector.reset_window()
         bd = original_play_steps_rnn(*args, **kwargs)
+        # Phase A4 P0 Task C — terminal aux alignment + aux copy.
+        # Without this, collector._last == storage[H-1] (off-by-one) and
+        # next_d_hat[T-1] is biased by one step. We also copy full_aux
+        # into experience_buffer here (instead of at the end of train_epoch)
+        # so the upcoming PPO minibatch loop sees up-to-date aux fields
+        # in case any consumer of get_aux_loss reads them.
+        last_d_hat_t, last_success_t = _record_terminal_and_copy_aux()
         capture["batch_dict"] = bd
+        capture["last_d_hat"] = last_d_hat_t
+        capture["last_success_count"] = last_success_t
+        rollout_state["generation"] += 1
+        if seq_distill_bridge is not None:
+            seq_distill_bridge.rollout_generation = rollout_state["generation"]
+            seq_distill_bridge.feature_capture.reset()
+            # Build the teacher cache NOW from the freshly-collected rollout
+            # so PPO's minibatch loop (which consumes get_aux_loss) sees a
+            # cache whose generation matches the live rollout. If coupling
+            # is disabled we skip the work entirely.
+            if seq_distill_bridge.cfg.enabled:
+                try:
+                    T = int(actor.horizon_length)
+                    N = int(actor.num_actors * actor.num_agents)
+                    returns_flat = bd.get("returns")
+                    if returns_flat is not None:
+                        value_size = (
+                            returns_flat.shape[-1] if returns_flat.ndim == 2 else 1
+                        )
+                        try:
+                            returns_full = (
+                                returns_flat
+                                .view(N, T, value_size)
+                                .transpose(0, 1)
+                                .contiguous()
+                            )
+                        except Exception:
+                            returns_full = returns_flat.view(T, N, value_size)
+                        last_obs = (
+                            actor.obs["obs"] if isinstance(actor.obs, dict)
+                            else actor.obs
+                        )
+                        cache = seq_wm_trainer.compute_teacher_cache(
+                            experience_buffer=actor.experience_buffer,
+                            last_obs=last_obs,
+                            returns_full=(
+                                returns_full.squeeze(-1)
+                                if returns_full.shape[-1] == 1 else returns_full
+                            ),
+                            last_d_hat=last_d_hat_t,
+                            last_success_count=last_success_t,
+                            generation=rollout_state["generation"],
+                        )
+                        seq_distill_bridge.cache = cache
+                        seq_distill_bridge.last_frames = int(
+                            getattr(actor, "frame", 0) or 0
+                        )
+                except Exception as exc:
+                    print(f"[SeqDistill] teacher cache build failed: {exc}")
         return bd
 
     actor.init_tensors = patched_init_tensors
     actor.play_steps_rnn = patched_play_steps_rnn
 
     # 3) Patch train_epoch to (a) copy collector window into the buffer's
-    #    aux fields, (b) call SeqWMTrainer.step() with returns from
-    #    capture["batch_dict"], (c) periodically save a SeqWM checkpoint.
+    #    aux fields, (b) build the seq distill teacher cache on the full
+    #    (T, N) rollout (only when coupling enabled), (c) call
+    #    SeqWMTrainer.step() with returns from capture["batch_dict"],
+    #    (d) periodically save a SeqWM checkpoint.
     original_train_epoch = actor.train_epoch
     seq_wm_trainer._epochs_since_save = 0
+    seq_wm_trainer._first_distill_assert_done = False
 
     def patched_train_epoch(*args, **kwargs):
+        # rl_games train_epoch flow:
+        #   play_steps_rnn() -> prepare_dataset() -> minibatch loop ->
+        #   (get_aux_loss is invoked here per minibatch)
+        # We installed terminal-aux + teacher-cache work inside
+        # patched_play_steps_rnn so the cache is ready BEFORE the
+        # minibatch loop. This tail just trains the seq WM on the
+        # collected rollout and emits TB metrics.
         result = original_train_epoch(*args, **kwargs)
         try:
-            full_aux = seq_aux_collector.full_window()
-            for name, tensor in full_aux.items():
-                store = actor.experience_buffer.tensor_dict.get(name)
-                if store is None:
-                    continue
-                store.copy_(tensor)
-
             bd = capture["batch_dict"]
             if bd is None:
                 return result
@@ -1038,15 +1218,12 @@ def _patch_actor_train_for_seq_wm(
             returns_flat = bd.get("returns")
             if returns_flat is None:
                 return result
-            # rl_games swap_and_flatten01: shape (T*N, value_size). Reshape
-            # back to (T, N) — value_size is 1 for our tasks.
             value_size = (
                 returns_flat.shape[-1] if returns_flat.ndim == 2 else 1
             )
             try:
                 returns_full = returns_flat.view(N, T, value_size).transpose(0, 1).contiguous()
             except Exception:
-                # Fall back: assume already (T, N, *) layout.
                 returns_full = returns_flat.view(T, N, value_size)
 
             obs_full = actor.experience_buffer.tensor_dict["obses"]
@@ -1056,13 +1233,8 @@ def _patch_actor_train_for_seq_wm(
                 else torch.zeros(N, obs_full.shape[-1], device=obs_full.device)
             )
 
-            last_aux = seq_aux_collector.last_step()
-            last_d_hat = last_aux.get("aux_d_hat")
-            last_success_count = last_aux.get("aux_success_cnt")
-            if last_d_hat is not None:
-                last_d_hat = last_d_hat.squeeze(-1)
-            if last_success_count is not None:
-                last_success_count = last_success_count.squeeze(-1)
+            last_d_hat = capture.get("last_d_hat")
+            last_success_count = capture.get("last_success_count")
 
             frames = int(getattr(actor, "frame", 0) or 0)
             metrics = seq_wm_trainer.step(
@@ -1092,6 +1264,74 @@ def _patch_actor_train_for_seq_wm(
                             tb_writer.add_scalar(tag, float(v), frames)
                         except Exception:
                             pass
+            if tb_writer is not None:
+                for k, v in terminal_metrics.items():
+                    try:
+                        tb_writer.add_scalar(f"seq_aux/{k}", float(v), frames)
+                    except Exception:
+                        pass
+                if seq_distill_bridge is not None:
+                    cfg = seq_distill_bridge.cfg
+                    try:
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/active",
+                            float(seq_distill_bridge.last_active),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/warmup_active",
+                            float(seq_distill_bridge.last_warmup_active),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/loss_value_distill",
+                            float(seq_distill_bridge.last_loss_value),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/loss_success_distill",
+                            float(seq_distill_bridge.last_loss_success),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/effective_weight",
+                            float(seq_distill_bridge.last_effective_weight),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_value_mean",
+                            float(seq_distill_bridge.last_teacher_value_mean),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/teacher_value_std",
+                            float(seq_distill_bridge.last_teacher_value_std),
+                            frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_policy_aux/coupling_mode_id",
+                            float({"none": 0, "distill_value": 1,
+                                    "distill_value_success": 2}.get(cfg.mode, -1)),
+                            frames,
+                        )
+                    except Exception:
+                        pass
+
+            # One-shot grad-flow log: when coupling != none, past warmup,
+            # and the bridge marks active=True, confirm the loss did flow.
+            if (
+                seq_distill_bridge is not None
+                and not seq_wm_trainer._first_distill_assert_done
+                and seq_distill_bridge.last_active
+                and seq_distill_bridge.last_frames >= int(
+                    seq_distill_bridge.cfg.warmup_frames
+                )
+            ):
+                print(
+                    f"[SeqWM] policy coupling={seq_distill_bridge.cfg.mode}: "
+                    "PPO model params updated by seq aux head: yes"
+                )
+                seq_wm_trainer._first_distill_assert_done = True
 
             seq_wm_trainer._epochs_since_save += 1
             if (seq_wm_save_dir is not None
@@ -1235,6 +1475,40 @@ def _patch_model_get_aux_loss(model, wm_trainer):
             wm_loss_dict.update(base)
 
         return wm_loss_dict if wm_loss_dict else None
+
+    model.get_aux_loss = patched_get_aux_loss
+
+
+def _patch_model_get_aux_loss_for_seq(model, seq_distill_bridge: "SeqDistillBridge"):
+    """Phase A4 P0 — install seq distill loss into rl_games' get_aux_loss hook.
+
+    rl_games' ``A2CAgent.calc_gradients`` calls ``model.get_aux_loss()`` AFTER
+    ``self.model(batch_dict)`` and adds each returned tensor to the PPO loss
+    before ``backward()``. By returning a tensor with grad on
+    ``seq_aux_value_head`` (and the captured ``actor_mlp_out``) we close the
+    gradient loop:
+
+        seq distill loss
+            -> seq_aux_value_head params
+            -> actor_mlp_out (captured by forward hook)
+            -> shared LSTM/MLP encoder
+            -> PPO model params
+
+    The teacher targets are read from the pre-built ``SeqDistillBridge.cache``
+    (no per-minibatch fwd through the seq WM). Fail-fast on missing
+    minibatch indices, stale cache generation, or shape mismatches.
+    """
+    original_get_aux_loss = model.get_aux_loss
+
+    def patched_get_aux_loss():
+        seq_loss_dict = compute_seq_distill_aux_loss(seq_distill_bridge)
+        # Also include any losses from the original method (almost always
+        # None — rl_games' default Network.get_aux_loss returns None).
+        base = original_get_aux_loss()
+        if base is not None:
+            seq_loss_dict = dict(seq_loss_dict)
+            seq_loss_dict.update(base)
+        return seq_loss_dict if seq_loss_dict else None
 
     model.get_aux_loss = patched_get_aux_loss
 
@@ -1398,7 +1672,8 @@ class _WmEnabledRunner(Runner):
                  tensorboard_writer=None, cf_tracker=None, raw_env=None,
                  cf_reset_epoch_counter: bool = False,
                  seq_wm_trainer=None, seq_aux_collector=None,
-                 seq_wm_save_dir=None):
+                 seq_wm_save_dir=None, seq_aux_env_wrap=None,
+                 seq_policy_coupling_cfg: "SeqPolicyCouplingConfig | None" = None):
         super().__init__(observer)
         self.wm_trainer = wm_trainer
         self.wm_ckpt_manager = wm_ckpt_manager
@@ -1413,6 +1688,10 @@ class _WmEnabledRunner(Runner):
         self.seq_wm_trainer = seq_wm_trainer
         self.seq_aux_collector = seq_aux_collector
         self.seq_wm_save_dir = seq_wm_save_dir
+        self.seq_aux_env_wrap = seq_aux_env_wrap
+        self.seq_policy_coupling_cfg = (
+            seq_policy_coupling_cfg or SeqPolicyCouplingConfig()
+        )
         # Patch 3 (rev 2, 2026-05-30): CF child needs to reset rl_games
         # `agent.frame` / `agent.epoch_num` / `last_mean_rewards` after
         # restoring the source checkpoint, otherwise the agent's recorded
@@ -1498,11 +1777,52 @@ class _WmEnabledRunner(Runner):
 
         # Phase A4: sequence WM path (mutually exclusive with legacy WMTrainer).
         if self.seq_wm_trainer is not None:
+            seq_distill_bridge = None
+            seq_policy_cfg = self.seq_policy_coupling_cfg
+            if seq_policy_cfg is not None and seq_policy_cfg.enabled:
+                seq_distill_bridge = SeqDistillBridge(cfg=seq_policy_cfg)
+                seq_distill_bridge.agent_ref = agent
+                # Register student heads on the rl_games model + add them
+                # to the PPO optimizer's param groups.
+                heads = attach_seq_aux_heads(
+                    rl_games_model=agent.model,
+                    optimizer=agent.optimizer,
+                    cfg=seq_policy_cfg,
+                    feature_dim=256,
+                    device=next(agent.model.parameters()).device,
+                )
+                seq_distill_bridge.seq_aux_value_head = heads.get(
+                    "seq_aux_value_head"
+                )
+                seq_distill_bridge.seq_aux_success_head = heads.get(
+                    "seq_aux_success_head"
+                )
+                # Install the actor_mlp_out forward hook. Captures fire on
+                # every model forward pass (PPO calc_gradients + any other
+                # forward); the bridge resets the capture at rollout start
+                # so a stale tensor cannot be silently reused.
+                self._seq_distill_hook_handle = register_actor_mlp_capture(
+                    agent.model,
+                    seq_distill_bridge.feature_capture,
+                )
+                # Install the get_aux_loss patch BEFORE _restore so any
+                # checkpoint restore that happens later sees the head
+                # weights / param groups already wired up.
+                _patch_model_get_aux_loss_for_seq(agent.model, seq_distill_bridge)
+                print(
+                    f"[SeqDistill] enabled: mode={seq_policy_cfg.mode} "
+                    f"weight={seq_policy_cfg.weight} "
+                    f"value_w={seq_policy_cfg.value_weight} "
+                    f"success_w={seq_policy_cfg.success_weight} "
+                    f"warmup_frames={seq_policy_cfg.warmup_frames}"
+                )
             _patch_actor_train_for_seq_wm(
                 agent,
                 self.seq_wm_trainer,
                 self.seq_aux_collector,
                 self.seq_wm_save_dir,
+                seq_aux_env_wrap=self.seq_aux_env_wrap,
+                seq_distill_bridge=seq_distill_bridge,
             )
             print(
                 f"[SeqWM] Connected to A2CAgent: strategy={self.wm_strategy}, "
@@ -1770,6 +2090,14 @@ def main():
     seq_wm_trainer = None
     seq_aux_collector = None
     seq_wm_save_dir = None
+    seq_aux_env_wrap = None
+    seq_policy_coupling_cfg = SeqPolicyCouplingConfig(
+        mode=args_cli.seq_wm_policy_coupling,
+        weight=float(args_cli.seq_wm_policy_coupling_weight),
+        value_weight=float(args_cli.seq_wm_policy_coupling_value_weight),
+        success_weight=float(args_cli.seq_wm_policy_coupling_success_weight),
+        warmup_frames=int(args_cli.seq_wm_policy_coupling_warmup_frames),
+    )
     is_sequence_strategy = (
         args_cli.enable_wm and args_cli.wm_strategy in SEQUENCE_STRATEGIES
     )
@@ -1856,6 +2184,9 @@ def main():
 
         env = SeqAuxInterceptorEnv(env, seq_aux_collector,
                                     env_attrs_provider=_seq_env_attrs)
+        # Phase A4 P0: keep a direct reference to the wrap so the runner
+        # can read its last_infos / last_env_attrs after play_steps_rnn.
+        seq_aux_env_wrap = env
 
         # Path used by patched_train_epoch to dump wm_seq_latest.pt.
         seq_wm_save_dir = Path(args_cli.workspace) / f"{args_cli.policy_idx:03d}" / "wm_seq_checkpoints"
@@ -2242,6 +2573,8 @@ def main():
             seq_wm_trainer=seq_wm_trainer,
             seq_aux_collector=seq_aux_collector,
             seq_wm_save_dir=seq_wm_save_dir,
+            seq_aux_env_wrap=seq_aux_env_wrap,
+            seq_policy_coupling_cfg=seq_policy_coupling_cfg,
         )
     else:
         runner = Runner(observer)

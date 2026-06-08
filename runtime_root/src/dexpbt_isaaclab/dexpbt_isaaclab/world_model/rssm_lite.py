@@ -168,7 +168,20 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
 
     # ---------- SequenceWorldModelBase API ----------
 
-    def encode_sequence(self, batch: SequenceBatch) -> torch.Tensor:
+    def encode_sequence(
+        self,
+        batch: SequenceBatch,
+        *,
+        deterministic: bool = False,
+    ) -> torch.Tensor:
+        """Forward the RSSM over a sequence batch and return ``b_t``.
+
+        ``deterministic=True`` substitutes ``z_t`` with the posterior mean
+        ``mu_q`` (no reparameterisation noise). Used by ``encode_belief``
+        so the teacher signal is stable across PPO minibatches; training
+        keeps the default stochastic path so the KL loss still has a
+        meaningful gradient.
+        """
         T, B = batch.T, batch.B
         device = batch.device
         obs_emb_seq = self.obs_encoder(batch.obs.reshape(T * B, -1)).reshape(T, B, -1)
@@ -196,7 +209,10 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             post_mu, post_std = self._split_dist(
                 self.posterior_net(torch.cat([h, obs_emb_seq[t]], dim=-1))
             )
-            z = self._reparam(post_mu, post_std)
+            if deterministic:
+                z = post_mu
+            else:
+                z = self._reparam(post_mu, post_std)
             belief = torch.cat([h, z], dim=-1)
             beliefs.append(belief)
             prior_mus.append(prior_mu)
@@ -211,6 +227,38 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         self._last_post_mu = torch.stack(post_mus, dim=0)
         self._last_post_std = torch.stack(post_stds, dim=0)
         return belief_seq
+
+    @torch.no_grad()
+    def encode_belief(
+        self, batch: SequenceBatch
+    ) -> dict[str, Optional[torch.Tensor]]:
+        """Deterministic belief + detached aux head outputs for distillation.
+
+        Overrides the base implementation so the teacher uses the posterior
+        mean (no reparameterisation noise). Heads are evaluated under
+        ``no_grad`` and their outputs are detached.
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            belief = self.encode_sequence(batch, deterministic=True)
+        finally:
+            if was_training:
+                self.train()
+        belief = belief.detach()
+        T, B = belief.shape[0], belief.shape[1]
+        belief_flat = belief.reshape(T * B, -1)
+        value = None
+        success_logit = None
+        if self.heads.has_value_head:
+            v = self.heads.predict_value(belief_flat)
+            if v is not None:
+                value = v.reshape(T, B).detach()
+        if self.heads.success_head is not None:
+            action_flat = batch.action.reshape(T * B, -1)
+            ba = torch.cat([belief_flat, action_flat], dim=-1)
+            success_logit = self.heads.success_head(ba).squeeze(-1).reshape(T, B).detach()
+        return {"belief": belief, "value": value, "success_logit": success_logit}
 
     def compute_aux_loss(
         self,

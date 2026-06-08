@@ -637,6 +637,10 @@ def main() -> None:
             # Phase A4 sequence WM toggles.
             "--seq_wm_value_detach_belief",
             "--no-seq_wm_value_detach_belief",
+            # Phase A4 P0: PPO-facing distillation has only value flags
+            # (--seq_wm_policy_coupling=...) so no boolean entries here;
+            # the generic `--key value` -> `--key=value` normalisation
+            # below handles them automatically.
         }
         extra = list(args.extra)
         i = 0

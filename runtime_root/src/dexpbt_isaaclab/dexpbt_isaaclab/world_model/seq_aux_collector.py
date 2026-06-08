@@ -126,6 +126,19 @@ class SeqAuxInterceptorEnv:
     Mirrors the pattern used by WMInterceptorEnv (used by the legacy WM data
     collector). The wrapper is otherwise transparent: it forwards
     step / reset / attribute access to the underlying env.
+
+    Phase A4 P0 (Task C, terminal aux alignment):
+
+    The wrapper also retains the most recent ``infos`` and ``env_attrs`` it
+    saw on its last ``step()``. After ``play_steps_rnn`` returns the
+    aux of step ``H`` (post-rollout) is ``last_infos`` / ``last_env_attrs``,
+    not ``storage[H-1]`` — the patched ``play_steps_rnn`` in
+    ``train.py`` will read these via ``last_infos`` / ``last_env_attrs``
+    and call ``collector.record_terminal()``.
+
+    Without this, ``last_d_hat`` / ``last_success_count`` were ``storage[H-1]``
+    (off-by-one), biasing every ``next_d_hat[T-1]`` / ``next_success_count[T-1]``
+    target seen by the seq WM trainer.
     """
 
     def __init__(
@@ -139,6 +152,8 @@ class SeqAuxInterceptorEnv:
         # env_attrs_provider(env) -> dict of names like {"lifted_object":...,
         # "successes":...}. None means rely on infos["wm"] only.
         self._env_attrs_provider = env_attrs_provider
+        self._last_infos: Optional[Mapping[str, Any]] = None
+        self._last_env_attrs: Optional[Mapping[str, Any]] = None
 
     def step(self, actions):
         obs, rew, terminated, truncated, infos = self._env.step(actions)
@@ -146,14 +161,37 @@ class SeqAuxInterceptorEnv:
             self._env_attrs_provider(self._env) if self._env_attrs_provider else None
         )
         self._collector.on_step(infos, env_attrs)
+        # Retain the last step's infos / env_attrs so the patched
+        # play_steps_rnn can call collector.record_terminal() with
+        # the post-rollout (step H) snapshot.
+        self._last_infos = infos
+        self._last_env_attrs = env_attrs
         return obs, rew, terminated, truncated, infos
 
     def reset(self, *args, **kwargs):
         return self._env.reset(*args, **kwargs)
 
+    @property
+    def last_infos(self) -> Optional[Mapping[str, Any]]:
+        return self._last_infos
+
+    @property
+    def last_env_attrs(self) -> Optional[Mapping[str, Any]]:
+        return self._last_env_attrs
+
+    @property
+    def collector(self) -> SeqAuxCollector:
+        return self._collector
+
     def __getattr__(self, name: str):
         # Delegate everything else to the underlying env.
-        if name in ("_env", "_collector", "_env_attrs_provider"):
+        if name in (
+            "_env",
+            "_collector",
+            "_env_attrs_provider",
+            "_last_infos",
+            "_last_env_attrs",
+        ):
             raise AttributeError(name)
         return getattr(self._env, name)
 
