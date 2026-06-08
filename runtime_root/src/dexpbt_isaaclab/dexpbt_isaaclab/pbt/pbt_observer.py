@@ -3484,6 +3484,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         _skip_prefixes = {"-u", "-m", "dexpbt_isaaclab.scripts.train"}
         _orphan_strategy_tokens = {
             "none", "aux_low", "aux_mid", "value_imag_h1", "value_imag_h3",
+            "rssm_aux", "rssm_belief_value", "trans_aux", "trans_belief_value",
         }
         base_args: list[str] = []
         idx = 1
@@ -4186,9 +4187,39 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         WM checkpoint warm-start rules:
         aux → value_imag:  inherit WM weights
         value_imag_h1 → h3: inherit
+        rssm_* / trans_* within-family: inherit wm_seq_latest.pt
         any → none:         reset
         """
         if strategy == "none":
+            return None
+
+        from dexpbt_isaaclab.world_model.wm_trainer import (
+            RSSM_FAMILY,
+            SEQUENCE_STRATEGIES,
+            TRANS_FAMILY,
+        )
+
+        if strategy in SEQUENCE_STRATEGIES:
+            src_dir = self.workspace / f"{source_policy:03d}" / "wm_seq_checkpoints"
+            src_ckpt = src_dir / "wm_seq_latest.pt"
+            if not src_ckpt.exists():
+                return None
+            src_strategy = None
+            try:
+                import torch
+
+                payload = torch.load(
+                    src_ckpt, map_location="cpu", weights_only=False
+                )
+                src_strategy = str(payload.get("strategy") or "")
+            except Exception:
+                src_strategy = None
+            if strategy in RSSM_FAMILY and (src_strategy or "") in RSSM_FAMILY:
+                return str(src_ckpt)
+            if strategy in TRANS_FAMILY and (src_strategy or "") in TRANS_FAMILY:
+                return str(src_ckpt)
+            if src_strategy == strategy:
+                return str(src_ckpt)
             return None
 
         src_dir = self.workspace / f"{source_policy:03d}" / "wm_checkpoints"

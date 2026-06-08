@@ -634,6 +634,9 @@ def main() -> None:
             "--no-pbt_early_collapse_detect",
             "--pbt_recovery_bypass_elimination_burnin",
             "--no-pbt_recovery_bypass_elimination_burnin",
+            # Phase A4 sequence WM toggles.
+            "--seq_wm_value_detach_belief",
+            "--no-seq_wm_value_detach_belief",
         }
         extra = list(args.extra)
         i = 0

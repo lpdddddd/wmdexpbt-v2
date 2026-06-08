@@ -1869,11 +1869,22 @@ def main():
             try:
                 payload = torch.load(wm_seq_ckpt_path, map_location=rl_device,
                                       weights_only=False)
-                if "model_state_dict" in payload and payload.get("strategy") in (
-                        args_cli.wm_strategy,
-                ):
+                src_strategy = str(payload.get("strategy") or "unknown")
+                compatible, compat_reason = _is_wm_strategy_compatible(
+                    src_strategy, args_cli.wm_strategy
+                )
+                if "model_state_dict" in payload and compatible:
                     seq_wm_trainer.load_state_dict(payload, strict=False)
-                    print(f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path}")
+                    print(
+                        f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path} "
+                        f"(src={src_strategy}, reason={compat_reason})"
+                    )
+                elif "model_state_dict" in payload:
+                    print(
+                        f"[SeqWM] skip warm-start from {wm_seq_ckpt_path}: "
+                        f"src={src_strategy} incompatible with "
+                        f"{args_cli.wm_strategy} ({compat_reason})"
+                    )
             except Exception as exc:
                 print(f"[SeqWM] failed to warm-start from {wm_seq_ckpt_path}: {exc}")
 
