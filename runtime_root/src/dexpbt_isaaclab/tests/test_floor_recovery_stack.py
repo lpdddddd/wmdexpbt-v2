@@ -674,5 +674,333 @@ class FloorRecoveryEvalBufferTest(unittest.TestCase):
         self.assertEqual(len(buf), 0)
 
 
+# =========================================================================
+# Section 8: Phase A4 P4 wired (2026-06-10) — runtime wiring tests.
+# =========================================================================
+#
+# These tests cover the runtime wiring patch:
+#   * default-off: TeacherManager / WMImaginedEvaluator construct cleanly
+#     with enabled=False and produce no side effects.
+#   * recovery target wider mask gives non-zero pos_rate at tight tol.
+#   * horizon heads skip horizons exceeding seq_len-2 (no fake zero loss).
+#   * imagined evaluator policy mode raises NotImplementedError.
+#   * train.py declares the new wiring flags.
+#   * pbt_observer.py exposes the new TB tags.
+#   * analyze_wm_runtime_wiring.py CLI module is importable.
+# =========================================================================
+
+
+class WiredHorizonSkipTest(unittest.TestCase):
+    """Horizons longer than seq_len-2 must be skipped, not silently zeroed."""
+
+    def test_h16_with_seq_len_16_is_skipped(self):
+        T, B = 16, 4
+        torch.manual_seed(0)
+        model = RSSMLiteWorldModel(
+            obs_dim=8,
+            action_dim=2,
+            obs_embed_dim=8,
+            action_embed_dim=4,
+            h_dim=8,
+            z_dim=4,
+            head_hidden=8,
+            with_value_head=True,
+            with_horizon_heads=True,
+            horizon_steps=(4, 8, 16),
+            with_recovery_head=True,
+            recovery_horizon=4,
+            free_nats=0.0,
+        )
+        batch = SequenceBatch(
+            obs=torch.randn(T, B, 8),
+            action=torch.zeros(T, B, 2),
+            reward=torch.zeros(T, B),
+            done=torch.zeros(T, B),
+            next_obs=torch.randn(T, B, 8),
+            returns=torch.zeros(T, B),
+            valid_mask=torch.ones(T, B),
+            segment_id=torch.zeros(T, B, dtype=torch.long),
+            d_hat=torch.full((T, B), 0.05),
+            next_d_hat=torch.full((T, B), 0.04),
+            success_count=torch.zeros(T, B),
+            next_success_count=torch.zeros(T, B),
+            success_tolerance_seq=torch.full((T, B), 0.03),
+        )
+        losses = model.compute_aux_loss(
+            batch,
+            recovery_shadow_tol_threshold=0.04,
+            horizon_skip_too_long=True,
+        )
+        # h16 must NOT be present (skipped because 16 > 16-2=14).
+        self.assertNotIn("loss_horizon_success_h16", losses)
+        # h4 and h8 (both <= 14) must be present.
+        self.assertIn("loss_horizon_success_h4", losses)
+        self.assertIn("loss_horizon_success_h8", losses)
+        metrics = model.report_metrics()
+        self.assertIn("horizon_skipped_h16", metrics)
+        self.assertEqual(metrics["horizon_skipped_h16"], 1.0)
+
+
+class WiredRecoveryShadowMaskTest(unittest.TestCase):
+    """Wider mask should produce non-zero pos_rate at tight tolerance."""
+
+    def test_pos_rate_nonzero_at_tight_tol(self):
+        T, B = 8, 4
+        torch.manual_seed(1)
+        model = RSSMLiteWorldModel(
+            obs_dim=4,
+            action_dim=2,
+            obs_embed_dim=4,
+            action_embed_dim=4,
+            h_dim=4,
+            z_dim=4,
+            head_hidden=4,
+            with_value_head=False,
+            with_horizon_heads=False,
+            with_recovery_head=True,
+            recovery_horizon=4,
+            free_nats=0.0,
+        )
+        # Tolerance is 0.03 (above the strict 0.02 floor but below the
+        # shadow threshold 0.04). d_hat improves by 0.01 each step.
+        d_hat = torch.tensor(
+            [[0.05 - 0.005 * t for _ in range(B)] for t in range(T)]
+        )
+        next_d_hat = torch.cat(
+            [d_hat[1:], d_hat[-1:].clone()], dim=0
+        )
+        batch = SequenceBatch(
+            obs=torch.zeros(T, B, 4),
+            action=torch.zeros(T, B, 2),
+            reward=torch.zeros(T, B),
+            done=torch.zeros(T, B),
+            next_obs=torch.zeros(T, B, 4),
+            returns=torch.zeros(T, B),
+            valid_mask=torch.ones(T, B),
+            segment_id=torch.zeros(T, B, dtype=torch.long),
+            d_hat=d_hat,
+            next_d_hat=next_d_hat,
+            success_count=torch.zeros(T, B),
+            next_success_count=torch.zeros(T, B),
+            success_tolerance_seq=torch.full((T, B), 0.03),
+        )
+        # Strict mask (default): 0.03 > 0.02 → recovery target empty.
+        losses_strict = model.compute_aux_loss(
+            batch,
+            floor_tol_threshold=0.02,
+        )
+        m_strict = model.report_metrics()
+        # Wider shadow: 0.03 <= 0.04 → mask covers steps and target>0.
+        losses_wide = model.compute_aux_loss(
+            batch,
+            floor_tol_threshold=0.02,
+            recovery_shadow_tol_threshold=0.04,
+            recovery_d_hat_margin=0.005,
+        )
+        m_wide = model.report_metrics()
+        # Strict path should have zero coverage; wide path > 0.
+        self.assertEqual(m_strict["recovery_floor_sample_fraction"], 0.0)
+        self.assertGreater(m_wide["recovery_floor_sample_fraction"], 0.0)
+        # And pos_rate should be non-zero in the wide path.
+        self.assertGreater(m_wide["recovery_pos_rate"], 0.0)
+
+
+class WiredImaginedEvaluatorTest(unittest.TestCase):
+    """Default-off, policy-mode raises, recorded-mode produces a valid dict."""
+
+    def test_default_off_returns_invalid(self):
+        ev = WMImaginedEvaluator(enabled=False)
+        out = ev.evaluate_batch(model=None, batch=None, device="cpu")
+        self.assertFalse(out["imagined_valid"])
+
+    def test_policy_mode_raises(self):
+        with self.assertRaises(NotImplementedError):
+            ev = WMImaginedEvaluator(enabled=True, action_mode="policy")
+            T, B = 4, 2
+            batch = SequenceBatch(
+                obs=torch.zeros(T, B, 4),
+                action=torch.zeros(T, B, 2),
+                reward=torch.zeros(T, B),
+                done=torch.zeros(T, B),
+                next_obs=torch.zeros(T, B, 4),
+                returns=torch.zeros(T, B),
+                valid_mask=torch.ones(T, B),
+                segment_id=torch.zeros(T, B, dtype=torch.long),
+            )
+            class _Stub:
+                training = False
+                def eval(self):
+                    return None
+                def train(self):
+                    return None
+                def compute_aux_loss(self, _b):
+                    return {}
+                def encode_sequence(self, _b):
+                    return torch.zeros(T, B, 4)
+                heads = None
+            ev.evaluate_batch(_Stub(), batch, device="cpu")
+
+
+class WiredCLIDeclarationTest(unittest.TestCase):
+    """Train.py declares the new wiring flags + the default horizon list."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.train_text = (
+            Path(__file__).parent.parent
+            / "dexpbt_isaaclab"
+            / "scripts"
+            / "train.py"
+        ).read_text()
+        cls.observer_text = (
+            Path(__file__).parent.parent
+            / "dexpbt_isaaclab"
+            / "pbt"
+            / "pbt_observer.py"
+        ).read_text()
+
+    def test_default_horizon_steps_is_4_8(self):
+        # The default must NOT be 8,16 anymore (h16 is degenerate at
+        # seq_len=16). Look for "default=\"4,8\"" near the seq_wm_horizon_steps
+        # parser entry.
+        seg = self.train_text.split("--seq_wm_horizon_steps", 1)[1][:400]
+        self.assertIn('default="4,8"', seg)
+
+    def test_train_declares_wiring_flags(self):
+        for flag in (
+            "--seq_wm_recovery_shadow_tol_threshold",
+            "--seq_wm_horizon_skip_too_long",
+            "--seq_wm_teacher_eval_buffer_capacity",
+            "--seq_wm_teacher_record_below_tol",
+            "--seq_wm_teacher_require_recovery_pos_low",
+            "--seq_wm_teacher_require_recovery_pos_high",
+        ):
+            self.assertIn(flag, self.train_text, f"{flag} not declared")
+
+    def test_train_imports_runtime_modules(self):
+        self.assertIn("from dexpbt_isaaclab.world_model.wm_teacher_manager", self.train_text)
+        self.assertIn("from dexpbt_isaaclab.world_model.wm_imagined_evaluator", self.train_text)
+        self.assertIn("_run_wm_runtime_wiring(", self.train_text)
+        # Per-policy disk mailbox publish path.
+        self.assertIn("_atomic_write_json(", self.train_text)
+        self.assertIn('wm_imagine_dir / f"{int(policy_idx_for_file):03d}.json"', self.train_text)
+
+    def test_observer_emits_wired_tags(self):
+        for tag in (
+            'pbt/wm_score_used',
+            'pbt/source_selected_by_wm',
+            'pbt/wm_fallback_reason_hash',
+            'pbt/floor_recovery_score_real',
+            'pbt/floor_recovery_score_wm',
+            'pbt/hard_collapse_population',
+        ):
+            self.assertIn(tag, self.observer_text, f"missing {tag}")
+
+    def test_observer_refresh_helper_present(self):
+        self.assertIn(
+            "_refresh_wm_imagined_eval_from_disk", self.observer_text
+        )
+
+
+class WiredObserverDiskRefreshTest(unittest.TestCase):
+    """Observer must reload imagined eval from per-policy JSON files."""
+
+    def test_refresh_reads_files(self):
+        # Construct a stub object with the required attributes only — we
+        # are unit-testing _refresh_wm_imagined_eval_from_disk in
+        # isolation without booting a full observer.
+        from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
+        class _Stub:
+            workspace = Path(tempfile.mkdtemp()) / "ws"
+            _wm_imagined_eval_per_policy = {}
+
+        stub = _Stub()
+        d = stub.workspace / "wm_imagined"
+        d.mkdir(parents=True, exist_ok=True)
+        for pidx, valid in [(0, True), (1, False)]:
+            (d / f"{pidx:03d}.json").write_text(
+                json.dumps({
+                    "policy_idx": pidx,
+                    "frames": 100_000_000,
+                    "imagined_valid": valid,
+                    "uncertainty": 0.2 if valid else 0.9,
+                    "wm_recovery_prob": 0.8 if valid else 0.0,
+                    "invalid_reason": "" if valid else "high_uncertainty",
+                })
+            )
+        # Bind the unbound method on the stub by passing it as ``self``.
+        n = DexPBTPbtAlgoObserver._refresh_wm_imagined_eval_from_disk(
+            stub, env_frames=110_000_000
+        )
+        self.assertEqual(n, 2)
+        self.assertIn(0, stub._wm_imagined_eval_per_policy)
+        self.assertIn(1, stub._wm_imagined_eval_per_policy)
+        # Stale gate: an entry older than max_age should flip valid=False.
+        n_stale = DexPBTPbtAlgoObserver._refresh_wm_imagined_eval_from_disk(
+            stub, env_frames=10_000_000_000, max_age_frames=1_000_000
+        )
+        self.assertEqual(n_stale, 2)
+        self.assertFalse(
+            stub._wm_imagined_eval_per_policy[0]["imagined_valid"]
+        )
+        self.assertEqual(
+            stub._wm_imagined_eval_per_policy[0]["invalid_reason"],
+            "stale_wm_imagined",
+        )
+
+
+class WiredAnalyzerImportTest(unittest.TestCase):
+    """analyze_wm_runtime_wiring.py imports cleanly and exposes analyze()."""
+
+    def test_module_loads(self):
+        import importlib.util
+        path = (
+            Path(__file__).parent.parent.parent.parent.parent
+            / "results"
+            / "analyze_wm_runtime_wiring.py"
+        )
+        self.assertTrue(path.exists(), f"missing {path}")
+        spec = importlib.util.spec_from_file_location(
+            "analyze_wm_runtime_wiring", path
+        )
+        self.assertIsNotNone(spec)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        self.assertTrue(hasattr(mod, "analyze"))
+        self.assertTrue(hasattr(mod, "render_markdown"))
+
+
+class WiredTeacherManagerNoEvalDataTest(unittest.TestCase):
+    """maybe_promote with empty buffer + zero recovery_pos_rate degeneracy."""
+
+    def test_empty_buffer_evaluate_returns_zero_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = TeacherManager(
+                workspace_root=Path(tmp),
+                policy_idx=0,
+                enabled=True,
+                require_recovery_pos_in=(0.05, 0.95),
+            )
+            buf = FloorRecoveryEvalBuffer(capacity=4)
+            # Stub model — never reached because buffer is empty.
+            metrics = TeacherManager.evaluate(
+                model=None,  # type: ignore[arg-type]
+                eval_buffer=buf,
+                device="cpu",
+            )
+            self.assertEqual(metrics.n_samples, 0)
+            self.assertEqual(metrics.score, 0.0)
+            # Promotion should still gate on recovery_pos_rate=0 → reject.
+            promoted, reason = mgr.maybe_promote(
+                candidate_path=Path(tmp) / "x.pt",
+                candidate_metrics=metrics,
+                env_frames=10_000_000,
+                global_step=0,
+            )
+            self.assertFalse(promoted)
+            self.assertEqual(reason, "recovery_pos_degenerate")
+
+
 if __name__ == "__main__":
     unittest.main()

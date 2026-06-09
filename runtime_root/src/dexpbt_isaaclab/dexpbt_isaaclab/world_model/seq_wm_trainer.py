@@ -100,6 +100,13 @@ class SeqWMConfig:
     lambda_recovery: float = 0.0
     recovery_d_hat_margin: float = 0.005
     recovery_d_hat_tol_min_steps: int = 0
+    # Phase A4 P4 wired (2026-06-10): widen recovery target/mask above
+    # the strict floor threshold so pos_rate is non-zero before the
+    # curriculum reaches floor. Default 0.04 mirrors the tight-tolerance
+    # zone used by adaptive_fast at 800M. Set to <=floor_tol_threshold
+    # to recover the original strict-only behaviour.
+    recovery_shadow_tol_threshold: float = 0.04
+    horizon_skip_too_long: bool = True
     # Replay prioritization (Part F). Defaults keep uniform sampling.
     replay_prioritize_floor_recovery: bool = False
     replay_floor_weight: float = 2.0
@@ -305,10 +312,34 @@ class SeqWMTrainer:
                     recovery_d_hat_tol_min_steps=int(
                         self.cfg.recovery_d_hat_tol_min_steps
                     ),
+                    recovery_shadow_tol_threshold=float(
+                        self.cfg.recovery_shadow_tol_threshold
+                    ),
+                    horizon_skip_too_long=bool(self.cfg.horizon_skip_too_long),
                     **kwargs,
                 )
             except TypeError:
-                losses = self.model.compute_aux_loss(batch, **kwargs)
+                # Backward-compat fallback: model didn't accept new kwargs.
+                try:
+                    losses = self.model.compute_aux_loss(
+                        batch,
+                        floor_aware_weighting=bool(
+                            self.cfg.floor_aware_weighting
+                        ),
+                        floor_tol_threshold=float(self.cfg.floor_tol_threshold),
+                        floor_tol_floor=float(self.cfg.floor_tol_floor),
+                        floor_weight_mid=float(self.cfg.floor_weight_mid),
+                        floor_weight_floor=float(self.cfg.floor_weight_floor),
+                        recovery_d_hat_margin=float(
+                            self.cfg.recovery_d_hat_margin
+                        ),
+                        recovery_d_hat_tol_min_steps=int(
+                            self.cfg.recovery_d_hat_tol_min_steps
+                        ),
+                        **kwargs,
+                    )
+                except TypeError:
+                    losses = self.model.compute_aux_loss(batch, **kwargs)
 
             scaled = self.cfg.lambda_total * losses["loss_total"]
             self.optimizer.zero_grad(set_to_none=True)

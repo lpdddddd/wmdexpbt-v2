@@ -335,6 +335,15 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         # Phase A4 P4 (2026-06-09): recovery soft-OR target (Part B / Item 6).
         recovery_d_hat_margin: float = 0.005,
         recovery_d_hat_tol_min_steps: int = 0,
+        # Phase A4 P4 wired (2026-06-10): widen recovery target mask so
+        # `recovery_pos_rate` is non-zero before the curriculum reaches
+        # floor (≤floor_tol_threshold). The loss is still emphasised on
+        # floor via ``floor_mult``; this only controls which steps are
+        # included in target/mask computation. Defaults to
+        # ``floor_tol_threshold`` for backwards compatibility.
+        recovery_shadow_tol_threshold: Optional[float] = None,
+        # Skip horizon heads whose horizon ≥ seq_len-1 (target undefined).
+        horizon_skip_too_long: bool = True,
     ) -> dict[str, torch.Tensor]:
         """Forward + losses. Returns dict with 'loss_total' and per-term keys."""
         if loss_weights is None:
@@ -431,7 +440,7 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         kl_clamped = (kl_per_step - self.free_nats).clamp_min(0.0)
         L_kl = _masked_mean(kl_clamped, eff_basic)
 
-        # ---- Phase A4 P4 (2026-06-09): horizon heads + recovery head (Part B) ----
+        # ---- Phase A4 P4 (2026-06-09 / 2026-06-10 wired): horizon heads + recovery head (Part B) ----
         # All optional; when the heads do not exist or the targets cannot
         # be built, the corresponding loss term stays at zero and the
         # caller-side lambda sets the multiplier to 0.0 by default.
@@ -439,6 +448,11 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         L_drop_risk: dict[int, torch.Tensor] = {}
         L_recovery = belief_seq.new_zeros(())
         recovery_pos_rate = 0.0
+        recovery_floor_sample_fraction = 0.0
+        recovery_missing_target_count = 0.0
+        horizon_skipped: dict[int, int] = {}
+        horizon_pos_rate: dict[int, float] = {}
+        drop_pos_rate: dict[int, float] = {}
         # Reuse pred for horizon/recovery. The heads, when present, are
         # called inside heads.predict_horizon / heads.predict_recovery.
         if self.with_horizon_heads and "horizon_logits" in pred:
@@ -447,12 +461,21 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 # shape (T*B, 1). Targets are built from in-window cumulative
                 # success_count / failure flags, masked by valid prefix and
                 # by no-done-cross within the horizon.
+                horizon_window = max(1, int(h_steps))
+                # Phase A4 P4 wired (2026-06-10): horizon target requires
+                # at least horizon_window+1 valid steps after t. With
+                # T==seq_len we need t+horizon_window < T → horizon must
+                # be ≤ seq_len-2. Skip degenerate horizons rather than
+                # producing zero loss that masquerades as learned.
+                if horizon_skip_too_long and horizon_window > T - 2:
+                    horizon_skipped[h_steps] = 1
+                    continue
                 if (
                     batch.success_count is None
                     or batch.next_success_count is None
                 ):
+                    horizon_skipped[h_steps] = 2  # missing success_count
                     continue
-                horizon_window = max(1, int(h_steps))
                 target_success = self._build_horizon_success_target(
                     batch, horizon_window
                 )
@@ -485,15 +508,34 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                     )
                     / denom
                 )
+                with torch.no_grad():
+                    if w.sum() > 0:
+                        horizon_pos_rate[h_steps] = float(
+                            (target_success.reshape(T * B) * w).sum().item()
+                            / float(denom.item())
+                        )
+                        drop_pos_rate[h_steps] = float(
+                            (target_drop.reshape(T * B) * w).sum().item()
+                            / float(denom.item())
+                        )
 
         if self.with_recovery_head and "recovery_logits" in pred:
             recovery_logit = pred["recovery_logits"].squeeze(-1)
+            # Phase A4 P4 wired (2026-06-10): recovery_shadow_tol_threshold
+            # widens the mask used for target/pos_rate so we get learning
+            # signal before tolerance reaches the strict floor. Defaults to
+            # the strict threshold for backward compatibility.
+            shadow_tol = (
+                float(floor_tol_threshold)
+                if recovery_shadow_tol_threshold is None
+                else float(recovery_shadow_tol_threshold)
+            )
             recovery_target, recovery_mask = self._build_recovery_target_soft_or(
                 batch,
                 horizon=self.recovery_horizon,
                 d_hat_margin=float(recovery_d_hat_margin),
                 d_hat_tol_min_steps=int(recovery_d_hat_tol_min_steps),
-                floor_tol_threshold=float(floor_tol_threshold),
+                floor_tol_threshold=shadow_tol,
             )
             w = recovery_mask.reshape(T * B)
             denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
@@ -507,11 +549,21 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 / denom
             )
             with torch.no_grad():
+                # `recovery_floor_sample_fraction` reports how many
+                # (T,B) entries the shadow mask actually covers. A value
+                # of 0 means no tight-tolerance signal in this batch and
+                # downstream consumers should treat the head as
+                # uncalibrated for the current rollout.
+                recovery_floor_sample_fraction = float(
+                    w.sum().item() / max(1.0, float(T * B))
+                )
                 if w.sum() > 0:
                     recovery_pos_rate = float(
                         (recovery_target.reshape(T * B) * w).sum().item()
                         / float(denom.item())
                     )
+                else:
+                    recovery_missing_target_count = 1.0
 
         # Phase A4 P4 (2026-06-09): floor-aware loss multiplier (Part B).
         floor_mult = belief_seq.new_ones(())
@@ -571,6 +623,15 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 "floor_loss_mult": float(floor_mult.detach().item()),
                 "loss_recovery": float(L_recovery.detach().item()),
                 "recovery_pos_rate": float(recovery_pos_rate),
+                # Phase A4 P4 wired (2026-06-10): degeneracy / coverage
+                # diagnostics so downstream gates can decide whether to
+                # trust the heads.
+                "recovery_floor_sample_fraction": float(
+                    recovery_floor_sample_fraction
+                ),
+                "recovery_missing_target_count": float(
+                    recovery_missing_target_count
+                ),
             }
             for h_steps, lh in L_horizon_success.items():
                 metrics[f"loss_horizon_success_h{int(h_steps)}"] = float(
@@ -580,6 +641,12 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 metrics[f"loss_drop_risk_h{int(h_steps)}"] = float(
                     ld.detach().item()
                 )
+            for h_steps, pr in horizon_pos_rate.items():
+                metrics[f"horizon_success_pos_rate_h{int(h_steps)}"] = float(pr)
+            for h_steps, pr in drop_pos_rate.items():
+                metrics[f"drop_risk_pos_rate_h{int(h_steps)}"] = float(pr)
+            for h_steps, code in horizon_skipped.items():
+                metrics[f"horizon_skipped_h{int(h_steps)}"] = float(code)
             self._last_metrics = metrics
 
         result = {

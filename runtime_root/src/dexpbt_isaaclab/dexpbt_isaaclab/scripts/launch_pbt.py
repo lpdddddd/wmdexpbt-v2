@@ -684,6 +684,9 @@ def main() -> None:
             "--no-seq_wm_replay_prioritize_floor_recovery",
             "--experimental_rssm_floor_recovery_stack",
             "--no-experimental_rssm_floor_recovery_stack",
+            # Phase A4 P4 wired (2026-06-10): horizon skip toggle.
+            "--seq_wm_horizon_skip_too_long",
+            "--no-seq_wm_horizon_skip_too_long",
         }
         extra = list(args.extra)
         i = 0

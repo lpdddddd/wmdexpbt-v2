@@ -654,8 +654,43 @@ parser.add_argument(
     help="Add horizon (success/drop) heads to RSSM PredictionHeads.",
 )
 parser.add_argument(
-    "--seq_wm_horizon_steps", type=str, default="8,16",
-    help="Comma-separated horizon lengths for the horizon heads.",
+    "--seq_wm_horizon_steps", type=str, default="4,8",
+    help="Comma-separated horizon lengths for the horizon heads. "
+    "Default 4,8 because seq_len=16 makes h>=15 degenerate "
+    "(target undefined inside the window). Set to 8,16 only if "
+    "seq_wm_seq_len is also raised.",
+)
+parser.add_argument(
+    "--seq_wm_horizon_skip_too_long",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Skip any horizon h > seq_len-2 (target/mask degenerate).",
+)
+parser.add_argument(
+    "--seq_wm_recovery_shadow_tol_threshold", type=float, default=0.04,
+    help="Widen recovery target/mask up to this tolerance so that "
+    "recovery_pos_rate is non-zero before the curriculum reaches "
+    "floor (≤floor_tol_threshold). The loss is still emphasised "
+    "on floor via floor-aware weighting; this only widens which "
+    "steps are eligible for target/mask. Default 0.04.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_eval_buffer_capacity", type=int, default=8,
+    help="FloorRecoveryEvalBuffer capacity (held-out batches).",
+)
+parser.add_argument(
+    "--seq_wm_teacher_record_below_tol", type=float, default=0.04,
+    help="Record into the eval buffer when ANY step's "
+    "success_tolerance is at or below this value. Default 0.04 "
+    "(matches the shadow target threshold).",
+)
+parser.add_argument(
+    "--seq_wm_teacher_require_recovery_pos_low", type=float, default=0.05,
+    help="Lower bound on recovery_pos_rate for promotion (gate).",
+)
+parser.add_argument(
+    "--seq_wm_teacher_require_recovery_pos_high", type=float, default=0.95,
+    help="Upper bound on recovery_pos_rate for promotion (gate).",
 )
 parser.add_argument(
     "--seq_wm_use_recovery_head",
@@ -1358,6 +1393,16 @@ from dexpbt_isaaclab.world_model.seq_policy_aux import (
 from dexpbt_isaaclab.world_model.wm_aux_buffer import register_seq_aux_fields
 from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
 from dexpbt_isaaclab.world_model.transformer_lite import TransformerLiteWorldModel
+# Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
+# teacher manager (Part C) and the short-horizon imagined evaluator
+# (Part D). Both are gated by their CLI flags; default-off path is
+# bit-for-bit unchanged.
+from dexpbt_isaaclab.world_model.wm_teacher_manager import (
+    FloorRecoveryEvalBuffer,
+    TeacherEvalMetrics,
+    TeacherManager,
+)
+from dexpbt_isaaclab.world_model.wm_imagined_evaluator import WMImaginedEvaluator
 
 
 # ----------------------------------------------------------------------
@@ -1572,6 +1617,316 @@ def _patch_actor_train_for_wm(actor, wm_trainer, wm_ckpt_manager, wm_strategy):
 # ----------------------------------------------------------------------
 # Sequence WM Actor Training Patch (Phase A4)
 # ----------------------------------------------------------------------
+
+def _atomic_write_json(path: "Path", payload: dict) -> None:
+    """Write ``payload`` as JSON to ``path`` using a unique tmp + rename.
+
+    Used by the WM runtime wiring to publish per-policy ``wm_imagined``
+    snapshots that observers in other processes consume at PBT ticks.
+    """
+    import os as _os
+    import uuid as _uuid
+
+    tmp = path.parent / f"{path.stem}.{_os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2))
+        _os.replace(str(tmp), str(path))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _run_wm_runtime_wiring(
+    *,
+    actor,
+    seq_wm_trainer: SeqWMTrainer,
+    frames: int,
+    last_obs,
+    returns_full,
+    last_d_hat,
+    last_success_count,
+) -> dict:
+    """Run the iterative-teacher and imagined-evaluator side-channels.
+
+    All work is gated by per-module ``enabled`` flags; if both are off
+    this function only returns three counters (``teacher_disabled``,
+    ``imagine_disabled``, ``invalid_reason_hash``). Failures are logged
+    but never raise — the WM runtime wiring is a best-effort overlay
+    and must never destabilise PPO/PBT.
+    """
+    out: dict[str, float] = {}
+    teacher = getattr(seq_wm_trainer, "_teacher_manager", None)
+    imag = getattr(seq_wm_trainer, "_imagined_evaluator", None)
+    eval_buf = getattr(seq_wm_trainer, "_floor_eval_buffer", None)
+    record_below_tol = float(
+        getattr(seq_wm_trainer, "_teacher_record_below_tol", 0.04)
+    )
+
+    teacher_enabled = bool(teacher is not None and teacher.enabled)
+    imagine_enabled = bool(imag is not None and imag.enabled)
+    out["teacher_disabled"] = float(0.0 if teacher_enabled else 1.0)
+    out["imagine_disabled"] = float(0.0 if imagine_enabled else 1.0)
+
+    if not (teacher_enabled or imagine_enabled):
+        return out
+
+    # Re-sample one batch through the trainer's sampler so eval +
+    # imagined-eval consume the same canonical pipeline used for
+    # training. This costs roughly one extra sampler.sample() per PPO
+    # epoch — negligible vs the actual model update.
+    import torch as _t
+    from dexpbt_isaaclab.world_model.wm_aux_buffer import read_aux_full
+
+    try:
+        td = actor.experience_buffer.tensor_dict
+        with _t.no_grad():
+            obs_full = td["obses"]
+            action_full = td["actions"]
+            reward_full = td["rewards"]
+            done_full = td["dones"].to(obs_full.dtype)
+            d_hat_full = read_aux_full(actor.experience_buffer, "aux_d_hat")
+            failure_full = read_aux_full(actor.experience_buffer, "aux_failure")
+            lifted_full = read_aux_full(actor.experience_buffer, "aux_lifted")
+            success_count_full = read_aux_full(
+                actor.experience_buffer, "aux_success_cnt"
+            )
+            picked_full = read_aux_full(actor.experience_buffer, "aux_picked")
+            dropped_full = read_aux_full(actor.experience_buffer, "aux_dropped")
+            closest_full = read_aux_full(
+                actor.experience_buffer, "aux_closest_d_hat"
+            )
+            success_tol_full = read_aux_full(
+                actor.experience_buffer, "aux_success_tolerance"
+            )
+            try:
+                returns_for_sample = returns_full
+            except NameError:
+                returns_for_sample = None
+            sample_batch = seq_wm_trainer.sampler.sample(
+                obs_full=obs_full,
+                action_full=action_full,
+                reward_full=reward_full,
+                done_full=done_full,
+                returns_full=returns_for_sample,
+                last_obs=last_obs.to(obs_full.dtype),
+                d_hat_full=d_hat_full,
+                last_d_hat=last_d_hat,
+                failure_full=failure_full,
+                success_count_full=success_count_full,
+                last_success_count=last_success_count,
+                lifted_full=lifted_full,
+                picked_full=picked_full,
+                dropped_full=dropped_full,
+                closest_d_hat_full=closest_full,
+                success_tolerance_full=success_tol_full,
+            )
+            sample_batch = sample_batch.to(seq_wm_trainer.device)
+    except Exception as exc:
+        out["sample_failed"] = 1.0
+        out["invalid_reason_hash"] = float(hash("sample_failed") % 1_000_003)
+        out["imagine_invalid_reason"] = 0.0
+        seq_wm_trainer._last_imagine_invalid_reason = "sample_failed"
+        return out
+
+    # ----- Eval-buffer recording (record any tight-tol batch, gated) -----
+    recorded = False
+    if teacher_enabled and eval_buf is not None:
+        try:
+            recorded = eval_buf.record_candidate(
+                sample_batch,
+                floor_tol_threshold=record_below_tol,
+                hard_floor_tol_threshold=float(
+                    getattr(seq_wm_trainer.cfg, "floor_tol_floor", 0.012)
+                ),
+                require_floor_signal=True,
+            )
+        except Exception:
+            recorded = False
+    out["teacher_eval_buffer_size"] = float(len(eval_buf) if eval_buf else 0)
+    out["teacher_recorded_now"] = float(1.0 if recorded else 0.0)
+
+    # ----- Teacher snapshot + eval + maybe_promote -----
+    if teacher_enabled and teacher.should_eval(frames):
+        out["teacher_eval_attempted"] = 1.0
+        seq_wm_trainer._teacher_eval_attempted_total += 1
+        try:
+            snap_path = teacher.maybe_save_candidate_snapshot(
+                env_frames=frames,
+                trainer_state_dict=seq_wm_trainer.state_dict(),
+            )
+            if eval_buf is not None and len(eval_buf) > 0:
+                metrics_obj = teacher.evaluate(
+                    seq_wm_trainer.model,
+                    eval_buf,
+                    device=seq_wm_trainer.device,
+                    floor_tol_threshold=float(
+                        getattr(seq_wm_trainer.cfg, "floor_tol_threshold", 0.02)
+                    ),
+                    floor_tol_floor=float(
+                        getattr(seq_wm_trainer.cfg, "floor_tol_floor", 0.012)
+                    ),
+                )
+                promoted, reason = teacher.maybe_promote(
+                    candidate_path=snap_path
+                    if snap_path is not None
+                    else (teacher.teacher_dir / "wm_teacher_inline.pt"),
+                    candidate_metrics=metrics_obj,
+                    env_frames=frames,
+                    global_step=int(seq_wm_trainer.global_step),
+                )
+                out["teacher_promoted"] = 1.0 if promoted else 0.0
+                out["teacher_promotion_count"] = float(teacher.promotions)
+                out["teacher_rejection_count"] = float(teacher.rejections)
+                out["teacher_eval_score"] = float(metrics_obj.score)
+                out["teacher_eval_recovery_pos"] = float(
+                    metrics_obj.recovery_pos_rate
+                )
+                out["teacher_rejected_reason_hash"] = float(
+                    hash(reason) % 1_000_003
+                )
+                if metrics_obj.has_nan:
+                    out["teacher_target_degenerate"] = 1.0
+                    seq_wm_trainer._teacher_target_degenerate_total += 1
+                if promoted:
+                    seq_wm_trainer._teacher_promoted_total += 1
+                lo, hi = teacher.require_recovery_pos_in
+                if not (lo <= metrics_obj.recovery_pos_rate <= hi):
+                    out["teacher_target_degenerate"] = 1.0
+                    seq_wm_trainer._teacher_target_degenerate_total += 1
+            else:
+                out["teacher_no_eval_data"] = 1.0
+                seq_wm_trainer._teacher_no_eval_data_total += 1
+                # Mark eval frame so we do not re-attempt every epoch.
+                teacher._last_eval_frame = int(frames)
+        except Exception as exc:
+            out["teacher_error"] = 1.0
+            out["teacher_rejected_reason_hash"] = float(
+                hash(f"err:{type(exc).__name__}") % 1_000_003
+            )
+        out["teacher_promoted_total"] = float(
+            seq_wm_trainer._teacher_promoted_total
+        )
+        out["teacher_eval_attempted_total"] = float(
+            seq_wm_trainer._teacher_eval_attempted_total
+        )
+        out["teacher_no_eval_data_total"] = float(
+            seq_wm_trainer._teacher_no_eval_data_total
+        )
+
+    # Always emit current teacher step (-1 if no teacher yet).
+    if teacher_enabled and teacher.current_teacher() is not None:
+        out["teacher_current_step"] = float(
+            teacher.current_teacher().frame
+        )
+    else:
+        out["teacher_current_step"] = -1.0
+
+    # ----- Imagined evaluator -----
+    if imagine_enabled:
+        try:
+            imag_out = imag.evaluate_batch(
+                seq_wm_trainer.model,
+                sample_batch,
+                device=seq_wm_trainer.device,
+            )
+            valid = bool(imag_out.get("imagined_valid", False))
+            if valid:
+                seq_wm_trainer._imagine_valid_total += 1
+            else:
+                seq_wm_trainer._imagine_invalid_total += 1
+                seq_wm_trainer._last_imagine_invalid_reason = str(
+                    imag_out.get("invalid_reason", "high_uncertainty")
+                )
+            out["imagine_valid"] = 1.0 if valid else 0.0
+            out["imagine_valid_total"] = float(
+                seq_wm_trainer._imagine_valid_total
+            )
+            out["imagine_invalid_total"] = float(
+                seq_wm_trainer._imagine_invalid_total
+            )
+            for k in (
+                "wm_recovery_prob",
+                "wm_success_prob",
+                "wm_drop_risk",
+                "uncertainty",
+                "recovery_h16",
+                "value_h16",
+            ):
+                if k in imag_out and isinstance(imag_out[k], (int, float)):
+                    out[f"imagine_{k}"] = float(imag_out[k])
+            for k, v in imag_out.items():
+                if k.startswith("success_h") or k.startswith("drop_h") or k.startswith("recovery_h"):
+                    if isinstance(v, (int, float)):
+                        out[f"imagine_{k}"] = float(v)
+            invalid_reason = "valid" if valid else (
+                seq_wm_trainer._last_imagine_invalid_reason or "high_uncertainty"
+            )
+            out["imagine_invalid_reason_hash"] = float(
+                hash(invalid_reason) % 1_000_003
+            )
+            # ----- Publish to disk for cross-process observers -----
+            wm_imagine_dir = getattr(seq_wm_trainer, "_wm_imagine_dir", None)
+            policy_idx_for_file = (
+                int(teacher.policy_idx)
+                if (teacher is not None and teacher.policy_idx is not None)
+                else 0
+            )
+            if wm_imagine_dir is not None:
+                payload = {
+                    "policy_idx": int(policy_idx_for_file),
+                    "frames": int(frames),
+                    "global_step": int(seq_wm_trainer.global_step),
+                    "imagined_valid": bool(valid),
+                    "invalid_reason": invalid_reason,
+                    "uncertainty": float(imag_out.get("uncertainty", 1.0)),
+                    "wm_recovery_prob": float(
+                        imag_out.get("wm_recovery_prob", 0.0)
+                    ),
+                    "wm_success_prob": float(
+                        imag_out.get("wm_success_prob", 0.0)
+                    ),
+                    "wm_drop_risk": float(imag_out.get("wm_drop_risk", 0.0)),
+                    "teacher_step": float(
+                        teacher.current_teacher().frame
+                        if (teacher is not None and teacher.current_teacher() is not None)
+                        else -1.0
+                    ),
+                    "horizon_pos_rate": {
+                        k.replace("imagine_", ""): float(v)
+                        for k, v in out.items()
+                        if k.startswith("imagine_success_h")
+                        or k.startswith("imagine_drop_h")
+                        or k.startswith("imagine_recovery_h")
+                    },
+                    "eval_num_starts": int(
+                        getattr(imag, "num_starts", 0)
+                    ),
+                    "writer_pid": int(os.getpid()),
+                    "writer_ts": float(time.time()),
+                }
+                _atomic_write_json(
+                    wm_imagine_dir / f"{int(policy_idx_for_file):03d}.json",
+                    payload,
+                )
+                out["imagine_published"] = 1.0
+        except NotImplementedError:
+            # Per user constraint #4 the policy mode must fail fast: re-raise.
+            raise
+        except Exception as exc:
+            seq_wm_trainer._imagine_invalid_total += 1
+            seq_wm_trainer._last_imagine_invalid_reason = (
+                f"err:{type(exc).__name__}"
+            )
+            out["imagine_valid"] = 0.0
+            out["imagine_invalid_reason_hash"] = float(
+                hash(seq_wm_trainer._last_imagine_invalid_reason) % 1_000_003
+            )
+    return out
+
 
 def _patch_actor_train_for_seq_wm(
     actor,
@@ -1820,6 +2175,27 @@ def _patch_actor_train_for_seq_wm(
                 last_success_count=last_success_count,
             )
 
+            # ----------------------------------------------------------
+            # Phase A4 P4 wired (2026-06-10): teacher eval + imagined eval.
+            # No-op when both modules are disabled or wiring failed.
+            # All work happens under torch.no_grad() and writes per-policy
+            # JSON into <workspace>/wm_imagined/<policy>.json (atomic) for
+            # cross-process consumption by PBT observers. Failures are
+            # logged but never crash the training loop.
+            # ----------------------------------------------------------
+            wiring_metrics: dict[str, float] = _run_wm_runtime_wiring(
+                actor=actor,
+                seq_wm_trainer=seq_wm_trainer,
+                frames=frames,
+                last_obs=last_obs_t,
+                returns_full=(
+                    returns_full.squeeze(-1)
+                    if returns_full.shape[-1] == 1 else returns_full
+                ),
+                last_d_hat=last_d_hat,
+                last_success_count=last_success_count,
+            )
+
             # TB logging.
             tb_writer = getattr(actor, "writer", None) or getattr(actor, "tensorboard_writer", None)
             if tb_writer is not None and metrics:
@@ -1842,6 +2218,23 @@ def _patch_actor_train_for_seq_wm(
                 for k, v in terminal_metrics.items():
                     try:
                         tb_writer.add_scalar(f"seq_aux/{k}", float(v), frames)
+                    except Exception:
+                        pass
+                # Phase A4 P4 wired (2026-06-10): teacher + imagined eval
+                # audit fields. Tags grouped under wm_teacher/* and
+                # wm_imagine/*. All scalars are forward-safe to read from
+                # downstream analyzers (analyze_wm_runtime_wiring.py).
+                for k, v in wiring_metrics.items():
+                    if not isinstance(v, (int, float)):
+                        continue
+                    if k.startswith("teacher_"):
+                        tag = f"wm_teacher/{k[len('teacher_'):]}"
+                    elif k.startswith("imagine_"):
+                        tag = f"wm_imagine/{k[len('imagine_'):]}"
+                    else:
+                        tag = f"wm_runtime_wiring/{k}"
+                    try:
+                        tb_writer.add_scalar(tag, float(v), frames)
                     except Exception:
                         pass
                 if seq_distill_bridge is not None:
@@ -2911,6 +3304,10 @@ def main():
             recovery_d_hat_tol_min_steps=int(
                 args_cli.seq_wm_recovery_d_hat_tol_min_steps
             ),
+            recovery_shadow_tol_threshold=float(
+                args_cli.seq_wm_recovery_shadow_tol_threshold
+            ),
+            horizon_skip_too_long=bool(args_cli.seq_wm_horizon_skip_too_long),
             replay_prioritize_floor_recovery=bool(
                 args_cli.seq_wm_replay_prioritize_floor_recovery
             ),
@@ -2981,6 +3378,79 @@ def main():
             device=rl_device,
             strategy=args_cli.wm_strategy,
         )
+
+        # ------------------------------------------------------------------
+        # Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
+        # teacher manager (Part C) + short-horizon imagined evaluator
+        # (Part D). Each is independently gated by its CLI flag and is a
+        # no-op when disabled. Both write per-policy JSON under
+        # ``<workspace>/wm_imagined/`` and ``<workspace>/world_model_teachers/``;
+        # PBT observers in other processes read those files at ranking time.
+        # ------------------------------------------------------------------
+        try:
+            workspace_root = Path(args_cli.workspace).resolve()
+            seq_wm_trainer._teacher_manager = TeacherManager(
+                workspace_root=workspace_root,
+                policy_idx=int(args_cli.policy_idx),
+                enabled=bool(args_cli.seq_wm_enable_iterative_teacher),
+                eval_interval_frames=int(
+                    args_cli.seq_wm_teacher_eval_interval_frames
+                ),
+                promote_min_improvement=float(
+                    args_cli.seq_wm_teacher_promote_min_improvement
+                ),
+                keep_last_k=int(args_cli.seq_wm_teacher_keep_last_k),
+                metric=str(args_cli.seq_wm_teacher_metric),
+                max_uncertainty=float(args_cli.pbt_wm_max_uncertainty),
+                require_recovery_pos_in=(
+                    float(args_cli.seq_wm_teacher_require_recovery_pos_low),
+                    float(args_cli.seq_wm_teacher_require_recovery_pos_high),
+                ),
+            )
+            seq_wm_trainer._floor_eval_buffer = FloorRecoveryEvalBuffer(
+                capacity=int(args_cli.seq_wm_teacher_eval_buffer_capacity)
+            )
+            seq_wm_trainer._teacher_record_below_tol = float(
+                args_cli.seq_wm_teacher_record_below_tol
+            )
+            seq_wm_trainer._imagined_evaluator = WMImaginedEvaluator(
+                enabled=bool(args_cli.seq_wm_enable_imagined_evaluator),
+                horizons=imagine_horizons_arg,
+                action_mode=str(args_cli.seq_wm_imagine_action_mode),
+                num_starts=int(args_cli.seq_wm_imagine_num_starts),
+                use_teacher=bool(args_cli.seq_wm_imagine_use_teacher),
+                max_uncertainty=float(args_cli.pbt_wm_max_uncertainty),
+            )
+            # Per-process audit counters surfaced into TB.
+            seq_wm_trainer._teacher_eval_attempted_total = 0
+            seq_wm_trainer._teacher_promoted_total = 0
+            seq_wm_trainer._teacher_no_eval_data_total = 0
+            seq_wm_trainer._teacher_target_degenerate_total = 0
+            seq_wm_trainer._imagine_valid_total = 0
+            seq_wm_trainer._imagine_invalid_total = 0
+            seq_wm_trainer._last_imagine_invalid_reason = ""
+            # Disk-backed cross-process imagined eval mailbox.
+            seq_wm_trainer._wm_imagine_dir = workspace_root / "wm_imagined"
+            if seq_wm_trainer._imagined_evaluator.enabled:
+                seq_wm_trainer._wm_imagine_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as _wire_exc:
+            print(
+                f"[wm-runtime-wiring] WARNING: teacher/imagined wiring "
+                f"failed to construct: {_wire_exc!r}; downstream PBT will "
+                f"fall back to real-only ranking."
+            )
+            seq_wm_trainer._teacher_manager = None
+            seq_wm_trainer._floor_eval_buffer = None
+            seq_wm_trainer._imagined_evaluator = None
+            seq_wm_trainer._teacher_record_below_tol = 0.04
+            seq_wm_trainer._teacher_eval_attempted_total = 0
+            seq_wm_trainer._teacher_promoted_total = 0
+            seq_wm_trainer._teacher_no_eval_data_total = 0
+            seq_wm_trainer._teacher_target_degenerate_total = 0
+            seq_wm_trainer._imagine_valid_total = 0
+            seq_wm_trainer._imagine_invalid_total = 0
+            seq_wm_trainer._last_imagine_invalid_reason = "wiring_error"
+            seq_wm_trainer._wm_imagine_dir = None
 
         # Aux collector + env wrap (must happen BEFORE RlGamesVecEnvWrapper).
         seq_aux_collector = SeqAuxCollector(

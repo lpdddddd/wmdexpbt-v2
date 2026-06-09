@@ -2294,6 +2294,57 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     # `self.pbt_floor_recovery_aware`.
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Phase A4 P4 wired (2026-06-10): cross-process WM imagined eval
+    # mailbox. Each policy's ``train.py`` writes its own JSON entry into
+    # ``<workspace>/wm_imagined/<pidx:03d>.json`` after each PPO epoch
+    # (atomic temp+rename). Observers in *every* process refresh the
+    # in-memory ``_wm_imagined_eval_per_policy`` from disk at PBT tick
+    # time so the WM-guided ranking has a recent value for every peer
+    # — not just the local policy.
+    # ------------------------------------------------------------------
+
+    def _refresh_wm_imagined_eval_from_disk(
+        self, env_frames: int, *, max_age_frames: int = 200_000_000
+    ) -> int:
+        """Refresh the WM imagined-eval mapping from disk; returns count.
+
+        Stale entries (writer ``frames`` older than ``max_age_frames``
+        before ``env_frames``) keep the file payload but flip
+        ``imagined_valid`` to False so the ranking falls back. The
+        ``invalid_reason`` is set to ``"stale_wm_imagined"`` for audit.
+        """
+        wm_dir = self.workspace / "wm_imagined"
+        if not wm_dir.exists():
+            return 0
+        n_loaded = 0
+        for path in wm_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:
+                continue
+            try:
+                pidx = int(
+                    payload.get("policy_idx", int(path.stem.lstrip("0") or "0"))
+                )
+            except (TypeError, ValueError):
+                continue
+            try:
+                payload_frames = int(payload.get("frames", 0))
+            except (TypeError, ValueError):
+                payload_frames = 0
+            age = max(0, int(env_frames) - payload_frames)
+            entry = dict(payload)
+            if age > int(max_age_frames):
+                entry["imagined_valid"] = False
+                entry["invalid_reason"] = "stale_wm_imagined"
+                entry["age_frames"] = int(age)
+            else:
+                entry["age_frames"] = int(age)
+            self._wm_imagined_eval_per_policy[pidx] = entry
+            n_loaded += 1
+        return n_loaded
+
     def _floor_stage_for(
         self, curriculum: dict[str, Any] | None
     ) -> str:
@@ -3358,6 +3409,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_shadow_changed_selection": int(
                     self._wm_shadow_changed_selection
                 ),
+                # Phase A4 P4 wired (2026-06-10): per-tick WM wiring audit.
+                "wm_score_used": bool(
+                    getattr(self, "_last_wm_score_used", False)
+                ),
+                "wm_fallback_reason": str(
+                    getattr(self, "_last_wm_fallback_reason", "feature_off")
+                ),
                 "experimental_rssm_floor_recovery_stack": bool(
                     self.experimental_rssm_floor_recovery_stack
                 ),
@@ -3796,47 +3854,113 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         objectives = {idx: ckpt["objective"] for idx, ckpt in population.items() if ckpt is not None}
         sorted_policies = sorted(objectives.keys(), key=lambda key: objectives[key], reverse=True) if objectives else []
 
-        # Phase A4 P4 (2026-06-09): floor-recovery-aware ranking (Part A+E).
-        # Always-running shadow path: when feature is on, compute alt
-        # ordering using floor_recovery_score (real + optional WM) and
-        # log whether the alt argmax differs from the legacy argmax. In
-        # 'active' mode AND when the local policy is at hard_floor, the
-        # alt ordering replaces the legacy one for the bottom-replacement
-        # decision in `_ternary_pbt`. Real `objective` values are NEVER
-        # mutated; we only swap the dict consumed by sort.
+        # Phase A4 P4 (2026-06-09 / wired 2026-06-10): floor-recovery-aware
+        # ranking (Part A+E). The shadow path always runs when the feature
+        # is on; the alt ordering only replaces the legacy ordering when:
+        #   * pbt_wm_score_mode == "active"
+        #   * the local policy is at ``hard_floor``
+        #   * no policy in the population has hard_collapse_triggered
+        #   * the WM imagined eval is valid AND uncertainty <= max_unc
+        #   * the recovery_pos_rate window is non-degenerate
+        # Otherwise we record a fallback reason and keep ``sorted_policies``
+        # untouched. Real ``objective`` values are NEVER mutated.
         sorted_policies_real = list(sorted_policies)
         sorted_policies_alt = list(sorted_policies)
         wm_changed_selection = False
+        wm_score_used_now = False
+        wm_fallback_reason = "feature_off"
+        floor_recovery_score_real_local = 0.0
+        floor_recovery_score_wm_local = 0.0
+        # Phase A4 P4 wired (2026-06-10): pull the latest WMImaginedEvaluator
+        # output for each policy. train.py writes
+        # ``<workspace>/wm_imagined/<pidx:03d>.json`` atomically each PPO
+        # epoch. Missing / stale files keep ``imagined_valid=False`` so
+        # active ranking falls back to real-only.
+        try:
+            self._refresh_wm_imagined_eval_from_disk(env_frames)
+        except Exception as _refresh_exc:  # pragma: no cover - never crash
+            print(
+                f"[floor-recovery-ranking] WM imagined eval disk refresh "
+                f"failed: {_refresh_exc}"
+            )
         try:
             if self.pbt_floor_recovery_aware and objectives:
+                # Hard-collapse population gate: any policy with hard
+                # collapse forces real-only ranking (Item: WM cannot
+                # override hard collapse).
+                any_hard_collapse = False
+                for _pidx, _ckpt in population.items():
+                    if _ckpt is None:
+                        continue
+                    cur = _ckpt.get("curriculum") or {}
+                    if bool(cur.get("hard_collapse_triggered", False)):
+                        any_hard_collapse = True
+                        break
+
                 alt_objectives: dict[int, float] = {}
                 wm_mode = self.pbt_wm_score_mode
+                # Shadow logging zone: include every policy whose
+                # tolerance is at or below the shadow zone (default 2x
+                # the strict floor threshold) so we can observe
+                # would-change events before reaching hard_floor. Active
+                # source replacement still gates on hard_floor.
+                shadow_tol_zone = max(
+                    float(self.pbt_floor_tol_threshold) * 2.0, 0.04
+                )
                 for pidx, ckpt in population.items():
                     if ckpt is None:
                         continue
                     cur = ckpt.get("curriculum") or {}
                     stage = self._floor_stage_for(cur)
+                    cur_tol = float(cur.get("success_tolerance", 1.0))
                     base_obj = float(ckpt.get("objective", float("-inf")))
-                    if stage != "hard_floor":
+                    if stage != "hard_floor" and cur_tol > shadow_tol_zone:
                         alt_objectives[pidx] = base_obj
                         continue
                     win = self._policy_window(pidx)
                     score_50, components, slope_pos = self._floor_recovery_score_for(
                         pidx, win, env_frames, hard_collapse=False
                     )
+                    score_real_for_pidx = float(score_50)
+                    score_with_wm = score_real_for_pidx
+                    used_wm_for_pidx = False
+                    fallback_reason_pidx = "wm_off"
                     if wm_mode in ("shadow", "active"):
                         wm_eval = self._wm_imagined_eval_per_policy.get(pidx) or {}
                         wm_valid = bool(wm_eval.get("imagined_valid", False))
                         wm_unc = float(wm_eval.get("uncertainty", 1.0))
-                        if (
-                            wm_valid
-                            and wm_unc <= float(self.pbt_wm_max_uncertainty)
-                        ):
+                        teacher_step = float(
+                            wm_eval.get("teacher_step", -1.0)
+                        )
+                        # Soft non-degenerate recovery target check —
+                        # if the writer included horizon_pos_rate we use
+                        # it; otherwise we accept ``imagined_valid``.
+                        h_rates = wm_eval.get("horizon_pos_rate", {}) or {}
+                        target_degenerate = False
+                        for _k, _v in h_rates.items():
+                            try:
+                                vv = float(_v)
+                                if vv <= 0.0 or vv >= 1.0:
+                                    target_degenerate = True
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                        if not wm_valid:
+                            fallback_reason_pidx = wm_eval.get(
+                                "invalid_reason", "no_imagined_valid"
+                            )
+                        elif wm_unc > float(self.pbt_wm_max_uncertainty):
+                            fallback_reason_pidx = "high_uncertainty"
+                        elif target_degenerate:
+                            fallback_reason_pidx = "target_degenerate"
+                        elif teacher_step < 0:
+                            fallback_reason_pidx = "no_promoted_teacher"
+                        else:
                             from dexpbt_isaaclab.dexpbt_utils import (
                                 combine_wm_recovery_score,
                             )
                             score_with_wm, _ = combine_wm_recovery_score(
-                                score_50,
+                                score_real_for_pidx,
                                 wm_recovery_prob=float(
                                     wm_eval.get("wm_recovery_prob", 0.0)
                                 ),
@@ -3852,13 +3976,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 drop_penalty=self.pbt_wm_drop_penalty,
                                 uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
                             )
-                        else:
-                            score_with_wm = score_50
-                    else:
-                        score_with_wm = score_50
+                            used_wm_for_pidx = True
+                            fallback_reason_pidx = "ok"
                     # Both paths place the alt score on the 0..50 scale so
                     # mixing with non-floor base_obj is meaningful.
                     alt_objectives[pidx] = float(score_with_wm)
+                    if pidx == self.policy_idx:
+                        floor_recovery_score_real_local = float(
+                            score_real_for_pidx
+                        )
+                        floor_recovery_score_wm_local = float(score_with_wm)
+                        if used_wm_for_pidx:
+                            wm_score_used_now = True
+                        wm_fallback_reason = fallback_reason_pidx
                 if alt_objectives:
                     sorted_policies_alt = sorted(
                         alt_objectives.keys(),
@@ -3874,9 +4004,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._wm_shadow_observations += 1
                 if wm_changed_selection:
                     self._wm_shadow_changed_selection += 1
-                if self.pbt_wm_score_mode == "active":
+                # Active replacement is gated by:
+                #   * mode == active
+                #   * no hard collapse anywhere in the population
+                #   * the local policy must be in hard_floor (the alt
+                #     loop already only mixes WM for those entries; if
+                #     the local one isn't in hard_floor we still flip
+                #     the order which can still demote / promote others,
+                #     so we additionally require ``wm_score_used_now``).
+                source_selected_by_wm = False
+                if (
+                    self.pbt_wm_score_mode == "active"
+                    and not any_hard_collapse
+                    and wm_score_used_now
+                ):
                     objectives = dict(alt_objectives)
                     sorted_policies = list(sorted_policies_alt)
+                    source_selected_by_wm = wm_changed_selection
+                elif (
+                    self.pbt_wm_score_mode == "active"
+                    and any_hard_collapse
+                ):
+                    wm_fallback_reason = "hard_collapse_population"
                 if self.writer is not None:
                     self.writer.add_scalar(
                         "pbt/wm_score_mode_hash",
@@ -3902,9 +4051,60 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         float(self._wm_shadow_changed_selection),
                         env_frames,
                     )
+                    # Phase A4 P4 wired (2026-06-10): expose the wiring
+                    # status separately from the legacy shadow tag set.
+                    self.writer.add_scalar(
+                        "pbt/wm_score_used",
+                        1.0 if wm_score_used_now else 0.0,
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/source_selected_by_wm",
+                        1.0 if source_selected_by_wm else 0.0,
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/wm_fallback_reason_hash",
+                        float(hash(wm_fallback_reason) % 1_000_003),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/floor_recovery_score_real",
+                        float(floor_recovery_score_real_local),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/floor_recovery_score_wm",
+                        float(floor_recovery_score_wm_local),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/hard_collapse_population",
+                        1.0 if any_hard_collapse else 0.0,
+                        env_frames,
+                    )
         except Exception as exc:  # pragma: no cover - guard against mis-init
             print(f"[floor-recovery-ranking] guarded fallback: {exc}")
             sorted_policies = list(sorted_policies_real)
+            wm_fallback_reason = f"observer_exception:{type(exc).__name__}"
+            if self.writer is not None:
+                try:
+                    self.writer.add_scalar(
+                        "pbt/wm_fallback_reason_hash",
+                        float(hash(wm_fallback_reason) % 1_000_003),
+                        env_frames,
+                    )
+                except Exception:
+                    pass
+        # Stash for jsonl audit / curriculum control.
+        self._last_wm_score_used = bool(wm_score_used_now)
+        self._last_wm_fallback_reason = str(wm_fallback_reason)
+        self._last_floor_recovery_score_real = float(
+            floor_recovery_score_real_local
+        )
+        self._last_floor_recovery_score_wm = float(
+            floor_recovery_score_wm_local
+        )
 
         point_tier = "unknown"
         if sorted_policies and self.policy_idx in sorted_policies:
