@@ -82,6 +82,24 @@ class SequenceBatch:
     # vectorised hidden-state reset in RSSM. Shape: (T, B), dtype long.
     segment_id: torch.Tensor = None  # type: ignore[assignment]
 
+    # Phase A4 P4 (2026-06-09): task-aware aux scalars (Part B).
+    # ``aux_scalars[t,b,:]`` is a small concatenation of normalised task
+    # signals (d_hat, next_d_hat, delta_d_hat, success_count, next_success_
+    # count, success_delta, success_tolerance, lifted, failure, ...). The
+    # field is None when --seq_wm_use_task_aux_inputs is False. Shape:
+    # (T, B, aux_dim). The model is responsible for handling None
+    # gracefully (default forward keeps the legacy path).
+    aux_scalars: Optional[torch.Tensor] = None
+    # Per-step success_tolerance (T, B). Used by floor-aware loss
+    # weighting in compute_aux_loss; None disables the feature.
+    success_tolerance_seq: Optional[torch.Tensor] = None
+    # Per-step picked / dropped flags (Part B). Optional; not consumed
+    # by the legacy loss computation, only by Phase-A4 P4 horizon /
+    # recovery / replay-prio code paths when those features are enabled.
+    picked: Optional[torch.Tensor] = None
+    dropped: Optional[torch.Tensor] = None
+    closest_d_hat: Optional[torch.Tensor] = None
+
     # Bookkeeping (not consumed by losses).
     meta: dict = field(default_factory=dict)
 
@@ -124,6 +142,11 @@ class SequenceBatch:
             lifted=_mv(self.lifted),
             valid_mask=_mv(self.valid_mask),
             segment_id=_mv(self.segment_id),
+            aux_scalars=_mv(self.aux_scalars),
+            success_tolerance_seq=_mv(self.success_tolerance_seq),
+            picked=_mv(self.picked),
+            dropped=_mv(self.dropped),
+            closest_d_hat=_mv(self.closest_d_hat),
             meta=dict(self.meta),
         )
 

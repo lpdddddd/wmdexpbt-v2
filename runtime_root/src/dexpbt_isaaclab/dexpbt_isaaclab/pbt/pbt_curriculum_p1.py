@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
+import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -104,16 +107,92 @@ class CurriculumControlState:
     blocked_by_adaptive_fast_low_nsucc: bool = False
     pre_shrink_tolerance: float = 0.0
     post_shrink_tolerance: float = 0.0
+    # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance audit.
+    # Defaults are inert; populated by the observer at copy time when
+    # --pbt_curriculum_inherit_mode=source_safe and consumed back via JSONL
+    # for reporting. The runtime curriculum logic does not branch on these
+    # fields; they only audit the most-recent copy event into this slot.
+    inheritance_mode: str = "reset"
+    inheritance_reason: str = ""
+    inherited_tolerance: float = 0.0
+    target_tolerance_before_copy: float = 0.0
+    target_tolerance_after_copy: float = 0.0
+    source_policy_idx_for_copy: int = -1
+    source_checkpoint_type_for_copy: str = ""
+    source_success_tolerance_for_copy: float = 0.0
+    source_nsucc_mean_for_copy: float = 0.0
+    source_nsucc_max_for_copy: float = 0.0
+    source_retention_for_copy: float = 0.0
+    source_safe_for_curriculum: bool = False
+    recovery_consolidation_frames_selected: int = 0
+    recovery_consolidation_source: str = ""
+    # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT audit fields.
+    # Defaults inert; the runtime only consumes them when the matching
+    # observer-side flag --pbt_floor_recovery_aware is true. They are
+    # safe to write to the JSON on every tick because the reader-side
+    # apply_env_tolerance_curriculum does not branch on them.
+    floor_stage: str = "none"  # one of {"none","floor","hard_floor"}
+    first_floor_frame: int = -1
+    first_hard_floor_frame: int = -1
+    frames_since_floor: int = 0
+    floor_recovery_slope: float = 0.0
+    floor_recovery_score: float = 0.0
+    floor_recovery_score_real: float = 0.0
+    floor_recovery_score_wm: float = 0.0
+    floor_recovery_score_norm: float = 0.0
+    floor_recovery_protect_until: int = 0
+    best_floor_recovery_archive_used: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def write_curriculum_control(path: Path, state: CurriculumControlState) -> None:
+def write_curriculum_control(
+    path: Path,
+    state: CurriculumControlState,
+    *,
+    max_retries: int = 3,
+    retry_sleep_s: float = 0.05,
+) -> None:
+    """Phase A4 P4 (2026-06-09): per-writer unique tmp + os.replace + retry.
+
+    Previously the writer used a shared ``path.with_suffix(".tmp")`` (e.g.
+    ``000.tmp``) for every policy / supervisor restart. Multiple concurrent
+    PBT writers that touched the same slot could observe a stale ``.tmp``
+    being renamed away mid-flight, surfacing as
+    ``FileNotFoundError: 000.tmp -> 000.json`` in the env-side reader.
+    The race is purely an infra issue, not algorithm logic.
+
+    Mitigation:
+      * tmp filename = ``{stem}.{pid}.{uuid8}.tmp`` so concurrent writers
+        never share a tmp path.
+      * ``os.replace`` (atomic on POSIX) instead of ``Path.replace`` (same
+        semantics; spelling the system call out for clarity).
+      * Up to ``max_retries`` attempts on transient ``OSError`` /
+        ``FileNotFoundError`` (e.g. someone else just renamed our tmp).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state.to_json(), indent=2))
-    tmp.replace(path)
+    payload = json.dumps(state.to_json(), indent=2)
+    last_err: Exception | None = None
+    for attempt in range(max(1, int(max_retries))):
+        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(payload)
+            os.replace(str(tmp), str(path))
+            return
+        except (FileNotFoundError, OSError) as err:
+            last_err = err
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            if attempt + 1 < int(max_retries):
+                time.sleep(float(retry_sleep_s))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err  # pragma: no cover (defensive)
 
 
 def read_curriculum_control(path: Path) -> CurriculumControlState | None:
@@ -133,6 +212,53 @@ def post_shrink_consolidation_active(
 ) -> bool:
     until = int(control.post_shrink_consolidation_until_restart_step)
     return until > 0 and int(frames_since_restart) < until
+
+
+def apply_source_safe_consolidation_on_copy(
+    path: Path,
+    *,
+    consolidation_env_frames: int,
+    consolidation_source: str,
+    num_envs: int,
+    inherited_tolerance: float,
+    inheritance_audit: dict[str, Any] | None = None,
+) -> None:
+    """Phase A4 P3 (2026-06-09): on a source_safe cross/recovery copy.
+
+    1. Clear stale slot history that came from the previous owner of this
+       policy slot:
+         post_shrink_consolidation_until_restart_step = 0
+         blocked_by_consolidation = False
+    2. Re-arm a fresh source-aware recovery consolidation window starting
+       from frame_since_restart=0 (the supervisor wipes that on relaunch):
+         post_shrink_consolidation_until_restart_step = freeze_steps
+       50M for stable source, 100M for unstable / missing metadata.
+    3. Sync last_mastered_tolerance to the inherited tolerance so a later
+       last_mastered cross-copy cascade stays consistent.
+    4. Persist the inheritance audit fields for downstream JSONL reporting.
+
+    The control JSON is the single source of truth for the env loop
+    (`apply_env_tolerance_curriculum`); we do NOT add any --*_resume flag.
+    """
+    from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
+
+    control = read_curriculum_control(path) or CurriculumControlState()
+    control.post_shrink_consolidation_until_restart_step = 0
+    control.blocked_by_consolidation = False
+    freeze_steps = env_frames_to_sim_steps(
+        int(consolidation_env_frames), int(num_envs)
+    )
+    control.post_shrink_consolidation_until_restart_step = int(freeze_steps)
+    control.post_shrink_freeze_env_frames = int(consolidation_env_frames)
+    control.recovery_consolidation_frames_selected = int(consolidation_env_frames)
+    control.recovery_consolidation_source = str(consolidation_source)
+    if float(inherited_tolerance) > 0.0:
+        control.last_mastered_tolerance = float(inherited_tolerance)
+    if inheritance_audit:
+        for k, v in inheritance_audit.items():
+            if hasattr(control, k):
+                setattr(control, k, v)
+    write_curriculum_control(path, control)
 
 
 def mark_shrink_consumed(

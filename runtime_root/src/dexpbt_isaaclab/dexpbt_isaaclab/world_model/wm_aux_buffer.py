@@ -47,6 +47,23 @@ DEFAULT_SEQ_AUX_FIELDS: dict[str, tuple[int, ...]] = {
     "aux_success_cnt": (1,),
 }
 
+# Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
+# These are additive defaults consumed only when
+# --seq_wm_use_task_aux_inputs is enabled in train.py. Registering them
+# unconditionally is cheap (a few (T,N,1) float buffers) but the
+# observer / trainer code MUST treat all values as optional.
+TASK_AUX_FIELDS: dict[str, tuple[int, ...]] = {
+    "aux_picked": (1,),
+    "aux_dropped": (1,),
+    "aux_closest_d_hat": (1,),
+    "aux_success_tolerance": (1,),
+}
+
+EXTENDED_SEQ_AUX_FIELDS: dict[str, tuple[int, ...]] = {
+    **DEFAULT_SEQ_AUX_FIELDS,
+    **TASK_AUX_FIELDS,
+}
+
 
 def register_seq_aux_fields(
     experience_buffer: Any,
@@ -186,11 +203,44 @@ def extract_step_aux(
         v = _to_tensor_2d(src, device=device)
         if v is not None:
             out["aux_success_cnt"] = v
+    # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
+    # All sources are best-effort; missing data leaves the field absent
+    # so register_seq_aux_fields' default zero-init is preserved.
+    if "aux_picked" in fields:
+        src = env_attrs.get("picked")
+        if src is None and isinstance(wm, Mapping):
+            src = wm.get("picked")
+        v = _to_tensor_2d(src, device=device)
+        if v is not None:
+            out["aux_picked"] = v
+    if "aux_dropped" in fields:
+        src = env_attrs.get("dropped")
+        if src is None and isinstance(wm, Mapping):
+            src = wm.get("dropped")
+        v = _to_tensor_2d(src, device=device)
+        if v is not None:
+            out["aux_dropped"] = v
+    if "aux_closest_d_hat" in fields:
+        src = env_attrs.get("closest_d_hat")
+        if src is None and isinstance(wm, Mapping):
+            src = wm.get("closest_d_hat")
+        v = _to_tensor_2d(src, device=device)
+        if v is not None:
+            out["aux_closest_d_hat"] = v
+    if "aux_success_tolerance" in fields:
+        src = env_attrs.get("success_tolerance")
+        if src is None and isinstance(wm, Mapping):
+            src = wm.get("success_tolerance")
+        v = _to_tensor_2d(src, device=device)
+        if v is not None:
+            out["aux_success_tolerance"] = v
     return out
 
 
 __all__ = [
     "DEFAULT_SEQ_AUX_FIELDS",
+    "TASK_AUX_FIELDS",
+    "EXTENDED_SEQ_AUX_FIELDS",
     "register_seq_aux_fields",
     "insert_step_aux",
     "read_aux_full",

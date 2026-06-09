@@ -1,0 +1,3797 @@
+diff --git a/results/latest_run.txt b/results/latest_run.txt
+index 2a57e6a..e98aed0 100644
+--- a/results/latest_run.txt
++++ b/results/latest_run.txt
+@@ -1 +1 @@
+-/root/autodl-tmp/wmdexpbt/results/regrasping_bayesian_no_h3_p2_1_3b_20260607_024931
++/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048
+diff --git a/results/latest_seq_wm_smoke_run.txt b/results/latest_seq_wm_smoke_run.txt
+index 0607c06..e98aed0 100644
+--- a/results/latest_seq_wm_smoke_run.txt
++++ b/results/latest_seq_wm_smoke_run.txt
+@@ -1 +1 @@
+-/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_belief_value_smoke_50m_20260608_010301
++/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048
+diff --git a/results/latest_smoke_run.txt b/results/latest_smoke_run.txt
+index 7575ba5..e98aed0 100644
+--- a/results/latest_smoke_run.txt
++++ b/results/latest_smoke_run.txt
+@@ -1 +1 @@
+-/root/autodl-tmp/wmdexpbt/results/regrasping_cbwm_smoke_800m_p2_1_no_h3_20260605_135426
++/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/dexpbt_utils.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/dexpbt_utils.py
+index e378f5f..613c138 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/dexpbt_utils.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/dexpbt_utils.py
+@@ -249,3 +249,169 @@ def compute_pbt_ranking_score(
+     if n < float(nsucc_low_threshold):
+         return min(score, float(nsucc_low_cap))
+     return score
++
++
++# ---------------------------------------------------------------------------
++# Phase A4 P4 (2026-06-09): floor-stage recovery scoring (Part A).
++#
++# Goal:
++#   At hard floor (success_tolerance ~ target_tolerance ~ 0.01) the
++#   "absolute nsucc_mean" signal alone misleads PBT: a worker that just
++#   re-learned at floor with nsucc=8 trending up should not be replaced
++#   by one stuck at nsucc=12 plateau with zero slope.
++#
++# The score below is a SECONDARY ranking signal, gated by
++# --pbt_floor_recovery_aware. Default code paths must not call it.
++#
++# Convention (per user constraint #7): all sub-terms are normalized to
++# 0..1 first, then the final score is multiplied by 50 to live on the
++# same nsucc scale as the legacy ranking. This avoids mixing 0..1 and
++# 0..50 metrics in WM-guided ranking later.
++# ---------------------------------------------------------------------------
++
++FLOOR_STAGE_NONE = "none"
++FLOOR_STAGE_FLOOR = "floor"
++FLOOR_STAGE_HARD_FLOOR = "hard_floor"
++
++
++def floor_stage_classify(
++    success_tolerance: float,
++    target_tolerance: float,
++    *,
++    floor_tol_threshold: float = 0.02,
++    hard_floor_tol_threshold: float = 0.012,
++    floor_tol_eq_target_eps: float = 1e-9,
++) -> str:
++    """Classify the per-policy floor stage from current curriculum state.
++
++    Returns one of {"none","floor","hard_floor"}. Pure function; safe to
++    call from tests and reports without observer state.
++    """
++    tol = float(success_tolerance)
++    tgt = float(target_tolerance)
++    if tol <= float(hard_floor_tol_threshold) or abs(tol - tgt) <= floor_tol_eq_target_eps:
++        return FLOOR_STAGE_HARD_FLOOR
++    if tol <= float(floor_tol_threshold):
++        return FLOOR_STAGE_FLOOR
++    return FLOOR_STAGE_NONE
++
++
++def compute_floor_recovery_slope(
++    nsucc_mean_history: list[float],
++    *,
++    window: int = 4,
++    nsucc_norm: float = 50.0,
++) -> tuple[float, float]:
++    """Return (slope_raw, slope_positive_norm) over the last ``window`` ticks.
++
++    slope_raw  = (nsucc_now - nsucc_window_ago) / max(1, window-1) / nsucc_norm
++    slope_positive_norm = clip(slope_raw, 0, 1)  # only positive recovery counts
++
++    A fully-saturated recovery from 0 -> 50 over `window` ticks gives
++    slope_positive_norm ~= 1. Negative slopes return (slope_raw, 0).
++    Empty/short histories return (0, 0).
++    """
++    xs = [float(x) for x in nsucc_mean_history if x is not None]
++    if len(xs) < 2:
++        return 0.0, 0.0
++    w = max(2, min(int(window), len(xs)))
++    tail = xs[-w:]
++    span = float(tail[-1]) - float(tail[0])
++    denom = max(1, w - 1) * max(1e-6, float(nsucc_norm))
++    slope = span / denom
++    return float(slope), float(max(0.0, min(1.0, slope)))
++
++
++def compute_floor_recovery_score(
++    *,
++    nsucc_mean: float,
++    nsucc_max: float,
++    retention: float,
++    slope_positive_norm: float,
++    drop_ratio: float,
++    hard_collapse: bool = False,
++    nsucc_norm: float = 50.0,
++    slope_weight: float = 0.5,
++    retention_weight: float = 0.3,
++    nsucc_max_weight: float = 0.2,
++    drop_penalty: float = 0.5,
++    hard_collapse_penalty: float = 1.0,
++) -> tuple[float, dict[str, float]]:
++    """Return (score_50, components).
++
++    All sub-terms are 0..1; ``score_50 = 50 * weighted_sum``. The legacy
++    PBT ranking is on a ~0..50 nsucc scale, so this stays comparable.
++
++    Components are returned for JSONL/TB audit logging.
++    """
++    nm = float(max(0.0, min(1.0, float(nsucc_mean) / max(1e-6, float(nsucc_norm)))))
++    nx = float(max(0.0, min(1.0, float(nsucc_max) / max(1e-6, float(nsucc_norm)))))
++    rt = float(max(0.0, min(1.0, float(retention))))
++    sl = float(max(0.0, min(1.0, float(slope_positive_norm))))
++    dp = float(max(0.0, min(1.0, float(drop_ratio))))
++    coll = 1.0 if bool(hard_collapse) else 0.0
++
++    weighted = (
++        1.0 * nm
++        + float(slope_weight) * sl
++        + float(retention_weight) * rt
++        + float(nsucc_max_weight) * nx
++        - float(drop_penalty) * dp
++        - float(hard_collapse_penalty) * coll
++    )
++    score_50 = 50.0 * float(weighted)
++    components = {
++        "nsucc_mean_norm": nm,
++        "nsucc_max_norm": nx,
++        "retention": rt,
++        "slope_positive_norm": sl,
++        "drop_ratio": dp,
++        "hard_collapse": coll,
++        "weighted_norm": float(weighted),
++        "score_50": float(score_50),
++    }
++    return float(score_50), components
++
++
++def combine_wm_recovery_score(
++    real_score_50: float,
++    *,
++    wm_recovery_prob: float,
++    wm_success_prob: float,
++    wm_drop_risk: float,
++    wm_uncertainty: float,
++    recovery_weight: float = 0.3,
++    success_weight: float = 0.2,
++    drop_penalty: float = 0.3,
++    uncertainty_penalty: float = 0.2,
++    nsucc_norm: float = 50.0,
++) -> tuple[float, dict[str, float]]:
++    """Combine real floor-recovery score with imagined WM evaluation.
++
++    Sub-terms are 0..1 probabilities; converted to the same 0..50 scale so
++    PBT can sort with one number. The real score is preserved as the
++    dominant additive term; WM contributes a bounded delta.
++    """
++    rp = float(max(0.0, min(1.0, float(wm_recovery_prob))))
++    sp = float(max(0.0, min(1.0, float(wm_success_prob))))
++    dr = float(max(0.0, min(1.0, float(wm_drop_risk))))
++    un = float(max(0.0, min(1.0, float(wm_uncertainty))))
++    delta_norm = (
++        float(recovery_weight) * rp
++        + float(success_weight) * sp
++        - float(drop_penalty) * dr
++        - float(uncertainty_penalty) * un
++    )
++    delta_50 = 50.0 * float(delta_norm)
++    score = float(real_score_50) + float(delta_50)
++    components = {
++        "wm_recovery_prob": rp,
++        "wm_success_prob": sp,
++        "wm_drop_risk": dr,
++        "wm_uncertainty": un,
++        "delta_norm": float(delta_norm),
++        "delta_50": float(delta_50),
++        "real_score_50": float(real_score_50),
++        "wm_score_50": float(score),
++    }
++    return float(score), components
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_curriculum_p1.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_curriculum_p1.py
+index fe1771d..31f30ee 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_curriculum_p1.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_curriculum_p1.py
+@@ -4,6 +4,9 @@ from __future__ import annotations
+ 
+ import json
+ import math
++import os
++import time
++import uuid as _uuid
+ from dataclasses import asdict, dataclass, field
+ from pathlib import Path
+ from typing import Any
+@@ -104,16 +107,92 @@ class CurriculumControlState:
+     blocked_by_adaptive_fast_low_nsucc: bool = False
+     pre_shrink_tolerance: float = 0.0
+     post_shrink_tolerance: float = 0.0
++    # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance audit.
++    # Defaults are inert; populated by the observer at copy time when
++    # --pbt_curriculum_inherit_mode=source_safe and consumed back via JSONL
++    # for reporting. The runtime curriculum logic does not branch on these
++    # fields; they only audit the most-recent copy event into this slot.
++    inheritance_mode: str = "reset"
++    inheritance_reason: str = ""
++    inherited_tolerance: float = 0.0
++    target_tolerance_before_copy: float = 0.0
++    target_tolerance_after_copy: float = 0.0
++    source_policy_idx_for_copy: int = -1
++    source_checkpoint_type_for_copy: str = ""
++    source_success_tolerance_for_copy: float = 0.0
++    source_nsucc_mean_for_copy: float = 0.0
++    source_nsucc_max_for_copy: float = 0.0
++    source_retention_for_copy: float = 0.0
++    source_safe_for_curriculum: bool = False
++    recovery_consolidation_frames_selected: int = 0
++    recovery_consolidation_source: str = ""
++    # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT audit fields.
++    # Defaults inert; the runtime only consumes them when the matching
++    # observer-side flag --pbt_floor_recovery_aware is true. They are
++    # safe to write to the JSON on every tick because the reader-side
++    # apply_env_tolerance_curriculum does not branch on them.
++    floor_stage: str = "none"  # one of {"none","floor","hard_floor"}
++    first_floor_frame: int = -1
++    first_hard_floor_frame: int = -1
++    frames_since_floor: int = 0
++    floor_recovery_slope: float = 0.0
++    floor_recovery_score: float = 0.0
++    floor_recovery_score_real: float = 0.0
++    floor_recovery_score_wm: float = 0.0
++    floor_recovery_score_norm: float = 0.0
++    floor_recovery_protect_until: int = 0
++    best_floor_recovery_archive_used: bool = False
+ 
+     def to_json(self) -> dict[str, Any]:
+         return asdict(self)
+ 
+ 
+-def write_curriculum_control(path: Path, state: CurriculumControlState) -> None:
++def write_curriculum_control(
++    path: Path,
++    state: CurriculumControlState,
++    *,
++    max_retries: int = 3,
++    retry_sleep_s: float = 0.05,
++) -> None:
++    """Phase A4 P4 (2026-06-09): per-writer unique tmp + os.replace + retry.
++
++    Previously the writer used a shared ``path.with_suffix(".tmp")`` (e.g.
++    ``000.tmp``) for every policy / supervisor restart. Multiple concurrent
++    PBT writers that touched the same slot could observe a stale ``.tmp``
++    being renamed away mid-flight, surfacing as
++    ``FileNotFoundError: 000.tmp -> 000.json`` in the env-side reader.
++    The race is purely an infra issue, not algorithm logic.
++
++    Mitigation:
++      * tmp filename = ``{stem}.{pid}.{uuid8}.tmp`` so concurrent writers
++        never share a tmp path.
++      * ``os.replace`` (atomic on POSIX) instead of ``Path.replace`` (same
++        semantics; spelling the system call out for clarity).
++      * Up to ``max_retries`` attempts on transient ``OSError`` /
++        ``FileNotFoundError`` (e.g. someone else just renamed our tmp).
++    """
+     path.parent.mkdir(parents=True, exist_ok=True)
+-    tmp = path.with_suffix(".tmp")
+-    tmp.write_text(json.dumps(state.to_json(), indent=2))
+-    tmp.replace(path)
++    payload = json.dumps(state.to_json(), indent=2)
++    last_err: Exception | None = None
++    for attempt in range(max(1, int(max_retries))):
++        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
++        try:
++            tmp.write_text(payload)
++            os.replace(str(tmp), str(path))
++            return
++        except (FileNotFoundError, OSError) as err:
++            last_err = err
++            try:
++                if tmp.exists():
++                    tmp.unlink()
++            except Exception:
++                pass
++            if attempt + 1 < int(max_retries):
++                time.sleep(float(retry_sleep_s))
++                continue
++            raise
++    if last_err is not None:
++        raise last_err  # pragma: no cover (defensive)
+ 
+ 
+ def read_curriculum_control(path: Path) -> CurriculumControlState | None:
+@@ -135,6 +214,53 @@ def post_shrink_consolidation_active(
+     return until > 0 and int(frames_since_restart) < until
+ 
+ 
++def apply_source_safe_consolidation_on_copy(
++    path: Path,
++    *,
++    consolidation_env_frames: int,
++    consolidation_source: str,
++    num_envs: int,
++    inherited_tolerance: float,
++    inheritance_audit: dict[str, Any] | None = None,
++) -> None:
++    """Phase A4 P3 (2026-06-09): on a source_safe cross/recovery copy.
++
++    1. Clear stale slot history that came from the previous owner of this
++       policy slot:
++         post_shrink_consolidation_until_restart_step = 0
++         blocked_by_consolidation = False
++    2. Re-arm a fresh source-aware recovery consolidation window starting
++       from frame_since_restart=0 (the supervisor wipes that on relaunch):
++         post_shrink_consolidation_until_restart_step = freeze_steps
++       50M for stable source, 100M for unstable / missing metadata.
++    3. Sync last_mastered_tolerance to the inherited tolerance so a later
++       last_mastered cross-copy cascade stays consistent.
++    4. Persist the inheritance audit fields for downstream JSONL reporting.
++
++    The control JSON is the single source of truth for the env loop
++    (`apply_env_tolerance_curriculum`); we do NOT add any --*_resume flag.
++    """
++    from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
++
++    control = read_curriculum_control(path) or CurriculumControlState()
++    control.post_shrink_consolidation_until_restart_step = 0
++    control.blocked_by_consolidation = False
++    freeze_steps = env_frames_to_sim_steps(
++        int(consolidation_env_frames), int(num_envs)
++    )
++    control.post_shrink_consolidation_until_restart_step = int(freeze_steps)
++    control.post_shrink_freeze_env_frames = int(consolidation_env_frames)
++    control.recovery_consolidation_frames_selected = int(consolidation_env_frames)
++    control.recovery_consolidation_source = str(consolidation_source)
++    if float(inherited_tolerance) > 0.0:
++        control.last_mastered_tolerance = float(inherited_tolerance)
++    if inheritance_audit:
++        for k, v in inheritance_audit.items():
++            if hasattr(control, k):
++                setattr(control, k, v)
++    write_curriculum_control(path, control)
++
++
+ def mark_shrink_consumed(
+     path: Path,
+     *,
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_observer.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_observer.py
+index efde1ea..21535c9 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_observer.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_observer.py
+@@ -27,6 +27,7 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+     CurriculumControlState,
+     RollingNsuccWindow,
+     WindowSample,
++    apply_source_safe_consolidation_on_copy,
+     evaluate_collapse_freeze,
+     evaluate_mastery_gate,
+     is_stable_source_window,
+@@ -326,6 +327,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         curriculum_fast_consolidation_frames: int = 50_000_000,
+         curriculum_fast_recovery_consolidation_frames: int = 100_000_000,
+         curriculum_fast_target_tolerance_800m: float = 0.04,
++        # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance and
++        # promising-worker anti-churn. Defaults are inert: 'reset' inherit
++        # mode + protection off preserves legacy behavior bit-for-bit.
++        pbt_curriculum_inherit_mode: str = "reset",
++        pbt_source_safe_recovery_consolidation_frames: int = 50_000_000,
++        pbt_source_unsafe_recovery_consolidation_frames: int = 100_000_000,
++        pbt_source_safe_min_mean: float = 20.0,
++        pbt_source_safe_min_retention: float = 0.7,
++        pbt_protect_promising_workers: bool = False,
++        pbt_promising_nsucc_mean: float = 20.0,
++        pbt_promising_peak_mean: float = 25.0,
++        pbt_promising_min_retention: float = 0.5,
++        pbt_promising_protect_frames: int = 150_000_000,
++        pbt_promising_allow_hard_collapse_override: bool = True,
+         # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
+         pbt_early_collapse_detect: bool = True,
+         early_collapse_drop_ratio: float = 0.3,
+@@ -353,6 +368,41 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         # Track C (2026-06-06): explicit Bayesian strategy pool. None means
+         # "use the canonical 5-strategy default" (legacy behaviour).
+         wm_strategy_pool: str | list[str] | None = None,
++        # ------------------------------------------------------------------
++        # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT (Part A).
++        # Defaults are inert: pbt_floor_recovery_aware=False keeps the entire
++        # legacy bottom-replacement / archive cascade unchanged bit-for-bit.
++        # ------------------------------------------------------------------
++        pbt_floor_recovery_aware: bool = False,
++        pbt_floor_tol_threshold: float = 0.02,
++        pbt_hard_floor_tol_threshold: float = 0.012,
++        pbt_floor_recovery_window: int = 4,
++        pbt_floor_recovery_slope_weight: float = 0.5,
++        pbt_floor_recovery_retention_weight: float = 0.3,
++        pbt_floor_recovery_nsucc_max_weight: float = 0.2,
++        pbt_floor_recovery_drop_penalty: float = 0.5,
++        pbt_floor_recovery_protect_frames: int = 200_000_000,
++        pbt_floor_recovery_min_nsucc_protect: float = 15.0,
++        pbt_floor_recovery_min_slope_protect: float = 0.05,
++        pbt_floor_recovery_min_retention_for_protect: float = 0.3,
++        pbt_enable_best_floor_recovery_archive: bool = False,
++        # Phase A4 P4 (2026-06-09): WM-guided PBT ranking (Part E).
++        # Tri-state: off | shadow | active. shadow records would-select but
++        # never overrides real ranking. active mixes WM into the score
++        # subject to all kill switches. Default 'off' keeps legacy behavior.
++        pbt_wm_score_mode: str = "off",
++        pbt_use_wm_recovery_score: bool = False,  # legacy alias kept for compat
++        pbt_wm_recovery_weight: float = 0.3,
++        pbt_wm_success_weight: float = 0.2,
++        pbt_wm_drop_penalty: float = 0.3,
++        pbt_wm_uncertainty_penalty: float = 0.2,
++        pbt_wm_max_uncertainty: float = 0.5,
++        # Phase A4 P4 (2026-06-09): experimental stack preset (Item 10).
++        # Convenience flag that does NOT bypass any per-feature kill switch;
++        # train.py expands it into individual flags BEFORE constructing the
++        # observer and prints the expansion. The observer just records that
++        # the preset was active for audit.
++        experimental_rssm_floor_recovery_stack: bool = False,
+         # Resume hooks; populated by train.py when the supervisor relaunches
+         # this worker. They are None on first launch and on cold start.
+         restart_count_resume: int | None = None,
+@@ -460,6 +510,82 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         self._cf_skipped_stale_meta_count = 0
+         self._last_cf_result_timestamp = 0.0
+ 
++        # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT params.
++        # Defaults inert: pbt_floor_recovery_aware=False short-circuits all
++        # new code paths. Values are still stored so JSONL / TB can audit
++        # the configuration even when the feature is off.
++        self.pbt_floor_recovery_aware = bool(pbt_floor_recovery_aware)
++        self.pbt_floor_tol_threshold = float(pbt_floor_tol_threshold)
++        self.pbt_hard_floor_tol_threshold = float(pbt_hard_floor_tol_threshold)
++        self.pbt_floor_recovery_window = max(2, int(pbt_floor_recovery_window))
++        self.pbt_floor_recovery_slope_weight = float(pbt_floor_recovery_slope_weight)
++        self.pbt_floor_recovery_retention_weight = float(
++            pbt_floor_recovery_retention_weight
++        )
++        self.pbt_floor_recovery_nsucc_max_weight = float(
++            pbt_floor_recovery_nsucc_max_weight
++        )
++        self.pbt_floor_recovery_drop_penalty = float(pbt_floor_recovery_drop_penalty)
++        self.pbt_floor_recovery_protect_frames = int(pbt_floor_recovery_protect_frames)
++        self.pbt_floor_recovery_min_nsucc_protect = float(
++            pbt_floor_recovery_min_nsucc_protect
++        )
++        self.pbt_floor_recovery_min_slope_protect = float(
++            pbt_floor_recovery_min_slope_protect
++        )
++        self.pbt_floor_recovery_min_retention_for_protect = float(
++            pbt_floor_recovery_min_retention_for_protect
++        )
++        self.pbt_enable_best_floor_recovery_archive = bool(
++            pbt_enable_best_floor_recovery_archive
++        )
++        if self.pbt_floor_recovery_aware:
++            if not (
++                0.0 < self.pbt_hard_floor_tol_threshold
++                <= self.pbt_floor_tol_threshold
++            ):
++                raise RuntimeError(
++                    "pbt_hard_floor_tol_threshold must satisfy "
++                    "0 < hard <= floor; got "
++                    f"hard={self.pbt_hard_floor_tol_threshold} "
++                    f"floor={self.pbt_floor_tol_threshold}"
++                )
++        # Phase A4 P4 (2026-06-09): WM-guided PBT ranking three-mode (Item 3).
++        if pbt_wm_score_mode not in ("off", "shadow", "active"):
++            raise RuntimeError(
++                f"Unknown pbt_wm_score_mode={pbt_wm_score_mode!r} "
++                f"(expected 'off' | 'shadow' | 'active')"
++            )
++        self.pbt_wm_score_mode = str(pbt_wm_score_mode)
++        # Legacy bool flag (pbt_use_wm_recovery_score) is mapped onto the
++        # tri-state mode for back-compat: True -> 'active' iff mode=='off',
++        # otherwise it is ignored. Tests must be able to set the bool alone.
++        if bool(pbt_use_wm_recovery_score) and self.pbt_wm_score_mode == "off":
++            self.pbt_wm_score_mode = "active"
++        self.pbt_use_wm_recovery_score = bool(pbt_use_wm_recovery_score)
++        self.pbt_wm_recovery_weight = float(pbt_wm_recovery_weight)
++        self.pbt_wm_success_weight = float(pbt_wm_success_weight)
++        self.pbt_wm_drop_penalty = float(pbt_wm_drop_penalty)
++        self.pbt_wm_uncertainty_penalty = float(pbt_wm_uncertainty_penalty)
++        self.pbt_wm_max_uncertainty = float(pbt_wm_max_uncertainty)
++        self.experimental_rssm_floor_recovery_stack = bool(
++            experimental_rssm_floor_recovery_stack
++        )
++        # Per-policy floor-recovery state (Part A).
++        self._first_floor_frame: dict[int, int] = {}
++        self._first_hard_floor_frame: dict[int, int] = {}
++        self._floor_recovery_protect_until: dict[int, int] = {}
++        self._floor_recovery_score_history: dict[int, list[float]] = {}
++        self._best_floor_recovery_state: dict[str, Any] | None = None
++        # Per-tick imagined-evaluator output (Part D); cached inside
++        # _ternary_pbt and consumed by ranking + audit. None means evaluator
++        # disabled or its output is not trusted (high uncertainty / teacher
++        # not promoted) -> WM ranking falls back to real-only.
++        self._wm_imagined_eval_per_policy: dict[int, dict[str, float]] = {}
++        # Counters for shadow-mode reporting.
++        self._wm_shadow_observations: int = 0
++        self._wm_shadow_changed_selection: int = 0
++
+         self.curr_policy_workspace = self.workspace / f"{self.policy_idx:03d}"
+         self.best_policy_workspace = self.workspace / "best"
+         # Patch 5 (rev 2, 2026-05-30): separate, peak-protected best archives.
+@@ -470,7 +596,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         self.best_r_meta_workspace = self.workspace / "best_r_meta"
+         self.best_nsucc_workspace = self.workspace / "best_nsucc"
+         self.best_stable_workspace = self.workspace / "best_stable"
++        # Phase A4 P4 (2026-06-09): floor-stage recovery archive (Part A).
++        # Created lazily; if the feature is off the dir is never populated.
++        self.best_floor_recovery_workspace = self.workspace / "best_floor_recovery"
+         self._curriculum_control_dir = self.workspace / "curriculum_control"
++        # Phase A4 P3 (2026-06-09): one JSONL per copy/recovery event.
++        self._pbt_copy_events_path = self.workspace / "metrics" / "pbt_copy_events.jsonl"
+ 
+         if self._enable_wm:
+             self._init_wm_components()
+@@ -651,6 +782,66 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                     "adaptive_fast requires --curriculum_mode=mastery; "
+                     f"got {self.curriculum_mode!r}"
+                 )
++        # Phase A4 P3 (2026-06-09): source-safe inheritance + promising guard.
++        if pbt_curriculum_inherit_mode not in ("reset", "source_safe"):
++            raise RuntimeError(
++                f"Unknown pbt_curriculum_inherit_mode="
++                f"{pbt_curriculum_inherit_mode!r} (expected 'reset' | "
++                f"'source_safe')"
++            )
++        self.pbt_curriculum_inherit_mode = str(pbt_curriculum_inherit_mode)
++        self.pbt_source_safe_recovery_consolidation_frames = int(
++            pbt_source_safe_recovery_consolidation_frames
++        )
++        self.pbt_source_unsafe_recovery_consolidation_frames = int(
++            pbt_source_unsafe_recovery_consolidation_frames
++        )
++        self.pbt_source_safe_min_mean = float(pbt_source_safe_min_mean)
++        self.pbt_source_safe_min_retention = float(pbt_source_safe_min_retention)
++        self.pbt_protect_promising_workers = bool(
++            pbt_protect_promising_workers
++        )
++        self.pbt_promising_nsucc_mean = float(pbt_promising_nsucc_mean)
++        self.pbt_promising_peak_mean = float(pbt_promising_peak_mean)
++        self.pbt_promising_min_retention = float(pbt_promising_min_retention)
++        self.pbt_promising_protect_frames = int(pbt_promising_protect_frames)
++        self.pbt_promising_allow_hard_collapse_override = bool(
++            pbt_promising_allow_hard_collapse_override
++        )
++        if self.pbt_curriculum_inherit_mode == "source_safe":
++            if self.pbt_source_safe_recovery_consolidation_frames <= 0:
++                raise RuntimeError(
++                    "source_safe inherit mode requires "
++                    "--pbt_source_safe_recovery_consolidation_frames > 0; "
++                    f"got {self.pbt_source_safe_recovery_consolidation_frames}"
++                )
++            if self.pbt_source_unsafe_recovery_consolidation_frames <= 0:
++                raise RuntimeError(
++                    "source_safe inherit mode requires "
++                    "--pbt_source_unsafe_recovery_consolidation_frames > 0; "
++                    f"got {self.pbt_source_unsafe_recovery_consolidation_frames}"
++                )
++            if not (0.0 < self.pbt_source_safe_min_retention <= 1.0):
++                raise RuntimeError(
++                    "--pbt_source_safe_min_retention must be in (0, 1]; "
++                    f"got {self.pbt_source_safe_min_retention}"
++                )
++        if self.pbt_protect_promising_workers:
++            if self.pbt_promising_protect_frames <= 0:
++                raise RuntimeError(
++                    "--pbt_promising_protect_frames must be > 0 when "
++                    "--pbt_protect_promising_workers is enabled; got "
++                    f"{self.pbt_promising_protect_frames}"
++                )
++            if not (0.0 < self.pbt_promising_min_retention <= 1.0):
++                raise RuntimeError(
++                    "--pbt_promising_min_retention must be in (0, 1]; "
++                    f"got {self.pbt_promising_min_retention}"
++                )
++        self._promising_protect_until: dict[int, int] = {}
++        self._curriculum_inherited_count: int = 0
++        self._curriculum_reset_count: int = 0
++        self._curriculum_missing_metadata_count: int = 0
+         self._policy_nsucc_windows: dict[int, RollingNsuccWindow] = {}
+         self._recent_peak_nsucc_mean: dict[int, float] = {}
+         self._collapse_freeze_until: dict[int, int] = {}
+@@ -725,6 +916,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             "relaxed_live": 0,
+             "archive": 0,
+             "best_stable_archive": 0,
++            "best_floor_recovery_archive": 0,
+             "skipped": 0,
+         }
+         # The "checkpoint provenance" for the current tick. live|archive.
+@@ -1158,6 +1350,46 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         prev_pre_shrink = float(prev_control.pre_shrink_tolerance) if prev_control else 0.0
+         prev_post_shrink = float(prev_control.post_shrink_tolerance) if prev_control else 0.0
+ 
++        # Phase A4 P4 (2026-06-09): floor-recovery audit fields.
++        # Defaults are inert ("none" / 0 / 0.0); only populated when the
++        # observer-side feature is enabled. The env-side curriculum logic
++        # does not branch on these fields, so writing them is safe even
++        # in default mode (left at zero values).
++        floor_stage_str = "none"
++        first_floor_frame_val = -1
++        first_hard_floor_frame_val = -1
++        frames_since_floor_val = 0
++        floor_recovery_slope_val = 0.0
++        floor_recovery_score_val = 0.0
++        floor_recovery_protect_until_val = int(
++            self._floor_recovery_protect_until.get(policy_idx, 0)
++        )
++        if self.pbt_floor_recovery_aware:
++            cur = (population or {}).get(policy_idx) or {}
++            curriculum_for_stage = cur.get("curriculum") or {}
++            floor_stage_str = self._floor_stage_for(curriculum_for_stage)
++            self._track_first_floor_frames(
++                policy_idx, env_frames, floor_stage_str
++            )
++            first_floor_frame_val = int(
++                self._first_floor_frame.get(policy_idx, -1)
++            )
++            first_hard_floor_frame_val = int(
++                self._first_hard_floor_frame.get(policy_idx, -1)
++            )
++            if first_floor_frame_val >= 0:
++                frames_since_floor_val = max(
++                    0, int(env_frames) - first_floor_frame_val
++                )
++            score_50, components, slope_pos = self._floor_recovery_score_for(
++                policy_idx,
++                window,
++                env_frames,
++                hard_collapse=hard_collapse_detected,
++            )
++            floor_recovery_slope_val = float(components.get("slope_raw", 0.0))
++            floor_recovery_score_val = float(score_50)
++
+         return CurriculumControlState(
+             curriculum_mode=self.curriculum_mode,
+             allow_shrink=allow_shrink,
+@@ -1197,6 +1429,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             blocked_by_adaptive_fast_low_nsucc=blocked_by_adaptive_fast_low_nsucc,
+             pre_shrink_tolerance=prev_pre_shrink,
+             post_shrink_tolerance=prev_post_shrink,
++            # Phase A4 P4 (2026-06-09): floor-recovery audit fields.
++            floor_stage=floor_stage_str,
++            first_floor_frame=first_floor_frame_val,
++            first_hard_floor_frame=first_hard_floor_frame_val,
++            frames_since_floor=frames_since_floor_val,
++            floor_recovery_slope=floor_recovery_slope_val,
++            floor_recovery_score=floor_recovery_score_val,
++            floor_recovery_score_real=floor_recovery_score_val,
++            floor_recovery_score_wm=0.0,
++            floor_recovery_score_norm=floor_recovery_score_val / 50.0
++            if floor_recovery_score_val
++            else 0.0,
++            floor_recovery_protect_until=floor_recovery_protect_until_val,
+         )
+ 
+     def _log_curriculum_control_scalars(
+@@ -1386,11 +1631,110 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             float(control.post_shrink_tolerance),
+             env_frames,
+         )
++        # Phase A4 P3 (2026-06-09): inheritance / promising-gate scalars.
++        self.writer.add_scalar(
++            "curriculum/inherited_tolerance_count",
++            float(self._curriculum_inherited_count),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/reset_to_initial_tolerance_count",
++            float(self._curriculum_reset_count),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/missing_source_curriculum_metadata_count",
++            float(self._curriculum_missing_metadata_count),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/recovery_consolidation_frames_selected",
++            float(control.recovery_consolidation_frames_selected),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/source_safe_for_curriculum",
++            1.0 if control.source_safe_for_curriculum else 0.0,
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/inherited_tolerance",
++            float(control.inherited_tolerance),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/target_tolerance_after_copy",
++            float(control.target_tolerance_after_copy),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "pbt/curriculum_inherit_mode",
++            1.0 if self.pbt_curriculum_inherit_mode == "source_safe" else 0.0,
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "pbt/protect_promising_workers_enabled",
++            1.0 if self.pbt_protect_promising_workers else 0.0,
++            env_frames,
++        )
+         self.writer.add_scalar(
+             "curriculum/fast_target_tolerance_800m",
+             float(self.curriculum_fast_target_tolerance_800m),
+             env_frames,
+         )
++        # Phase A4 P4 (2026-06-09): floor-recovery scalars (Part A).
++        self.writer.add_scalar(
++            "curriculum/floor_stage_hash",
++            float({"none": 0, "floor": 1, "hard_floor": 2}.get(
++                str(control.floor_stage), 0
++            )),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/first_floor_frame",
++            float(control.first_floor_frame),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/first_hard_floor_frame",
++            float(control.first_hard_floor_frame),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/frames_since_floor",
++            float(control.frames_since_floor),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/floor_recovery_slope",
++            float(control.floor_recovery_slope),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/floor_recovery_score",
++            float(control.floor_recovery_score),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/floor_recovery_score_real",
++            float(control.floor_recovery_score_real),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/floor_recovery_score_wm",
++            float(control.floor_recovery_score_wm),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "curriculum/floor_recovery_protect_until",
++            float(control.floor_recovery_protect_until),
++            env_frames,
++        )
++        self.writer.add_scalar(
++            "pbt/floor_recovery_aware_enabled",
++            1.0 if self.pbt_floor_recovery_aware else 0.0,
++            env_frames,
++        )
+ 
+     @staticmethod
+     def _validate_ranking_metric(mode: str) -> str:
+@@ -1659,7 +2003,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         ckpt_tol = float(
+             source_curriculum.get("success_tolerance", 0.075) or 0.075
+         )
+-        if checkpoint_type in ("archive", "best_stable_archive"):
++        if checkpoint_type in (
++            "archive",
++            "best_stable_archive",
++            "best_floor_recovery_archive",
++        ):
+             mode = self.pbt_recovery_tolerance_mode
+         else:
+             mode = self.pbt_crosscopy_tolerance_mode
+@@ -1673,6 +2021,456 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             return float(relaxed), mode
+         return ckpt_tol, mode
+ 
++    # ------------------------------------------------------------------ #
++    # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance.
++    # ------------------------------------------------------------------ #
++    def _extract_source_curriculum_metadata(
++        self,
++        *,
++        source_state: dict[str, Any],
++        source_policy_idx: int,
++    ) -> dict[str, Any]:
++        """Pull source success_tolerance / nsucc / retention for inheritance.
++
++        Live cross-copy: source_state comes from the source's per-tick
++            workspace meta (`_save_workspace_checkpoint`).
++        Archive recovery: source_state is the archive _index.json dict.
++
++        Returns a dict with floats and a ``has_*`` boolean flag set so the
++        caller can decide stable vs unstable vs missing-metadata.
++        """
++        cur = dict(source_state.get("curriculum") or {})
++        # Tolerance: prefer curriculum.success_tolerance; missing -> NaN.
++        src_tol = cur.get("success_tolerance")
++        if src_tol is None or (
++            isinstance(src_tol, float) and math.isnan(src_tol)
++        ):
++            has_tol = False
++            src_tol_f = float("nan")
++        else:
++            has_tol = True
++            src_tol_f = float(src_tol)
++        # nsucc_mean / nsucc_max: top-level first, fall back to curriculum.
++        nm = source_state.get("nsucc_mean")
++        if nm is None or (isinstance(nm, float) and math.isnan(nm)):
++            nm = cur.get("mean_prev_episode_successes")
++        nx = source_state.get("nsucc_max")
++        if nx is None or (isinstance(nx, float) and math.isnan(nx)):
++            nx = cur.get("max_prev_episode_successes")
++        try:
++            nm_f = float(nm) if nm is not None else float("nan")
++        except Exception:
++            nm_f = float("nan")
++        try:
++            nx_f = float(nx) if nx is not None else float("nan")
++        except Exception:
++            nx_f = float("nan")
++        # Retention: prefer enriched archive field, then curriculum_control
++        # of source policy idx, then live observer rolling window proxy.
++        retention = source_state.get("source_retention_at_save")
++        if retention is None:
++            retention = cur.get("retention_used_for_shrink")
++        if retention is None:
++            ctrl_path = (
++                self._curriculum_control_dir / f"{int(source_policy_idx):03d}.json"
++            )
++            ctrl = read_curriculum_control(ctrl_path)
++            if ctrl is not None and ctrl.retention_used_for_shrink > 0.0:
++                retention = float(ctrl.retention_used_for_shrink)
++        if retention is None:
++            window = self._policy_nsucc_windows.get(int(source_policy_idx))
++            if window is not None and window.samples:
++                end_mean = float(window.samples[-1].nsucc_mean)
++                peak = max(float(s.nsucc_mean) for s in window.samples)
++                retention = end_mean / peak if peak > 1e-9 else 1.0
++        if retention is None or (
++            isinstance(retention, float) and math.isnan(float(retention))
++        ):
++            retention_f = float("nan")
++            has_retention = False
++        else:
++            retention_f = float(retention)
++            has_retention = True
++        return {
++            "source_success_tolerance": src_tol_f,
++            "has_source_success_tolerance": has_tol,
++            "source_nsucc_mean": nm_f,
++            "source_nsucc_max": nx_f,
++            "source_retention": retention_f,
++            "has_source_retention": has_retention,
++        }
++
++    @staticmethod
++    def _is_source_safe_for_curriculum(
++        meta: dict[str, Any],
++        *,
++        min_mean: float,
++        min_retention: float,
++    ) -> bool:
++        nm = float(meta.get("source_nsucc_mean", float("nan")))
++        if math.isnan(nm) or nm < float(min_mean):
++            return False
++        if not bool(meta.get("has_source_retention")):
++            return False
++        ret = float(meta.get("source_retention", float("nan")))
++        if math.isnan(ret) or ret < float(min_retention):
++            return False
++        return True
++
++    def _resolve_curriculum_inheritance(
++        self,
++        *,
++        source_policy: int,
++        source_state: dict[str, Any],
++        source_curriculum: dict[str, Any],
++        checkpoint_type: str,
++        target_current_tolerance: float,
++    ) -> dict[str, Any]:
++        """Source-safe curriculum inheritance dispatcher.
++
++        Returns a dict with the resolved post-copy tolerance plus a full
++        audit payload for the copy-event logger and target control JSON.
++
++        Branches:
++          * inherit_mode == 'reset' -> delegate to legacy resolver, label
++            disabled_reset_mode (legacy bit-for-bit when this flag is the
++            default).
++          * Source missing tolerance metadata -> legacy + missing_reason.
++          * Source unstable (low nsucc / low retention) -> legacy +
++            source_unstable_legacy.
++          * Source stable -> inherited = max(src_tol/0.95, target_floor),
++            target_after = min(current_target, inherited). Floor-clamp
++            audited via floor_clamped reason.
++        """
++        meta = self._extract_source_curriculum_metadata(
++            source_state=source_state, source_policy_idx=source_policy
++        )
++        ckpt_tol = float(
++            source_curriculum.get("success_tolerance", 0.075) or 0.075
++        )
++        # Floor: never inherit below the env's target_success_tolerance.
++        floor = float(
++            source_curriculum.get("target_tolerance", 0.0) or 0.0
++        )
++        if floor <= 0.0:
++            floor = 0.0  # legacy floor; env already clamps when applying
++        legacy_tol, legacy_mode = self._resolve_restart_success_tolerance(
++            source_policy=source_policy,
++            source_curriculum=source_curriculum,
++            checkpoint_type=checkpoint_type,
++        )
++        target_before = (
++            float(target_current_tolerance)
++            if target_current_tolerance is not None
++            and not (
++                isinstance(target_current_tolerance, float)
++                and math.isnan(float(target_current_tolerance))
++            )
++            else 0.075
++        )
++        out: dict[str, Any] = {
++            "tol_after": float(legacy_tol),
++            "legacy_tol": float(legacy_tol),
++            "legacy_mode": str(legacy_mode),
++            "inheritance_mode": str(self.pbt_curriculum_inherit_mode),
++            "inheritance_reason": "",
++            "inherited_tolerance": 0.0,
++            "target_tolerance_before_copy": target_before,
++            "source_safe_for_curriculum": False,
++            "source_meta": meta,
++            "ckpt_tol": ckpt_tol,
++        }
++
++        if self.pbt_curriculum_inherit_mode != "source_safe":
++            out["inheritance_reason"] = "disabled_reset_mode"
++            return out
++
++        if not bool(meta.get("has_source_success_tolerance")):
++            out["inheritance_reason"] = "missing_source_tolerance"
++            return out
++
++        is_safe = self._is_source_safe_for_curriculum(
++            meta,
++            min_mean=self.pbt_source_safe_min_mean,
++            min_retention=self.pbt_source_safe_min_retention,
++        )
++        if not is_safe:
++            out["inheritance_reason"] = "source_unstable_legacy"
++            return out
++
++        # Stable source -> one-level-looser inheritance.
++        src_tol = float(meta["source_success_tolerance"])
++        legacy_factor = float(self.curriculum_shrink_factor)
++        if legacy_factor <= 0.0:
++            legacy_factor = 0.95
++        relaxed = src_tol / legacy_factor
++        floor_applied = False
++        if floor > 0.0 and relaxed < floor:
++            relaxed = floor
++            floor_applied = True
++        # Never re-loosen tolerance: target keeps the tighter of (current
++        # target, relaxed-from-source).
++        if (
++            target_before > 0.0
++            and not math.isnan(target_before)
++            and target_before < relaxed
++        ):
++            tol_after = target_before
++            out["inheritance_reason"] = (
++                "floor_clamped" if floor_applied else "target_already_tighter"
++            )
++        else:
++            tol_after = relaxed
++            out["inheritance_reason"] = (
++                "floor_clamped" if floor_applied else "source_stable_relax_one_level"
++            )
++        out["tol_after"] = float(tol_after)
++        out["inherited_tolerance"] = float(tol_after)
++        out["source_safe_for_curriculum"] = True
++        return out
++
++    def _is_promising_protected(
++        self,
++        policy_idx: int,
++        env_frames: int,
++        own_state: dict[str, Any] | None = None,
++    ) -> tuple[bool, str]:
++        """Return (protected, reason). Override checks live at call site.
++
++        Promotion gate: end_mean >= pbt_promising_nsucc_mean OR
++        (recent_peak_nsucc_mean >= pbt_promising_peak_mean AND
++         retention >= pbt_promising_min_retention).
++
++        The retention guard prevents protecting a worker that once peaked
++        high but has since collapsed (its peak still scores high but the
++        retention proxy reveals the regression).
++        """
++        if not self.pbt_protect_promising_workers:
++            return False, "feature_disabled"
++        deadline = int(self._promising_protect_until.get(policy_idx, 0))
++        if int(env_frames) >= deadline:
++            return False, "no_active_window"
++        return True, "active_window"
++
++    def _maybe_enter_promising_protection(
++        self,
++        policy_idx: int,
++        env_frames: int,
++        window: RollingNsuccWindow,
++    ) -> None:
++        if not self.pbt_protect_promising_workers:
++            return
++        if not window.samples:
++            return
++        end_mean = float(window.samples[-1].nsucc_mean)
++        peak = float(self._recent_peak_nsucc_mean.get(policy_idx, 0.0))
++        retention = end_mean / peak if peak > 1e-9 else 0.0
++        promising = end_mean >= float(self.pbt_promising_nsucc_mean) or (
++            peak >= float(self.pbt_promising_peak_mean)
++            and retention >= float(self.pbt_promising_min_retention)
++        )
++        if promising:
++            self._promising_protect_until[policy_idx] = (
++                int(env_frames) + int(self.pbt_promising_protect_frames)
++            )
++
++    def _write_pbt_copy_event(self, payload: dict[str, Any]) -> None:
++        try:
++            self._pbt_copy_events_path.parent.mkdir(
++                parents=True, exist_ok=True
++            )
++            payload.setdefault("timestamp", time.time())
++            payload.setdefault("policy_idx", int(self.policy_idx))
++            payload.setdefault("pbt_iteration", int(self.pbt_iteration))
++            with open(self._pbt_copy_events_path, "a", encoding="utf-8") as fh:
++                fh.write(json.dumps(payload) + "\n")
++        except Exception as exc:  # pragma: no cover - best effort
++            print(f"[pbt-copy-events] write failed: {exc}")
++
++    # ------------------------------------------------------------------
++    # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT helpers (Part A).
++    # All methods are read-only / pure-derivation when called from a
++    # disabled (default) configuration: callers must guard each call with
++    # `self.pbt_floor_recovery_aware`.
++    # ------------------------------------------------------------------
++
++    def _floor_stage_for(
++        self, curriculum: dict[str, Any] | None
++    ) -> str:
++        """Classify floor stage from a curriculum dict (env meta.json).
++
++        Returns one of {"none","floor","hard_floor"}. Returns "none" on
++        missing data so an empty population state never spuriously enters
++        floor stage.
++        """
++        from dexpbt_isaaclab.dexpbt_utils import floor_stage_classify
++
++        cur = curriculum or {}
++        try:
++            tol = float(cur.get("success_tolerance", float("nan")))
++            tgt = float(cur.get("target_tolerance", 0.0))
++        except (TypeError, ValueError):
++            return "none"
++        if math.isnan(tol):
++            return "none"
++        return floor_stage_classify(
++            tol,
++            tgt,
++            floor_tol_threshold=self.pbt_floor_tol_threshold,
++            hard_floor_tol_threshold=self.pbt_hard_floor_tol_threshold,
++        )
++
++    def _track_first_floor_frames(
++        self, policy_idx: int, env_frames: int, stage: str
++    ) -> None:
++        """Record first time a policy hits floor / hard_floor (per-process)."""
++        if stage in ("floor", "hard_floor") and policy_idx not in self._first_floor_frame:
++            self._first_floor_frame[policy_idx] = int(env_frames)
++        if stage == "hard_floor" and policy_idx not in self._first_hard_floor_frame:
++            self._first_hard_floor_frame[policy_idx] = int(env_frames)
++
++    def _floor_recovery_score_for(
++        self,
++        policy_idx: int,
++        window: RollingNsuccWindow,
++        env_frames: int,
++        *,
++        hard_collapse: bool = False,
++    ) -> tuple[float, dict[str, float], float]:
++        """Compute (score_50, components, slope_positive_norm) for one policy.
++
++        Pure helper: caller is expected to have already classified the
++        policy as being in (hard_)floor stage. ``hard_collapse`` should be
++        True if the env-side curriculum control marks a hard collapse this
++        tick; that flips the collapse-penalty term.
++        """
++        from dexpbt_isaaclab.dexpbt_utils import (
++            compute_floor_recovery_score,
++            compute_floor_recovery_slope,
++        )
++
++        # Recent nsucc_mean history for slope.
++        history = [s.nsucc_mean for s in window.last_n(self.pbt_floor_recovery_window + 1)]
++        slope_raw, slope_pos = compute_floor_recovery_slope(
++            history, window=self.pbt_floor_recovery_window
++        )
++
++        if window.samples:
++            last = window.samples[-1]
++            nsucc_mean = float(last.nsucc_mean)
++            nsucc_max = float(last.nsucc_max)
++        else:
++            nsucc_mean = 0.0
++            nsucc_max = 0.0
++        peak = float(self._recent_peak_nsucc_mean.get(policy_idx, 0.0))
++        retention = nsucc_mean / peak if peak > 1e-9 else 1.0
++        retention = float(max(0.0, min(1.0, retention)))
++        drop_ratio = float(window.drop_ratio_vs_prior(2))
++
++        score_50, components = compute_floor_recovery_score(
++            nsucc_mean=nsucc_mean,
++            nsucc_max=nsucc_max,
++            retention=retention,
++            slope_positive_norm=slope_pos,
++            drop_ratio=drop_ratio,
++            hard_collapse=hard_collapse,
++            slope_weight=self.pbt_floor_recovery_slope_weight,
++            retention_weight=self.pbt_floor_recovery_retention_weight,
++            nsucc_max_weight=self.pbt_floor_recovery_nsucc_max_weight,
++            drop_penalty=self.pbt_floor_recovery_drop_penalty,
++        )
++        components["slope_raw"] = float(slope_raw)
++        # Track the score history for in-process reporting; bounded length.
++        hist = self._floor_recovery_score_history.setdefault(policy_idx, [])
++        hist.append(float(score_50))
++        if len(hist) > 32:
++            del hist[: len(hist) - 32]
++        return float(score_50), components, float(slope_pos)
++
++    def _is_floor_recovery_protected(
++        self, policy_idx: int, env_frames: int
++    ) -> tuple[bool, str]:
++        """Return (protected, reason). Independent from promising gate."""
++        if not self.pbt_floor_recovery_aware:
++            return False, "feature_disabled"
++        deadline = int(self._floor_recovery_protect_until.get(policy_idx, 0))
++        if int(env_frames) >= deadline:
++            return False, "no_active_window"
++        return True, "active_window"
++
++    def _maybe_enter_floor_recovery_protection(
++        self,
++        policy_idx: int,
++        env_frames: int,
++        window: RollingNsuccWindow,
++        stage: str,
++        *,
++        hard_collapse: bool = False,
++    ) -> None:
++        """Promote a hard-floor worker into a recovery-protection window.
++
++        Gate: policy must be at hard_floor and either
++          (a) nsucc_mean >= pbt_floor_recovery_min_nsucc_protect, OR
++          (b) slope_positive >= pbt_floor_recovery_min_slope_protect AND
++              retention >= pbt_floor_recovery_min_retention_for_protect.
++        Hard collapse cancels the gate (no protection extension).
++        """
++        if not self.pbt_floor_recovery_aware:
++            return
++        if stage != "hard_floor":
++            return
++        if hard_collapse:
++            return
++        if not window.samples:
++            return
++        score_50, components, slope_pos = self._floor_recovery_score_for(
++            policy_idx, window, env_frames, hard_collapse=False
++        )
++        end_mean = float(window.samples[-1].nsucc_mean)
++        retention = float(components.get("retention", 0.0))
++        promising = end_mean >= float(self.pbt_floor_recovery_min_nsucc_protect) or (
++            slope_pos >= float(self.pbt_floor_recovery_min_slope_protect)
++            and retention >= float(self.pbt_floor_recovery_min_retention_for_protect)
++        )
++        if promising:
++            self._floor_recovery_protect_until[policy_idx] = (
++                int(env_frames) + int(self.pbt_floor_recovery_protect_frames)
++            )
++
++    def _select_best_floor_recovery_recovery_source(
++        self, env_frames: int
++    ) -> tuple[dict[str, Any] | None, str]:
++        """Recover from workspace `best_floor_recovery/` archive.
++
++        Mirrors `_select_best_stable_recovery_source` but uses the floor-
++        recovery archive populated only when
++        ``pbt_enable_best_floor_recovery_archive`` is True. Returns
++        ``(synth, reason)`` with synth=None on any failure.
++        """
++        if not self.pbt_enable_best_floor_recovery_archive:
++            return None, "feature_disabled"
++        if env_frames - self._last_recovery_frame < self.recovery_cooldown_frames:
++            return None, "recovery_cooldown"
++        try:
++            best = self._load_best_index(self.best_floor_recovery_workspace)
++        except Exception as exc:  # pragma: no cover - defensive
++            return None, f"archive_read_error:{type(exc).__name__}"
++        if not best:
++            return None, "archive_empty"
++        # Floor recovery archive saves only at hard_floor; no nsucc gate
++        # because nsucc at floor can be modest. Sanity-check the score.
++        score = float(best.get("floor_recovery_score", float("-inf")))
++        if math.isnan(score) or score <= 0.0:
++            return None, "archive_score_nonpositive"
++        prefix = self._peak_filename("floor_recovery", best)
++        pth = self.best_floor_recovery_workspace / f"{prefix}.pth"
++        if not pth.exists():
++            return None, "archive_pth_missing"
++        synth = dict(best)
++        synth["checkpoint"] = str(pth)
++        synth["_source_checkpoint_type"] = "best_floor_recovery_archive"
++        return synth, "ok"
++
+     def _log_best_stable_recovery_outcome(
+         self,
+         *,
+@@ -1850,6 +2648,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                 "skip_reason": None,
+             }
+ 
++        # Phase A4 P4 (2026-06-09): floor-recovery archive comes first
++        # because it is only populated at hard floor where existing
++        # best_stable / best_nsucc archives may be far behind. If the
++        # feature is off this returns immediately with synth=None.
++        synth_fr, archive_reason_fr = self._select_best_floor_recovery_recovery_source(
++            env_frames
++        )
++        if synth_fr is not None:
++            return {
++                "action": "copy",
++                "tier": "best_floor_recovery_archive",
++                "source_policy": int(synth_fr.get("policy_idx", -1)),
++                "source_state": synth_fr,
++                "checkpoint_type": "best_floor_recovery_archive",
++                "strict_candidates": [],
++                "relaxed_candidates": relaxed_candidates,
++                "strict_filter_reasons": stable_filter_reasons,
++                "relaxed_filter_reasons": relaxed_filter_reasons,
++                "archive_reason": archive_reason_fr,
++                "skip_reason": None,
++            }
++
+         synth, archive_reason = self._select_best_stable_recovery_source(env_frames)
+         if synth is not None:
+             return {
+@@ -2425,6 +3245,122 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                 "curriculum_fast_target_tolerance_800m": float(
+                     self.curriculum_fast_target_tolerance_800m
+                 ),
++                # Phase A4 P3 (2026-06-09): inheritance / promising audit.
++                "pbt_curriculum_inherit_mode": str(
++                    self.pbt_curriculum_inherit_mode
++                ),
++                "pbt_protect_promising_workers": bool(
++                    self.pbt_protect_promising_workers
++                ),
++                "promising_protect_until": int(
++                    self._promising_protect_until.get(self.policy_idx, 0)
++                ),
++                "protected_by_promising_gate_now": bool(
++                    self._is_promising_protected(self.policy_idx, env_frames)[0]
++                ),
++                "curriculum_inheritance_mode_state": str(
++                    own_ctrl.inheritance_mode if own_ctrl else "reset"
++                ),
++                "curriculum_inheritance_reason_state": str(
++                    own_ctrl.inheritance_reason if own_ctrl else ""
++                ),
++                "curriculum_inherited_tolerance_state": float(
++                    own_ctrl.inherited_tolerance if own_ctrl else 0.0
++                ),
++                "curriculum_target_tolerance_before_copy_state": float(
++                    own_ctrl.target_tolerance_before_copy if own_ctrl else 0.0
++                ),
++                "curriculum_target_tolerance_after_copy_state": float(
++                    own_ctrl.target_tolerance_after_copy if own_ctrl else 0.0
++                ),
++                "curriculum_source_policy_idx_for_copy_state": int(
++                    own_ctrl.source_policy_idx_for_copy if own_ctrl else -1
++                ),
++                "curriculum_source_checkpoint_type_for_copy_state": str(
++                    own_ctrl.source_checkpoint_type_for_copy if own_ctrl else ""
++                ),
++                "curriculum_source_safe_for_curriculum_state": bool(
++                    own_ctrl.source_safe_for_curriculum if own_ctrl else False
++                ),
++                "curriculum_source_nsucc_mean_for_copy_state": float(
++                    own_ctrl.source_nsucc_mean_for_copy if own_ctrl else 0.0
++                ),
++                "curriculum_source_retention_for_copy_state": float(
++                    own_ctrl.source_retention_for_copy if own_ctrl else 0.0
++                ),
++                "curriculum_recovery_consolidation_frames_selected_state": int(
++                    own_ctrl.recovery_consolidation_frames_selected
++                    if own_ctrl
++                    else 0
++                ),
++                "curriculum_recovery_consolidation_source_state": str(
++                    own_ctrl.recovery_consolidation_source if own_ctrl else ""
++                ),
++                "curriculum_inherited_tolerance_count": int(
++                    self._curriculum_inherited_count
++                ),
++                "curriculum_reset_to_initial_tolerance_count": int(
++                    self._curriculum_reset_count
++                ),
++                "curriculum_missing_source_curriculum_metadata_count": int(
++                    self._curriculum_missing_metadata_count
++                ),
++                # Phase A4 P4 (2026-06-09): floor-recovery audit (Part A+E).
++                "pbt_floor_recovery_aware": bool(self.pbt_floor_recovery_aware),
++                "pbt_enable_best_floor_recovery_archive": bool(
++                    self.pbt_enable_best_floor_recovery_archive
++                ),
++                "pbt_floor_tol_threshold": float(self.pbt_floor_tol_threshold),
++                "pbt_hard_floor_tol_threshold": float(
++                    self.pbt_hard_floor_tol_threshold
++                ),
++                "floor_stage": str(own_ctrl.floor_stage if own_ctrl else "none"),
++                "first_floor_frame": int(
++                    own_ctrl.first_floor_frame if own_ctrl else -1
++                ),
++                "first_hard_floor_frame": int(
++                    own_ctrl.first_hard_floor_frame if own_ctrl else -1
++                ),
++                "frames_since_floor": int(
++                    own_ctrl.frames_since_floor if own_ctrl else 0
++                ),
++                "floor_recovery_slope": float(
++                    own_ctrl.floor_recovery_slope if own_ctrl else 0.0
++                ),
++                "floor_recovery_score": float(
++                    own_ctrl.floor_recovery_score if own_ctrl else 0.0
++                ),
++                "floor_recovery_score_real": float(
++                    own_ctrl.floor_recovery_score_real if own_ctrl else 0.0
++                ),
++                "floor_recovery_score_wm": float(
++                    own_ctrl.floor_recovery_score_wm if own_ctrl else 0.0
++                ),
++                "floor_recovery_protect_until": int(
++                    self._floor_recovery_protect_until.get(self.policy_idx, 0)
++                ),
++                "protected_by_floor_recovery_gate_now": bool(
++                    self._is_floor_recovery_protected(
++                        self.policy_idx, env_frames
++                    )[0]
++                ),
++                # Phase A4 P4: WM-guided ranking three-mode + shadow audit.
++                "pbt_wm_score_mode": str(self.pbt_wm_score_mode),
++                "pbt_use_wm_recovery_score": bool(self.pbt_use_wm_recovery_score),
++                "pbt_wm_recovery_weight": float(self.pbt_wm_recovery_weight),
++                "pbt_wm_success_weight": float(self.pbt_wm_success_weight),
++                "pbt_wm_drop_penalty": float(self.pbt_wm_drop_penalty),
++                "pbt_wm_uncertainty_penalty": float(
++                    self.pbt_wm_uncertainty_penalty
++                ),
++                "pbt_wm_max_uncertainty": float(self.pbt_wm_max_uncertainty),
++                "wm_shadow_observations": int(self._wm_shadow_observations),
++                "wm_shadow_changed_selection": int(
++                    self._wm_shadow_changed_selection
++                ),
++                "experimental_rssm_floor_recovery_stack": bool(
++                    self.experimental_rssm_floor_recovery_stack
++                ),
+                 "tier": str(tier),
+                 "checkpoint": own_state.get("checkpoint", ""),
+                 "params": {k: own_state["params"][k] for k in own_state.get("params", {})},
+@@ -2561,6 +3497,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         self._best_r_meta_state = self._load_best_index(self.best_r_meta_workspace)
+         self._best_nsucc_state = self._load_best_index(self.best_nsucc_workspace)
+         self._best_stable_state = self._load_best_index(self.best_stable_workspace)
++        # Phase A4 P4 (2026-06-09): floor-recovery archive bootstrap.
++        # Always rebuild the in-memory state from disk so a supervisor
++        # restart picks up an existing archive even if the feature was
++        # toggled mid-experiment. The directory is only created when the
++        # feature is enabled to keep default runs noise-free.
++        if self.pbt_enable_best_floor_recovery_archive:
++            self.best_floor_recovery_workspace.mkdir(parents=True, exist_ok=True)
++        if self.best_floor_recovery_workspace.exists():
++            self._best_floor_recovery_state = self._load_best_index(
++                self.best_floor_recovery_workspace
++            )
+ 
+     def process_infos(self, infos, done_indices):
+         super().process_infos(infos, done_indices)
+@@ -2848,6 +3795,117 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         # what the success-aware cap produces.
+         objectives = {idx: ckpt["objective"] for idx, ckpt in population.items() if ckpt is not None}
+         sorted_policies = sorted(objectives.keys(), key=lambda key: objectives[key], reverse=True) if objectives else []
++
++        # Phase A4 P4 (2026-06-09): floor-recovery-aware ranking (Part A+E).
++        # Always-running shadow path: when feature is on, compute alt
++        # ordering using floor_recovery_score (real + optional WM) and
++        # log whether the alt argmax differs from the legacy argmax. In
++        # 'active' mode AND when the local policy is at hard_floor, the
++        # alt ordering replaces the legacy one for the bottom-replacement
++        # decision in `_ternary_pbt`. Real `objective` values are NEVER
++        # mutated; we only swap the dict consumed by sort.
++        sorted_policies_real = list(sorted_policies)
++        sorted_policies_alt = list(sorted_policies)
++        wm_changed_selection = False
++        try:
++            if self.pbt_floor_recovery_aware and objectives:
++                alt_objectives: dict[int, float] = {}
++                wm_mode = self.pbt_wm_score_mode
++                for pidx, ckpt in population.items():
++                    if ckpt is None:
++                        continue
++                    cur = ckpt.get("curriculum") or {}
++                    stage = self._floor_stage_for(cur)
++                    base_obj = float(ckpt.get("objective", float("-inf")))
++                    if stage != "hard_floor":
++                        alt_objectives[pidx] = base_obj
++                        continue
++                    win = self._policy_window(pidx)
++                    score_50, components, slope_pos = self._floor_recovery_score_for(
++                        pidx, win, env_frames, hard_collapse=False
++                    )
++                    if wm_mode in ("shadow", "active"):
++                        wm_eval = self._wm_imagined_eval_per_policy.get(pidx) or {}
++                        wm_valid = bool(wm_eval.get("imagined_valid", False))
++                        wm_unc = float(wm_eval.get("uncertainty", 1.0))
++                        if (
++                            wm_valid
++                            and wm_unc <= float(self.pbt_wm_max_uncertainty)
++                        ):
++                            from dexpbt_isaaclab.dexpbt_utils import (
++                                combine_wm_recovery_score,
++                            )
++                            score_with_wm, _ = combine_wm_recovery_score(
++                                score_50,
++                                wm_recovery_prob=float(
++                                    wm_eval.get("wm_recovery_prob", 0.0)
++                                ),
++                                wm_success_prob=float(
++                                    wm_eval.get("wm_success_prob", 0.0)
++                                ),
++                                wm_drop_risk=float(
++                                    wm_eval.get("wm_drop_risk", 0.0)
++                                ),
++                                wm_uncertainty=wm_unc,
++                                recovery_weight=self.pbt_wm_recovery_weight,
++                                success_weight=self.pbt_wm_success_weight,
++                                drop_penalty=self.pbt_wm_drop_penalty,
++                                uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
++                            )
++                        else:
++                            score_with_wm = score_50
++                    else:
++                        score_with_wm = score_50
++                    # Both paths place the alt score on the 0..50 scale so
++                    # mixing with non-floor base_obj is meaningful.
++                    alt_objectives[pidx] = float(score_with_wm)
++                if alt_objectives:
++                    sorted_policies_alt = sorted(
++                        alt_objectives.keys(),
++                        key=lambda k: alt_objectives[k],
++                        reverse=True,
++                    )
++                    if (
++                        sorted_policies_alt
++                        and sorted_policies_real
++                        and sorted_policies_alt[0] != sorted_policies_real[0]
++                    ):
++                        wm_changed_selection = True
++                self._wm_shadow_observations += 1
++                if wm_changed_selection:
++                    self._wm_shadow_changed_selection += 1
++                if self.pbt_wm_score_mode == "active":
++                    objectives = dict(alt_objectives)
++                    sorted_policies = list(sorted_policies_alt)
++                if self.writer is not None:
++                    self.writer.add_scalar(
++                        "pbt/wm_score_mode_hash",
++                        float(
++                            {"off": 0, "shadow": 1, "active": 2}.get(
++                                self.pbt_wm_score_mode, 0
++                            )
++                        ),
++                        env_frames,
++                    )
++                    self.writer.add_scalar(
++                        "pbt/wm_changed_source_selection",
++                        1.0 if wm_changed_selection else 0.0,
++                        env_frames,
++                    )
++                    self.writer.add_scalar(
++                        "pbt/wm_shadow_observations",
++                        float(self._wm_shadow_observations),
++                        env_frames,
++                    )
++                    self.writer.add_scalar(
++                        "pbt/wm_shadow_changed_selection",
++                        float(self._wm_shadow_changed_selection),
++                        env_frames,
++                    )
++        except Exception as exc:  # pragma: no cover - guard against mis-init
++            print(f"[floor-recovery-ranking] guarded fallback: {exc}")
++            sorted_policies = list(sorted_policies_real)
++
+         point_tier = "unknown"
+         if sorted_policies and self.policy_idx in sorted_policies:
+             rank = sorted_policies.index(self.policy_idx)
+@@ -2949,11 +4007,145 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+ 
+         self._maybe_save_best_policy(population[sorted_policies[0]])
+ 
++        # Phase A4 P4 (2026-06-09): cache hard-collapse signal for the
++        # floor-recovery gate downstream (independent from promising
++        # protection so we keep both kill switches working).
++        own_ctrl_for_floor = read_curriculum_control(
++            self._curriculum_control_dir / f"{self.policy_idx:03d}.json"
++        )
++        own_curriculum_for_floor = (
++            (population.get(self.policy_idx) or {}).get("curriculum") or {}
++        )
++        own_stage = self._floor_stage_for(own_curriculum_for_floor)
++        self._track_first_floor_frames(self.policy_idx, env_frames, own_stage)
++        own_hard_collapse_signal = bool(
++            own_ctrl_for_floor is not None
++            and own_ctrl_for_floor.hard_collapse_triggered
++        )
++
+         if tier == "top":
+             print(f"Policy {self.policy_idx}: top tier -- keep training")
++            self._maybe_enter_promising_protection(
++                self.policy_idx,
++                env_frames,
++                self._policy_window(self.policy_idx),
++            )
++            self._maybe_enter_floor_recovery_protection(
++                self.policy_idx,
++                env_frames,
++                self._policy_window(self.policy_idx),
++                own_stage,
++                hard_collapse=own_hard_collapse_signal,
++            )
+             return
+ 
++        # Phase A4 P3 (2026-06-09): mid-tier promising protection update so
++        # workers earn protection before they get pushed into bottom.
++        if tier == "mid":
++            self._maybe_enter_promising_protection(
++                self.policy_idx,
++                env_frames,
++                self._policy_window(self.policy_idx),
++            )
++            self._maybe_enter_floor_recovery_protection(
++                self.policy_idx,
++                env_frames,
++                self._policy_window(self.policy_idx),
++                own_stage,
++                hard_collapse=own_hard_collapse_signal,
++            )
++
+         if tier == "bottom":
++            # Phase A4 P3 (2026-06-09): promising-worker anti-churn gate.
++            # If THIS bottom worker is currently inside a promising
++            # protection window, skip replacement entirely. Hard collapse
++            # / early collapse / NaN can override (when allowed).
++            protected, _proto_reason = self._is_promising_protected(
++                self.policy_idx, env_frames
++            )
++            override_allowed = self.pbt_promising_allow_hard_collapse_override
++            collapse_override = bool(
++                self._collapse_freeze_until.get(self.policy_idx, 0)
++                > int(env_frames)
++            )
++            if protected and not (override_allowed and collapse_override):
++                print(
++                    f"Policy {self.policy_idx}: skip restart (promising "
++                    f"protection until env_frames="
++                    f"{self._promising_protect_until.get(self.policy_idx)})"
++                )
++                if self.writer is not None:
++                    self.writer.add_scalar(
++                        "pbt/protected_by_promising_gate", 1.0, env_frames
++                    )
++                    self.writer.add_scalar(
++                        "pbt/promising_protect_until",
++                        float(
++                            self._promising_protect_until.get(
++                                self.policy_idx, 0
++                            )
++                        ),
++                        env_frames,
++                    )
++                self._last_restart_type = 3  # skipped
++                return
++            if self.writer is not None:
++                self.writer.add_scalar(
++                    "pbt/protected_by_promising_gate", 0.0, env_frames
++                )
++                self.writer.add_scalar(
++                    "pbt/promising_protect_until",
++                    float(
++                        self._promising_protect_until.get(self.policy_idx, 0)
++                    ),
++                    env_frames,
++                )
++
++            # Phase A4 P4 (2026-06-09): floor-recovery anti-churn gate.
++            # Hard collapse / OOM / NaN can override (when allowed by the
++            # promising override flag) so that a degraded floor-recovery
++            # worker still gets pulled out of bottom by collapse logic.
++            fr_protected, fr_reason = self._is_floor_recovery_protected(
++                self.policy_idx, env_frames
++            )
++            if fr_protected and not (override_allowed and collapse_override):
++                print(
++                    f"Policy {self.policy_idx}: skip restart (floor recovery "
++                    f"protection until env_frames="
++                    f"{self._floor_recovery_protect_until.get(self.policy_idx)})"
++                )
++                if self.writer is not None:
++                    self.writer.add_scalar(
++                        "pbt/protected_by_floor_recovery_gate",
++                        1.0,
++                        env_frames,
++                    )
++                    self.writer.add_scalar(
++                        "pbt/floor_recovery_protect_until",
++                        float(
++                            self._floor_recovery_protect_until.get(
++                                self.policy_idx, 0
++                            )
++                        ),
++                        env_frames,
++                    )
++                self._last_restart_type = 3  # skipped
++                return
++            if self.writer is not None:
++                self.writer.add_scalar(
++                    "pbt/protected_by_floor_recovery_gate",
++                    0.0,
++                    env_frames,
++                )
++                self.writer.add_scalar(
++                    "pbt/floor_recovery_protect_until",
++                    float(
++                        self._floor_recovery_protect_until.get(
++                            self.policy_idx, 0
++                        )
++                    ),
++                    env_frames,
++                )
+             # Patch G (2026-05-31): tiered source selection cascade.
+             # `_select_source` produces a fully audited decision dict
+             # covering L1 strict / L2 relaxed / L3 archive / L4 skip.
+@@ -2982,6 +4174,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                     "relaxed_live",
+                     "archive",
+                     "best_stable_archive",
++                    "best_floor_recovery_archive",
+                     "skipped",
+                 )
+                 for k in tier_one_hot:
+@@ -3009,7 +4202,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                     "pbt/source_checkpoint_is_archive",
+                     1.0
+                     if self._last_source_checkpoint_type
+-                    in ("archive", "best_stable_archive")
++                    in (
++                        "archive",
++                        "best_stable_archive",
++                        "best_floor_recovery_archive",
++                    )
+                     else 0.0,
+                     env_frames,
+                 )
+@@ -3020,6 +4217,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+                     else 0.0,
+                     env_frames,
+                 )
++                self.writer.add_scalar(
++                    "pbt/source_checkpoint_is_best_floor_recovery_archive",
++                    1.0
++                    if self._last_source_checkpoint_type
++                    == "best_floor_recovery_archive"
++                    else 0.0,
++                    env_frames,
++                )
+                 self.writer.add_scalar(
+                     "pbt/usable_live_min_mean",
+                     float(self.pbt_usable_live_min_mean),
+@@ -3079,7 +4284,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             # an anti-churn guard on the *bottom worker*, distinct from
+             # the source-side eligibility above.
+             own_state = population.get(self.policy_idx)
+-            recovery_tier = tier_label in ("archive", "best_stable_archive")
++            recovery_tier = tier_label in (
++                "archive",
++                "best_stable_archive",
++                "best_floor_recovery_archive",
++            )
+             bypass_burnin = (
+                 recovery_tier and self.pbt_recovery_bypass_elimination_burnin
+             )
+@@ -3172,12 +4381,214 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         tol_before = float(
+             source_curriculum.get("success_tolerance", float("nan")) or float("nan")
+         )
+-        tol_after, tol_mode = self._resolve_restart_success_tolerance(
+-            source_policy=source_policy,
+-            source_curriculum=source_curriculum,
+-            checkpoint_type=ckpt_type,
++        # Phase A4 P3 (2026-06-09): source-safe inheritance dispatcher.
++        # In legacy reset mode this delegates to the legacy resolver
++        # bit-for-bit and the source-safe consolidation re-arm is skipped
++        # below. Mid-tier self-restart (source==self) bypasses the
++        # dispatcher and keeps the legacy resolver to avoid degenerate
++        # self->self inheritance accounting.
++        own_state = population.get(self.policy_idx) or {}
++        own_curriculum = dict(own_state.get("curriculum") or {})
++        target_current_tol = float(
++            own_curriculum.get("success_tolerance", float("nan")) or float("nan")
+         )
++        if tier == "bottom":
++            inherit_audit = self._resolve_curriculum_inheritance(
++                source_policy=source_policy,
++                source_state=source_state,
++                source_curriculum=source_curriculum,
++                checkpoint_type=ckpt_type,
++                target_current_tolerance=target_current_tol,
++            )
++            tol_after = float(inherit_audit["tol_after"])
++            tol_mode = str(inherit_audit["legacy_mode"])
++        else:
++            legacy_tol_v, legacy_mode_v = self._resolve_restart_success_tolerance(
++                source_policy=source_policy,
++                source_curriculum=source_curriculum,
++                checkpoint_type=ckpt_type,
++            )
++            tol_after = float(legacy_tol_v)
++            tol_mode = str(legacy_mode_v)
++            inherit_audit = {
++                "tol_after": tol_after,
++                "legacy_tol": tol_after,
++                "legacy_mode": tol_mode,
++                "inheritance_mode": str(self.pbt_curriculum_inherit_mode),
++                "inheritance_reason": "mid_self_restart_legacy",
++                "inherited_tolerance": 0.0,
++                "target_tolerance_before_copy": target_current_tol
++                if not (
++                    isinstance(target_current_tol, float)
++                    and math.isnan(target_current_tol)
++                )
++                else 0.0,
++                "source_safe_for_curriculum": False,
++                "source_meta": {
++                    "source_success_tolerance": float("nan"),
++                    "has_source_success_tolerance": False,
++                    "source_nsucc_mean": float("nan"),
++                    "source_nsucc_max": float("nan"),
++                    "source_retention": float("nan"),
++                    "has_source_retention": False,
++                },
++                "ckpt_tol": tol_after,
++            }
+         source_curriculum["success_tolerance"] = float(tol_after)
++        # Update inheritance counters (post-hoc reporting only).
++        if inherit_audit["inheritance_reason"] == "missing_source_tolerance":
++            self._curriculum_missing_metadata_count += 1
++        if inherit_audit["source_safe_for_curriculum"]:
++            self._curriculum_inherited_count += 1
++        else:
++            if self.pbt_curriculum_inherit_mode == "reset":
++                self._curriculum_reset_count += 1
++        # Phase A4 P3: source-aware recovery consolidation re-arm. Only
++        # active under source_safe inherit mode. We always clear the stale
++        # target-slot consolidation; if the source is stable we use 50M,
++        # otherwise 100M (configurable).
++        recovery_consolidation_source = ""
++        recovery_consolidation_frames = 0
++        # Mid-tier self-restart copies from self -> self; treat it like a
++        # legacy event for inheritance purposes. The bottom-tier branch is
++        # the only one that crosses worker boundaries.
++        is_cross_or_recovery = tier == "bottom"
++        if (
++            self.pbt_curriculum_inherit_mode == "source_safe"
++            and is_cross_or_recovery
++        ):
++            if inherit_audit["source_safe_for_curriculum"]:
++                recovery_consolidation_frames = int(
++                    self.pbt_source_safe_recovery_consolidation_frames
++                )
++                recovery_consolidation_source = "recovery_consolidation_source_safe"
++            elif (
++                inherit_audit["inheritance_reason"]
++                == "missing_source_tolerance"
++            ):
++                recovery_consolidation_frames = int(
++                    self.pbt_source_unsafe_recovery_consolidation_frames
++                )
++                recovery_consolidation_source = (
++                    "recovery_consolidation_missing_metadata"
++                )
++            else:
++                recovery_consolidation_frames = int(
++                    self.pbt_source_unsafe_recovery_consolidation_frames
++                )
++                recovery_consolidation_source = (
++                    "recovery_consolidation_source_unsafe"
++                )
++            def _coerce_finite_audit(v: Any) -> float:
++                try:
++                    f = float(v)
++                except Exception:
++                    return 0.0
++                if math.isnan(f) or math.isinf(f):
++                    return 0.0
++                return f
++
++            ctrl_path = (
++                self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
++            )
++            audit_payload = {
++                "inheritance_mode": str(inherit_audit["inheritance_mode"]),
++                "inheritance_reason": str(inherit_audit["inheritance_reason"]),
++                "inherited_tolerance": _coerce_finite_audit(
++                    inherit_audit["inherited_tolerance"]
++                ),
++                "target_tolerance_before_copy": _coerce_finite_audit(
++                    inherit_audit["target_tolerance_before_copy"]
++                ),
++                "target_tolerance_after_copy": _coerce_finite_audit(tol_after),
++                "source_policy_idx_for_copy": int(source_policy),
++                "source_checkpoint_type_for_copy": str(ckpt_type),
++                "source_success_tolerance_for_copy": _coerce_finite_audit(
++                    inherit_audit["source_meta"]["source_success_tolerance"]
++                ),
++                "source_nsucc_mean_for_copy": _coerce_finite_audit(
++                    inherit_audit["source_meta"]["source_nsucc_mean"]
++                ),
++                "source_nsucc_max_for_copy": _coerce_finite_audit(
++                    inherit_audit["source_meta"]["source_nsucc_max"]
++                ),
++                "source_retention_for_copy": _coerce_finite_audit(
++                    inherit_audit["source_meta"]["source_retention"]
++                ),
++                "source_safe_for_curriculum": bool(
++                    inherit_audit["source_safe_for_curriculum"]
++                ),
++            }
++            apply_source_safe_consolidation_on_copy(
++                ctrl_path,
++                consolidation_env_frames=recovery_consolidation_frames,
++                consolidation_source=recovery_consolidation_source,
++                num_envs=int(self.num_envs),
++                inherited_tolerance=float(tol_after),
++                inheritance_audit=audit_payload,
++            )
++        # Persist a copy-event record for downstream analysis. Note that
++        # ``tier_label`` is only defined when the bottom-tier source-selection
++        # cascade ran; mid-tier self-restarts log a synthetic label.
++        _event_tier_label = (
++            str(tier_label) if tier == "bottom" else "mid_self_restart"  # type: ignore[name-defined]
++        )
++
++        def _coerce_finite(v: Any) -> float:
++            try:
++                f = float(v)
++            except Exception:
++                return 0.0
++            if math.isnan(f) or math.isinf(f):
++                return 0.0
++            return f
++
++        smeta = inherit_audit["source_meta"]
++        self._write_pbt_copy_event(
++            {
++                "env_frames": int(env_frames),
++                "tier": _event_tier_label,
++                "tier_top_level": str(tier),
++                "curriculum_inherit_mode": str(self.pbt_curriculum_inherit_mode),
++                "source_policy_idx": int(source_policy),
++                "source_checkpoint_type": str(ckpt_type),
++                "source_success_tolerance": _coerce_finite(
++                    smeta["source_success_tolerance"]
++                ),
++                "source_nsucc_mean": _coerce_finite(smeta["source_nsucc_mean"]),
++                "source_nsucc_max": _coerce_finite(smeta["source_nsucc_max"]),
++                "source_retention": _coerce_finite(smeta["source_retention"]),
++                "source_safe_for_curriculum": bool(
++                    inherit_audit["source_safe_for_curriculum"]
++                ),
++                "target_tolerance_before_copy": _coerce_finite(
++                    inherit_audit["target_tolerance_before_copy"]
++                ),
++                "target_tolerance_after_copy": _coerce_finite(tol_after),
++                "inherited_tolerance": _coerce_finite(
++                    inherit_audit["inherited_tolerance"]
++                ),
++                "inheritance_reason": str(
++                    inherit_audit["inheritance_reason"]
++                ),
++                "legacy_tolerance_mode": str(tol_mode),
++                "legacy_tolerance_value": _coerce_finite(
++                    inherit_audit["legacy_tol"]
++                ),
++                "recovery_consolidation_frames_selected": int(
++                    recovery_consolidation_frames
++                ),
++                "recovery_consolidation_source": str(
++                    recovery_consolidation_source
++                ),
++                "protected_by_promising_gate": bool(
++                    self._is_promising_protected(self.policy_idx, env_frames)[0]
++                ),
++                "promising_protect_until": int(
++                    self._promising_protect_until.get(self.policy_idx, 0)
++                ),
++            }
++        )
+         if self.writer is not None:
+             tol_mode_idx = float(
+                 ["checkpoint", "last_mastered", "relax_one_level"].index(tol_mode)
+@@ -3322,6 +4733,33 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+         self.curr_nsucc_mean = nsucc_mean
+         self.curr_nsucc_max = nsucc_max
+ 
++        # Phase A4 P3 (2026-06-09): enriched archive metadata for source-safe
++        # inheritance. Compute retention proxy and surface last_mastered_
++        # tolerance into the checkpoint state so archive recovery can pull
++        # them without scanning curriculum_control JSON.
++        own_window = self._policy_nsucc_windows.get(self.policy_idx)
++        retention_at_save = float("nan")
++        if own_window is not None and own_window.samples:
++            end_mean_w = float(own_window.samples[-1].nsucc_mean)
++            peak_in_window = max(float(s.nsucc_mean) for s in own_window.samples)
++            if peak_in_window > 1e-9:
++                retention_at_save = end_mean_w / peak_in_window
++            else:
++                retention_at_save = 1.0
++        last_mastered_at_save = float(
++            self._last_mastered_tolerance.get(self.policy_idx, 0.075)
++        )
++        # source_safe_for_curriculum flag is computed against fastcurr-style
++        # defaults (mean 20, retention 0.7). Consumers can recompute their
++        # own gate using the raw fields below; this is a convenience hint.
++        try:
++            source_safe_at_save = bool(
++                (not math.isnan(retention_at_save))
++                and nsucc_mean >= 20.0
++                and retention_at_save >= 0.7
++            )
++        except Exception:
++            source_safe_at_save = False
+         state = {
+             "policy_idx": self.policy_idx,
+             # Patch 1: "objective" is now the PBT *ranking* score (used by
+@@ -3333,6 +4771,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             "pbt_ranking_score": ranking_score,
+             "ranking_metric_mode": self.pbt_ranking_metric,
+             "nsucc_zero_cap": self.pbt_nsucc_zero_cap,
++            # Phase A4 P3 (2026-06-09): source-safe metadata.
++            "source_retention_at_save": float(retention_at_save),
++            "last_mastered_tolerance_at_save": float(last_mastered_at_save),
++            "source_safe_for_curriculum_at_save": bool(source_safe_at_save),
+             # Patch B (rev 3, 2026-05-30): low-nsucc cap params persisted
+             # on every checkpoint so post-hoc analysis can reconstruct
+             # exactly how a ranking_score was derived from r_meta_raw.
+@@ -3508,6 +4950,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             archive_dir = self.best_nsucc_workspace
+         elif kind == "stable":
+             archive_dir = self.best_stable_workspace
++        elif kind == "floor_recovery":
++            archive_dir = self.best_floor_recovery_workspace
++            archive_dir.mkdir(parents=True, exist_ok=True)
+         else:
+             raise ValueError(f"Unknown peak archive kind={kind!r}")
+ 
+@@ -3601,6 +5046,56 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
+             self._save_peak_archive("stable", stable_state)
+             self._best_stable_state = dict(stable_state)
+ 
++        # Phase A4 P4 (2026-06-09): floor-recovery archive (Part A).
++        # Save criteria:
++        #   * feature explicitly enabled
++        #   * current state is at hard_floor (success_tolerance ~ target)
++        #   * recovery score strictly improves the archive AND is positive
++        #   * not in collapse / not in rollback this tick
++        #   * worker shows real signal: nsucc_mean >= protect threshold OR
++        #     positive slope above slope-protect threshold
++        if (
++            self.pbt_floor_recovery_aware
++            and self.pbt_enable_best_floor_recovery_archive
++        ):
++            cur_curriculum = state.get("curriculum") or {}
++            stage = self._floor_stage_for(cur_curriculum)
++            if stage == "hard_floor" and not consolidation_active:
++                hard_collapse = bool(
++                    own_ctrl is not None
++                    and own_ctrl.hard_collapse_triggered
++                )
++                if not hard_collapse:
++                    score_50, components, slope_pos = self._floor_recovery_score_for(
++                        self.policy_idx,
++                        eval_window,
++                        int(state.get("frame", 0)),
++                        hard_collapse=False,
++                    )
++                    end_mean = float(state.get("nsucc_mean", 0.0) or 0.0)
++                    qualifies = end_mean >= float(
++                        self.pbt_floor_recovery_min_nsucc_protect
++                    ) or slope_pos >= float(
++                        self.pbt_floor_recovery_min_slope_protect
++                    )
++                    prev_best = self._best_floor_recovery_state
++                    prev_score = (
++                        float(prev_best.get("floor_recovery_score", float("-inf")))
++                        if prev_best is not None
++                        else float("-inf")
++                    )
++                    if qualifies and score_50 > 0.0 and score_50 > prev_score:
++                        floor_state = dict(state)
++                        floor_state["floor_recovery_score"] = float(score_50)
++                        floor_state["floor_recovery_components"] = dict(
++                            components
++                        )
++                        floor_state["floor_recovery_slope_positive"] = float(
++                            slope_pos
++                        )
++                        self._save_peak_archive("floor_recovery", floor_state)
++                        self._best_floor_recovery_state = dict(floor_state)
++
+     def _rewrite_checkpoint(
+         self,
+         checkpoint_path: Path,
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/launch_pbt.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/launch_pbt.py
+index 5025884..062108b 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/launch_pbt.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/launch_pbt.py
+@@ -647,6 +647,43 @@ def main() -> None:
+             # (--curriculum_speed_mode=..., --curriculum_fast_*=...) are
+             # all value flags handled by the generic normalisation below.
+             # No boolean entries needed.
++            # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance
++            # value flags (--pbt_curriculum_inherit_mode=...,
++            # --pbt_source_safe_*=..., --pbt_source_unsafe_*=...,
++            # --pbt_promising_nsucc_mean=..., --pbt_promising_peak_mean=...,
++            # --pbt_promising_min_retention=...,
++            # --pbt_promising_protect_frames=...) are handled below.
++            # The two BooleanOptionalAction toggles need explicit entries:
++            "--pbt_protect_promising_workers",
++            "--no-pbt_protect_promising_workers",
++            "--pbt_promising_allow_hard_collapse_override",
++            "--no-pbt_promising_allow_hard_collapse_override",
++            # Phase A4 P4 (2026-06-09): floor-recovery + RSSM iterative
++            # stack BooleanOptionalAction toggles (Items 2, 3, 10).
++            "--pbt_floor_recovery_aware",
++            "--no-pbt_floor_recovery_aware",
++            "--pbt_enable_best_floor_recovery_archive",
++            "--no-pbt_enable_best_floor_recovery_archive",
++            "--pbt_use_wm_recovery_score",
++            "--no-pbt_use_wm_recovery_score",
++            "--seq_wm_use_task_aux_inputs",
++            "--no-seq_wm_use_task_aux_inputs",
++            "--seq_wm_floor_aware_weighting",
++            "--no-seq_wm_floor_aware_weighting",
++            "--seq_wm_use_horizon_heads",
++            "--no-seq_wm_use_horizon_heads",
++            "--seq_wm_use_recovery_head",
++            "--no-seq_wm_use_recovery_head",
++            "--seq_wm_enable_iterative_teacher",
++            "--no-seq_wm_enable_iterative_teacher",
++            "--seq_wm_enable_imagined_evaluator",
++            "--no-seq_wm_enable_imagined_evaluator",
++            "--seq_wm_imagine_use_teacher",
++            "--no-seq_wm_imagine_use_teacher",
++            "--seq_wm_replay_prioritize_floor_recovery",
++            "--no-seq_wm_replay_prioritize_floor_recovery",
++            "--experimental_rssm_floor_recovery_stack",
++            "--no-experimental_rssm_floor_recovery_stack",
+         }
+         extra = list(args.extra)
+         i = 0
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/train.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/train.py
+index 3012582..ce22ebb 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/train.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/train.py
+@@ -421,6 +421,358 @@ parser.add_argument(
+     "logged but does NOT change the runtime floor (which stays at "
+     "target_success_tolerance, typically 0.01).",
+ )
++# Phase A4 P3 (2026-06-09): source-safe curriculum inheritance + promising
++# anti-churn for fastcurr_inherit 800M. Defaults are inert ("reset" /
++# protection off) so legacy / fastcurr runs are bit-for-bit unchanged.
++parser.add_argument(
++    "--pbt_curriculum_inherit_mode",
++    type=str,
++    default="reset",
++    choices=["reset", "source_safe"],
++    help="On a PBT cross/recovery copy, how to inherit the source's "
++    "curriculum tolerance into the target policy. 'reset' delegates to "
++    "--pbt_recovery_tolerance_mode / --pbt_crosscopy_tolerance_mode "
++    "(legacy). 'source_safe' inherits one level looser than the source "
++    "(source_tol/0.95) when source is stable (nsucc_mean >= "
++    "--pbt_source_safe_min_mean AND retention >= "
++    "--pbt_source_safe_min_retention), clamped to the runtime floor; "
++    "unstable / missing metadata falls back to legacy.",
++)
++parser.add_argument(
++    "--pbt_source_safe_recovery_consolidation_frames",
++    type=int,
++    default=50_000_000,
++    help="source_safe: recovery consolidation length (env frames) re-armed "
++    "on the target slot when the source is stable. Stale post_shrink "
++    "consolidation from the previous slot owner is cleared first.",
++)
++parser.add_argument(
++    "--pbt_source_unsafe_recovery_consolidation_frames",
++    type=int,
++    default=100_000_000,
++    help="source_safe: recovery consolidation length (env frames) re-armed "
++    "on the target slot when the source is unstable or its curriculum "
++    "metadata is missing.",
++)
++parser.add_argument(
++    "--pbt_source_safe_min_mean",
++    type=float,
++    default=20.0,
++    help="source_safe: source.nsucc_mean threshold above which the source "
++    "is considered stable for inheritance purposes.",
++)
++parser.add_argument(
++    "--pbt_source_safe_min_retention",
++    type=float,
++    default=0.7,
++    help="source_safe: source rolling end_mean / peak_mean threshold "
++    "above which the source is considered stable for inheritance.",
++)
++parser.add_argument(
++    "--pbt_protect_promising_workers",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="When true, workers that recently reached high nsucc are "
++    "shielded from bottom-tier replacement for "
++    "--pbt_promising_protect_frames (anti-churn). Hard collapse / NaN "
++    "/ OOM still override the protection.",
++)
++parser.add_argument(
++    "--pbt_promising_nsucc_mean",
++    type=float,
++    default=20.0,
++    help="Promising-worker gate: protect if rolling end_mean >= this.",
++)
++parser.add_argument(
++    "--pbt_promising_peak_mean",
++    type=float,
++    default=25.0,
++    help="Promising-worker gate (with retention): protect if "
++    "recent_peak_nsucc_mean >= this AND current retention >= "
++    "--pbt_promising_min_retention.",
++)
++parser.add_argument(
++    "--pbt_promising_min_retention",
++    type=float,
++    default=0.5,
++    help="Retention guard for the peak-based promising promotion. Avoids "
++    "protecting a worker that once peaked high but has since degraded.",
++)
++parser.add_argument(
++    "--pbt_promising_protect_frames",
++    type=int,
++    default=150_000_000,
++    help="Promising-worker protection window length (env frames).",
++)
++parser.add_argument(
++    "--pbt_promising_allow_hard_collapse_override",
++    action=argparse.BooleanOptionalAction,
++    default=True,
++    help="When true (default), hard collapse / early collapse on the "
++    "protected worker bypasses the protection so the supervisor can "
++    "still replace it.",
++)
++# ----------------------------------------------------------------------
++# Phase A4 P4 (2026-06-09): floor-recovery-aware PBT (Part A) +
++# task-aware RSSM (Part B) + iterative teacher (Part C) + imagined
++# evaluator (Part D) + WM-guided ranking (Part E) + replay
++# prioritization (Part F). Defaults are inert; legacy runs unchanged.
++# ----------------------------------------------------------------------
++# Part A: Floor-recovery PBT.
++parser.add_argument(
++    "--pbt_floor_recovery_aware",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Enable floor-stage recovery-aware PBT ranking + protection "
++    "+ archive. Default false keeps legacy behavior bit-for-bit.",
++)
++parser.add_argument(
++    "--pbt_floor_tol_threshold", type=float, default=0.02,
++    help="success_tolerance below this counts as floor stage.",
++)
++parser.add_argument(
++    "--pbt_hard_floor_tol_threshold", type=float, default=0.012,
++    help="success_tolerance below this counts as hard floor.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_window", type=int, default=4,
++    help="Rolling window length for floor-recovery slope estimation.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_slope_weight", type=float, default=0.5,
++    help="Weight on positive recovery slope inside floor_recovery_score.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_retention_weight", type=float, default=0.3,
++    help="Weight on retention proxy inside floor_recovery_score.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_nsucc_max_weight", type=float, default=0.2,
++    help="Weight on normalised nsucc_max inside floor_recovery_score.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_drop_penalty", type=float, default=0.5,
++    help="Drop-ratio penalty inside floor_recovery_score.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_protect_frames", type=int, default=200_000_000,
++    help="Floor-recovery protection window length (env frames).",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_min_nsucc_protect", type=float, default=15.0,
++    help="Min nsucc_mean (alone) to enter floor-recovery protection.",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_min_slope_protect", type=float, default=0.05,
++    help="Min positive-slope to enter floor-recovery protection (with retention).",
++)
++parser.add_argument(
++    "--pbt_floor_recovery_min_retention_for_protect", type=float, default=0.3,
++    help="Min retention to enter floor-recovery protection via slope.",
++)
++parser.add_argument(
++    "--pbt_enable_best_floor_recovery_archive",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Save / select best_floor_recovery checkpoints.",
++)
++# Part E: WM-guided PBT ranking three-mode.
++parser.add_argument(
++    "--pbt_wm_score_mode", type=str, default="off",
++    choices=["off", "shadow", "active"],
++    help="off: real-only; shadow: log would-change without replacing; "
++    "active: combine real + WM in ranking. Default off.",
++)
++parser.add_argument(
++    "--pbt_use_wm_recovery_score",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Legacy alias: True -> --pbt_wm_score_mode=active when mode=off.",
++)
++parser.add_argument(
++    "--pbt_wm_recovery_weight", type=float, default=0.3,
++    help="WM recovery probability weight in combined score.",
++)
++parser.add_argument(
++    "--pbt_wm_success_weight", type=float, default=0.2,
++    help="WM success probability weight in combined score.",
++)
++parser.add_argument(
++    "--pbt_wm_drop_penalty", type=float, default=0.3,
++    help="WM drop risk penalty weight in combined score.",
++)
++parser.add_argument(
++    "--pbt_wm_uncertainty_penalty", type=float, default=0.2,
++    help="WM uncertainty penalty weight in combined score.",
++)
++parser.add_argument(
++    "--pbt_wm_max_uncertainty", type=float, default=0.5,
++    help="WM eval ignored when uncertainty > this; falls back to real.",
++)
++# Part B: task-aware RSSM extensions.
++parser.add_argument(
++    "--seq_wm_use_task_aux_inputs",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Add aux scalar encoder to RSSM posterior input.",
++)
++parser.add_argument(
++    "--seq_wm_aux_embed_dim", type=int, default=64,
++    help="Aux scalar encoder output dim.",
++)
++parser.add_argument(
++    "--seq_wm_loss_preset", type=str, default="default",
++    choices=["default", "task_focused"],
++    help="default keeps legacy lambdas; task_focused biases task losses.",
++)
++parser.add_argument(
++    "--seq_wm_floor_aware_weighting",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Multiply task-side losses by floor / hard-floor multipliers.",
++)
++parser.add_argument(
++    "--seq_wm_floor_tol_threshold", type=float, default=0.02,
++    help="seq_wm-side floor stage threshold (mirrors PBT one).",
++)
++parser.add_argument(
++    "--seq_wm_floor_tol_floor", type=float, default=0.012,
++    help="seq_wm-side hard-floor threshold (mirrors PBT one).",
++)
++parser.add_argument(
++    "--seq_wm_floor_weight_mid", type=float, default=2.0,
++    help="task-loss multiplier in floor stage.",
++)
++parser.add_argument(
++    "--seq_wm_floor_weight_floor", type=float, default=3.0,
++    help="task-loss multiplier in hard-floor stage.",
++)
++parser.add_argument(
++    "--seq_wm_use_horizon_heads",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Add horizon (success/drop) heads to RSSM PredictionHeads.",
++)
++parser.add_argument(
++    "--seq_wm_horizon_steps", type=str, default="8,16",
++    help="Comma-separated horizon lengths for the horizon heads.",
++)
++parser.add_argument(
++    "--seq_wm_use_recovery_head",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Add soft-OR recovery head to RSSM PredictionHeads.",
++)
++parser.add_argument(
++    "--seq_wm_recovery_horizon", type=int, default=16,
++    help="Recovery head horizon length.",
++)
++parser.add_argument(
++    "--seq_wm_lambda_horizon_success", type=float, default=0.0,
++    help="Loss weight on horizon-success heads (default 0 -> disabled).",
++)
++parser.add_argument(
++    "--seq_wm_lambda_drop_risk", type=float, default=0.0,
++    help="Loss weight on drop-risk heads (default 0 -> disabled).",
++)
++parser.add_argument(
++    "--seq_wm_lambda_recovery", type=float, default=0.0,
++    help="Loss weight on recovery head (default 0 -> disabled).",
++)
++parser.add_argument(
++    "--seq_wm_recovery_d_hat_margin", type=float, default=0.005,
++    help="d_hat improvement margin used in soft-OR recovery target.",
++)
++parser.add_argument(
++    "--seq_wm_recovery_d_hat_tol_min_steps", type=int, default=0,
++    help="Min steps with d_hat<=tolerance to mark soft-OR recovery.",
++)
++# Part C: iterative teacher.
++parser.add_argument(
++    "--seq_wm_enable_iterative_teacher",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Snapshot RSSM and run held-out floor evaluation with promotion gate.",
++)
++parser.add_argument(
++    "--seq_wm_teacher_eval_interval_frames", type=int, default=50_000_000,
++    help="env-frame interval between teacher snapshot evaluations.",
++)
++parser.add_argument(
++    "--seq_wm_teacher_promote_min_improvement", type=float, default=0.02,
++    help="min eval-score improvement required to promote a candidate.",
++)
++parser.add_argument(
++    "--seq_wm_teacher_keep_last_k", type=int, default=3,
++    help="number of teacher snapshots to keep on disk.",
++)
++parser.add_argument(
++    "--seq_wm_teacher_metric", type=str, default="floor_recovery_eval_score",
++    help="Metric driving teacher promotion. Currently only floor_recovery_eval_score.",
++)
++# Part D: imagined evaluator.
++parser.add_argument(
++    "--seq_wm_enable_imagined_evaluator",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Run short-horizon imagined evaluation each PBT tick.",
++)
++parser.add_argument(
++    "--seq_wm_imagine_horizons", type=str, default="8,16",
++    help="Comma-separated horizon lengths for imagined evaluation.",
++)
++parser.add_argument(
++    "--seq_wm_imagine_action_mode", type=str, default="recorded",
++    choices=["recorded", "policy"],
++    help="recorded uses stored actions; policy raises NotImplementedError.",
++)
++parser.add_argument(
++    "--seq_wm_imagine_num_starts", type=int, default=256,
++    help="Number of start states sampled for imagined evaluation.",
++)
++parser.add_argument(
++    "--seq_wm_imagine_use_teacher",
++    action=argparse.BooleanOptionalAction,
++    default=True,
++    help="Use the promoted teacher for imagined evaluation when available.",
++)
++# Part F: replay prioritization.
++parser.add_argument(
++    "--seq_wm_replay_prioritize_floor_recovery",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Bias the SeqWM sampler toward floor / recovery / drop-near-success windows.",
++)
++parser.add_argument(
++    "--seq_wm_replay_floor_weight", type=float, default=2.0,
++    help="Floor-stage replay weight.",
++)
++parser.add_argument(
++    "--seq_wm_replay_hard_floor_weight", type=float, default=3.0,
++    help="Hard-floor stage replay weight.",
++)
++parser.add_argument(
++    "--seq_wm_replay_positive_slope_weight", type=float, default=2.0,
++    help="Positive-slope replay weight.",
++)
++parser.add_argument(
++    "--seq_wm_replay_drop_near_success_weight", type=float, default=1.5,
++    help="Drop-near-success replay weight.",
++)
++parser.add_argument(
++    "--seq_wm_replay_uniform_floor", type=float, default=0.3,
++    help="Min fraction of batch reserved for uniform sampling.",
++)
++# Convenience preset (Item 10). Does NOT bypass kill switches; train.py
++# expands it into individual flags BEFORE constructing the observer and
++# logs the expanded flag set.
++parser.add_argument(
++    "--experimental_rssm_floor_recovery_stack",
++    action=argparse.BooleanOptionalAction,
++    default=False,
++    help="Convenience preset that turns on Part A+B+C+D+E+F. Each "
++    "feature has its own --no-* kill switch which always wins.",
++)
+ # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
+ parser.add_argument(
+     "--pbt_early_collapse_detect",
+@@ -893,6 +1245,59 @@ parser.add_argument(
+ AppLauncher.add_app_launcher_args(parser)
+ args_cli, hydra_args = parser.parse_known_args()
+ 
++# ----------------------------------------------------------------------
++# Phase A4 P4 (2026-06-09): expand --experimental_rssm_floor_recovery_stack
++# (Item 10). The preset toggles ON every per-feature flag that has
++# default-False. Each kill switch keeps overriding via argparse normal
++# semantics: any explicit --no-* on the command line is parsed BEFORE we
++# get here, so users can still disable individual layers. We log the
++# expanded flag set so the run audit captures every switch flipped.
++# ----------------------------------------------------------------------
++if bool(getattr(args_cli, "experimental_rssm_floor_recovery_stack", False)):
++    _stack_flags = [
++        ("pbt_floor_recovery_aware", True),
++        ("pbt_enable_best_floor_recovery_archive", True),
++        ("seq_wm_use_task_aux_inputs", True),
++        ("seq_wm_floor_aware_weighting", True),
++        ("seq_wm_use_horizon_heads", True),
++        ("seq_wm_use_recovery_head", True),
++        ("seq_wm_enable_iterative_teacher", True),
++        ("seq_wm_enable_imagined_evaluator", True),
++    ]
++    _audit_lines: list[str] = []
++    for flag_name, target in _stack_flags:
++        cur_val = getattr(args_cli, flag_name, None)
++        if cur_val is False:  # only flip implicit defaults
++            setattr(args_cli, flag_name, target)
++            _audit_lines.append(f"{flag_name}: False -> True (preset)")
++        else:
++            _audit_lines.append(
++                f"{flag_name}: kept {cur_val!r} (kill switch wins)"
++            )
++    # WM-guided ranking: preset bumps to 'shadow' (NEVER 'active' by
++    # default — Item 3 requires explicit opt-in for active mode).
++    if str(getattr(args_cli, "pbt_wm_score_mode", "off")) == "off":
++        args_cli.pbt_wm_score_mode = "shadow"
++        _audit_lines.append("pbt_wm_score_mode: off -> shadow (preset)")
++    else:
++        _audit_lines.append(
++            f"pbt_wm_score_mode: kept {args_cli.pbt_wm_score_mode!r} "
++            "(kill switch wins)"
++        )
++    # Lambdas for the new heads default to 0; the preset turns them on
++    # so the heads actually contribute to the loss when use_*_head flags
++    # are true. Users can still override via --seq_wm_lambda_*.
++    if float(getattr(args_cli, "seq_wm_lambda_horizon_success", 0.0)) <= 0.0:
++        args_cli.seq_wm_lambda_horizon_success = 0.5
++    if float(getattr(args_cli, "seq_wm_lambda_drop_risk", 0.0)) <= 0.0:
++        args_cli.seq_wm_lambda_drop_risk = 0.5
++    if float(getattr(args_cli, "seq_wm_lambda_recovery", 0.0)) <= 0.0:
++        args_cli.seq_wm_lambda_recovery = 1.0
++    print(
++        "[experimental_rssm_floor_recovery_stack] expansion:\n  "
++        + "\n  ".join(_audit_lines)
++    )
++
+ # Save original sys.argv before modification so PBT observer can reconstruct
+ # the restart command with all parsed arguments (e.g. --task, --observer_mode).
+ _original_sys_argv = list(sys.argv)
+@@ -2459,6 +2864,15 @@ def main():
+         except Exception:
+             action_dim = 23
+ 
++        # Phase A4 P4 (2026-06-09): horizon list parser (Part B / D).
++        def _parse_int_list(spec: str) -> tuple[int, ...]:
++            return tuple(
++                int(s.strip()) for s in str(spec or "").split(",") if s.strip()
++            )
++
++        horizon_steps_arg = _parse_int_list(args_cli.seq_wm_horizon_steps) or (8, 16)
++        imagine_horizons_arg = _parse_int_list(args_cli.seq_wm_imagine_horizons) or (8, 16)
++
+         seq_cfg = SeqWMConfig(
+             seq_len=int(args_cli.seq_wm_seq_len),
+             seq_batch_size=int(args_cli.seq_wm_seq_batch_size),
+@@ -2477,14 +2891,76 @@ def main():
+             beta_kl_end=float(args_cli.seq_wm_beta_kl_end),
+             beta_kl_warmup_frames=int(args_cli.seq_wm_beta_kl_warmup_frames),
+             free_nats=float(args_cli.seq_wm_free_nats),
++            # Phase A4 P4 (2026-06-09): task-aware extras + replay + teacher.
++            use_task_aux_inputs=bool(args_cli.seq_wm_use_task_aux_inputs),
++            aux_embed_dim=int(args_cli.seq_wm_aux_embed_dim),
++            loss_preset=str(args_cli.seq_wm_loss_preset),
++            floor_aware_weighting=bool(args_cli.seq_wm_floor_aware_weighting),
++            floor_tol_threshold=float(args_cli.seq_wm_floor_tol_threshold),
++            floor_tol_floor=float(args_cli.seq_wm_floor_tol_floor),
++            floor_weight_mid=float(args_cli.seq_wm_floor_weight_mid),
++            floor_weight_floor=float(args_cli.seq_wm_floor_weight_floor),
++            use_horizon_heads=bool(args_cli.seq_wm_use_horizon_heads),
++            horizon_steps=horizon_steps_arg,
++            use_recovery_head=bool(args_cli.seq_wm_use_recovery_head),
++            recovery_horizon=int(args_cli.seq_wm_recovery_horizon),
++            lambda_horizon_success=float(args_cli.seq_wm_lambda_horizon_success),
++            lambda_drop_risk=float(args_cli.seq_wm_lambda_drop_risk),
++            lambda_recovery=float(args_cli.seq_wm_lambda_recovery),
++            recovery_d_hat_margin=float(args_cli.seq_wm_recovery_d_hat_margin),
++            recovery_d_hat_tol_min_steps=int(
++                args_cli.seq_wm_recovery_d_hat_tol_min_steps
++            ),
++            replay_prioritize_floor_recovery=bool(
++                args_cli.seq_wm_replay_prioritize_floor_recovery
++            ),
++            replay_floor_weight=float(args_cli.seq_wm_replay_floor_weight),
++            replay_hard_floor_weight=float(
++                args_cli.seq_wm_replay_hard_floor_weight
++            ),
++            replay_positive_slope_weight=float(
++                args_cli.seq_wm_replay_positive_slope_weight
++            ),
++            replay_drop_near_success_weight=float(
++                args_cli.seq_wm_replay_drop_near_success_weight
++            ),
++            replay_uniform_floor=float(args_cli.seq_wm_replay_uniform_floor),
++            enable_iterative_teacher=bool(
++                args_cli.seq_wm_enable_iterative_teacher
++            ),
++            teacher_eval_interval_frames=int(
++                args_cli.seq_wm_teacher_eval_interval_frames
++            ),
++            teacher_promote_min_improvement=float(
++                args_cli.seq_wm_teacher_promote_min_improvement
++            ),
++            teacher_keep_last_k=int(args_cli.seq_wm_teacher_keep_last_k),
++            teacher_metric=str(args_cli.seq_wm_teacher_metric),
++            enable_imagined_evaluator=bool(
++                args_cli.seq_wm_enable_imagined_evaluator
++            ),
++            imagine_horizons=imagine_horizons_arg,
++            imagine_action_mode=str(args_cli.seq_wm_imagine_action_mode),
++            imagine_num_starts=int(args_cli.seq_wm_imagine_num_starts),
++            imagine_use_teacher=bool(args_cli.seq_wm_imagine_use_teacher),
+         )
+         with_value = args_cli.wm_strategy in ("rssm_belief_value", "trans_belief_value")
++        # Aux dim is determined by the sampler at runtime (12 columns); the
++        # RSSM uses 12 only when use_task_aux_inputs is True. The default
++        # zero falls back to the legacy posterior input shape.
++        rssm_aux_dim = 12 if seq_cfg.use_task_aux_inputs else 0
+         if args_cli.wm_strategy in RSSM_FAMILY:
+             seq_model = RSSMLiteWorldModel(
+                 obs_dim=obs_dim,
+                 action_dim=action_dim,
+                 free_nats=seq_cfg.free_nats,
+                 with_value_head=with_value,
++                aux_dim=rssm_aux_dim,
++                aux_embed_dim=seq_cfg.aux_embed_dim,
++                with_horizon_heads=seq_cfg.use_horizon_heads,
++                horizon_steps=seq_cfg.horizon_steps,
++                with_recovery_head=seq_cfg.use_recovery_head,
++                recovery_horizon=seq_cfg.recovery_horizon,
+             )
+         elif args_cli.wm_strategy in TRANS_FAMILY:
+             seq_model = TransformerLiteWorldModel(
+@@ -2863,6 +3339,74 @@ def main():
+             curriculum_fast_target_tolerance_800m=(
+                 args_cli.curriculum_fast_target_tolerance_800m
+             ),
++            # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance.
++            pbt_curriculum_inherit_mode=args_cli.pbt_curriculum_inherit_mode,
++            pbt_source_safe_recovery_consolidation_frames=(
++                args_cli.pbt_source_safe_recovery_consolidation_frames
++            ),
++            pbt_source_unsafe_recovery_consolidation_frames=(
++                args_cli.pbt_source_unsafe_recovery_consolidation_frames
++            ),
++            pbt_source_safe_min_mean=args_cli.pbt_source_safe_min_mean,
++            pbt_source_safe_min_retention=(
++                args_cli.pbt_source_safe_min_retention
++            ),
++            pbt_protect_promising_workers=(
++                args_cli.pbt_protect_promising_workers
++            ),
++            pbt_promising_nsucc_mean=args_cli.pbt_promising_nsucc_mean,
++            pbt_promising_peak_mean=args_cli.pbt_promising_peak_mean,
++            pbt_promising_min_retention=(
++                args_cli.pbt_promising_min_retention
++            ),
++            pbt_promising_protect_frames=(
++                args_cli.pbt_promising_protect_frames
++            ),
++            pbt_promising_allow_hard_collapse_override=(
++                args_cli.pbt_promising_allow_hard_collapse_override
++            ),
++            # Phase A4 P4 (2026-06-09): floor-recovery + WM-guided ranking.
++            pbt_floor_recovery_aware=args_cli.pbt_floor_recovery_aware,
++            pbt_floor_tol_threshold=args_cli.pbt_floor_tol_threshold,
++            pbt_hard_floor_tol_threshold=args_cli.pbt_hard_floor_tol_threshold,
++            pbt_floor_recovery_window=args_cli.pbt_floor_recovery_window,
++            pbt_floor_recovery_slope_weight=(
++                args_cli.pbt_floor_recovery_slope_weight
++            ),
++            pbt_floor_recovery_retention_weight=(
++                args_cli.pbt_floor_recovery_retention_weight
++            ),
++            pbt_floor_recovery_nsucc_max_weight=(
++                args_cli.pbt_floor_recovery_nsucc_max_weight
++            ),
++            pbt_floor_recovery_drop_penalty=(
++                args_cli.pbt_floor_recovery_drop_penalty
++            ),
++            pbt_floor_recovery_protect_frames=(
++                args_cli.pbt_floor_recovery_protect_frames
++            ),
++            pbt_floor_recovery_min_nsucc_protect=(
++                args_cli.pbt_floor_recovery_min_nsucc_protect
++            ),
++            pbt_floor_recovery_min_slope_protect=(
++                args_cli.pbt_floor_recovery_min_slope_protect
++            ),
++            pbt_floor_recovery_min_retention_for_protect=(
++                args_cli.pbt_floor_recovery_min_retention_for_protect
++            ),
++            pbt_enable_best_floor_recovery_archive=(
++                args_cli.pbt_enable_best_floor_recovery_archive
++            ),
++            pbt_wm_score_mode=args_cli.pbt_wm_score_mode,
++            pbt_use_wm_recovery_score=args_cli.pbt_use_wm_recovery_score,
++            pbt_wm_recovery_weight=args_cli.pbt_wm_recovery_weight,
++            pbt_wm_success_weight=args_cli.pbt_wm_success_weight,
++            pbt_wm_drop_penalty=args_cli.pbt_wm_drop_penalty,
++            pbt_wm_uncertainty_penalty=args_cli.pbt_wm_uncertainty_penalty,
++            pbt_wm_max_uncertainty=args_cli.pbt_wm_max_uncertainty,
++            experimental_rssm_floor_recovery_stack=(
++                args_cli.experimental_rssm_floor_recovery_stack
++            ),
+             pbt_early_collapse_detect=args_cli.pbt_early_collapse_detect,
+             early_collapse_drop_ratio=args_cli.early_collapse_drop_ratio,
+             early_collapse_patience=args_cli.early_collapse_patience,
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/rssm_lite.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/rssm_lite.py
+index b162082..a7b375f 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/rssm_lite.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/rssm_lite.py
+@@ -117,6 +117,16 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+         with_task_error_head: bool = True,
+         free_nats: float = 1.0,
+         std_floor: float = 0.1,
++        # Phase A4 P4 (2026-06-09): task-aware extensions (Part B).
++        # All defaults are inert: aux_dim=0 disables the aux encoder and
++        # falls back to the legacy posterior input shape; horizon/recovery
++        # heads are off until explicitly toggled.
++        aux_dim: int = 0,
++        aux_embed_dim: int = 64,
++        with_horizon_heads: bool = False,
++        horizon_steps: tuple[int, ...] = (8, 16),
++        with_recovery_head: bool = False,
++        recovery_horizon: int = 16,
+     ) -> None:
+         super().__init__()
+         self.obs_dim = int(obs_dim)
+@@ -133,12 +143,27 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+         self.obs_encoder = _mlp(self.obs_dim, obs_embed_dim, obs_embed_dim, n_hidden=1)
+         self.action_encoder = _mlp(self.action_dim, action_embed_dim, action_embed_dim, n_hidden=0)
+ 
++        # Phase A4 P4 (2026-06-09): optional aux encoder (Part B).
++        # When aux_dim==0 the encoder is None and the posterior consumes
++        # the legacy concat(h, obs_emb) as before; default forward is
++        # bit-for-bit unchanged.
++        self.aux_dim = int(max(0, aux_dim))
++        self.aux_embed_dim = int(aux_embed_dim) if self.aux_dim > 0 else 0
++        if self.aux_dim > 0 and self.aux_embed_dim > 0:
++            self.aux_encoder = _mlp(
++                self.aux_dim, self.aux_embed_dim, self.aux_embed_dim, n_hidden=1
++            )
++            posterior_in = self.h_dim + obs_embed_dim + self.aux_embed_dim
++        else:
++            self.aux_encoder = None
++            posterior_in = self.h_dim + obs_embed_dim
++
+         # Transition: GRU(input = z_prev[Z] + a_emb_prev[Aemb])
+         self.gru = nn.GRUCell(input_size=self.z_dim + action_embed_dim, hidden_size=self.h_dim)
+ 
+         # Prior and posterior produce 2*z_dim params (mu, raw_std).
+         self.prior_net = _mlp(self.h_dim, h_dim, 2 * self.z_dim, n_hidden=1)
+-        self.posterior_net = _mlp(self.h_dim + obs_embed_dim, h_dim, 2 * self.z_dim, n_hidden=1)
++        self.posterior_net = _mlp(posterior_in, h_dim, 2 * self.z_dim, n_hidden=1)
+ 
+         # Shared prediction heads.
+         self.heads = PredictionHeads(
+@@ -150,8 +175,18 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+             with_value_head=with_value_head,
+             with_success_head=with_success_head,
+             with_task_error_head=with_task_error_head,
++            with_horizon_heads=bool(with_horizon_heads),
++            horizon_steps=tuple(int(x) for x in horizon_steps if int(x) > 0),
++            with_recovery_head=bool(with_recovery_head),
++            recovery_horizon=int(max(1, recovery_horizon)),
+         )
+ 
++        # Phase A4 P4 (2026-06-09): bookkeeping for new heads.
++        self.with_horizon_heads = bool(with_horizon_heads)
++        self.horizon_steps = tuple(int(x) for x in horizon_steps if int(x) > 0)
++        self.with_recovery_head = bool(with_recovery_head)
++        self.recovery_horizon = int(max(1, recovery_horizon))
++
+         # Tiny per-step running stats for telemetry.
+         self._last_metrics: dict[str, float] = {}
+ 
+@@ -187,6 +222,18 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+         obs_emb_seq = self.obs_encoder(batch.obs.reshape(T * B, -1)).reshape(T, B, -1)
+         act_emb_seq = self.action_encoder(batch.action.reshape(T * B, -1)).reshape(T, B, -1)
+ 
++        # Phase A4 P4 (2026-06-09): optional aux scalar embedding (Part B).
++        # When the aux encoder is None or the batch lacks aux_scalars, the
++        # posterior input shape falls back to the legacy concat(h, obs_emb).
++        aux_emb_seq: Optional[torch.Tensor] = None
++        if (
++            self.aux_encoder is not None
++            and batch.aux_scalars is not None
++            and batch.aux_scalars.shape[-1] == self.aux_dim
++        ):
++            aux_in = batch.aux_scalars.reshape(T * B, -1)
++            aux_emb_seq = self.aux_encoder(aux_in).reshape(T, B, -1)
++
+         h = torch.zeros(B, self.h_dim, device=device, dtype=batch.obs.dtype)
+         z = torch.zeros(B, self.z_dim, device=device, dtype=batch.obs.dtype)
+         beliefs: list[torch.Tensor] = []
+@@ -206,9 +253,13 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+                 h = self.gru(gru_in, h)
+             # Prior and posterior at h_t.
+             prior_mu, prior_std = self._split_dist(self.prior_net(h))
+-            post_mu, post_std = self._split_dist(
+-                self.posterior_net(torch.cat([h, obs_emb_seq[t]], dim=-1))
+-            )
++            if aux_emb_seq is None:
++                post_input = torch.cat([h, obs_emb_seq[t]], dim=-1)
++            else:
++                post_input = torch.cat(
++                    [h, obs_emb_seq[t], aux_emb_seq[t]], dim=-1
++                )
++            post_mu, post_std = self._split_dist(self.posterior_net(post_input))
+             if deterministic:
+                 z = post_mu
+             else:
+@@ -267,6 +318,23 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+         loss_weights: Optional[dict[str, float]] = None,
+         beta_kl: float = 0.1,
+         value_detach_belief: bool = False,
++        # Phase A4 P4 (2026-06-09): floor-aware task-loss weighting (Part B).
++        # All defaults disable the feature so legacy callers see the same
++        # math. When ``floor_aware_weighting=True`` we look at
++        # batch.success_tolerance_seq (per-step tol) and multiply
++        # success/task_error/value/horizon/drop/recovery losses by:
++        #   * 1.0 above floor_tol_threshold
++        #   * floor_weight_mid in (hard_floor_tol, floor_tol]
++        #   * floor_weight_floor at or below hard_floor_tol
++        # state and KL losses are NEVER multiplied (per spec).
++        floor_aware_weighting: bool = False,
++        floor_tol_threshold: float = 0.02,
++        floor_tol_floor: float = 0.012,
++        floor_weight_mid: float = 2.0,
++        floor_weight_floor: float = 3.0,
++        # Phase A4 P4 (2026-06-09): recovery soft-OR target (Part B / Item 6).
++        recovery_d_hat_margin: float = 0.005,
++        recovery_d_hat_tol_min_steps: int = 0,
+     ) -> dict[str, torch.Tensor]:
+         """Forward + losses. Returns dict with 'loss_total' and per-term keys."""
+         if loss_weights is None:
+@@ -363,19 +431,129 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+         kl_clamped = (kl_per_step - self.free_nats).clamp_min(0.0)
+         L_kl = _masked_mean(kl_clamped, eff_basic)
+ 
++        # ---- Phase A4 P4 (2026-06-09): horizon heads + recovery head (Part B) ----
++        # All optional; when the heads do not exist or the targets cannot
++        # be built, the corresponding loss term stays at zero and the
++        # caller-side lambda sets the multiplier to 0.0 by default.
++        L_horizon_success: dict[int, torch.Tensor] = {}
++        L_drop_risk: dict[int, torch.Tensor] = {}
++        L_recovery = belief_seq.new_zeros(())
++        recovery_pos_rate = 0.0
++        # Reuse pred for horizon/recovery. The heads, when present, are
++        # called inside heads.predict_horizon / heads.predict_recovery.
++        if self.with_horizon_heads and "horizon_logits" in pred:
++            for h_steps, head_out in pred["horizon_logits"].items():
++                # head_out is dict with 'success' and 'drop' logits, each
++                # shape (T*B, 1). Targets are built from in-window cumulative
++                # success_count / failure flags, masked by valid prefix and
++                # by no-done-cross within the horizon.
++                if (
++                    batch.success_count is None
++                    or batch.next_success_count is None
++                ):
++                    continue
++                horizon_window = max(1, int(h_steps))
++                target_success = self._build_horizon_success_target(
++                    batch, horizon_window
++                )
++                horizon_mask = self._build_horizon_valid_mask(
++                    batch, horizon_window
++                )
++                logit_s = head_out["success"].squeeze(-1)
++                logit_d = head_out["drop"].squeeze(-1)
++                target_drop = self._build_horizon_drop_target(
++                    batch, horizon_window
++                )
++                # Use binary_cross_entropy_with_logits with sample weights.
++                w = horizon_mask.reshape(T * B)
++                denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
++                L_horizon_success[h_steps] = (
++                    F.binary_cross_entropy_with_logits(
++                        logit_s,
++                        target_success.reshape(T * B),
++                        weight=w,
++                        reduction="sum",
++                    )
++                    / denom
++                )
++                L_drop_risk[h_steps] = (
++                    F.binary_cross_entropy_with_logits(
++                        logit_d,
++                        target_drop.reshape(T * B),
++                        weight=w,
++                        reduction="sum",
++                    )
++                    / denom
++                )
++
++        if self.with_recovery_head and "recovery_logits" in pred:
++            recovery_logit = pred["recovery_logits"].squeeze(-1)
++            recovery_target, recovery_mask = self._build_recovery_target_soft_or(
++                batch,
++                horizon=self.recovery_horizon,
++                d_hat_margin=float(recovery_d_hat_margin),
++                d_hat_tol_min_steps=int(recovery_d_hat_tol_min_steps),
++                floor_tol_threshold=float(floor_tol_threshold),
++            )
++            w = recovery_mask.reshape(T * B)
++            denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
++            L_recovery = (
++                F.binary_cross_entropy_with_logits(
++                    recovery_logit,
++                    recovery_target.reshape(T * B),
++                    weight=w,
++                    reduction="sum",
++                )
++                / denom
++            )
++            with torch.no_grad():
++                if w.sum() > 0:
++                    recovery_pos_rate = float(
++                        (recovery_target.reshape(T * B) * w).sum().item()
++                        / float(denom.item())
++                    )
++
++        # Phase A4 P4 (2026-06-09): floor-aware loss multiplier (Part B).
++        floor_mult = belief_seq.new_ones(())
++        if (
++            floor_aware_weighting
++            and batch.success_tolerance_seq is not None
++            and batch.success_tolerance_seq.numel() > 0
++        ):
++            with torch.no_grad():
++                tol_seq = batch.success_tolerance_seq.float()
++                tol_mean = float(
++                    (tol_seq * batch.valid_mask).sum().item()
++                    / max(float(batch.valid_mask.sum().item()), 1.0)
++                )
++            if tol_mean <= float(floor_tol_floor):
++                floor_mult = belief_seq.new_full((), float(floor_weight_floor))
++            elif tol_mean <= float(floor_tol_threshold):
++                floor_mult = belief_seq.new_full((), float(floor_weight_mid))
++            else:
++                floor_mult = belief_seq.new_ones(())
++
+         L_total = (
+             loss_weights["state"] * L_state
+             + loss_weights["reward"] * L_reward
+             + loss_weights["done"] * L_done
+-            + loss_weights.get("success", 0.0) * L_success
+-            + loss_weights.get("task_error", 0.0) * L_task_error
++            + floor_mult * loss_weights.get("success", 0.0) * L_success
++            + floor_mult * loss_weights.get("task_error", 0.0) * L_task_error
+             + beta_kl * L_kl
+-            + loss_weights.get("value", 0.0) * L_value
++            + floor_mult * loss_weights.get("value", 0.0) * L_value
+         )
++        for h_steps, lh in L_horizon_success.items():
++            key = f"horizon_success_h{int(h_steps)}"
++            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * lh
++        for h_steps, ld in L_drop_risk.items():
++            key = f"drop_risk_h{int(h_steps)}"
++            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * ld
++        if self.with_recovery_head:
++            L_total = L_total + floor_mult * loss_weights.get("recovery", 0.0) * L_recovery
+ 
+         # Cache scalar metrics for telemetry.
+         with torch.no_grad():
+-            self._last_metrics = {
++            metrics = {
+                 "loss_total": float(L_total.detach().item()),
+                 "loss_state": float(L_state.detach().item()),
+                 "loss_reward": float(L_reward.detach().item()),
+@@ -389,9 +567,22 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+                 "prior_std_mean": float(self._last_prior_std.mean().item()),
+                 "posterior_std_mean": float(self._last_post_std.mean().item()),
+                 "kl_raw_mean": float(kl_per_step.mean().item()),
++                # Phase A4 P4 (2026-06-09): task-aware diagnostics.
++                "floor_loss_mult": float(floor_mult.detach().item()),
++                "loss_recovery": float(L_recovery.detach().item()),
++                "recovery_pos_rate": float(recovery_pos_rate),
+             }
+-
+-        return {
++            for h_steps, lh in L_horizon_success.items():
++                metrics[f"loss_horizon_success_h{int(h_steps)}"] = float(
++                    lh.detach().item()
++                )
++            for h_steps, ld in L_drop_risk.items():
++                metrics[f"loss_drop_risk_h{int(h_steps)}"] = float(
++                    ld.detach().item()
++                )
++            self._last_metrics = metrics
++
++        result = {
+             "loss_total": L_total,
+             "loss_state": L_state,
+             "loss_reward": L_reward,
+@@ -400,7 +591,159 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
+             "loss_task_error": L_task_error,
+             "loss_value": L_value,
+             "loss_kl": L_kl,
++            "loss_recovery": L_recovery,
++            "recovery_pos_rate": belief_seq.new_full((), float(recovery_pos_rate)),
+         }
++        for h_steps, lh in L_horizon_success.items():
++            result[f"loss_horizon_success_h{int(h_steps)}"] = lh
++        for h_steps, ld in L_drop_risk.items():
++            result[f"loss_drop_risk_h{int(h_steps)}"] = ld
++        return result
++
++    # ------------------------------------------------------------------
++    # Phase A4 P4 (2026-06-09): horizon / recovery target builders.
++    # All targets only use within-window information; no cross-episode
++    # crossing (the cumulative-product mask `seg_ok` enforces that).
++    # ------------------------------------------------------------------
++
++    @staticmethod
++    def _build_horizon_valid_mask(
++        batch: SequenceBatch, horizon: int
++    ) -> torch.Tensor:
++        """Return mask (T, B) where target is computable inside the window.
++
++        For step t we need the next ``horizon`` steps (t+1..t+H) to lie in
++        the same segment_id (no done crossing) and inside the window. The
++        mask is the elementwise product of:
++          * batch.valid_mask[t]
++          * (1 - done[t])  # done at t means episode ended; no future
++          * cumulative product of (1 - done[t..t+H-1]) over the horizon
++          * 1 if (t + H) < T else 0
++        """
++        T, B = batch.T, batch.B
++        device = batch.device
++        h = max(1, int(horizon))
++        not_done = (1.0 - batch.done.float())
++        in_seg = batch.valid_mask.float()
++        ok = batch.valid_mask.new_zeros(T, B)
++        for t in range(T):
++            if t + h >= T:
++                continue
++            window = not_done[t : t + h]  # (h, B)
++            seg = in_seg[t]
++            ok[t] = seg * window.prod(dim=0)
++        return ok
++
++    @staticmethod
++    def _build_horizon_success_target(
++        batch: SequenceBatch, horizon: int
++    ) -> torch.Tensor:
++        """Return float (T, B): 1.0 if success_count strictly increases over [t, t+H]."""
++        T, B = batch.T, batch.B
++        device = batch.device
++        h = max(1, int(horizon))
++        sc = batch.success_count
++        nsc = batch.next_success_count
++        if sc is None or nsc is None:
++            return torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
++        # Use next_success_count[t+H-1] as the "after H steps" counter.
++        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
++        for t in range(T):
++            t_end = min(T - 1, t + h - 1)
++            inc = (nsc[t_end] - sc[t]).clamp_min(0)
++            target[t] = (inc > 0.5).to(target.dtype)
++        return target
++
++    @staticmethod
++    def _build_horizon_drop_target(
++        batch: SequenceBatch, horizon: int
++    ) -> torch.Tensor:
++        """Return float (T, B): 1.0 if any drop/failure within [t, t+H-1]."""
++        T, B = batch.T, batch.B
++        device = batch.device
++        h = max(1, int(horizon))
++        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
++        if batch.failure is None and batch.dropped is None:
++            return target
++        fail_seq = batch.failure if batch.failure is not None else None
++        drop_seq = batch.dropped if batch.dropped is not None else None
++        for t in range(T):
++            t_end = min(T, t + h)
++            window_fail = (
++                fail_seq[t:t_end].sum(dim=0)
++                if fail_seq is not None
++                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
++            )
++            window_drop = (
++                drop_seq[t:t_end].sum(dim=0)
++                if drop_seq is not None
++                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
++            )
++            target[t] = ((window_fail + window_drop) > 0.5).to(target.dtype)
++        return target
++
++    def _build_recovery_target_soft_or(
++        self,
++        batch: SequenceBatch,
++        *,
++        horizon: int,
++        d_hat_margin: float,
++        d_hat_tol_min_steps: int,
++        floor_tol_threshold: float,
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Soft-OR recovery target (Item 6 of user constraints).
++
++        target[t,b] = 1 if ANY of:
++          * success_count strictly increases over horizon
++          * d_hat improves by ``d_hat_margin`` (i.e. d_hat[t] - d_hat[t+H-1] >= margin)
++          * d_hat <= success_tolerance for >= ``d_hat_tol_min_steps`` of the
++            next horizon valid steps
++        Drop / failure are NOT a hard AND on positives; they are recorded
++        only via the drop-risk head separately. Recovery loss is masked to
++        floor stage: success_tolerance <= floor_tol_threshold.
++        """
++        T, B = batch.T, batch.B
++        device = batch.device
++        h = max(1, int(horizon))
++        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
++
++        success_inc = self._build_horizon_success_target(batch, h)
++        target = torch.maximum(target, success_inc)
++
++        if batch.d_hat is not None:
++            for t in range(T):
++                t_end = min(T - 1, t + h - 1)
++                margin_ok = (batch.d_hat[t] - batch.d_hat[t_end]) >= float(
++                    d_hat_margin
++                )
++                target[t] = torch.maximum(
++                    target[t], margin_ok.to(target.dtype)
++                )
++
++        if (
++            batch.d_hat is not None
++            and batch.success_tolerance_seq is not None
++            and int(d_hat_tol_min_steps) > 0
++        ):
++            for t in range(T):
++                t_end = min(T, t + h)
++                tol_seg = batch.success_tolerance_seq[t:t_end]
++                d_seg = batch.d_hat[t:t_end]
++                under_tol = (d_seg <= tol_seg).float().sum(dim=0)
++                target[t] = torch.maximum(
++                    target[t],
++                    (under_tol >= float(d_hat_tol_min_steps)).to(target.dtype),
++                )
++
++        # Mask: only learn recovery at floor stage AND when target is
++        # well-defined inside the window (no done crossing).
++        valid_h = self._build_horizon_valid_mask(batch, h)
++        mask = valid_h
++        if batch.success_tolerance_seq is not None:
++            tol_at_t = batch.success_tolerance_seq
++            in_floor = (tol_at_t <= float(floor_tol_threshold)).to(mask.dtype)
++            mask = mask * in_floor
++        return target, mask
+ 
+     def report_metrics(self) -> dict[str, float]:
+         return dict(self._last_metrics)
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_base.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_base.py
+index 0116200..acdea13 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_base.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_base.py
+@@ -82,6 +82,24 @@ class SequenceBatch:
+     # vectorised hidden-state reset in RSSM. Shape: (T, B), dtype long.
+     segment_id: torch.Tensor = None  # type: ignore[assignment]
+ 
++    # Phase A4 P4 (2026-06-09): task-aware aux scalars (Part B).
++    # ``aux_scalars[t,b,:]`` is a small concatenation of normalised task
++    # signals (d_hat, next_d_hat, delta_d_hat, success_count, next_success_
++    # count, success_delta, success_tolerance, lifted, failure, ...). The
++    # field is None when --seq_wm_use_task_aux_inputs is False. Shape:
++    # (T, B, aux_dim). The model is responsible for handling None
++    # gracefully (default forward keeps the legacy path).
++    aux_scalars: Optional[torch.Tensor] = None
++    # Per-step success_tolerance (T, B). Used by floor-aware loss
++    # weighting in compute_aux_loss; None disables the feature.
++    success_tolerance_seq: Optional[torch.Tensor] = None
++    # Per-step picked / dropped flags (Part B). Optional; not consumed
++    # by the legacy loss computation, only by Phase-A4 P4 horizon /
++    # recovery / replay-prio code paths when those features are enabled.
++    picked: Optional[torch.Tensor] = None
++    dropped: Optional[torch.Tensor] = None
++    closest_d_hat: Optional[torch.Tensor] = None
++
+     # Bookkeeping (not consumed by losses).
+     meta: dict = field(default_factory=dict)
+ 
+@@ -124,6 +142,11 @@ class SequenceBatch:
+             lifted=_mv(self.lifted),
+             valid_mask=_mv(self.valid_mask),
+             segment_id=_mv(self.segment_id),
++            aux_scalars=_mv(self.aux_scalars),
++            success_tolerance_seq=_mv(self.success_tolerance_seq),
++            picked=_mv(self.picked),
++            dropped=_mv(self.dropped),
++            closest_d_hat=_mv(self.closest_d_hat),
+             meta=dict(self.meta),
+         )
+ 
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_heads.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_heads.py
+index 3c33b9a..8f6e7dc 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_heads.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_heads.py
+@@ -51,6 +51,12 @@ class PredictionHeads(nn.Module):
+         with_value_head: bool = True,
+         with_success_head: bool = True,
+         with_task_error_head: bool = True,
++        # Phase A4 P4 (2026-06-09): horizon / recovery heads (Part B).
++        # All defaults inert; legacy callers see the same module surface.
++        with_horizon_heads: bool = False,
++        horizon_steps: tuple[int, ...] = (8, 16),
++        with_recovery_head: bool = False,
++        recovery_horizon: int = 16,
+     ) -> None:
+         super().__init__()
+         self.belief_dim = int(belief_dim)
+@@ -77,6 +83,30 @@ class PredictionHeads(nn.Module):
+             _mlp(self.belief_dim, hidden_dim, 1, n_hidden) if with_value_head else None
+         )
+ 
++        # Phase A4 P4 (2026-06-09): horizon heads (Part B).
++        self.with_horizon_heads = bool(with_horizon_heads)
++        self.horizon_steps = tuple(int(x) for x in horizon_steps if int(x) > 0)
++        self.success_horizon_heads: nn.ModuleDict = nn.ModuleDict()
++        self.drop_risk_heads: nn.ModuleDict = nn.ModuleDict()
++        if self.with_horizon_heads:
++            for h in self.horizon_steps:
++                self.success_horizon_heads[f"h{int(h)}"] = _mlp(
++                    ba_in, hidden_dim, 1, n_hidden
++                )
++                self.drop_risk_heads[f"h{int(h)}"] = _mlp(
++                    ba_in, hidden_dim, 1, n_hidden
++                )
++        # Recovery head (Part B / Item 6): predicts soft-OR recovery
++        # within ``recovery_horizon`` steps. Only defined when explicitly
++        # enabled; consumers must check ``has_recovery_head``.
++        self.with_recovery_head = bool(with_recovery_head)
++        self.recovery_horizon = int(max(1, recovery_horizon))
++        self.recovery_head: nn.Module | None = (
++            _mlp(ba_in, hidden_dim, 1, n_hidden)
++            if self.with_recovery_head
++            else None
++        )
++
+     # -- Forward helpers (caller flattens (T, B, ...) -> (T*B, ...)) --
+ 
+     def predict_transition(
+@@ -100,6 +130,18 @@ class PredictionHeads(nn.Module):
+             out["task_error_delta"] = self.task_error_delta_head(ba)
+         if self.success_head is not None:
+             out["success_logits"] = self.success_head(ba)
++        # Phase A4 P4 (2026-06-09): horizon + recovery outputs (Part B).
++        if self.with_horizon_heads and self.success_horizon_heads:
++            horizon_out: dict[int, dict[str, torch.Tensor]] = {}
++            for key, head in self.success_horizon_heads.items():
++                h_steps = int(key[1:])
++                horizon_out[h_steps] = {
++                    "success": head(ba),
++                    "drop": self.drop_risk_heads[key](ba),
++                }
++            out["horizon_logits"] = horizon_out
++        if self.recovery_head is not None:
++            out["recovery_logits"] = self.recovery_head(ba)
+         return out
+ 
+     def predict_value(self, belief_flat: torch.Tensor) -> torch.Tensor | None:
+@@ -116,5 +158,13 @@ class PredictionHeads(nn.Module):
+     def has_value_head(self) -> bool:
+         return self.value_head is not None
+ 
++    @property
++    def has_recovery_head(self) -> bool:
++        return self.recovery_head is not None
++
++    @property
++    def has_horizon_heads(self) -> bool:
++        return self.with_horizon_heads and len(self.success_horizon_heads) > 0
++
+ 
+ __all__ = ["PredictionHeads"]
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_sampler.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_sampler.py
+index 86e6d3c..aaaac28 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_sampler.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_sampler.py
+@@ -102,6 +102,20 @@ class SequenceSampler:
+         seq_batch_size: int,
+         device: torch.device | str = "cuda",
+         generator: Optional[torch.Generator] = None,
++        # Phase A4 P4 (2026-06-09): replay prioritization knobs (Part F).
++        # Defaults preserve uniform sampling. When prioritize=True the
++        # sampler computes per-(env, start_t) weights from ``failure``,
++        # ``success_count`` deltas, and per-step success_tolerance, then
++        # uses torch.multinomial to pick prioritized indices for the
++        # non-uniform fraction. ``uniform_floor`` of indices stay uniform.
++        prioritize_floor_recovery: bool = False,
++        floor_weight: float = 2.0,
++        hard_floor_weight: float = 3.0,
++        positive_slope_weight: float = 2.0,
++        drop_near_success_weight: float = 1.5,
++        uniform_floor: float = 0.3,
++        floor_tol_threshold: float = 0.02,
++        hard_floor_tol_threshold: float = 0.012,
+     ) -> None:
+         if seq_len <= 0:
+             raise ValueError(f"seq_len must be > 0, got {seq_len}")
+@@ -111,6 +125,15 @@ class SequenceSampler:
+         self.seq_batch_size = int(seq_batch_size)
+         self.device = torch.device(device)
+         self._gen = generator  # may be None -> default RNG
++        self.prioritize_floor_recovery = bool(prioritize_floor_recovery)
++        self.floor_weight = float(floor_weight)
++        self.hard_floor_weight = float(hard_floor_weight)
++        self.positive_slope_weight = float(positive_slope_weight)
++        self.drop_near_success_weight = float(drop_near_success_weight)
++        self.uniform_floor = float(min(1.0, max(0.0, uniform_floor)))
++        self.floor_tol_threshold = float(floor_tol_threshold)
++        self.hard_floor_tol_threshold = float(hard_floor_tol_threshold)
++        self.last_replay_metrics: dict[str, float] = {}
+ 
+     # ----- index sampling -----
+ 
+@@ -194,6 +217,14 @@ class SequenceSampler:
+         success_count_full: Optional[torch.Tensor] = None,
+         last_success_count: Optional[torch.Tensor] = None,
+         lifted_full: Optional[torch.Tensor] = None,
++        # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
++        picked_full: Optional[torch.Tensor] = None,
++        dropped_full: Optional[torch.Tensor] = None,
++        closest_d_hat_full: Optional[torch.Tensor] = None,
++        success_tolerance_full: Optional[torch.Tensor] = None,
++        # Optional pre-computed aux scalar tensor (T-only); when provided,
++        # already shape (H, N, A) and bypasses the field-by-field assemble.
++        aux_scalars_full: Optional[torch.Tensor] = None,
+     ) -> SequenceBatch:
+         # Shape sanity & normalisation.
+         if obs_full.ndim != 3:
+@@ -211,6 +242,10 @@ class SequenceSampler:
+         failure_full = _maybe_squeeze_last(failure_full)
+         success_count_full = _maybe_squeeze_last(success_count_full)
+         lifted_full = _maybe_squeeze_last(lifted_full)
++        picked_full = _maybe_squeeze_last(picked_full)
++        dropped_full = _maybe_squeeze_last(dropped_full)
++        closest_d_hat_full = _maybe_squeeze_last(closest_d_hat_full)
++        success_tolerance_full = _maybe_squeeze_last(success_tolerance_full)
+         last_d_hat = _maybe_squeeze_last(last_d_hat) if last_d_hat is not None else None
+         last_success_count = (
+             _maybe_squeeze_last(last_success_count)
+@@ -222,8 +257,16 @@ class SequenceSampler:
+                 f"last_obs must have shape (N, D_obs)=({N},{D_obs}); got {last_obs.shape}"
+             )
+ 
+-        # Build (T, B) index grids.
+-        t_idx, e_idx = self._sample_indices(H, N)
++        # Build (T, B) index grids. Optionally apply replay prioritization
++        # weights for a fraction (1 - uniform_floor) of the batch.
++        t_idx, e_idx = self._sample_indices_prioritized(
++            H,
++            N,
++            success_tolerance_full=success_tolerance_full,
++            failure_full=failure_full,
++            success_count_full=success_count_full,
++            d_hat_full=d_hat_full,
++        )
+         T, B = t_idx.shape
+         assert T == self.seq_len and B == self.seq_batch_size
+ 
+@@ -237,6 +280,10 @@ class SequenceSampler:
+         failure_w = _gather_seq(failure_full, t_idx, e_idx)
+         success_w = _gather_seq(success_count_full, t_idx, e_idx)
+         lifted_w  = _gather_seq(lifted_full,  t_idx, e_idx)
++        picked_w  = _gather_seq(picked_full,  t_idx, e_idx)
++        dropped_w = _gather_seq(dropped_full, t_idx, e_idx)
++        closest_w = _gather_seq(closest_d_hat_full, t_idx, e_idx)
++        succtol_w = _gather_seq(success_tolerance_full, t_idx, e_idx)
+ 
+         next_obs_w = _gather_next(obs_full, last_obs, t_idx, e_idx, H)
+         next_d_hat_w = _gather_next(d_hat_full, last_d_hat, t_idx, e_idx, H)
+@@ -244,6 +291,46 @@ class SequenceSampler:
+ 
+         valid_mask, segment_id = self._build_mask_and_segment(done_w)
+ 
++        # Phase A4 P4 (2026-06-09): build aux_scalars tensor (Part B).
++        aux_scalars_w: Optional[torch.Tensor] = None
++        if aux_scalars_full is not None:
++            aux_scalars_w = _gather_seq(aux_scalars_full, t_idx, e_idx)
++        else:
++            aux_components: list[torch.Tensor] = []
++            # Order is stable: d_hat, next_d_hat, delta, success_cnt,
++            # next_success_cnt, success_delta, success_tolerance, lifted,
++            # failure, picked, dropped, closest_d_hat. Missing fields
++            # contribute a zero column so model.aux_dim can be audited.
++            def _push(x: Optional[torch.Tensor]):
++                if x is None:
++                    aux_components.append(
++                        torch.zeros(T, B, 1, device=obs_full.device, dtype=obs_full.dtype)
++                    )
++                else:
++                    if x.ndim == 2:
++                        aux_components.append(x.unsqueeze(-1).to(obs_full.dtype))
++                    else:
++                        aux_components.append(x.to(obs_full.dtype))
++            _push(d_hat_w)
++            _push(next_d_hat_w)
++            if d_hat_w is not None and next_d_hat_w is not None:
++                _push(next_d_hat_w - d_hat_w)
++            else:
++                _push(None)
++            _push(success_w)
++            _push(next_success_w)
++            if success_w is not None and next_success_w is not None:
++                _push(next_success_w - success_w)
++            else:
++                _push(None)
++            _push(succtol_w)
++            _push(lifted_w)
++            _push(failure_w)
++            _push(picked_w)
++            _push(dropped_w)
++            _push(closest_w)
++            aux_scalars_w = torch.cat(aux_components, dim=-1)
++
+         return SequenceBatch(
+             obs=obs_w,
+             action=action_w,
+@@ -259,14 +346,132 @@ class SequenceSampler:
+             lifted=lifted_w,
+             valid_mask=valid_mask,
+             segment_id=segment_id,
++            aux_scalars=aux_scalars_w,
++            success_tolerance_seq=succtol_w,
++            picked=picked_w,
++            dropped=dropped_w,
++            closest_d_hat=closest_w,
+             meta={
+                 "horizon_length": int(H),
+                 "num_actors": int(N),
+                 "obs_dim": int(D_obs),
+                 "seq_len": int(T),
+                 "seq_batch_size": int(B),
++                "replay_prioritized": bool(self.prioritize_floor_recovery),
++                "aux_dim": int(aux_scalars_w.shape[-1])
++                if aux_scalars_w is not None else 0,
+             },
+         )
+ 
++    def _sample_indices_prioritized(
++        self,
++        H: int,
++        N: int,
++        *,
++        success_tolerance_full: Optional[torch.Tensor],
++        failure_full: Optional[torch.Tensor],
++        success_count_full: Optional[torch.Tensor],
++        d_hat_full: Optional[torch.Tensor],
++    ) -> tuple[torch.Tensor, torch.Tensor]:
++        """Phase A4 P4 (2026-06-09): replay prioritization (Part F).
++
++        When ``self.prioritize_floor_recovery`` is False this falls back
++        to the legacy uniform sampler.
++
++        Otherwise the (env, start_t) probability is built from a 0..1
++        weight per (start_t, env) bin, scaled by per-feature multipliers.
++        ``self.uniform_floor`` of the batch is reserved for legacy
++        uniform draws so the prior over the data does not collapse.
++        """
++        if not self.prioritize_floor_recovery:
++            return self._sample_indices(H, N)
++        T = self.seq_len
++        B = self.seq_batch_size
++        if T > H:
++            return self._sample_indices(H, N)
++        n_uniform = max(1, int(round(self.uniform_floor * B)))
++        n_prio = max(0, B - n_uniform)
++        # Uniform pool first (re-use legacy logic):
++        t_idx_u, e_idx_u = self._sample_indices(H, N)
++        if n_uniform == B or n_prio == 0:
++            return t_idx_u, e_idx_u
++        # Build per-(t_start, env) weights. We work on shape (H_eff, N)
++        # where H_eff = H - T + 1 to ensure the window fits.
++        H_eff = max(1, H - T + 1)
++        device = self.device
++        weights = torch.ones(H_eff, N, device=device, dtype=torch.float32)
++        # Floor stage from per-step success_tolerance averaged over
++        # window. Missing -> uniform.
++        if success_tolerance_full is not None:
++            tol = success_tolerance_full.to(device=device, dtype=torch.float32)
++            if tol.ndim == 3:
++                tol = tol.squeeze(-1)
++            # average tolerance over the (T)-length window starting at t.
++            cum = tol.cumsum(dim=0)
++            for ts in range(H_eff):
++                end = ts + T
++                window_sum = (
++                    cum[end - 1] - (cum[ts - 1] if ts >= 1 else 0.0)
++                )
++                window_mean = window_sum / max(T, 1)
++                hard_mask = (window_mean <= self.hard_floor_tol_threshold).float()
++                floor_mask = (
++                    (window_mean <= self.floor_tol_threshold).float() - hard_mask
++                ).clamp_min(0.0)
++                weights[ts] = (
++                    weights[ts]
++                    + (self.hard_floor_weight - 1.0) * hard_mask
++                    + (self.floor_weight - 1.0) * floor_mask
++                )
++        # Drop-near-success: failure_full sees a positive within window
++        # AND success_count rises within same window.
++        if failure_full is not None and success_count_full is not None:
++            fail = failure_full.to(device=device, dtype=torch.float32)
++            sc = success_count_full.to(device=device, dtype=torch.float32)
++            if fail.ndim == 3:
++                fail = fail.squeeze(-1)
++            if sc.ndim == 3:
++                sc = sc.squeeze(-1)
++            for ts in range(H_eff):
++                end = ts + T
++                fail_in_window = (fail[ts:end].sum(dim=0) > 0.5).float()
++                sc_rise = (sc[end - 1] - sc[ts]).clamp_min(0.0)
++                near_success = ((sc_rise > 0.5) & (fail_in_window > 0.5)).float()
++                weights[ts] = (
++                    weights[ts] + (self.drop_near_success_weight - 1.0) * near_success
++                )
++        # Positive slope: d_hat trends down within the window.
++        if d_hat_full is not None:
++            d_hat = d_hat_full.to(device=device, dtype=torch.float32)
++            if d_hat.ndim == 3:
++                d_hat = d_hat.squeeze(-1)
++            for ts in range(H_eff):
++                end = ts + T
++                slope = (d_hat[ts] - d_hat[end - 1]).clamp_min(0.0)
++                weights[ts] = (
++                    weights[ts] + (self.positive_slope_weight - 1.0) * (slope > 1e-6).float()
++                )
++        # Sample prioritized indices via 1D multinomial.
++        flat = weights.reshape(-1)
++        flat = flat / (flat.sum() + 1e-9)
++        idx = torch.multinomial(flat, num_samples=n_prio, replacement=True)
++        ts_p = (idx // N).long()
++        e_p = (idx % N).long()
++        # Build (T, B) for prioritized portion.
++        t_off = torch.arange(T, device=device).unsqueeze(1)
++        t_idx_p = ts_p.unsqueeze(0) + t_off
++        e_idx_p = e_p.unsqueeze(0).expand(T, n_prio).contiguous()
++        # Concatenate uniform + prioritized; shuffle so layout is mixed.
++        t_idx = torch.cat([t_idx_u[:, : n_uniform], t_idx_p], dim=1)
++        e_idx = torch.cat([e_idx_u[:, : n_uniform], e_idx_p], dim=1)
++        perm = torch.randperm(B, device=device)
++        self.last_replay_metrics = {
++            "uniform_fraction": float(n_uniform / max(B, 1)),
++            "prio_fraction": float(n_prio / max(B, 1)),
++            "weights_max": float(weights.max().item()),
++            "weights_mean": float(weights.mean().item()),
++        }
++        return t_idx[:, perm], e_idx[:, perm]
++
+ 
+ __all__ = ["SequenceSampler"]
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_trainer.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_trainer.py
+index 9ea3cb6..6b88c2d 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_trainer.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/seq_wm_trainer.py
+@@ -77,6 +77,62 @@ class SeqWMConfig:
+     # Misc.
+     seed: int = 0
+ 
++    # ------------------------------------------------------------------
++    # Phase A4 P4 (2026-06-09): task-aware extensions (Part B + Part F).
++    # All defaults inert. Enabled flags only take effect when the
++    # corresponding kill switch on the trainer is True.
++    # ------------------------------------------------------------------
++    use_task_aux_inputs: bool = False
++    aux_dim: int = 0  # auto-derived from the aux assembler when > 0
++    aux_embed_dim: int = 64
++    loss_preset: str = "default"  # "default" | "task_focused"
++    floor_aware_weighting: bool = False
++    floor_tol_threshold: float = 0.02
++    floor_tol_floor: float = 0.012
++    floor_weight_mid: float = 2.0
++    floor_weight_floor: float = 3.0
++    use_horizon_heads: bool = False
++    horizon_steps: tuple[int, ...] = (8, 16)
++    use_recovery_head: bool = False
++    recovery_horizon: int = 16
++    lambda_horizon_success: float = 0.0
++    lambda_drop_risk: float = 0.0
++    lambda_recovery: float = 0.0
++    recovery_d_hat_margin: float = 0.005
++    recovery_d_hat_tol_min_steps: int = 0
++    # Replay prioritization (Part F). Defaults keep uniform sampling.
++    replay_prioritize_floor_recovery: bool = False
++    replay_floor_weight: float = 2.0
++    replay_hard_floor_weight: float = 3.0
++    replay_positive_slope_weight: float = 2.0
++    replay_drop_near_success_weight: float = 1.5
++    replay_uniform_floor: float = 0.3
++    # Iterative teacher (Part C).
++    enable_iterative_teacher: bool = False
++    teacher_eval_interval_frames: int = 50_000_000
++    teacher_promote_min_improvement: float = 0.02
++    teacher_keep_last_k: int = 3
++    teacher_metric: str = "floor_recovery_eval_score"
++    # Imagined evaluator (Part D).
++    enable_imagined_evaluator: bool = False
++    imagine_horizons: tuple[int, ...] = (8, 16)
++    imagine_action_mode: str = "recorded"  # "recorded" | "policy"
++    imagine_num_starts: int = 256
++    imagine_use_teacher: bool = True
++
++
++_LOSS_PRESETS: dict[str, dict[str, float]] = {
++    "default": {},  # empty -> use cfg.lambda_*
++    "task_focused": {
++        "state": 0.3,
++        "reward": 0.5,
++        "done": 0.1,
++        "success": 2.0,
++        "task_error": 3.0,
++        "value": 0.3,
++    },
++}
++
+ 
+ def _beta_kl_at(frames: int, cfg: SeqWMConfig) -> float:
+     """Linear warmup from `beta_kl_start` to `beta_kl_end` over
+@@ -114,6 +170,14 @@ class SeqWMTrainer:
+             seq_len=cfg.seq_len,
+             seq_batch_size=cfg.seq_batch_size,
+             device=self.device,
++            prioritize_floor_recovery=bool(cfg.replay_prioritize_floor_recovery),
++            floor_weight=float(cfg.replay_floor_weight),
++            hard_floor_weight=float(cfg.replay_hard_floor_weight),
++            positive_slope_weight=float(cfg.replay_positive_slope_weight),
++            drop_near_success_weight=float(cfg.replay_drop_near_success_weight),
++            uniform_floor=float(cfg.replay_uniform_floor),
++            floor_tol_threshold=float(cfg.floor_tol_threshold),
++            hard_floor_tol_threshold=float(cfg.floor_tol_floor),
+         )
+         self.global_step = 0
+         self.last_metrics: dict[str, float] = {}
+@@ -123,7 +187,7 @@ class SeqWMTrainer:
+     @torch.no_grad()
+     def _build_loss_weights(self) -> dict[str, float]:
+         c = self.cfg
+-        return {
++        weights = {
+             "state": c.lambda_state,
+             "reward": c.lambda_reward,
+             "done": c.lambda_done,
+@@ -131,6 +195,23 @@ class SeqWMTrainer:
+             "task_error": c.lambda_task_error,
+             "value": c.lambda_value,
+         }
++        # Phase A4 P4 (2026-06-09): apply optional preset on top of legacy
++        # lambdas. Explicit CLI lambda_* still wins because train.py forwards
++        # them after the preset has been applied; this only changes defaults
++        # for the non-overridden keys.
++        preset = _LOSS_PRESETS.get(str(c.loss_preset), {})
++        if preset:
++            for k, v in preset.items():
++                weights[k] = float(v)
++        # Horizon / recovery extras enter via dedicated lambdas.
++        if c.use_horizon_heads:
++            weights["horizon_success_h" + str(0)] = 0.0  # unused; placeholder
++            for h in c.horizon_steps:
++                weights[f"horizon_success_h{int(h)}"] = float(c.lambda_horizon_success)
++                weights[f"drop_risk_h{int(h)}"] = float(c.lambda_drop_risk)
++        if c.use_recovery_head:
++            weights["recovery"] = float(c.lambda_recovery)
++        return weights
+ 
+     def step(
+         self,
+@@ -168,6 +249,14 @@ class SeqWMTrainer:
+         failure_full = read_aux_full(experience_buffer, "aux_failure")
+         lifted_full = read_aux_full(experience_buffer, "aux_lifted")
+         success_count_full = read_aux_full(experience_buffer, "aux_success_cnt")
++        # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B). All
++        # are optional; the buffer returns None when not registered, in
++        # which case the sampler still produces a zero column for the
++        # corresponding aux scalar slot so model.aux_dim stays stable.
++        picked_full = read_aux_full(experience_buffer, "aux_picked")
++        dropped_full = read_aux_full(experience_buffer, "aux_dropped")
++        closest_full = read_aux_full(experience_buffer, "aux_closest_d_hat")
++        success_tol_full = read_aux_full(experience_buffer, "aux_success_tolerance")
+ 
+         cumulative_metrics: dict[str, float] = {}
+ 
+@@ -185,6 +274,10 @@ class SeqWMTrainer:
+                 success_count_full=success_count_full,
+                 last_success_count=last_success_count,
+                 lifted_full=lifted_full,
++                picked_full=picked_full,
++                dropped_full=dropped_full,
++                closest_d_hat_full=closest_full,
++                success_tolerance_full=success_tol_full,
+             )
+             batch = batch.to(self.device)
+             beta = _beta_kl_at(frames, self.cfg)
+@@ -195,7 +288,27 @@ class SeqWMTrainer:
+                 "beta_kl": beta,
+                 "value_detach_belief": self.cfg.value_detach_belief,
+             }
+-            losses = self.model.compute_aux_loss(batch, **kwargs)
++            # Phase A4 P4 (2026-06-09): forward floor-aware and recovery
++            # config IFF the model accepts them. RSSM-lite does. Other
++            # backbones (Transformer-lite, etc.) silently ignore unknown
++            # kwargs via their compute_aux_loss signatures, so we wrap the
++            # call in a try/except to keep the surface backward-compatible.
++            try:
++                losses = self.model.compute_aux_loss(
++                    batch,
++                    floor_aware_weighting=bool(self.cfg.floor_aware_weighting),
++                    floor_tol_threshold=float(self.cfg.floor_tol_threshold),
++                    floor_tol_floor=float(self.cfg.floor_tol_floor),
++                    floor_weight_mid=float(self.cfg.floor_weight_mid),
++                    floor_weight_floor=float(self.cfg.floor_weight_floor),
++                    recovery_d_hat_margin=float(self.cfg.recovery_d_hat_margin),
++                    recovery_d_hat_tol_min_steps=int(
++                        self.cfg.recovery_d_hat_tol_min_steps
++                    ),
++                    **kwargs,
++                )
++            except TypeError:
++                losses = self.model.compute_aux_loss(batch, **kwargs)
+ 
+             scaled = self.cfg.lambda_total * losses["loss_total"]
+             self.optimizer.zero_grad(set_to_none=True)
+diff --git a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_aux_buffer.py b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_aux_buffer.py
+index 1bc03d8..efc68d3 100644
+--- a/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_aux_buffer.py
++++ b/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_aux_buffer.py
+@@ -47,6 +47,23 @@ DEFAULT_SEQ_AUX_FIELDS: dict[str, tuple[int, ...]] = {
+     "aux_success_cnt": (1,),
+ }
+ 
++# Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
++# These are additive defaults consumed only when
++# --seq_wm_use_task_aux_inputs is enabled in train.py. Registering them
++# unconditionally is cheap (a few (T,N,1) float buffers) but the
++# observer / trainer code MUST treat all values as optional.
++TASK_AUX_FIELDS: dict[str, tuple[int, ...]] = {
++    "aux_picked": (1,),
++    "aux_dropped": (1,),
++    "aux_closest_d_hat": (1,),
++    "aux_success_tolerance": (1,),
++}
++
++EXTENDED_SEQ_AUX_FIELDS: dict[str, tuple[int, ...]] = {
++    **DEFAULT_SEQ_AUX_FIELDS,
++    **TASK_AUX_FIELDS,
++}
++
+ 
+ def register_seq_aux_fields(
+     experience_buffer: Any,
+@@ -186,11 +203,44 @@ def extract_step_aux(
+         v = _to_tensor_2d(src, device=device)
+         if v is not None:
+             out["aux_success_cnt"] = v
++    # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
++    # All sources are best-effort; missing data leaves the field absent
++    # so register_seq_aux_fields' default zero-init is preserved.
++    if "aux_picked" in fields:
++        src = env_attrs.get("picked")
++        if src is None and isinstance(wm, Mapping):
++            src = wm.get("picked")
++        v = _to_tensor_2d(src, device=device)
++        if v is not None:
++            out["aux_picked"] = v
++    if "aux_dropped" in fields:
++        src = env_attrs.get("dropped")
++        if src is None and isinstance(wm, Mapping):
++            src = wm.get("dropped")
++        v = _to_tensor_2d(src, device=device)
++        if v is not None:
++            out["aux_dropped"] = v
++    if "aux_closest_d_hat" in fields:
++        src = env_attrs.get("closest_d_hat")
++        if src is None and isinstance(wm, Mapping):
++            src = wm.get("closest_d_hat")
++        v = _to_tensor_2d(src, device=device)
++        if v is not None:
++            out["aux_closest_d_hat"] = v
++    if "aux_success_tolerance" in fields:
++        src = env_attrs.get("success_tolerance")
++        if src is None and isinstance(wm, Mapping):
++            src = wm.get("success_tolerance")
++        v = _to_tensor_2d(src, device=device)
++        if v is not None:
++            out["aux_success_tolerance"] = v
+     return out
+ 
+ 
+ __all__ = [
+     "DEFAULT_SEQ_AUX_FIELDS",
++    "TASK_AUX_FIELDS",
++    "EXTENDED_SEQ_AUX_FIELDS",
+     "register_seq_aux_fields",
+     "insert_step_aux",
+     "read_aux_full",

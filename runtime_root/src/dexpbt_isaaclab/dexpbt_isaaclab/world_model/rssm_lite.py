@@ -117,6 +117,16 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         with_task_error_head: bool = True,
         free_nats: float = 1.0,
         std_floor: float = 0.1,
+        # Phase A4 P4 (2026-06-09): task-aware extensions (Part B).
+        # All defaults are inert: aux_dim=0 disables the aux encoder and
+        # falls back to the legacy posterior input shape; horizon/recovery
+        # heads are off until explicitly toggled.
+        aux_dim: int = 0,
+        aux_embed_dim: int = 64,
+        with_horizon_heads: bool = False,
+        horizon_steps: tuple[int, ...] = (8, 16),
+        with_recovery_head: bool = False,
+        recovery_horizon: int = 16,
     ) -> None:
         super().__init__()
         self.obs_dim = int(obs_dim)
@@ -133,12 +143,27 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         self.obs_encoder = _mlp(self.obs_dim, obs_embed_dim, obs_embed_dim, n_hidden=1)
         self.action_encoder = _mlp(self.action_dim, action_embed_dim, action_embed_dim, n_hidden=0)
 
+        # Phase A4 P4 (2026-06-09): optional aux encoder (Part B).
+        # When aux_dim==0 the encoder is None and the posterior consumes
+        # the legacy concat(h, obs_emb) as before; default forward is
+        # bit-for-bit unchanged.
+        self.aux_dim = int(max(0, aux_dim))
+        self.aux_embed_dim = int(aux_embed_dim) if self.aux_dim > 0 else 0
+        if self.aux_dim > 0 and self.aux_embed_dim > 0:
+            self.aux_encoder = _mlp(
+                self.aux_dim, self.aux_embed_dim, self.aux_embed_dim, n_hidden=1
+            )
+            posterior_in = self.h_dim + obs_embed_dim + self.aux_embed_dim
+        else:
+            self.aux_encoder = None
+            posterior_in = self.h_dim + obs_embed_dim
+
         # Transition: GRU(input = z_prev[Z] + a_emb_prev[Aemb])
         self.gru = nn.GRUCell(input_size=self.z_dim + action_embed_dim, hidden_size=self.h_dim)
 
         # Prior and posterior produce 2*z_dim params (mu, raw_std).
         self.prior_net = _mlp(self.h_dim, h_dim, 2 * self.z_dim, n_hidden=1)
-        self.posterior_net = _mlp(self.h_dim + obs_embed_dim, h_dim, 2 * self.z_dim, n_hidden=1)
+        self.posterior_net = _mlp(posterior_in, h_dim, 2 * self.z_dim, n_hidden=1)
 
         # Shared prediction heads.
         self.heads = PredictionHeads(
@@ -150,7 +175,17 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             with_value_head=with_value_head,
             with_success_head=with_success_head,
             with_task_error_head=with_task_error_head,
+            with_horizon_heads=bool(with_horizon_heads),
+            horizon_steps=tuple(int(x) for x in horizon_steps if int(x) > 0),
+            with_recovery_head=bool(with_recovery_head),
+            recovery_horizon=int(max(1, recovery_horizon)),
         )
+
+        # Phase A4 P4 (2026-06-09): bookkeeping for new heads.
+        self.with_horizon_heads = bool(with_horizon_heads)
+        self.horizon_steps = tuple(int(x) for x in horizon_steps if int(x) > 0)
+        self.with_recovery_head = bool(with_recovery_head)
+        self.recovery_horizon = int(max(1, recovery_horizon))
 
         # Tiny per-step running stats for telemetry.
         self._last_metrics: dict[str, float] = {}
@@ -187,6 +222,18 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         obs_emb_seq = self.obs_encoder(batch.obs.reshape(T * B, -1)).reshape(T, B, -1)
         act_emb_seq = self.action_encoder(batch.action.reshape(T * B, -1)).reshape(T, B, -1)
 
+        # Phase A4 P4 (2026-06-09): optional aux scalar embedding (Part B).
+        # When the aux encoder is None or the batch lacks aux_scalars, the
+        # posterior input shape falls back to the legacy concat(h, obs_emb).
+        aux_emb_seq: Optional[torch.Tensor] = None
+        if (
+            self.aux_encoder is not None
+            and batch.aux_scalars is not None
+            and batch.aux_scalars.shape[-1] == self.aux_dim
+        ):
+            aux_in = batch.aux_scalars.reshape(T * B, -1)
+            aux_emb_seq = self.aux_encoder(aux_in).reshape(T, B, -1)
+
         h = torch.zeros(B, self.h_dim, device=device, dtype=batch.obs.dtype)
         z = torch.zeros(B, self.z_dim, device=device, dtype=batch.obs.dtype)
         beliefs: list[torch.Tensor] = []
@@ -206,9 +253,13 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 h = self.gru(gru_in, h)
             # Prior and posterior at h_t.
             prior_mu, prior_std = self._split_dist(self.prior_net(h))
-            post_mu, post_std = self._split_dist(
-                self.posterior_net(torch.cat([h, obs_emb_seq[t]], dim=-1))
-            )
+            if aux_emb_seq is None:
+                post_input = torch.cat([h, obs_emb_seq[t]], dim=-1)
+            else:
+                post_input = torch.cat(
+                    [h, obs_emb_seq[t], aux_emb_seq[t]], dim=-1
+                )
+            post_mu, post_std = self._split_dist(self.posterior_net(post_input))
             if deterministic:
                 z = post_mu
             else:
@@ -267,6 +318,23 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         loss_weights: Optional[dict[str, float]] = None,
         beta_kl: float = 0.1,
         value_detach_belief: bool = False,
+        # Phase A4 P4 (2026-06-09): floor-aware task-loss weighting (Part B).
+        # All defaults disable the feature so legacy callers see the same
+        # math. When ``floor_aware_weighting=True`` we look at
+        # batch.success_tolerance_seq (per-step tol) and multiply
+        # success/task_error/value/horizon/drop/recovery losses by:
+        #   * 1.0 above floor_tol_threshold
+        #   * floor_weight_mid in (hard_floor_tol, floor_tol]
+        #   * floor_weight_floor at or below hard_floor_tol
+        # state and KL losses are NEVER multiplied (per spec).
+        floor_aware_weighting: bool = False,
+        floor_tol_threshold: float = 0.02,
+        floor_tol_floor: float = 0.012,
+        floor_weight_mid: float = 2.0,
+        floor_weight_floor: float = 3.0,
+        # Phase A4 P4 (2026-06-09): recovery soft-OR target (Part B / Item 6).
+        recovery_d_hat_margin: float = 0.005,
+        recovery_d_hat_tol_min_steps: int = 0,
     ) -> dict[str, torch.Tensor]:
         """Forward + losses. Returns dict with 'loss_total' and per-term keys."""
         if loss_weights is None:
@@ -363,19 +431,129 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         kl_clamped = (kl_per_step - self.free_nats).clamp_min(0.0)
         L_kl = _masked_mean(kl_clamped, eff_basic)
 
+        # ---- Phase A4 P4 (2026-06-09): horizon heads + recovery head (Part B) ----
+        # All optional; when the heads do not exist or the targets cannot
+        # be built, the corresponding loss term stays at zero and the
+        # caller-side lambda sets the multiplier to 0.0 by default.
+        L_horizon_success: dict[int, torch.Tensor] = {}
+        L_drop_risk: dict[int, torch.Tensor] = {}
+        L_recovery = belief_seq.new_zeros(())
+        recovery_pos_rate = 0.0
+        # Reuse pred for horizon/recovery. The heads, when present, are
+        # called inside heads.predict_horizon / heads.predict_recovery.
+        if self.with_horizon_heads and "horizon_logits" in pred:
+            for h_steps, head_out in pred["horizon_logits"].items():
+                # head_out is dict with 'success' and 'drop' logits, each
+                # shape (T*B, 1). Targets are built from in-window cumulative
+                # success_count / failure flags, masked by valid prefix and
+                # by no-done-cross within the horizon.
+                if (
+                    batch.success_count is None
+                    or batch.next_success_count is None
+                ):
+                    continue
+                horizon_window = max(1, int(h_steps))
+                target_success = self._build_horizon_success_target(
+                    batch, horizon_window
+                )
+                horizon_mask = self._build_horizon_valid_mask(
+                    batch, horizon_window
+                )
+                logit_s = head_out["success"].squeeze(-1)
+                logit_d = head_out["drop"].squeeze(-1)
+                target_drop = self._build_horizon_drop_target(
+                    batch, horizon_window
+                )
+                # Use binary_cross_entropy_with_logits with sample weights.
+                w = horizon_mask.reshape(T * B)
+                denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
+                L_horizon_success[h_steps] = (
+                    F.binary_cross_entropy_with_logits(
+                        logit_s,
+                        target_success.reshape(T * B),
+                        weight=w,
+                        reduction="sum",
+                    )
+                    / denom
+                )
+                L_drop_risk[h_steps] = (
+                    F.binary_cross_entropy_with_logits(
+                        logit_d,
+                        target_drop.reshape(T * B),
+                        weight=w,
+                        reduction="sum",
+                    )
+                    / denom
+                )
+
+        if self.with_recovery_head and "recovery_logits" in pred:
+            recovery_logit = pred["recovery_logits"].squeeze(-1)
+            recovery_target, recovery_mask = self._build_recovery_target_soft_or(
+                batch,
+                horizon=self.recovery_horizon,
+                d_hat_margin=float(recovery_d_hat_margin),
+                d_hat_tol_min_steps=int(recovery_d_hat_tol_min_steps),
+                floor_tol_threshold=float(floor_tol_threshold),
+            )
+            w = recovery_mask.reshape(T * B)
+            denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
+            L_recovery = (
+                F.binary_cross_entropy_with_logits(
+                    recovery_logit,
+                    recovery_target.reshape(T * B),
+                    weight=w,
+                    reduction="sum",
+                )
+                / denom
+            )
+            with torch.no_grad():
+                if w.sum() > 0:
+                    recovery_pos_rate = float(
+                        (recovery_target.reshape(T * B) * w).sum().item()
+                        / float(denom.item())
+                    )
+
+        # Phase A4 P4 (2026-06-09): floor-aware loss multiplier (Part B).
+        floor_mult = belief_seq.new_ones(())
+        if (
+            floor_aware_weighting
+            and batch.success_tolerance_seq is not None
+            and batch.success_tolerance_seq.numel() > 0
+        ):
+            with torch.no_grad():
+                tol_seq = batch.success_tolerance_seq.float()
+                tol_mean = float(
+                    (tol_seq * batch.valid_mask).sum().item()
+                    / max(float(batch.valid_mask.sum().item()), 1.0)
+                )
+            if tol_mean <= float(floor_tol_floor):
+                floor_mult = belief_seq.new_full((), float(floor_weight_floor))
+            elif tol_mean <= float(floor_tol_threshold):
+                floor_mult = belief_seq.new_full((), float(floor_weight_mid))
+            else:
+                floor_mult = belief_seq.new_ones(())
+
         L_total = (
             loss_weights["state"] * L_state
             + loss_weights["reward"] * L_reward
             + loss_weights["done"] * L_done
-            + loss_weights.get("success", 0.0) * L_success
-            + loss_weights.get("task_error", 0.0) * L_task_error
+            + floor_mult * loss_weights.get("success", 0.0) * L_success
+            + floor_mult * loss_weights.get("task_error", 0.0) * L_task_error
             + beta_kl * L_kl
-            + loss_weights.get("value", 0.0) * L_value
+            + floor_mult * loss_weights.get("value", 0.0) * L_value
         )
+        for h_steps, lh in L_horizon_success.items():
+            key = f"horizon_success_h{int(h_steps)}"
+            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * lh
+        for h_steps, ld in L_drop_risk.items():
+            key = f"drop_risk_h{int(h_steps)}"
+            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * ld
+        if self.with_recovery_head:
+            L_total = L_total + floor_mult * loss_weights.get("recovery", 0.0) * L_recovery
 
         # Cache scalar metrics for telemetry.
         with torch.no_grad():
-            self._last_metrics = {
+            metrics = {
                 "loss_total": float(L_total.detach().item()),
                 "loss_state": float(L_state.detach().item()),
                 "loss_reward": float(L_reward.detach().item()),
@@ -389,9 +567,22 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 "prior_std_mean": float(self._last_prior_std.mean().item()),
                 "posterior_std_mean": float(self._last_post_std.mean().item()),
                 "kl_raw_mean": float(kl_per_step.mean().item()),
+                # Phase A4 P4 (2026-06-09): task-aware diagnostics.
+                "floor_loss_mult": float(floor_mult.detach().item()),
+                "loss_recovery": float(L_recovery.detach().item()),
+                "recovery_pos_rate": float(recovery_pos_rate),
             }
+            for h_steps, lh in L_horizon_success.items():
+                metrics[f"loss_horizon_success_h{int(h_steps)}"] = float(
+                    lh.detach().item()
+                )
+            for h_steps, ld in L_drop_risk.items():
+                metrics[f"loss_drop_risk_h{int(h_steps)}"] = float(
+                    ld.detach().item()
+                )
+            self._last_metrics = metrics
 
-        return {
+        result = {
             "loss_total": L_total,
             "loss_state": L_state,
             "loss_reward": L_reward,
@@ -400,7 +591,159 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             "loss_task_error": L_task_error,
             "loss_value": L_value,
             "loss_kl": L_kl,
+            "loss_recovery": L_recovery,
+            "recovery_pos_rate": belief_seq.new_full((), float(recovery_pos_rate)),
         }
+        for h_steps, lh in L_horizon_success.items():
+            result[f"loss_horizon_success_h{int(h_steps)}"] = lh
+        for h_steps, ld in L_drop_risk.items():
+            result[f"loss_drop_risk_h{int(h_steps)}"] = ld
+        return result
+
+    # ------------------------------------------------------------------
+    # Phase A4 P4 (2026-06-09): horizon / recovery target builders.
+    # All targets only use within-window information; no cross-episode
+    # crossing (the cumulative-product mask `seg_ok` enforces that).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_horizon_valid_mask(
+        batch: SequenceBatch, horizon: int
+    ) -> torch.Tensor:
+        """Return mask (T, B) where target is computable inside the window.
+
+        For step t we need the next ``horizon`` steps (t+1..t+H) to lie in
+        the same segment_id (no done crossing) and inside the window. The
+        mask is the elementwise product of:
+          * batch.valid_mask[t]
+          * (1 - done[t])  # done at t means episode ended; no future
+          * cumulative product of (1 - done[t..t+H-1]) over the horizon
+          * 1 if (t + H) < T else 0
+        """
+        T, B = batch.T, batch.B
+        device = batch.device
+        h = max(1, int(horizon))
+        not_done = (1.0 - batch.done.float())
+        in_seg = batch.valid_mask.float()
+        ok = batch.valid_mask.new_zeros(T, B)
+        for t in range(T):
+            if t + h >= T:
+                continue
+            window = not_done[t : t + h]  # (h, B)
+            seg = in_seg[t]
+            ok[t] = seg * window.prod(dim=0)
+        return ok
+
+    @staticmethod
+    def _build_horizon_success_target(
+        batch: SequenceBatch, horizon: int
+    ) -> torch.Tensor:
+        """Return float (T, B): 1.0 if success_count strictly increases over [t, t+H]."""
+        T, B = batch.T, batch.B
+        device = batch.device
+        h = max(1, int(horizon))
+        sc = batch.success_count
+        nsc = batch.next_success_count
+        if sc is None or nsc is None:
+            return torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
+        # Use next_success_count[t+H-1] as the "after H steps" counter.
+        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
+        for t in range(T):
+            t_end = min(T - 1, t + h - 1)
+            inc = (nsc[t_end] - sc[t]).clamp_min(0)
+            target[t] = (inc > 0.5).to(target.dtype)
+        return target
+
+    @staticmethod
+    def _build_horizon_drop_target(
+        batch: SequenceBatch, horizon: int
+    ) -> torch.Tensor:
+        """Return float (T, B): 1.0 if any drop/failure within [t, t+H-1]."""
+        T, B = batch.T, batch.B
+        device = batch.device
+        h = max(1, int(horizon))
+        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
+        if batch.failure is None and batch.dropped is None:
+            return target
+        fail_seq = batch.failure if batch.failure is not None else None
+        drop_seq = batch.dropped if batch.dropped is not None else None
+        for t in range(T):
+            t_end = min(T, t + h)
+            window_fail = (
+                fail_seq[t:t_end].sum(dim=0)
+                if fail_seq is not None
+                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
+            )
+            window_drop = (
+                drop_seq[t:t_end].sum(dim=0)
+                if drop_seq is not None
+                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
+            )
+            target[t] = ((window_fail + window_drop) > 0.5).to(target.dtype)
+        return target
+
+    def _build_recovery_target_soft_or(
+        self,
+        batch: SequenceBatch,
+        *,
+        horizon: int,
+        d_hat_margin: float,
+        d_hat_tol_min_steps: int,
+        floor_tol_threshold: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Soft-OR recovery target (Item 6 of user constraints).
+
+        target[t,b] = 1 if ANY of:
+          * success_count strictly increases over horizon
+          * d_hat improves by ``d_hat_margin`` (i.e. d_hat[t] - d_hat[t+H-1] >= margin)
+          * d_hat <= success_tolerance for >= ``d_hat_tol_min_steps`` of the
+            next horizon valid steps
+        Drop / failure are NOT a hard AND on positives; they are recorded
+        only via the drop-risk head separately. Recovery loss is masked to
+        floor stage: success_tolerance <= floor_tol_threshold.
+        """
+        T, B = batch.T, batch.B
+        device = batch.device
+        h = max(1, int(horizon))
+        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
+
+        success_inc = self._build_horizon_success_target(batch, h)
+        target = torch.maximum(target, success_inc)
+
+        if batch.d_hat is not None:
+            for t in range(T):
+                t_end = min(T - 1, t + h - 1)
+                margin_ok = (batch.d_hat[t] - batch.d_hat[t_end]) >= float(
+                    d_hat_margin
+                )
+                target[t] = torch.maximum(
+                    target[t], margin_ok.to(target.dtype)
+                )
+
+        if (
+            batch.d_hat is not None
+            and batch.success_tolerance_seq is not None
+            and int(d_hat_tol_min_steps) > 0
+        ):
+            for t in range(T):
+                t_end = min(T, t + h)
+                tol_seg = batch.success_tolerance_seq[t:t_end]
+                d_seg = batch.d_hat[t:t_end]
+                under_tol = (d_seg <= tol_seg).float().sum(dim=0)
+                target[t] = torch.maximum(
+                    target[t],
+                    (under_tol >= float(d_hat_tol_min_steps)).to(target.dtype),
+                )
+
+        # Mask: only learn recovery at floor stage AND when target is
+        # well-defined inside the window (no done crossing).
+        valid_h = self._build_horizon_valid_mask(batch, h)
+        mask = valid_h
+        if batch.success_tolerance_seq is not None:
+            tol_at_t = batch.success_tolerance_seq
+            in_floor = (tol_at_t <= float(floor_tol_threshold)).to(mask.dtype)
+            mask = mask * in_floor
+        return target, mask
 
     def report_metrics(self) -> dict[str, float]:
         return dict(self._last_metrics)

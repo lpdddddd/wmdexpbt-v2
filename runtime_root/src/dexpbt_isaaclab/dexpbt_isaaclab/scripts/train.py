@@ -421,6 +421,358 @@ parser.add_argument(
     "logged but does NOT change the runtime floor (which stays at "
     "target_success_tolerance, typically 0.01).",
 )
+# Phase A4 P3 (2026-06-09): source-safe curriculum inheritance + promising
+# anti-churn for fastcurr_inherit 800M. Defaults are inert ("reset" /
+# protection off) so legacy / fastcurr runs are bit-for-bit unchanged.
+parser.add_argument(
+    "--pbt_curriculum_inherit_mode",
+    type=str,
+    default="reset",
+    choices=["reset", "source_safe"],
+    help="On a PBT cross/recovery copy, how to inherit the source's "
+    "curriculum tolerance into the target policy. 'reset' delegates to "
+    "--pbt_recovery_tolerance_mode / --pbt_crosscopy_tolerance_mode "
+    "(legacy). 'source_safe' inherits one level looser than the source "
+    "(source_tol/0.95) when source is stable (nsucc_mean >= "
+    "--pbt_source_safe_min_mean AND retention >= "
+    "--pbt_source_safe_min_retention), clamped to the runtime floor; "
+    "unstable / missing metadata falls back to legacy.",
+)
+parser.add_argument(
+    "--pbt_source_safe_recovery_consolidation_frames",
+    type=int,
+    default=50_000_000,
+    help="source_safe: recovery consolidation length (env frames) re-armed "
+    "on the target slot when the source is stable. Stale post_shrink "
+    "consolidation from the previous slot owner is cleared first.",
+)
+parser.add_argument(
+    "--pbt_source_unsafe_recovery_consolidation_frames",
+    type=int,
+    default=100_000_000,
+    help="source_safe: recovery consolidation length (env frames) re-armed "
+    "on the target slot when the source is unstable or its curriculum "
+    "metadata is missing.",
+)
+parser.add_argument(
+    "--pbt_source_safe_min_mean",
+    type=float,
+    default=20.0,
+    help="source_safe: source.nsucc_mean threshold above which the source "
+    "is considered stable for inheritance purposes.",
+)
+parser.add_argument(
+    "--pbt_source_safe_min_retention",
+    type=float,
+    default=0.7,
+    help="source_safe: source rolling end_mean / peak_mean threshold "
+    "above which the source is considered stable for inheritance.",
+)
+parser.add_argument(
+    "--pbt_protect_promising_workers",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="When true, workers that recently reached high nsucc are "
+    "shielded from bottom-tier replacement for "
+    "--pbt_promising_protect_frames (anti-churn). Hard collapse / NaN "
+    "/ OOM still override the protection.",
+)
+parser.add_argument(
+    "--pbt_promising_nsucc_mean",
+    type=float,
+    default=20.0,
+    help="Promising-worker gate: protect if rolling end_mean >= this.",
+)
+parser.add_argument(
+    "--pbt_promising_peak_mean",
+    type=float,
+    default=25.0,
+    help="Promising-worker gate (with retention): protect if "
+    "recent_peak_nsucc_mean >= this AND current retention >= "
+    "--pbt_promising_min_retention.",
+)
+parser.add_argument(
+    "--pbt_promising_min_retention",
+    type=float,
+    default=0.5,
+    help="Retention guard for the peak-based promising promotion. Avoids "
+    "protecting a worker that once peaked high but has since degraded.",
+)
+parser.add_argument(
+    "--pbt_promising_protect_frames",
+    type=int,
+    default=150_000_000,
+    help="Promising-worker protection window length (env frames).",
+)
+parser.add_argument(
+    "--pbt_promising_allow_hard_collapse_override",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="When true (default), hard collapse / early collapse on the "
+    "protected worker bypasses the protection so the supervisor can "
+    "still replace it.",
+)
+# ----------------------------------------------------------------------
+# Phase A4 P4 (2026-06-09): floor-recovery-aware PBT (Part A) +
+# task-aware RSSM (Part B) + iterative teacher (Part C) + imagined
+# evaluator (Part D) + WM-guided ranking (Part E) + replay
+# prioritization (Part F). Defaults are inert; legacy runs unchanged.
+# ----------------------------------------------------------------------
+# Part A: Floor-recovery PBT.
+parser.add_argument(
+    "--pbt_floor_recovery_aware",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable floor-stage recovery-aware PBT ranking + protection "
+    "+ archive. Default false keeps legacy behavior bit-for-bit.",
+)
+parser.add_argument(
+    "--pbt_floor_tol_threshold", type=float, default=0.02,
+    help="success_tolerance below this counts as floor stage.",
+)
+parser.add_argument(
+    "--pbt_hard_floor_tol_threshold", type=float, default=0.012,
+    help="success_tolerance below this counts as hard floor.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_window", type=int, default=4,
+    help="Rolling window length for floor-recovery slope estimation.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_slope_weight", type=float, default=0.5,
+    help="Weight on positive recovery slope inside floor_recovery_score.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_retention_weight", type=float, default=0.3,
+    help="Weight on retention proxy inside floor_recovery_score.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_nsucc_max_weight", type=float, default=0.2,
+    help="Weight on normalised nsucc_max inside floor_recovery_score.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_drop_penalty", type=float, default=0.5,
+    help="Drop-ratio penalty inside floor_recovery_score.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_protect_frames", type=int, default=200_000_000,
+    help="Floor-recovery protection window length (env frames).",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_min_nsucc_protect", type=float, default=15.0,
+    help="Min nsucc_mean (alone) to enter floor-recovery protection.",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_min_slope_protect", type=float, default=0.05,
+    help="Min positive-slope to enter floor-recovery protection (with retention).",
+)
+parser.add_argument(
+    "--pbt_floor_recovery_min_retention_for_protect", type=float, default=0.3,
+    help="Min retention to enter floor-recovery protection via slope.",
+)
+parser.add_argument(
+    "--pbt_enable_best_floor_recovery_archive",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Save / select best_floor_recovery checkpoints.",
+)
+# Part E: WM-guided PBT ranking three-mode.
+parser.add_argument(
+    "--pbt_wm_score_mode", type=str, default="off",
+    choices=["off", "shadow", "active"],
+    help="off: real-only; shadow: log would-change without replacing; "
+    "active: combine real + WM in ranking. Default off.",
+)
+parser.add_argument(
+    "--pbt_use_wm_recovery_score",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Legacy alias: True -> --pbt_wm_score_mode=active when mode=off.",
+)
+parser.add_argument(
+    "--pbt_wm_recovery_weight", type=float, default=0.3,
+    help="WM recovery probability weight in combined score.",
+)
+parser.add_argument(
+    "--pbt_wm_success_weight", type=float, default=0.2,
+    help="WM success probability weight in combined score.",
+)
+parser.add_argument(
+    "--pbt_wm_drop_penalty", type=float, default=0.3,
+    help="WM drop risk penalty weight in combined score.",
+)
+parser.add_argument(
+    "--pbt_wm_uncertainty_penalty", type=float, default=0.2,
+    help="WM uncertainty penalty weight in combined score.",
+)
+parser.add_argument(
+    "--pbt_wm_max_uncertainty", type=float, default=0.5,
+    help="WM eval ignored when uncertainty > this; falls back to real.",
+)
+# Part B: task-aware RSSM extensions.
+parser.add_argument(
+    "--seq_wm_use_task_aux_inputs",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Add aux scalar encoder to RSSM posterior input.",
+)
+parser.add_argument(
+    "--seq_wm_aux_embed_dim", type=int, default=64,
+    help="Aux scalar encoder output dim.",
+)
+parser.add_argument(
+    "--seq_wm_loss_preset", type=str, default="default",
+    choices=["default", "task_focused"],
+    help="default keeps legacy lambdas; task_focused biases task losses.",
+)
+parser.add_argument(
+    "--seq_wm_floor_aware_weighting",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Multiply task-side losses by floor / hard-floor multipliers.",
+)
+parser.add_argument(
+    "--seq_wm_floor_tol_threshold", type=float, default=0.02,
+    help="seq_wm-side floor stage threshold (mirrors PBT one).",
+)
+parser.add_argument(
+    "--seq_wm_floor_tol_floor", type=float, default=0.012,
+    help="seq_wm-side hard-floor threshold (mirrors PBT one).",
+)
+parser.add_argument(
+    "--seq_wm_floor_weight_mid", type=float, default=2.0,
+    help="task-loss multiplier in floor stage.",
+)
+parser.add_argument(
+    "--seq_wm_floor_weight_floor", type=float, default=3.0,
+    help="task-loss multiplier in hard-floor stage.",
+)
+parser.add_argument(
+    "--seq_wm_use_horizon_heads",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Add horizon (success/drop) heads to RSSM PredictionHeads.",
+)
+parser.add_argument(
+    "--seq_wm_horizon_steps", type=str, default="8,16",
+    help="Comma-separated horizon lengths for the horizon heads.",
+)
+parser.add_argument(
+    "--seq_wm_use_recovery_head",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Add soft-OR recovery head to RSSM PredictionHeads.",
+)
+parser.add_argument(
+    "--seq_wm_recovery_horizon", type=int, default=16,
+    help="Recovery head horizon length.",
+)
+parser.add_argument(
+    "--seq_wm_lambda_horizon_success", type=float, default=0.0,
+    help="Loss weight on horizon-success heads (default 0 -> disabled).",
+)
+parser.add_argument(
+    "--seq_wm_lambda_drop_risk", type=float, default=0.0,
+    help="Loss weight on drop-risk heads (default 0 -> disabled).",
+)
+parser.add_argument(
+    "--seq_wm_lambda_recovery", type=float, default=0.0,
+    help="Loss weight on recovery head (default 0 -> disabled).",
+)
+parser.add_argument(
+    "--seq_wm_recovery_d_hat_margin", type=float, default=0.005,
+    help="d_hat improvement margin used in soft-OR recovery target.",
+)
+parser.add_argument(
+    "--seq_wm_recovery_d_hat_tol_min_steps", type=int, default=0,
+    help="Min steps with d_hat<=tolerance to mark soft-OR recovery.",
+)
+# Part C: iterative teacher.
+parser.add_argument(
+    "--seq_wm_enable_iterative_teacher",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Snapshot RSSM and run held-out floor evaluation with promotion gate.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_eval_interval_frames", type=int, default=50_000_000,
+    help="env-frame interval between teacher snapshot evaluations.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_promote_min_improvement", type=float, default=0.02,
+    help="min eval-score improvement required to promote a candidate.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_keep_last_k", type=int, default=3,
+    help="number of teacher snapshots to keep on disk.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_metric", type=str, default="floor_recovery_eval_score",
+    help="Metric driving teacher promotion. Currently only floor_recovery_eval_score.",
+)
+# Part D: imagined evaluator.
+parser.add_argument(
+    "--seq_wm_enable_imagined_evaluator",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Run short-horizon imagined evaluation each PBT tick.",
+)
+parser.add_argument(
+    "--seq_wm_imagine_horizons", type=str, default="8,16",
+    help="Comma-separated horizon lengths for imagined evaluation.",
+)
+parser.add_argument(
+    "--seq_wm_imagine_action_mode", type=str, default="recorded",
+    choices=["recorded", "policy"],
+    help="recorded uses stored actions; policy raises NotImplementedError.",
+)
+parser.add_argument(
+    "--seq_wm_imagine_num_starts", type=int, default=256,
+    help="Number of start states sampled for imagined evaluation.",
+)
+parser.add_argument(
+    "--seq_wm_imagine_use_teacher",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Use the promoted teacher for imagined evaluation when available.",
+)
+# Part F: replay prioritization.
+parser.add_argument(
+    "--seq_wm_replay_prioritize_floor_recovery",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Bias the SeqWM sampler toward floor / recovery / drop-near-success windows.",
+)
+parser.add_argument(
+    "--seq_wm_replay_floor_weight", type=float, default=2.0,
+    help="Floor-stage replay weight.",
+)
+parser.add_argument(
+    "--seq_wm_replay_hard_floor_weight", type=float, default=3.0,
+    help="Hard-floor stage replay weight.",
+)
+parser.add_argument(
+    "--seq_wm_replay_positive_slope_weight", type=float, default=2.0,
+    help="Positive-slope replay weight.",
+)
+parser.add_argument(
+    "--seq_wm_replay_drop_near_success_weight", type=float, default=1.5,
+    help="Drop-near-success replay weight.",
+)
+parser.add_argument(
+    "--seq_wm_replay_uniform_floor", type=float, default=0.3,
+    help="Min fraction of batch reserved for uniform sampling.",
+)
+# Convenience preset (Item 10). Does NOT bypass kill switches; train.py
+# expands it into individual flags BEFORE constructing the observer and
+# logs the expanded flag set.
+parser.add_argument(
+    "--experimental_rssm_floor_recovery_stack",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Convenience preset that turns on Part A+B+C+D+E+F. Each "
+    "feature has its own --no-* kill switch which always wins.",
+)
 # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
 parser.add_argument(
     "--pbt_early_collapse_detect",
@@ -892,6 +1244,59 @@ parser.add_argument(
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+# ----------------------------------------------------------------------
+# Phase A4 P4 (2026-06-09): expand --experimental_rssm_floor_recovery_stack
+# (Item 10). The preset toggles ON every per-feature flag that has
+# default-False. Each kill switch keeps overriding via argparse normal
+# semantics: any explicit --no-* on the command line is parsed BEFORE we
+# get here, so users can still disable individual layers. We log the
+# expanded flag set so the run audit captures every switch flipped.
+# ----------------------------------------------------------------------
+if bool(getattr(args_cli, "experimental_rssm_floor_recovery_stack", False)):
+    _stack_flags = [
+        ("pbt_floor_recovery_aware", True),
+        ("pbt_enable_best_floor_recovery_archive", True),
+        ("seq_wm_use_task_aux_inputs", True),
+        ("seq_wm_floor_aware_weighting", True),
+        ("seq_wm_use_horizon_heads", True),
+        ("seq_wm_use_recovery_head", True),
+        ("seq_wm_enable_iterative_teacher", True),
+        ("seq_wm_enable_imagined_evaluator", True),
+    ]
+    _audit_lines: list[str] = []
+    for flag_name, target in _stack_flags:
+        cur_val = getattr(args_cli, flag_name, None)
+        if cur_val is False:  # only flip implicit defaults
+            setattr(args_cli, flag_name, target)
+            _audit_lines.append(f"{flag_name}: False -> True (preset)")
+        else:
+            _audit_lines.append(
+                f"{flag_name}: kept {cur_val!r} (kill switch wins)"
+            )
+    # WM-guided ranking: preset bumps to 'shadow' (NEVER 'active' by
+    # default — Item 3 requires explicit opt-in for active mode).
+    if str(getattr(args_cli, "pbt_wm_score_mode", "off")) == "off":
+        args_cli.pbt_wm_score_mode = "shadow"
+        _audit_lines.append("pbt_wm_score_mode: off -> shadow (preset)")
+    else:
+        _audit_lines.append(
+            f"pbt_wm_score_mode: kept {args_cli.pbt_wm_score_mode!r} "
+            "(kill switch wins)"
+        )
+    # Lambdas for the new heads default to 0; the preset turns them on
+    # so the heads actually contribute to the loss when use_*_head flags
+    # are true. Users can still override via --seq_wm_lambda_*.
+    if float(getattr(args_cli, "seq_wm_lambda_horizon_success", 0.0)) <= 0.0:
+        args_cli.seq_wm_lambda_horizon_success = 0.5
+    if float(getattr(args_cli, "seq_wm_lambda_drop_risk", 0.0)) <= 0.0:
+        args_cli.seq_wm_lambda_drop_risk = 0.5
+    if float(getattr(args_cli, "seq_wm_lambda_recovery", 0.0)) <= 0.0:
+        args_cli.seq_wm_lambda_recovery = 1.0
+    print(
+        "[experimental_rssm_floor_recovery_stack] expansion:\n  "
+        + "\n  ".join(_audit_lines)
+    )
 
 # Save original sys.argv before modification so PBT observer can reconstruct
 # the restart command with all parsed arguments (e.g. --task, --observer_mode).
@@ -2459,6 +2864,15 @@ def main():
         except Exception:
             action_dim = 23
 
+        # Phase A4 P4 (2026-06-09): horizon list parser (Part B / D).
+        def _parse_int_list(spec: str) -> tuple[int, ...]:
+            return tuple(
+                int(s.strip()) for s in str(spec or "").split(",") if s.strip()
+            )
+
+        horizon_steps_arg = _parse_int_list(args_cli.seq_wm_horizon_steps) or (8, 16)
+        imagine_horizons_arg = _parse_int_list(args_cli.seq_wm_imagine_horizons) or (8, 16)
+
         seq_cfg = SeqWMConfig(
             seq_len=int(args_cli.seq_wm_seq_len),
             seq_batch_size=int(args_cli.seq_wm_seq_batch_size),
@@ -2477,14 +2891,76 @@ def main():
             beta_kl_end=float(args_cli.seq_wm_beta_kl_end),
             beta_kl_warmup_frames=int(args_cli.seq_wm_beta_kl_warmup_frames),
             free_nats=float(args_cli.seq_wm_free_nats),
+            # Phase A4 P4 (2026-06-09): task-aware extras + replay + teacher.
+            use_task_aux_inputs=bool(args_cli.seq_wm_use_task_aux_inputs),
+            aux_embed_dim=int(args_cli.seq_wm_aux_embed_dim),
+            loss_preset=str(args_cli.seq_wm_loss_preset),
+            floor_aware_weighting=bool(args_cli.seq_wm_floor_aware_weighting),
+            floor_tol_threshold=float(args_cli.seq_wm_floor_tol_threshold),
+            floor_tol_floor=float(args_cli.seq_wm_floor_tol_floor),
+            floor_weight_mid=float(args_cli.seq_wm_floor_weight_mid),
+            floor_weight_floor=float(args_cli.seq_wm_floor_weight_floor),
+            use_horizon_heads=bool(args_cli.seq_wm_use_horizon_heads),
+            horizon_steps=horizon_steps_arg,
+            use_recovery_head=bool(args_cli.seq_wm_use_recovery_head),
+            recovery_horizon=int(args_cli.seq_wm_recovery_horizon),
+            lambda_horizon_success=float(args_cli.seq_wm_lambda_horizon_success),
+            lambda_drop_risk=float(args_cli.seq_wm_lambda_drop_risk),
+            lambda_recovery=float(args_cli.seq_wm_lambda_recovery),
+            recovery_d_hat_margin=float(args_cli.seq_wm_recovery_d_hat_margin),
+            recovery_d_hat_tol_min_steps=int(
+                args_cli.seq_wm_recovery_d_hat_tol_min_steps
+            ),
+            replay_prioritize_floor_recovery=bool(
+                args_cli.seq_wm_replay_prioritize_floor_recovery
+            ),
+            replay_floor_weight=float(args_cli.seq_wm_replay_floor_weight),
+            replay_hard_floor_weight=float(
+                args_cli.seq_wm_replay_hard_floor_weight
+            ),
+            replay_positive_slope_weight=float(
+                args_cli.seq_wm_replay_positive_slope_weight
+            ),
+            replay_drop_near_success_weight=float(
+                args_cli.seq_wm_replay_drop_near_success_weight
+            ),
+            replay_uniform_floor=float(args_cli.seq_wm_replay_uniform_floor),
+            enable_iterative_teacher=bool(
+                args_cli.seq_wm_enable_iterative_teacher
+            ),
+            teacher_eval_interval_frames=int(
+                args_cli.seq_wm_teacher_eval_interval_frames
+            ),
+            teacher_promote_min_improvement=float(
+                args_cli.seq_wm_teacher_promote_min_improvement
+            ),
+            teacher_keep_last_k=int(args_cli.seq_wm_teacher_keep_last_k),
+            teacher_metric=str(args_cli.seq_wm_teacher_metric),
+            enable_imagined_evaluator=bool(
+                args_cli.seq_wm_enable_imagined_evaluator
+            ),
+            imagine_horizons=imagine_horizons_arg,
+            imagine_action_mode=str(args_cli.seq_wm_imagine_action_mode),
+            imagine_num_starts=int(args_cli.seq_wm_imagine_num_starts),
+            imagine_use_teacher=bool(args_cli.seq_wm_imagine_use_teacher),
         )
         with_value = args_cli.wm_strategy in ("rssm_belief_value", "trans_belief_value")
+        # Aux dim is determined by the sampler at runtime (12 columns); the
+        # RSSM uses 12 only when use_task_aux_inputs is True. The default
+        # zero falls back to the legacy posterior input shape.
+        rssm_aux_dim = 12 if seq_cfg.use_task_aux_inputs else 0
         if args_cli.wm_strategy in RSSM_FAMILY:
             seq_model = RSSMLiteWorldModel(
                 obs_dim=obs_dim,
                 action_dim=action_dim,
                 free_nats=seq_cfg.free_nats,
                 with_value_head=with_value,
+                aux_dim=rssm_aux_dim,
+                aux_embed_dim=seq_cfg.aux_embed_dim,
+                with_horizon_heads=seq_cfg.use_horizon_heads,
+                horizon_steps=seq_cfg.horizon_steps,
+                with_recovery_head=seq_cfg.use_recovery_head,
+                recovery_horizon=seq_cfg.recovery_horizon,
             )
         elif args_cli.wm_strategy in TRANS_FAMILY:
             seq_model = TransformerLiteWorldModel(
@@ -2862,6 +3338,74 @@ def main():
             ),
             curriculum_fast_target_tolerance_800m=(
                 args_cli.curriculum_fast_target_tolerance_800m
+            ),
+            # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance.
+            pbt_curriculum_inherit_mode=args_cli.pbt_curriculum_inherit_mode,
+            pbt_source_safe_recovery_consolidation_frames=(
+                args_cli.pbt_source_safe_recovery_consolidation_frames
+            ),
+            pbt_source_unsafe_recovery_consolidation_frames=(
+                args_cli.pbt_source_unsafe_recovery_consolidation_frames
+            ),
+            pbt_source_safe_min_mean=args_cli.pbt_source_safe_min_mean,
+            pbt_source_safe_min_retention=(
+                args_cli.pbt_source_safe_min_retention
+            ),
+            pbt_protect_promising_workers=(
+                args_cli.pbt_protect_promising_workers
+            ),
+            pbt_promising_nsucc_mean=args_cli.pbt_promising_nsucc_mean,
+            pbt_promising_peak_mean=args_cli.pbt_promising_peak_mean,
+            pbt_promising_min_retention=(
+                args_cli.pbt_promising_min_retention
+            ),
+            pbt_promising_protect_frames=(
+                args_cli.pbt_promising_protect_frames
+            ),
+            pbt_promising_allow_hard_collapse_override=(
+                args_cli.pbt_promising_allow_hard_collapse_override
+            ),
+            # Phase A4 P4 (2026-06-09): floor-recovery + WM-guided ranking.
+            pbt_floor_recovery_aware=args_cli.pbt_floor_recovery_aware,
+            pbt_floor_tol_threshold=args_cli.pbt_floor_tol_threshold,
+            pbt_hard_floor_tol_threshold=args_cli.pbt_hard_floor_tol_threshold,
+            pbt_floor_recovery_window=args_cli.pbt_floor_recovery_window,
+            pbt_floor_recovery_slope_weight=(
+                args_cli.pbt_floor_recovery_slope_weight
+            ),
+            pbt_floor_recovery_retention_weight=(
+                args_cli.pbt_floor_recovery_retention_weight
+            ),
+            pbt_floor_recovery_nsucc_max_weight=(
+                args_cli.pbt_floor_recovery_nsucc_max_weight
+            ),
+            pbt_floor_recovery_drop_penalty=(
+                args_cli.pbt_floor_recovery_drop_penalty
+            ),
+            pbt_floor_recovery_protect_frames=(
+                args_cli.pbt_floor_recovery_protect_frames
+            ),
+            pbt_floor_recovery_min_nsucc_protect=(
+                args_cli.pbt_floor_recovery_min_nsucc_protect
+            ),
+            pbt_floor_recovery_min_slope_protect=(
+                args_cli.pbt_floor_recovery_min_slope_protect
+            ),
+            pbt_floor_recovery_min_retention_for_protect=(
+                args_cli.pbt_floor_recovery_min_retention_for_protect
+            ),
+            pbt_enable_best_floor_recovery_archive=(
+                args_cli.pbt_enable_best_floor_recovery_archive
+            ),
+            pbt_wm_score_mode=args_cli.pbt_wm_score_mode,
+            pbt_use_wm_recovery_score=args_cli.pbt_use_wm_recovery_score,
+            pbt_wm_recovery_weight=args_cli.pbt_wm_recovery_weight,
+            pbt_wm_success_weight=args_cli.pbt_wm_success_weight,
+            pbt_wm_drop_penalty=args_cli.pbt_wm_drop_penalty,
+            pbt_wm_uncertainty_penalty=args_cli.pbt_wm_uncertainty_penalty,
+            pbt_wm_max_uncertainty=args_cli.pbt_wm_max_uncertainty,
+            experimental_rssm_floor_recovery_stack=(
+                args_cli.experimental_rssm_floor_recovery_stack
             ),
             pbt_early_collapse_detect=args_cli.pbt_early_collapse_detect,
             early_collapse_drop_ratio=args_cli.early_collapse_drop_ratio,

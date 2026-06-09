@@ -51,6 +51,12 @@ class PredictionHeads(nn.Module):
         with_value_head: bool = True,
         with_success_head: bool = True,
         with_task_error_head: bool = True,
+        # Phase A4 P4 (2026-06-09): horizon / recovery heads (Part B).
+        # All defaults inert; legacy callers see the same module surface.
+        with_horizon_heads: bool = False,
+        horizon_steps: tuple[int, ...] = (8, 16),
+        with_recovery_head: bool = False,
+        recovery_horizon: int = 16,
     ) -> None:
         super().__init__()
         self.belief_dim = int(belief_dim)
@@ -77,6 +83,30 @@ class PredictionHeads(nn.Module):
             _mlp(self.belief_dim, hidden_dim, 1, n_hidden) if with_value_head else None
         )
 
+        # Phase A4 P4 (2026-06-09): horizon heads (Part B).
+        self.with_horizon_heads = bool(with_horizon_heads)
+        self.horizon_steps = tuple(int(x) for x in horizon_steps if int(x) > 0)
+        self.success_horizon_heads: nn.ModuleDict = nn.ModuleDict()
+        self.drop_risk_heads: nn.ModuleDict = nn.ModuleDict()
+        if self.with_horizon_heads:
+            for h in self.horizon_steps:
+                self.success_horizon_heads[f"h{int(h)}"] = _mlp(
+                    ba_in, hidden_dim, 1, n_hidden
+                )
+                self.drop_risk_heads[f"h{int(h)}"] = _mlp(
+                    ba_in, hidden_dim, 1, n_hidden
+                )
+        # Recovery head (Part B / Item 6): predicts soft-OR recovery
+        # within ``recovery_horizon`` steps. Only defined when explicitly
+        # enabled; consumers must check ``has_recovery_head``.
+        self.with_recovery_head = bool(with_recovery_head)
+        self.recovery_horizon = int(max(1, recovery_horizon))
+        self.recovery_head: nn.Module | None = (
+            _mlp(ba_in, hidden_dim, 1, n_hidden)
+            if self.with_recovery_head
+            else None
+        )
+
     # -- Forward helpers (caller flattens (T, B, ...) -> (T*B, ...)) --
 
     def predict_transition(
@@ -100,6 +130,18 @@ class PredictionHeads(nn.Module):
             out["task_error_delta"] = self.task_error_delta_head(ba)
         if self.success_head is not None:
             out["success_logits"] = self.success_head(ba)
+        # Phase A4 P4 (2026-06-09): horizon + recovery outputs (Part B).
+        if self.with_horizon_heads and self.success_horizon_heads:
+            horizon_out: dict[int, dict[str, torch.Tensor]] = {}
+            for key, head in self.success_horizon_heads.items():
+                h_steps = int(key[1:])
+                horizon_out[h_steps] = {
+                    "success": head(ba),
+                    "drop": self.drop_risk_heads[key](ba),
+                }
+            out["horizon_logits"] = horizon_out
+        if self.recovery_head is not None:
+            out["recovery_logits"] = self.recovery_head(ba)
         return out
 
     def predict_value(self, belief_flat: torch.Tensor) -> torch.Tensor | None:
@@ -115,6 +157,14 @@ class PredictionHeads(nn.Module):
     @property
     def has_value_head(self) -> bool:
         return self.value_head is not None
+
+    @property
+    def has_recovery_head(self) -> bool:
+        return self.recovery_head is not None
+
+    @property
+    def has_horizon_heads(self) -> bool:
+        return self.with_horizon_heads and len(self.success_horizon_heads) > 0
 
 
 __all__ = ["PredictionHeads"]

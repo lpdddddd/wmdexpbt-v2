@@ -647,6 +647,43 @@ def main() -> None:
             # (--curriculum_speed_mode=..., --curriculum_fast_*=...) are
             # all value flags handled by the generic normalisation below.
             # No boolean entries needed.
+            # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance
+            # value flags (--pbt_curriculum_inherit_mode=...,
+            # --pbt_source_safe_*=..., --pbt_source_unsafe_*=...,
+            # --pbt_promising_nsucc_mean=..., --pbt_promising_peak_mean=...,
+            # --pbt_promising_min_retention=...,
+            # --pbt_promising_protect_frames=...) are handled below.
+            # The two BooleanOptionalAction toggles need explicit entries:
+            "--pbt_protect_promising_workers",
+            "--no-pbt_protect_promising_workers",
+            "--pbt_promising_allow_hard_collapse_override",
+            "--no-pbt_promising_allow_hard_collapse_override",
+            # Phase A4 P4 (2026-06-09): floor-recovery + RSSM iterative
+            # stack BooleanOptionalAction toggles (Items 2, 3, 10).
+            "--pbt_floor_recovery_aware",
+            "--no-pbt_floor_recovery_aware",
+            "--pbt_enable_best_floor_recovery_archive",
+            "--no-pbt_enable_best_floor_recovery_archive",
+            "--pbt_use_wm_recovery_score",
+            "--no-pbt_use_wm_recovery_score",
+            "--seq_wm_use_task_aux_inputs",
+            "--no-seq_wm_use_task_aux_inputs",
+            "--seq_wm_floor_aware_weighting",
+            "--no-seq_wm_floor_aware_weighting",
+            "--seq_wm_use_horizon_heads",
+            "--no-seq_wm_use_horizon_heads",
+            "--seq_wm_use_recovery_head",
+            "--no-seq_wm_use_recovery_head",
+            "--seq_wm_enable_iterative_teacher",
+            "--no-seq_wm_enable_iterative_teacher",
+            "--seq_wm_enable_imagined_evaluator",
+            "--no-seq_wm_enable_imagined_evaluator",
+            "--seq_wm_imagine_use_teacher",
+            "--no-seq_wm_imagine_use_teacher",
+            "--seq_wm_replay_prioritize_floor_recovery",
+            "--no-seq_wm_replay_prioritize_floor_recovery",
+            "--experimental_rssm_floor_recovery_stack",
+            "--no-experimental_rssm_floor_recovery_stack",
         }
         extra = list(args.extra)
         i = 0

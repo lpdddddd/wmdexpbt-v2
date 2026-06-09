@@ -249,3 +249,169 @@ def compute_pbt_ranking_score(
     if n < float(nsucc_low_threshold):
         return min(score, float(nsucc_low_cap))
     return score
+
+
+# ---------------------------------------------------------------------------
+# Phase A4 P4 (2026-06-09): floor-stage recovery scoring (Part A).
+#
+# Goal:
+#   At hard floor (success_tolerance ~ target_tolerance ~ 0.01) the
+#   "absolute nsucc_mean" signal alone misleads PBT: a worker that just
+#   re-learned at floor with nsucc=8 trending up should not be replaced
+#   by one stuck at nsucc=12 plateau with zero slope.
+#
+# The score below is a SECONDARY ranking signal, gated by
+# --pbt_floor_recovery_aware. Default code paths must not call it.
+#
+# Convention (per user constraint #7): all sub-terms are normalized to
+# 0..1 first, then the final score is multiplied by 50 to live on the
+# same nsucc scale as the legacy ranking. This avoids mixing 0..1 and
+# 0..50 metrics in WM-guided ranking later.
+# ---------------------------------------------------------------------------
+
+FLOOR_STAGE_NONE = "none"
+FLOOR_STAGE_FLOOR = "floor"
+FLOOR_STAGE_HARD_FLOOR = "hard_floor"
+
+
+def floor_stage_classify(
+    success_tolerance: float,
+    target_tolerance: float,
+    *,
+    floor_tol_threshold: float = 0.02,
+    hard_floor_tol_threshold: float = 0.012,
+    floor_tol_eq_target_eps: float = 1e-9,
+) -> str:
+    """Classify the per-policy floor stage from current curriculum state.
+
+    Returns one of {"none","floor","hard_floor"}. Pure function; safe to
+    call from tests and reports without observer state.
+    """
+    tol = float(success_tolerance)
+    tgt = float(target_tolerance)
+    if tol <= float(hard_floor_tol_threshold) or abs(tol - tgt) <= floor_tol_eq_target_eps:
+        return FLOOR_STAGE_HARD_FLOOR
+    if tol <= float(floor_tol_threshold):
+        return FLOOR_STAGE_FLOOR
+    return FLOOR_STAGE_NONE
+
+
+def compute_floor_recovery_slope(
+    nsucc_mean_history: list[float],
+    *,
+    window: int = 4,
+    nsucc_norm: float = 50.0,
+) -> tuple[float, float]:
+    """Return (slope_raw, slope_positive_norm) over the last ``window`` ticks.
+
+    slope_raw  = (nsucc_now - nsucc_window_ago) / max(1, window-1) / nsucc_norm
+    slope_positive_norm = clip(slope_raw, 0, 1)  # only positive recovery counts
+
+    A fully-saturated recovery from 0 -> 50 over `window` ticks gives
+    slope_positive_norm ~= 1. Negative slopes return (slope_raw, 0).
+    Empty/short histories return (0, 0).
+    """
+    xs = [float(x) for x in nsucc_mean_history if x is not None]
+    if len(xs) < 2:
+        return 0.0, 0.0
+    w = max(2, min(int(window), len(xs)))
+    tail = xs[-w:]
+    span = float(tail[-1]) - float(tail[0])
+    denom = max(1, w - 1) * max(1e-6, float(nsucc_norm))
+    slope = span / denom
+    return float(slope), float(max(0.0, min(1.0, slope)))
+
+
+def compute_floor_recovery_score(
+    *,
+    nsucc_mean: float,
+    nsucc_max: float,
+    retention: float,
+    slope_positive_norm: float,
+    drop_ratio: float,
+    hard_collapse: bool = False,
+    nsucc_norm: float = 50.0,
+    slope_weight: float = 0.5,
+    retention_weight: float = 0.3,
+    nsucc_max_weight: float = 0.2,
+    drop_penalty: float = 0.5,
+    hard_collapse_penalty: float = 1.0,
+) -> tuple[float, dict[str, float]]:
+    """Return (score_50, components).
+
+    All sub-terms are 0..1; ``score_50 = 50 * weighted_sum``. The legacy
+    PBT ranking is on a ~0..50 nsucc scale, so this stays comparable.
+
+    Components are returned for JSONL/TB audit logging.
+    """
+    nm = float(max(0.0, min(1.0, float(nsucc_mean) / max(1e-6, float(nsucc_norm)))))
+    nx = float(max(0.0, min(1.0, float(nsucc_max) / max(1e-6, float(nsucc_norm)))))
+    rt = float(max(0.0, min(1.0, float(retention))))
+    sl = float(max(0.0, min(1.0, float(slope_positive_norm))))
+    dp = float(max(0.0, min(1.0, float(drop_ratio))))
+    coll = 1.0 if bool(hard_collapse) else 0.0
+
+    weighted = (
+        1.0 * nm
+        + float(slope_weight) * sl
+        + float(retention_weight) * rt
+        + float(nsucc_max_weight) * nx
+        - float(drop_penalty) * dp
+        - float(hard_collapse_penalty) * coll
+    )
+    score_50 = 50.0 * float(weighted)
+    components = {
+        "nsucc_mean_norm": nm,
+        "nsucc_max_norm": nx,
+        "retention": rt,
+        "slope_positive_norm": sl,
+        "drop_ratio": dp,
+        "hard_collapse": coll,
+        "weighted_norm": float(weighted),
+        "score_50": float(score_50),
+    }
+    return float(score_50), components
+
+
+def combine_wm_recovery_score(
+    real_score_50: float,
+    *,
+    wm_recovery_prob: float,
+    wm_success_prob: float,
+    wm_drop_risk: float,
+    wm_uncertainty: float,
+    recovery_weight: float = 0.3,
+    success_weight: float = 0.2,
+    drop_penalty: float = 0.3,
+    uncertainty_penalty: float = 0.2,
+    nsucc_norm: float = 50.0,
+) -> tuple[float, dict[str, float]]:
+    """Combine real floor-recovery score with imagined WM evaluation.
+
+    Sub-terms are 0..1 probabilities; converted to the same 0..50 scale so
+    PBT can sort with one number. The real score is preserved as the
+    dominant additive term; WM contributes a bounded delta.
+    """
+    rp = float(max(0.0, min(1.0, float(wm_recovery_prob))))
+    sp = float(max(0.0, min(1.0, float(wm_success_prob))))
+    dr = float(max(0.0, min(1.0, float(wm_drop_risk))))
+    un = float(max(0.0, min(1.0, float(wm_uncertainty))))
+    delta_norm = (
+        float(recovery_weight) * rp
+        + float(success_weight) * sp
+        - float(drop_penalty) * dr
+        - float(uncertainty_penalty) * un
+    )
+    delta_50 = 50.0 * float(delta_norm)
+    score = float(real_score_50) + float(delta_50)
+    components = {
+        "wm_recovery_prob": rp,
+        "wm_success_prob": sp,
+        "wm_drop_risk": dr,
+        "wm_uncertainty": un,
+        "delta_norm": float(delta_norm),
+        "delta_50": float(delta_50),
+        "real_score_50": float(real_score_50),
+        "wm_score_50": float(score),
+    }
+    return float(score), components

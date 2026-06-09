@@ -102,6 +102,20 @@ class SequenceSampler:
         seq_batch_size: int,
         device: torch.device | str = "cuda",
         generator: Optional[torch.Generator] = None,
+        # Phase A4 P4 (2026-06-09): replay prioritization knobs (Part F).
+        # Defaults preserve uniform sampling. When prioritize=True the
+        # sampler computes per-(env, start_t) weights from ``failure``,
+        # ``success_count`` deltas, and per-step success_tolerance, then
+        # uses torch.multinomial to pick prioritized indices for the
+        # non-uniform fraction. ``uniform_floor`` of indices stay uniform.
+        prioritize_floor_recovery: bool = False,
+        floor_weight: float = 2.0,
+        hard_floor_weight: float = 3.0,
+        positive_slope_weight: float = 2.0,
+        drop_near_success_weight: float = 1.5,
+        uniform_floor: float = 0.3,
+        floor_tol_threshold: float = 0.02,
+        hard_floor_tol_threshold: float = 0.012,
     ) -> None:
         if seq_len <= 0:
             raise ValueError(f"seq_len must be > 0, got {seq_len}")
@@ -111,6 +125,15 @@ class SequenceSampler:
         self.seq_batch_size = int(seq_batch_size)
         self.device = torch.device(device)
         self._gen = generator  # may be None -> default RNG
+        self.prioritize_floor_recovery = bool(prioritize_floor_recovery)
+        self.floor_weight = float(floor_weight)
+        self.hard_floor_weight = float(hard_floor_weight)
+        self.positive_slope_weight = float(positive_slope_weight)
+        self.drop_near_success_weight = float(drop_near_success_weight)
+        self.uniform_floor = float(min(1.0, max(0.0, uniform_floor)))
+        self.floor_tol_threshold = float(floor_tol_threshold)
+        self.hard_floor_tol_threshold = float(hard_floor_tol_threshold)
+        self.last_replay_metrics: dict[str, float] = {}
 
     # ----- index sampling -----
 
@@ -194,6 +217,14 @@ class SequenceSampler:
         success_count_full: Optional[torch.Tensor] = None,
         last_success_count: Optional[torch.Tensor] = None,
         lifted_full: Optional[torch.Tensor] = None,
+        # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B).
+        picked_full: Optional[torch.Tensor] = None,
+        dropped_full: Optional[torch.Tensor] = None,
+        closest_d_hat_full: Optional[torch.Tensor] = None,
+        success_tolerance_full: Optional[torch.Tensor] = None,
+        # Optional pre-computed aux scalar tensor (T-only); when provided,
+        # already shape (H, N, A) and bypasses the field-by-field assemble.
+        aux_scalars_full: Optional[torch.Tensor] = None,
     ) -> SequenceBatch:
         # Shape sanity & normalisation.
         if obs_full.ndim != 3:
@@ -211,6 +242,10 @@ class SequenceSampler:
         failure_full = _maybe_squeeze_last(failure_full)
         success_count_full = _maybe_squeeze_last(success_count_full)
         lifted_full = _maybe_squeeze_last(lifted_full)
+        picked_full = _maybe_squeeze_last(picked_full)
+        dropped_full = _maybe_squeeze_last(dropped_full)
+        closest_d_hat_full = _maybe_squeeze_last(closest_d_hat_full)
+        success_tolerance_full = _maybe_squeeze_last(success_tolerance_full)
         last_d_hat = _maybe_squeeze_last(last_d_hat) if last_d_hat is not None else None
         last_success_count = (
             _maybe_squeeze_last(last_success_count)
@@ -222,8 +257,16 @@ class SequenceSampler:
                 f"last_obs must have shape (N, D_obs)=({N},{D_obs}); got {last_obs.shape}"
             )
 
-        # Build (T, B) index grids.
-        t_idx, e_idx = self._sample_indices(H, N)
+        # Build (T, B) index grids. Optionally apply replay prioritization
+        # weights for a fraction (1 - uniform_floor) of the batch.
+        t_idx, e_idx = self._sample_indices_prioritized(
+            H,
+            N,
+            success_tolerance_full=success_tolerance_full,
+            failure_full=failure_full,
+            success_count_full=success_count_full,
+            d_hat_full=d_hat_full,
+        )
         T, B = t_idx.shape
         assert T == self.seq_len and B == self.seq_batch_size
 
@@ -237,12 +280,56 @@ class SequenceSampler:
         failure_w = _gather_seq(failure_full, t_idx, e_idx)
         success_w = _gather_seq(success_count_full, t_idx, e_idx)
         lifted_w  = _gather_seq(lifted_full,  t_idx, e_idx)
+        picked_w  = _gather_seq(picked_full,  t_idx, e_idx)
+        dropped_w = _gather_seq(dropped_full, t_idx, e_idx)
+        closest_w = _gather_seq(closest_d_hat_full, t_idx, e_idx)
+        succtol_w = _gather_seq(success_tolerance_full, t_idx, e_idx)
 
         next_obs_w = _gather_next(obs_full, last_obs, t_idx, e_idx, H)
         next_d_hat_w = _gather_next(d_hat_full, last_d_hat, t_idx, e_idx, H)
         next_success_w = _gather_next(success_count_full, last_success_count, t_idx, e_idx, H)
 
         valid_mask, segment_id = self._build_mask_and_segment(done_w)
+
+        # Phase A4 P4 (2026-06-09): build aux_scalars tensor (Part B).
+        aux_scalars_w: Optional[torch.Tensor] = None
+        if aux_scalars_full is not None:
+            aux_scalars_w = _gather_seq(aux_scalars_full, t_idx, e_idx)
+        else:
+            aux_components: list[torch.Tensor] = []
+            # Order is stable: d_hat, next_d_hat, delta, success_cnt,
+            # next_success_cnt, success_delta, success_tolerance, lifted,
+            # failure, picked, dropped, closest_d_hat. Missing fields
+            # contribute a zero column so model.aux_dim can be audited.
+            def _push(x: Optional[torch.Tensor]):
+                if x is None:
+                    aux_components.append(
+                        torch.zeros(T, B, 1, device=obs_full.device, dtype=obs_full.dtype)
+                    )
+                else:
+                    if x.ndim == 2:
+                        aux_components.append(x.unsqueeze(-1).to(obs_full.dtype))
+                    else:
+                        aux_components.append(x.to(obs_full.dtype))
+            _push(d_hat_w)
+            _push(next_d_hat_w)
+            if d_hat_w is not None and next_d_hat_w is not None:
+                _push(next_d_hat_w - d_hat_w)
+            else:
+                _push(None)
+            _push(success_w)
+            _push(next_success_w)
+            if success_w is not None and next_success_w is not None:
+                _push(next_success_w - success_w)
+            else:
+                _push(None)
+            _push(succtol_w)
+            _push(lifted_w)
+            _push(failure_w)
+            _push(picked_w)
+            _push(dropped_w)
+            _push(closest_w)
+            aux_scalars_w = torch.cat(aux_components, dim=-1)
 
         return SequenceBatch(
             obs=obs_w,
@@ -259,14 +346,132 @@ class SequenceSampler:
             lifted=lifted_w,
             valid_mask=valid_mask,
             segment_id=segment_id,
+            aux_scalars=aux_scalars_w,
+            success_tolerance_seq=succtol_w,
+            picked=picked_w,
+            dropped=dropped_w,
+            closest_d_hat=closest_w,
             meta={
                 "horizon_length": int(H),
                 "num_actors": int(N),
                 "obs_dim": int(D_obs),
                 "seq_len": int(T),
                 "seq_batch_size": int(B),
+                "replay_prioritized": bool(self.prioritize_floor_recovery),
+                "aux_dim": int(aux_scalars_w.shape[-1])
+                if aux_scalars_w is not None else 0,
             },
         )
+
+    def _sample_indices_prioritized(
+        self,
+        H: int,
+        N: int,
+        *,
+        success_tolerance_full: Optional[torch.Tensor],
+        failure_full: Optional[torch.Tensor],
+        success_count_full: Optional[torch.Tensor],
+        d_hat_full: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Phase A4 P4 (2026-06-09): replay prioritization (Part F).
+
+        When ``self.prioritize_floor_recovery`` is False this falls back
+        to the legacy uniform sampler.
+
+        Otherwise the (env, start_t) probability is built from a 0..1
+        weight per (start_t, env) bin, scaled by per-feature multipliers.
+        ``self.uniform_floor`` of the batch is reserved for legacy
+        uniform draws so the prior over the data does not collapse.
+        """
+        if not self.prioritize_floor_recovery:
+            return self._sample_indices(H, N)
+        T = self.seq_len
+        B = self.seq_batch_size
+        if T > H:
+            return self._sample_indices(H, N)
+        n_uniform = max(1, int(round(self.uniform_floor * B)))
+        n_prio = max(0, B - n_uniform)
+        # Uniform pool first (re-use legacy logic):
+        t_idx_u, e_idx_u = self._sample_indices(H, N)
+        if n_uniform == B or n_prio == 0:
+            return t_idx_u, e_idx_u
+        # Build per-(t_start, env) weights. We work on shape (H_eff, N)
+        # where H_eff = H - T + 1 to ensure the window fits.
+        H_eff = max(1, H - T + 1)
+        device = self.device
+        weights = torch.ones(H_eff, N, device=device, dtype=torch.float32)
+        # Floor stage from per-step success_tolerance averaged over
+        # window. Missing -> uniform.
+        if success_tolerance_full is not None:
+            tol = success_tolerance_full.to(device=device, dtype=torch.float32)
+            if tol.ndim == 3:
+                tol = tol.squeeze(-1)
+            # average tolerance over the (T)-length window starting at t.
+            cum = tol.cumsum(dim=0)
+            for ts in range(H_eff):
+                end = ts + T
+                window_sum = (
+                    cum[end - 1] - (cum[ts - 1] if ts >= 1 else 0.0)
+                )
+                window_mean = window_sum / max(T, 1)
+                hard_mask = (window_mean <= self.hard_floor_tol_threshold).float()
+                floor_mask = (
+                    (window_mean <= self.floor_tol_threshold).float() - hard_mask
+                ).clamp_min(0.0)
+                weights[ts] = (
+                    weights[ts]
+                    + (self.hard_floor_weight - 1.0) * hard_mask
+                    + (self.floor_weight - 1.0) * floor_mask
+                )
+        # Drop-near-success: failure_full sees a positive within window
+        # AND success_count rises within same window.
+        if failure_full is not None and success_count_full is not None:
+            fail = failure_full.to(device=device, dtype=torch.float32)
+            sc = success_count_full.to(device=device, dtype=torch.float32)
+            if fail.ndim == 3:
+                fail = fail.squeeze(-1)
+            if sc.ndim == 3:
+                sc = sc.squeeze(-1)
+            for ts in range(H_eff):
+                end = ts + T
+                fail_in_window = (fail[ts:end].sum(dim=0) > 0.5).float()
+                sc_rise = (sc[end - 1] - sc[ts]).clamp_min(0.0)
+                near_success = ((sc_rise > 0.5) & (fail_in_window > 0.5)).float()
+                weights[ts] = (
+                    weights[ts] + (self.drop_near_success_weight - 1.0) * near_success
+                )
+        # Positive slope: d_hat trends down within the window.
+        if d_hat_full is not None:
+            d_hat = d_hat_full.to(device=device, dtype=torch.float32)
+            if d_hat.ndim == 3:
+                d_hat = d_hat.squeeze(-1)
+            for ts in range(H_eff):
+                end = ts + T
+                slope = (d_hat[ts] - d_hat[end - 1]).clamp_min(0.0)
+                weights[ts] = (
+                    weights[ts] + (self.positive_slope_weight - 1.0) * (slope > 1e-6).float()
+                )
+        # Sample prioritized indices via 1D multinomial.
+        flat = weights.reshape(-1)
+        flat = flat / (flat.sum() + 1e-9)
+        idx = torch.multinomial(flat, num_samples=n_prio, replacement=True)
+        ts_p = (idx // N).long()
+        e_p = (idx % N).long()
+        # Build (T, B) for prioritized portion.
+        t_off = torch.arange(T, device=device).unsqueeze(1)
+        t_idx_p = ts_p.unsqueeze(0) + t_off
+        e_idx_p = e_p.unsqueeze(0).expand(T, n_prio).contiguous()
+        # Concatenate uniform + prioritized; shuffle so layout is mixed.
+        t_idx = torch.cat([t_idx_u[:, : n_uniform], t_idx_p], dim=1)
+        e_idx = torch.cat([e_idx_u[:, : n_uniform], e_idx_p], dim=1)
+        perm = torch.randperm(B, device=device)
+        self.last_replay_metrics = {
+            "uniform_fraction": float(n_uniform / max(B, 1)),
+            "prio_fraction": float(n_prio / max(B, 1)),
+            "weights_max": float(weights.max().item()),
+            "weights_mean": float(weights.mean().item()),
+        }
+        return t_idx[:, perm], e_idx[:, perm]
 
 
 __all__ = ["SequenceSampler"]

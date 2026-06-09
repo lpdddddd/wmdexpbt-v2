@@ -77,6 +77,62 @@ class SeqWMConfig:
     # Misc.
     seed: int = 0
 
+    # ------------------------------------------------------------------
+    # Phase A4 P4 (2026-06-09): task-aware extensions (Part B + Part F).
+    # All defaults inert. Enabled flags only take effect when the
+    # corresponding kill switch on the trainer is True.
+    # ------------------------------------------------------------------
+    use_task_aux_inputs: bool = False
+    aux_dim: int = 0  # auto-derived from the aux assembler when > 0
+    aux_embed_dim: int = 64
+    loss_preset: str = "default"  # "default" | "task_focused"
+    floor_aware_weighting: bool = False
+    floor_tol_threshold: float = 0.02
+    floor_tol_floor: float = 0.012
+    floor_weight_mid: float = 2.0
+    floor_weight_floor: float = 3.0
+    use_horizon_heads: bool = False
+    horizon_steps: tuple[int, ...] = (8, 16)
+    use_recovery_head: bool = False
+    recovery_horizon: int = 16
+    lambda_horizon_success: float = 0.0
+    lambda_drop_risk: float = 0.0
+    lambda_recovery: float = 0.0
+    recovery_d_hat_margin: float = 0.005
+    recovery_d_hat_tol_min_steps: int = 0
+    # Replay prioritization (Part F). Defaults keep uniform sampling.
+    replay_prioritize_floor_recovery: bool = False
+    replay_floor_weight: float = 2.0
+    replay_hard_floor_weight: float = 3.0
+    replay_positive_slope_weight: float = 2.0
+    replay_drop_near_success_weight: float = 1.5
+    replay_uniform_floor: float = 0.3
+    # Iterative teacher (Part C).
+    enable_iterative_teacher: bool = False
+    teacher_eval_interval_frames: int = 50_000_000
+    teacher_promote_min_improvement: float = 0.02
+    teacher_keep_last_k: int = 3
+    teacher_metric: str = "floor_recovery_eval_score"
+    # Imagined evaluator (Part D).
+    enable_imagined_evaluator: bool = False
+    imagine_horizons: tuple[int, ...] = (8, 16)
+    imagine_action_mode: str = "recorded"  # "recorded" | "policy"
+    imagine_num_starts: int = 256
+    imagine_use_teacher: bool = True
+
+
+_LOSS_PRESETS: dict[str, dict[str, float]] = {
+    "default": {},  # empty -> use cfg.lambda_*
+    "task_focused": {
+        "state": 0.3,
+        "reward": 0.5,
+        "done": 0.1,
+        "success": 2.0,
+        "task_error": 3.0,
+        "value": 0.3,
+    },
+}
+
 
 def _beta_kl_at(frames: int, cfg: SeqWMConfig) -> float:
     """Linear warmup from `beta_kl_start` to `beta_kl_end` over
@@ -114,6 +170,14 @@ class SeqWMTrainer:
             seq_len=cfg.seq_len,
             seq_batch_size=cfg.seq_batch_size,
             device=self.device,
+            prioritize_floor_recovery=bool(cfg.replay_prioritize_floor_recovery),
+            floor_weight=float(cfg.replay_floor_weight),
+            hard_floor_weight=float(cfg.replay_hard_floor_weight),
+            positive_slope_weight=float(cfg.replay_positive_slope_weight),
+            drop_near_success_weight=float(cfg.replay_drop_near_success_weight),
+            uniform_floor=float(cfg.replay_uniform_floor),
+            floor_tol_threshold=float(cfg.floor_tol_threshold),
+            hard_floor_tol_threshold=float(cfg.floor_tol_floor),
         )
         self.global_step = 0
         self.last_metrics: dict[str, float] = {}
@@ -123,7 +187,7 @@ class SeqWMTrainer:
     @torch.no_grad()
     def _build_loss_weights(self) -> dict[str, float]:
         c = self.cfg
-        return {
+        weights = {
             "state": c.lambda_state,
             "reward": c.lambda_reward,
             "done": c.lambda_done,
@@ -131,6 +195,23 @@ class SeqWMTrainer:
             "task_error": c.lambda_task_error,
             "value": c.lambda_value,
         }
+        # Phase A4 P4 (2026-06-09): apply optional preset on top of legacy
+        # lambdas. Explicit CLI lambda_* still wins because train.py forwards
+        # them after the preset has been applied; this only changes defaults
+        # for the non-overridden keys.
+        preset = _LOSS_PRESETS.get(str(c.loss_preset), {})
+        if preset:
+            for k, v in preset.items():
+                weights[k] = float(v)
+        # Horizon / recovery extras enter via dedicated lambdas.
+        if c.use_horizon_heads:
+            weights["horizon_success_h" + str(0)] = 0.0  # unused; placeholder
+            for h in c.horizon_steps:
+                weights[f"horizon_success_h{int(h)}"] = float(c.lambda_horizon_success)
+                weights[f"drop_risk_h{int(h)}"] = float(c.lambda_drop_risk)
+        if c.use_recovery_head:
+            weights["recovery"] = float(c.lambda_recovery)
+        return weights
 
     def step(
         self,
@@ -168,6 +249,14 @@ class SeqWMTrainer:
         failure_full = read_aux_full(experience_buffer, "aux_failure")
         lifted_full = read_aux_full(experience_buffer, "aux_lifted")
         success_count_full = read_aux_full(experience_buffer, "aux_success_cnt")
+        # Phase A4 P4 (2026-06-09): task-aware aux fields (Part B). All
+        # are optional; the buffer returns None when not registered, in
+        # which case the sampler still produces a zero column for the
+        # corresponding aux scalar slot so model.aux_dim stays stable.
+        picked_full = read_aux_full(experience_buffer, "aux_picked")
+        dropped_full = read_aux_full(experience_buffer, "aux_dropped")
+        closest_full = read_aux_full(experience_buffer, "aux_closest_d_hat")
+        success_tol_full = read_aux_full(experience_buffer, "aux_success_tolerance")
 
         cumulative_metrics: dict[str, float] = {}
 
@@ -185,6 +274,10 @@ class SeqWMTrainer:
                 success_count_full=success_count_full,
                 last_success_count=last_success_count,
                 lifted_full=lifted_full,
+                picked_full=picked_full,
+                dropped_full=dropped_full,
+                closest_d_hat_full=closest_full,
+                success_tolerance_full=success_tol_full,
             )
             batch = batch.to(self.device)
             beta = _beta_kl_at(frames, self.cfg)
@@ -195,7 +288,27 @@ class SeqWMTrainer:
                 "beta_kl": beta,
                 "value_detach_belief": self.cfg.value_detach_belief,
             }
-            losses = self.model.compute_aux_loss(batch, **kwargs)
+            # Phase A4 P4 (2026-06-09): forward floor-aware and recovery
+            # config IFF the model accepts them. RSSM-lite does. Other
+            # backbones (Transformer-lite, etc.) silently ignore unknown
+            # kwargs via their compute_aux_loss signatures, so we wrap the
+            # call in a try/except to keep the surface backward-compatible.
+            try:
+                losses = self.model.compute_aux_loss(
+                    batch,
+                    floor_aware_weighting=bool(self.cfg.floor_aware_weighting),
+                    floor_tol_threshold=float(self.cfg.floor_tol_threshold),
+                    floor_tol_floor=float(self.cfg.floor_tol_floor),
+                    floor_weight_mid=float(self.cfg.floor_weight_mid),
+                    floor_weight_floor=float(self.cfg.floor_weight_floor),
+                    recovery_d_hat_margin=float(self.cfg.recovery_d_hat_margin),
+                    recovery_d_hat_tol_min_steps=int(
+                        self.cfg.recovery_d_hat_tol_min_steps
+                    ),
+                    **kwargs,
+                )
+            except TypeError:
+                losses = self.model.compute_aux_loss(batch, **kwargs)
 
             scaled = self.cfg.lambda_total * losses["loss_total"]
             self.optimizer.zero_grad(set_to_none=True)
