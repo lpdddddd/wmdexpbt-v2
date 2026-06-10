@@ -1,0 +1,84 @@
+params:
+  seed: 1042
+  env:
+    clip_observations: 10.0
+    clip_actions: 1.0
+  algo:
+    name: a2c_continuous
+  model:
+    name: continuous_a2c_logstd
+  network:
+    name: actor_critic
+    separate: false
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: true
+    mlp:
+      units:
+      - 768
+      - 512
+      - 256
+      activation: elu
+      d2rl: false
+      initializer:
+        name: default
+      regularizer:
+        name: None
+    rnn:
+      name: lstm
+      units: 768
+      layers: 1
+      before_mlp: true
+      layer_norm: true
+  load_checkpoint: true
+  load_path: /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_full_active_replay_3b_20260609_213859/dexpbt_8gpu_ws/restart_p1/000021.pth
+  config:
+    name: DexPBTKukaAllegroLSTMPPO
+    env_name: rlgpu
+    device: cuda:0
+    device_name: cuda:0
+    multi_gpu: false
+    ppo: true
+    mixed_precision: true
+    normalize_input: true
+    normalize_value: true
+    normalize_advantage: true
+    reward_shaper:
+      scale_value: 0.01
+    num_actors: -1
+    gamma: 0.9
+    tau: 0.95
+    learning_rate: 0.0001
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.016
+    score_to_win: 1000000
+    max_epochs: 22889
+    save_best_after: 100
+    save_frequency: 1000
+    print_stats: true
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: true
+    e_clip: 0.07755744876451975
+    minibatch_size: 8192
+    mini_epochs: 2
+    critic_coef: 4.0
+    clip_value: true
+    horizon_length: 16
+    seq_length: 16
+    bounds_loss_coef: 0.0001
+    player:
+      deterministic: false
+      games_num: 100000
+      print_stats: false
+    torch_compile: false
+    train_dir: /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_full_active_replay_3b_20260609_213859/policy_01/rl_games
+    full_experiment_name: attempt_4_2026-06-09_23-14-53

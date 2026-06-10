@@ -1,0 +1,125 @@
+{
+  "v2": {
+    "label": "v2",
+    "run_dir": "results/regrasping_fixed_rssm_belief_value_critic_distill_v2_smoke_800m_20260608_190922",
+    "policies": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "n_policies": 6,
+    "rows_loaded": 165,
+    "peak_mean": {
+      "median": 30.9351806640625,
+      "min": 2.526611328125,
+      "max": 31.404052734375,
+      "n": 6
+    },
+    "peak_max": {
+      "median": 50.0,
+      "min": 50.0,
+      "max": 50.0,
+      "n": 6
+    },
+    "end_mean": {
+      "median": 30.10247802734375,
+      "min": 2.526611328125,
+      "max": 30.80859375,
+      "n": 6
+    },
+    "end_max": {
+      "median": 50.0,
+      "min": 50.0,
+      "max": 50.0,
+      "n": 6
+    },
+    "retention": {
+      "median": 0.9836621505093516,
+      "min": 0.9105290592661136,
+      "n": 6
+    },
+    "time_to_nsucc_10": 290193408,
+    "time_to_nsucc_20": 340000768,
+    "time_to_nsucc_30": 600047616,
+    "count_peak_above_30": 5,
+    "count_peak_above_35": 0,
+    "pbt_events": {
+      "self_restart_total": 0,
+      "cross_restart_total": 2,
+      "rollback_total": 0,
+      "recovery_total": 0
+    }
+  },
+  "reference": {
+    "label": "reference",
+    "run_dir": "results/regrasping_fixed_rssm_belief_value_p2_1_smoke_800m_20260608_012847",
+    "policies": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "n_policies": 6,
+    "rows_loaded": 163,
+    "peak_mean": {
+      "median": 31.9820556640625,
+      "min": 30.4818115234375,
+      "max": 34.5670166015625,
+      "n": 6
+    },
+    "peak_max": {
+      "median": 50.0,
+      "min": 50.0,
+      "max": 50.0,
+      "n": 6
+    },
+    "end_mean": {
+      "median": 31.31561279296875,
+      "min": 26.9927978515625,
+      "max": 34.5670166015625,
+      "n": 6
+    },
+    "end_max": {
+      "median": 50.0,
+      "min": 50.0,
+      "max": 50.0,
+      "n": 6
+    },
+    "retention": {
+      "median": 0.9809565733979724,
+      "min": 0.8855378503606226,
+      "n": 6
+    },
+    "time_to_nsucc_10": 295108608,
+    "time_to_nsucc_20": 395116544,
+    "time_to_nsucc_30": 620036096,
+    "count_peak_above_30": 6,
+    "count_peak_above_35": 0,
+    "pbt_events": {
+      "self_restart_total": 0,
+      "cross_restart_total": 1,
+      "rollback_total": 0,
+      "recovery_total": 0
+    }
+  },
+  "verdict": {
+    "primary_pass": false,
+    "secondary_pass": false,
+    "overall": "FAIL",
+    "primary_notes": [
+      "peak_mean median ratio v2/ref = 0.967 (need >=1.05)",
+      "end_mean median ratio v2/ref = 0.961 (need >=1.05)"
+    ],
+    "secondary_notes": [
+      "time-to-nsucc20 ratio v2/ref = 0.861 (need <=0.85)",
+      "policies peak>=35: v2=0 ref=0 (need v2>ref)"
+    ]
+  },
+  "target_frames": 800000000,
+  "reference_is_strict": false
+}

@@ -381,14 +381,26 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "manager_disabled")
 
+    def _valid_first_metrics(self, **overrides) -> TeacherEvalMetrics:
+        """Phase A4 P5: helper that returns metrics passing the new gate."""
+        defaults = dict(
+            score=1.0,
+            recovery_pos_rate=0.5,
+            horizon_success_pos_rate_h4=0.05,
+            horizon_success_pos_rate_h8=0.10,
+            n_samples=1024,
+            uncertainty=0.2,
+        )
+        defaults.update(overrides)
+        return TeacherEvalMetrics(**defaults)
+
     def test_first_teacher_accepted(self):
         mgr = TeacherManager(
             workspace_root=self.workspace, policy_idx=0, enabled=True
         )
-        m = TeacherEvalMetrics(score=1.0, recovery_pos_rate=0.5)
         ok, reason = mgr.maybe_promote(
             candidate_path=self.workspace / "x.pt",
-            candidate_metrics=m,
+            candidate_metrics=self._valid_first_metrics(),
             env_frames=0,
             global_step=0,
         )
@@ -399,7 +411,7 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
         mgr = TeacherManager(
             workspace_root=self.workspace, policy_idx=0, enabled=True
         )
-        m = TeacherEvalMetrics(score=1.0, has_nan=True, recovery_pos_rate=0.5)
+        m = self._valid_first_metrics(has_nan=True)
         ok, reason = mgr.maybe_promote(
             candidate_path=self.workspace / "x.pt",
             candidate_metrics=m,
@@ -409,11 +421,19 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "nan")
 
-    def test_recovery_pos_degenerate_rejected(self):
+    def test_target_fully_degenerate_rejected(self):
+        """Phase A4 P5: when both horizon-success heads are saturated the
+        target is considered fully degenerate and the candidate is rejected.
+        ``recovery_pos_rate=0`` alone no longer triggers rejection.
+        """
         mgr = TeacherManager(
             workspace_root=self.workspace, policy_idx=0, enabled=True
         )
-        m = TeacherEvalMetrics(score=10.0, recovery_pos_rate=0.0)
+        m = self._valid_first_metrics(
+            horizon_success_pos_rate_h4=0.0,
+            horizon_success_pos_rate_h8=0.0,
+            recovery_pos_rate=0.0,
+        )
         ok, reason = mgr.maybe_promote(
             candidate_path=self.workspace / "x.pt",
             candidate_metrics=m,
@@ -421,7 +441,7 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
             global_step=0,
         )
         self.assertFalse(ok)
-        self.assertEqual(reason, "recovery_pos_degenerate")
+        self.assertEqual(reason, "target_fully_degenerate")
 
     def test_score_below_threshold_rejected(self):
         mgr = TeacherManager(
@@ -430,7 +450,7 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
             enabled=True,
             promote_min_improvement=0.05,
         )
-        first = TeacherEvalMetrics(score=10.0, recovery_pos_rate=0.5)
+        first = self._valid_first_metrics(score=10.0)
         mgr.maybe_promote(
             candidate_path=self.workspace / "first.pt",
             candidate_metrics=first,
@@ -440,6 +460,10 @@ class TeacherManagerPromotionGateTest(unittest.TestCase):
         cand = TeacherEvalMetrics(
             score=10.02,
             recovery_pos_rate=0.5,
+            horizon_success_pos_rate_h4=0.05,
+            horizon_success_pos_rate_h8=0.10,
+            n_samples=1024,
+            uncertainty=0.2,
             recovery_bce=first.recovery_bce,
             horizon_success_bce=first.horizon_success_bce,
             drop_risk_bce=first.drop_risk_bce,
@@ -615,17 +639,28 @@ class FloorRecoveryFlagsDeclaredTest(unittest.TestCase):
         )
 
     def test_launchers_disable_active_by_default(self):
-        # Iterative shadow / replay launchers must NOT default to active.
-        for path in (
-            "/root/autodl-tmp/wmdexpbt/results/start_regrasping_fixed_rssm_iterative_shadow_800m.sh",
-            "/root/autodl-tmp/wmdexpbt/results/start_regrasping_fixed_rssm_iterative_replay_800m.sh",
+        """Phase A4 P5 (2026-06-10): launchers may live under
+        ``results/`` or ``results/launchers/`` after the directory reorg.
+        We resolve each name in both locations."""
+        roots = [
+            Path("/root/autodl-tmp/wmdexpbt/results"),
+            Path("/root/autodl-tmp/wmdexpbt/results/launchers"),
+        ]
+
+        def _find(name: str) -> Path:
+            for r in roots:
+                p = r / name
+                if p.exists():
+                    return p
+            self.fail(f"launcher {name} not found under any of {roots}")
+
+        for name in (
+            "start_regrasping_fixed_rssm_iterative_shadow_800m.sh",
+            "start_regrasping_fixed_rssm_iterative_replay_800m.sh",
         ):
-            text = Path(path).read_text()
-            self.assertNotIn("--pbt_wm_score_mode active", text, path)
-        # Active launcher exists separately.
-        active = Path(
-            "/root/autodl-tmp/wmdexpbt/results/start_regrasping_fixed_rssm_iterative_active_800m.sh"
-        )
+            text = _find(name).read_text()
+            self.assertNotIn("--pbt_wm_score_mode active", text, name)
+        active = _find("start_regrasping_fixed_rssm_iterative_active_800m.sh")
         self.assertIn("--pbt_wm_score_mode active", active.read_text())
 
 
@@ -954,13 +989,23 @@ class WiredAnalyzerImportTest(unittest.TestCase):
     """analyze_wm_runtime_wiring.py imports cleanly and exposes analyze()."""
 
     def test_module_loads(self):
+        """Phase A4 P5 (2026-06-10): support both legacy ``results/`` and
+        post-reorg ``results/tools/`` locations."""
         import importlib.util
-        path = (
-            Path(__file__).parent.parent.parent.parent.parent
-            / "results"
-            / "analyze_wm_runtime_wiring.py"
+        results_root = (
+            Path(__file__).parent.parent.parent.parent.parent / "results"
         )
-        self.assertTrue(path.exists(), f"missing {path}")
+        for cand in (
+            results_root / "tools" / "analyze_wm_runtime_wiring.py",
+            results_root / "analyze_wm_runtime_wiring.py",
+        ):
+            if cand.exists():
+                path = cand
+                break
+        else:
+            self.fail(
+                f"analyze_wm_runtime_wiring.py not found in {results_root}"
+            )
         spec = importlib.util.spec_from_file_location(
             "analyze_wm_runtime_wiring", path
         )
@@ -972,7 +1017,14 @@ class WiredAnalyzerImportTest(unittest.TestCase):
 
 
 class WiredTeacherManagerNoEvalDataTest(unittest.TestCase):
-    """maybe_promote with empty buffer + zero recovery_pos_rate degeneracy."""
+    """maybe_promote with empty buffer rejects with reason=no_eval_data.
+
+    Phase A4 P5 (2026-06-10): the empty-buffer case is now distinguished
+    from target degeneracy via the dedicated ``no_eval_data`` reason. The
+    legacy ``recovery_pos_degenerate`` reason is retained for cases where
+    the buffer IS populated but recovery target is saturated AND horizon
+    heads are also saturated (covered by ``test_target_fully_degenerate``).
+    """
 
     def test_empty_buffer_evaluate_returns_zero_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -980,7 +1032,7 @@ class WiredTeacherManagerNoEvalDataTest(unittest.TestCase):
                 workspace_root=Path(tmp),
                 policy_idx=0,
                 enabled=True,
-                require_recovery_pos_in=(0.05, 0.95),
+                min_eval_size=512,
             )
             buf = FloorRecoveryEvalBuffer(capacity=4)
             # Stub model — never reached because buffer is empty.
@@ -991,7 +1043,8 @@ class WiredTeacherManagerNoEvalDataTest(unittest.TestCase):
             )
             self.assertEqual(metrics.n_samples, 0)
             self.assertEqual(metrics.score, 0.0)
-            # Promotion should still gate on recovery_pos_rate=0 → reject.
+            # Promotion should reject with reason=no_eval_data because
+            # n_samples=0 < min_eval_size=512.
             promoted, reason = mgr.maybe_promote(
                 candidate_path=Path(tmp) / "x.pt",
                 candidate_metrics=metrics,
@@ -999,7 +1052,261 @@ class WiredTeacherManagerNoEvalDataTest(unittest.TestCase):
                 global_step=0,
             )
             self.assertFalse(promoted)
-            self.assertEqual(reason, "recovery_pos_degenerate")
+            self.assertEqual(reason, "no_eval_data")
+
+
+# =========================================================================
+# Phase A4 P5 (2026-06-10): TeacherManager gate fix tests (Items B-F).
+#
+# Covers:
+#   1. no previous teacher + valid eval data -> first teacher promoted.
+#   2. no previous teacher + no eval data    -> reject reason=no_eval_data.
+#   3. recovery_pos_rate=0 but horizon_success_pos_rate valid -> first
+#      teacher promoted (warning-only on recovery saturation).
+#   4. all task heads degenerate -> reject reason=target_fully_degenerate.
+#   5. every eval attempt writes index.json (regardless of outcome).
+#   6. every eval attempt appends one line to teacher_eval_events.jsonl.
+#   7. keep_last_k=6 keeps exactly six latest snapshots, prunes earlier.
+#   8. current_teacher_step >=0 after first promotion (index.json field).
+#   9. observer-side: with index.json present and teacher_step >=0 the
+#      observer's _refresh_wm_imagined_eval_from_disk path makes a
+#      promoted teacher visible to the active gate, so a 'no_promoted_
+#      teacher' fallback would not apply for that policy.
+# =========================================================================
+
+
+class TeacherGateFixTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _valid_first(self, **overrides) -> TeacherEvalMetrics:
+        defaults = dict(
+            score=1.0,
+            recovery_pos_rate=0.5,
+            horizon_success_pos_rate_h4=0.05,
+            horizon_success_pos_rate_h8=0.10,
+            n_samples=1024,
+            uncertainty=0.2,
+        )
+        defaults.update(overrides)
+        return TeacherEvalMetrics(**defaults)
+
+    # 1.
+    def test_first_valid_promotes(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True
+        )
+        ok, reason = mgr.maybe_promote(
+            candidate_path=self.workspace / "x.pt",
+            candidate_metrics=self._valid_first(),
+            env_frames=10_000_000,
+            global_step=0,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "first_teacher")
+        self.assertEqual(mgr.promotions, 1)
+        self.assertIsNotNone(mgr.current_teacher())
+
+    # 2.
+    def test_no_eval_data_rejected_with_persisted_state(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True,
+            min_eval_size=512,
+        )
+        ok, reason = mgr.record_no_eval_data(
+            env_frames=10_000_000, eval_buffer_size=0
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "no_eval_data")
+        # index.json must exist with eval_attempt_count=1.
+        idx_path = mgr.teacher_dir / "index.json"
+        self.assertTrue(idx_path.exists())
+        idx = json.loads(idx_path.read_text())
+        self.assertEqual(idx["eval_attempt_count"], 1)
+        self.assertEqual(idx["promotion_count"], 0)
+        self.assertEqual(idx["rejection_count"], 1)
+        self.assertEqual(idx["last_rejected_reason"], "no_eval_data")
+
+    # 3.
+    def test_recovery_zero_but_horizon_valid_first_promotes(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True
+        )
+        m = self._valid_first(
+            recovery_pos_rate=0.0,
+            horizon_success_pos_rate_h4=0.05,
+            horizon_success_pos_rate_h8=0.10,
+        )
+        ok, reason = mgr.maybe_promote(
+            candidate_path=self.workspace / "x.pt",
+            candidate_metrics=m,
+            env_frames=10_000_000,
+            global_step=0,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "first_teacher")
+
+    # 4.
+    def test_all_task_heads_degenerate_rejected(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True
+        )
+        m = self._valid_first(
+            horizon_success_pos_rate_h4=0.0,
+            horizon_success_pos_rate_h8=1.0,
+        )
+        ok, reason = mgr.maybe_promote(
+            candidate_path=self.workspace / "x.pt",
+            candidate_metrics=m,
+            env_frames=10_000_000,
+            global_step=0,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "target_fully_degenerate")
+
+    # 5.
+    def test_every_attempt_writes_index_json(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True,
+            min_eval_size=10_000,  # force no_eval_data on small samples
+        )
+        # Three different rejection paths.
+        mgr.record_no_eval_data(env_frames=1_000_000, eval_buffer_size=0)
+        idx1 = json.loads((mgr.teacher_dir / "index.json").read_text())
+        self.assertEqual(idx1["eval_attempt_count"], 1)
+        # nan attempt
+        m_nan = self._valid_first(has_nan=True, n_samples=20_000)
+        mgr.maybe_promote(
+            candidate_path=mgr.teacher_dir / "y.pt",
+            candidate_metrics=m_nan, env_frames=2_000_000, global_step=0,
+        )
+        idx2 = json.loads((mgr.teacher_dir / "index.json").read_text())
+        self.assertEqual(idx2["eval_attempt_count"], 2)
+        self.assertEqual(idx2["last_rejected_reason"], "nan")
+        # valid attempt
+        mgr.maybe_promote(
+            candidate_path=mgr.teacher_dir / "z.pt",
+            candidate_metrics=self._valid_first(n_samples=20_000),
+            env_frames=3_000_000, global_step=0,
+        )
+        idx3 = json.loads((mgr.teacher_dir / "index.json").read_text())
+        self.assertEqual(idx3["eval_attempt_count"], 3)
+        self.assertEqual(idx3["promotion_count"], 1)
+        self.assertEqual(idx3["last_promoted_reason"], "first_teacher")
+
+    # 6.
+    def test_every_attempt_appends_event(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True,
+        )
+        mgr.record_no_eval_data(env_frames=1_000_000, eval_buffer_size=0)
+        mgr.maybe_promote(
+            candidate_path=mgr.teacher_dir / "x.pt",
+            candidate_metrics=self._valid_first(),
+            env_frames=2_000_000, global_step=0,
+        )
+        events_path = mgr.teacher_dir / "teacher_eval_events.jsonl"
+        self.assertTrue(events_path.exists())
+        rows = [json.loads(l) for l in events_path.read_text().splitlines()]
+        self.assertEqual(len(rows), 2)
+        self.assertFalse(rows[0]["promoted"])
+        self.assertEqual(rows[0]["rejected_reason"], "no_eval_data")
+        self.assertTrue(rows[1]["promoted"])
+        self.assertEqual(rows[1]["promoted_reason"], "first_teacher")
+        # All required event fields present.
+        for required_key in (
+            "frame", "eval_score", "promoted", "eval_buffer_size",
+            "recovery_pos_rate", "horizon_success_pos_rate_h4",
+            "horizon_success_pos_rate_h8", "drop_risk_pos_rate_h4",
+            "drop_risk_pos_rate_h8", "uncertainty",
+            "previous_teacher_score", "improvement",
+        ):
+            self.assertIn(required_key, rows[1])
+
+    # 7.
+    def test_keep_last_k_six_keeps_six(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True,
+            keep_last_k=6,
+        )
+        # Persist 10 candidate snapshots; only 6 should remain.
+        for i in range(1, 11):
+            mgr.maybe_save_candidate_snapshot(
+                env_frames=i * 10_000_000,
+                trainer_state_dict={"foo": torch.tensor([float(i)])},
+            )
+        snaps = sorted(mgr.teacher_dir.glob("wm_teacher_step_*.pt"))
+        self.assertEqual(len(snaps), 6)
+        # Surviving snapshots are the latest six (steps 5e7..1e8).
+        steps = [
+            int(p.name.replace("wm_teacher_step_", "").replace(".pt", ""))
+            for p in snaps
+        ]
+        self.assertEqual(
+            steps, [50_000_000, 60_000_000, 70_000_000, 80_000_000,
+                    90_000_000, 100_000_000],
+        )
+
+    # 8.
+    def test_current_teacher_step_after_first_promotion(self):
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=0, enabled=True
+        )
+        mgr.maybe_promote(
+            candidate_path=mgr.teacher_dir / "x.pt",
+            candidate_metrics=self._valid_first(),
+            env_frames=42_000_000, global_step=7,
+        )
+        idx = json.loads((mgr.teacher_dir / "index.json").read_text())
+        self.assertGreaterEqual(idx["current_teacher_step"], 0)
+        self.assertEqual(idx["current_teacher_step"], 42_000_000)
+        self.assertTrue(idx["is_teacher_valid"])
+        self.assertEqual(idx["promotion_count"], 1)
+
+    # 9.
+    def test_observer_sees_promoted_teacher_via_disk(self):
+        """After a promotion the canonical index.json carries
+        ``current_teacher_step >= 0``; downstream code (analyzer + observer)
+        that reads it can no longer fall back to ``no_promoted_teacher`` for
+        this policy. We exercise the analyzer's reader directly to keep the
+        test independent of the live observer event loop.
+        """
+        import importlib.util
+        mgr = TeacherManager(
+            workspace_root=self.workspace, policy_idx=2, enabled=True
+        )
+        mgr.maybe_promote(
+            candidate_path=mgr.teacher_dir / "x.pt",
+            candidate_metrics=self._valid_first(),
+            env_frames=123_000_000, global_step=1,
+        )
+        # Phase A4 P5 (2026-06-10): tests live at
+        # runtime_root/src/dexpbt_isaaclab/tests/, so results/ is parents[4].
+        results_root = Path(__file__).resolve().parents[4] / "results"
+        analyzer_path = (
+            results_root / "tools" / "analyze_wm_runtime_wiring.py"
+        )
+        if not analyzer_path.exists():
+            analyzer_path = results_root / "analyze_wm_runtime_wiring.py"
+        self.assertTrue(
+            analyzer_path.exists(),
+            f"analyze_wm_runtime_wiring.py not found in {results_root}",
+        )
+        spec = importlib.util.spec_from_file_location(
+            "analyze_wm_runtime_wiring", analyzer_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        summary = mod._summarize_teacher_index(mgr.teacher_dir)
+        self.assertTrue(summary["present"])
+        self.assertEqual(summary["promotions"], 1)
+        self.assertGreaterEqual(summary["current_teacher_step"], 0)
+        self.assertTrue(summary["is_teacher_valid"])
+        self.assertEqual(summary["last_promotion_reason"], "first_teacher")
 
 
 if __name__ == "__main__":

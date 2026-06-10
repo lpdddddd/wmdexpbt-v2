@@ -1,0 +1,323 @@
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /root/autodl-tmp/wmdexpbt/runtime_root/src/IsaacLab/apps/isaaclab.python.headless.kit
+Loading user config located at: '/root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[Info] [carb] Logging to file: /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/logs/Kit/Isaac-Sim/5.1/kit_20260608_124656.log
+2026-06-08T04:46:56Z [128ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-06-08T04:46:56Z [175ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libMaterialXRenderHw.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-08T04:46:56Z [182ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libMaterialXRenderGlsl.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-08T04:46:56Z [188ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libusd_usdBakeMtlx.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-08T04:46:56Z [211ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.iray.libs-0.0.0+69cbf6ad.lx64.r/bin/iray/libneuray.so. Error: libGLU.so.1: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-08T04:46:56Z [345ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-08T04:46:56Z [465ms] [Warning] [carb] Acquiring non optional plugin interface which is not listed as dependency: [omni::physx::IPhysxBenchmarks v1.0] (plugin: <default plugin>), by client: omni.physics.physx.plugin. Add it to CARB_PLUGIN_IMPL_DEPS() macro of a client.
+2026-06-08T04:46:56Z [473ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-08T04:46:58Z [2,619ms] [Warning] [carb.cudainterop.plugin] CUDA_VISIBLE_DEVICES environment variable is set.
+2026-06-08T04:46:58Z [2,619ms] [Warning] [carb.cudainterop.plugin] Note CUDA device enumeration and Omniverse device enumeration are different.
+2026-06-08T04:46:58Z [2,619ms] [Warning] [carb.cudainterop.plugin] Setting CUDA_VISIBLE_DEVICES can lead to undesired behavior or crashes.
+2026-06-08T04:46:59Z [2,897ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,897ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,899ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,899ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,899ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,899ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,900ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,900ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-08T04:46:59Z [2,901ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.58.03     | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | c2635b2e.. |
+|     |                                  |        |     |            | 51        |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 061e5739.. |
+|     |                                  |        |     |            | 63        |            |
+|---------------------------------------------------------------------------------------------|
+| 2   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | f3a886af.. |
+|     |                                  |        |     |            | 64        |            |
+|---------------------------------------------------------------------------------------------|
+| 3   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 68079924.. |
+|     |                                  |        |     |            | d0        |            |
+|---------------------------------------------------------------------------------------------|
+| 4   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 8aaeb606.. |
+|     |                                  |        |     |            | e1        |            |
+|---------------------------------------------------------------------------------------------|
+| 5   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | a977c546.. |
+|     |                                  |        |     |            | e2        |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 5.15.0-78-generic
+| Processor: Intel(R) Xeon(R) Gold 6459C
+| Bare Metal Cores: 64 | Bare Metal Logical Cores: 128
+| Core Usage Quota: 72
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 589824 | Free Memory: 536946
+| Total Page/Swap (MB): 0 | Free Page/Swap: 0
+|---------------------------------------------------------------------------------------------|
+2026-06-08T04:46:59Z [3,551ms] [Warning] [gpu.foundation.plugin] PCIe link width current (8) and maximum (16) for device 1 don't match.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[train] policy_idx=1 base_seed=42 effective_seed=1042
+[INFO] Logging to: /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56
+
+[36m======================================================================================[0m
+[36m[1m[INFO][IsaacLab]: Logging to file: /tmp/isaaclab/logs/isaaclab_2026-06-08_12-47-01.log[0m
+[36m======================================================================================[0m
+
+[33m12:47:01 [simulation_context.py] WARNING: The `enable_external_forces_every_iteration` parameter in the PhysxCfg is set to False. If you are experiencing noisy velocities, consider enabling this flag. You may need to slightly increase the number of velocity iterations (setting it to 1 or 2 rather than 0), together with this flag, to improve the accuracy of velocity updates.[0m
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : 1042
+	Physics step-size     : 0.016666666666666666
+	Rendering step-size   : 0.016666666666666666
+	Environment step-size : 0.016666666666666666
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_2/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_5/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_5/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_6/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_6/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_1/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_3/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_0/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_4/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_4/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_7/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_7/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_2/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_0/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_0/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_3/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_0/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_3/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_2/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/allegro_mount/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/allegro_mount/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_1/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_2/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_1/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_1/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_0/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/palm_link/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/palm_link/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_3/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_3/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_2/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+2026-06-08T04:47:01Z [5,137ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_1/materials>. (recomposing stage on stage @anon:0x5634224ff8a0:World0.usd@ <0x563422504b80>)
+
+[INFO]: Time taken for scene creation : 6.792318 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 8192
+	Environment spacing   : 1.2
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : []
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 8.407730 seconds
+[INFO]: Completed setting up the environment...
+[RESUME] PBT restart from source_policy=0: success_tolerance=0.075, initial_tolerance=0.075, target_tolerance=0.01, last_curriculum_update=70833, frame_since_restart=85472, curriculum_freeze_steps_after_restart=12208
+/root/autodl-tmp/wmdexpbt/runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/transformer_lite.py:135: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+[SeqWM] Loaded checkpoint from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/dexpbt_8gpu_ws/000/wm_seq_checkpoints/wm_seq_latest.pt (src=trans_belief_value, reason=same_strategy)
+[SeqWM] enabled: strategy=trans_belief_value, obs_dim=92, action_dim=23, seq_len=16, seq_batch_size=1024, lambda_total=0.05, value_detach=False
+[Posterior] Loaded shared posterior from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/dexpbt_8gpu_ws/wm_posterior_latest.json
+[WM] init: strategy=trans_belief_value, ensemble=3, cf=False
+self.seed = 1042
+[train] policy_idx=1 env_randomization_hash=d5235f3b8e631ebc
+Exact experiment name requested from command line: attempt_10_2026-06-08_12-46-56
+seq_length: 16
+current training device: cuda:0
+build mlp: 768
+RunningMeanStd:  (1,)
+RunningMeanStd:  (92,)
+[SeqWM] Connected to A2CAgent: strategy=trans_belief_value, backbone=TransformerLiteWorldModel, seq_len=16, seq_batch_size=1024
+=> loading checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/dexpbt_8gpu_ws/restart_p1/000035.pth'
+[WM] torch.compile disabled
+2026-06-08T04:47:18Z [21,807ms] [Warning] [omni.physx.fabric.plugin] FabricManager::initializePointInstancer mismatched prototypes on point instancer: /Visuals/goal_marker.
+fps step: 122899 fps step and policy inference: 105366 fps total: 71044 epoch: 5343/6112 frames: 710541312
+fps step: 259137 fps step and policy inference: 239904 fps total: 175234 epoch: 5344/6112 frames: 710672384
+saving next best rewards:  [313.6713]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 201677 fps step and policy inference: 187726 fps total: 126265 epoch: 5345/6112 frames: 710803456
+saving next best rewards:  [331.48877]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 256543 fps step and policy inference: 236818 fps total: 138565 epoch: 5346/6112 frames: 710934528
+fps step: 250554 fps step and policy inference: 224668 fps total: 128210 epoch: 5347/6112 frames: 711065600
+saving next best rewards:  [346.75183]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 272959 fps step and policy inference: 247523 fps total: 128595 epoch: 5348/6112 frames: 711196672
+saving next best rewards:  [409.30847]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 262506 fps step and policy inference: 239409 fps total: 132307 epoch: 5349/6112 frames: 711327744
+saving next best rewards:  [437.2593]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 202026 fps step and policy inference: 186947 fps total: 111473 epoch: 5350/6112 frames: 711458816
+saving next best rewards:  [453.93918]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 184722 fps step and policy inference: 171578 fps total: 104884 epoch: 5351/6112 frames: 711589888
+saving next best rewards:  [559.9552]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 238639 fps step and policy inference: 221509 fps total: 132428 epoch: 5352/6112 frames: 711720960
+saving next best rewards:  [597.0226]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 259077 fps step and policy inference: 238181 fps total: 135726 epoch: 5353/6112 frames: 711852032
+saving next best rewards:  [685.78735]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 284740 fps step and policy inference: 261383 fps total: 143426 epoch: 5354/6112 frames: 711983104
+saving next best rewards:  [918.6456]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 293900 fps step and policy inference: 269741 fps total: 147030 epoch: 5355/6112 frames: 712114176
+saving next best rewards:  [1058.8546]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 243441 fps step and policy inference: 225976 fps total: 132365 epoch: 5356/6112 frames: 712245248
+saving next best rewards:  [1184.1646]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 191082 fps step and policy inference: 177562 fps total: 110465 epoch: 5357/6112 frames: 712376320
+saving next best rewards:  [1305.581]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 213351 fps step and policy inference: 196745 fps total: 113964 epoch: 5358/6112 frames: 712507392
+saving next best rewards:  [1382.101]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 224919 fps step and policy inference: 206667 fps total: 118914 epoch: 5359/6112 frames: 712638464
+saving next best rewards:  [1491.2399]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 213975 fps step and policy inference: 196966 fps total: 116860 epoch: 5360/6112 frames: 712769536
+saving next best rewards:  [1769.7736]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 236655 fps step and policy inference: 216326 fps total: 112880 epoch: 5361/6112 frames: 712900608
+fps step: 186213 fps step and policy inference: 171345 fps total: 108304 epoch: 5362/6112 frames: 713031680
+fps step: 178804 fps step and policy inference: 164162 fps total: 101303 epoch: 5363/6112 frames: 713162752
+fps step: 176650 fps step and policy inference: 162668 fps total: 103862 epoch: 5364/6112 frames: 713293824
+fps step: 203923 fps step and policy inference: 186424 fps total: 115024 epoch: 5365/6112 frames: 713424896
+fps step: 219310 fps step and policy inference: 199463 fps total: 118154 epoch: 5366/6112 frames: 713555968
+saving next best rewards:  [2149.8892]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 242237 fps step and policy inference: 221519 fps total: 105414 epoch: 5367/6112 frames: 713687040
+saving next best rewards:  [2198.939]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 215561 fps step and policy inference: 198578 fps total: 107783 epoch: 5368/6112 frames: 713818112
+saving next best rewards:  [2301.9614]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 195897 fps step and policy inference: 180590 fps total: 116655 epoch: 5369/6112 frames: 713949184
+saving next best rewards:  [2608.724]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192744 fps step and policy inference: 178822 fps total: 105676 epoch: 5370/6112 frames: 714080256
+saving next best rewards:  [2870.2915]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 197852 fps step and policy inference: 182914 fps total: 112390 epoch: 5371/6112 frames: 714211328
+saving next best rewards:  [3173.2312]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 220898 fps step and policy inference: 203191 fps total: 132970 epoch: 5372/6112 frames: 714342400
+saving next best rewards:  [3470.8677]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 212916 fps step and policy inference: 196012 fps total: 132744 epoch: 5373/6112 frames: 714473472
+saving next best rewards:  [3585.309]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 217193 fps step and policy inference: 200619 fps total: 108457 epoch: 5374/6112 frames: 714604544
+saving next best rewards:  [3890.4153]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 201021 fps step and policy inference: 186251 fps total: 108710 epoch: 5375/6112 frames: 714735616
+saving next best rewards:  [4064.1975]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 193778 fps step and policy inference: 179692 fps total: 115195 epoch: 5376/6112 frames: 714866688
+saving next best rewards:  [4255.264]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 214665 fps step and policy inference: 198357 fps total: 123968 epoch: 5377/6112 frames: 714997760
+saving next best rewards:  [4403.2393]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 217096 fps step and policy inference: 200201 fps total: 116736 epoch: 5378/6112 frames: 715128832
+saving next best rewards:  [4767.7866]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 216185 fps step and policy inference: 199183 fps total: 107316 epoch: 5379/6112 frames: 715259904
+saving next best rewards:  [5130.033]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 203956 fps step and policy inference: 188401 fps total: 100250 epoch: 5380/6112 frames: 715390976
+fps step: 176733 fps step and policy inference: 163006 fps total: 95785 epoch: 5381/6112 frames: 715522048
+fps step: 179359 fps step and policy inference: 165206 fps total: 98046 epoch: 5382/6112 frames: 715653120
+fps step: 167388 fps step and policy inference: 154841 fps total: 96473 epoch: 5383/6112 frames: 715784192
+saving next best rewards:  [5295.695]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 206288 fps step and policy inference: 190337 fps total: 108101 epoch: 5384/6112 frames: 715915264
+saving next best rewards:  [5885.9243]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 201032 fps step and policy inference: 185826 fps total: 106833 epoch: 5385/6112 frames: 716046336
+saving next best rewards:  [6133.8115]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192796 fps step and policy inference: 178301 fps total: 95773 epoch: 5386/6112 frames: 716177408
+fps step: 178510 fps step and policy inference: 164286 fps total: 98892 epoch: 5387/6112 frames: 716308480
+fps step: 176523 fps step and policy inference: 162818 fps total: 98699 epoch: 5388/6112 frames: 716439552
+fps step: 178013 fps step and policy inference: 164039 fps total: 99011 epoch: 5389/6112 frames: 716570624
+fps step: 182829 fps step and policy inference: 168124 fps total: 115715 epoch: 5390/6112 frames: 716701696
+saving next best rewards:  [6609.588]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211785 fps step and policy inference: 195424 fps total: 111169 epoch: 5391/6112 frames: 716832768
+saving next best rewards:  [7111.1978]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211252 fps step and policy inference: 194635 fps total: 100929 epoch: 5392/6112 frames: 716963840
+fps step: 188875 fps step and policy inference: 174243 fps total: 91336 epoch: 5393/6112 frames: 717094912
+fps step: 176223 fps step and policy inference: 161839 fps total: 92878 epoch: 5394/6112 frames: 717225984
+fps step: 179287 fps step and policy inference: 164939 fps total: 96569 epoch: 5395/6112 frames: 717357056
+saving next best rewards:  [7130.1865]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 196694 fps step and policy inference: 181917 fps total: 106407 epoch: 5396/6112 frames: 717488128
+saving next best rewards:  [7597.808]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 204246 fps step and policy inference: 188162 fps total: 105105 epoch: 5397/6112 frames: 717619200
+saving next best rewards:  [8168.385]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211871 fps step and policy inference: 195578 fps total: 106047 epoch: 5398/6112 frames: 717750272
+fps step: 194121 fps step and policy inference: 178301 fps total: 102939 epoch: 5399/6112 frames: 717881344
+fps step: 186272 fps step and policy inference: 171076 fps total: 100799 epoch: 5400/6112 frames: 718012416
+saving next best rewards:  [8169.7617]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 196659 fps step and policy inference: 181540 fps total: 103987 epoch: 5401/6112 frames: 718143488
+saving next best rewards:  [8400.719]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 227967 fps step and policy inference: 209629 fps total: 129274 epoch: 5402/6112 frames: 718274560
+saving next best rewards:  [8802.118]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 207058 fps step and policy inference: 191115 fps total: 105469 epoch: 5403/6112 frames: 718405632
+saving next best rewards:  [9338.579]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_01/rl_games/attempt_10_2026-06-08_12-46-56/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 194815 fps step and policy inference: 180644 fps total: 99462 epoch: 5404/6112 frames: 718536704
+fps step: 171442 fps step and policy inference: 158044 fps total: 85878 epoch: 5405/6112 frames: 718667776
+fps step: 171564 fps step and policy inference: 157832 fps total: 90681 epoch: 5406/6112 frames: 718798848

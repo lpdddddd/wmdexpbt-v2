@@ -687,6 +687,9 @@ def main() -> None:
             # Phase A4 P4 wired (2026-06-10): horizon skip toggle.
             "--seq_wm_horizon_skip_too_long",
             "--no-seq_wm_horizon_skip_too_long",
+            # Phase A4 P5 (2026-06-10): teacher-gate fix toggles.
+            "--seq_wm_teacher_allow_first_promotion",
+            "--no-seq_wm_teacher_allow_first_promotion",
         }
         extra = list(args.extra)
         i = 0

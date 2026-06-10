@@ -1,0 +1,10 @@
+smoke_run=false
+patch=track_c_bayesian_no_h3
+target_frames=3000000000
+max_iterations=22889
+curriculum_mode=mastery
+pbt_single_shrink_per_window=true
+pbt_early_collapse_detect=true
+pbt_recovery_tolerance_mode=last_mastered
+pbt_recovery_bypass_elimination_burnin=true
+note=Track C bayesian-no-h3 3B; pool=none,aux_mid,value_imag_h1; CF on

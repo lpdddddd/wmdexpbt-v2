@@ -1,0 +1,88 @@
+{
+  "reason": "stop unwired full_active_replay run; TeacherManager/WMImaginedEvaluator not connected to runtime",
+  "stop_time": "2026-06-10 01:38:51 CST",
+  "stop_method": "SIGTERM->90s wait->SIGKILL+pkill on supervisor pgids and train.py for this run only",
+  "frames_snapshot": {
+    "snapshot_time": "2026-06-10 01:38:51",
+    "policies": {
+      "p0": {
+        "frames": 1240072192,
+        "tolerance": 0.025859932937317788,
+        "nsucc_mean": 22.2913818359375,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 0,
+        "cross_restart_count": 0,
+        "pbt_iteration": 62,
+        "n_curve_points": 53
+      },
+      "p1": {
+        "frames": 1140064256,
+        "tolerance": 0.036177423574778385,
+        "nsucc_mean": 30.644287109375,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 12,
+        "cross_restart_count": 12,
+        "pbt_iteration": 57,
+        "n_curve_points": 30
+      },
+      "p2": {
+        "frames": 1260126208,
+        "tolerance": 0.026373341786013433,
+        "nsucc_mean": 28.438232421875,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 3,
+        "cross_restart_count": 3,
+        "pbt_iteration": 63,
+        "n_curve_points": 50
+      },
+      "p3": {
+        "frames": 1180041216,
+        "tolerance": 0.024548991121503428,
+        "nsucc_mean": 28.20166015625,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 1,
+        "cross_restart_count": 1,
+        "pbt_iteration": 59,
+        "n_curve_points": 49
+      },
+      "p4": {
+        "frames": 1280049152,
+        "tolerance": 0.02333858947592931,
+        "nsucc_mean": 23.79541015625,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 2,
+        "cross_restart_count": 2,
+        "pbt_iteration": 64,
+        "n_curve_points": 53
+      },
+      "p5": {
+        "frames": 1220018176,
+        "tolerance": 0.031017618537425604,
+        "nsucc_mean": 31.416259765625,
+        "nsucc_max": 50.0,
+        "floor_stage": "none",
+        "restart_count": 2,
+        "cross_restart_count": 1,
+        "pbt_iteration": 61,
+        "n_curve_points": 50
+      }
+    }
+  },
+  "note": "This run is a control: full flags enabled but active WM path not actually wired. TeacherManager and WMImaginedEvaluator exist as classes but are not instantiated in train.py. Observer-side _wm_imagined_eval_per_policy is read but never written. WM-guided ranking therefore always falls back to real-only score.",
+  "diagnostics": {
+    "wm_changed_source_selection_total": 0,
+    "wm_shadow_changed_selection_total": 0,
+    "teacher_promotion_count": 0,
+    "imagined_evaluator_valid_count": 0,
+    "floor_stage_ever_reached": "none",
+    "recovery_pos_rate_p0": 0.0,
+    "horizon_h16_loss_mean": 0.0,
+    "horizon_h8_loss_mean": 0.056,
+    "drop_risk_h16_loss_mean": 0.0
+  }
+}

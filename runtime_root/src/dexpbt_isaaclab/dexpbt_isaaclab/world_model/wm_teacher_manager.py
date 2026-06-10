@@ -53,7 +53,14 @@ from .seq_wm_base import SequenceBatch, SequenceWorldModelBase
 
 @dataclass
 class TeacherEvalMetrics:
-    """Per-snapshot evaluation metrics on the held-out floor buffer."""
+    """Per-snapshot evaluation metrics on the held-out floor buffer.
+
+    Phase A4 P5 (2026-06-10): added per-horizon pos_rate fields and
+    ``uncertainty`` so the promotion gate can reason about target
+    non-degeneracy at the head level instead of relying on recovery only.
+    Backward compat: legacy ``horizon_pos_rate`` / ``drop_pos_rate``
+    aggregate scalars are still populated by ``evaluate``.
+    """
 
     score: float = 0.0
     recovery_bce: float = 0.0
@@ -64,6 +71,11 @@ class TeacherEvalMetrics:
     recovery_pos_rate: float = 0.0
     horizon_pos_rate: float = 0.0
     drop_pos_rate: float = 0.0
+    horizon_success_pos_rate_h4: float = 0.0
+    horizon_success_pos_rate_h8: float = 0.0
+    drop_risk_pos_rate_h4: float = 0.0
+    drop_risk_pos_rate_h8: float = 0.0
+    uncertainty: float = 0.0
     n_samples: int = 0
     has_nan: bool = False
     components: dict[str, float] = field(default_factory=dict)
@@ -154,10 +166,15 @@ class TeacherManager:
         enabled: bool = False,
         eval_interval_frames: int = 50_000_000,
         promote_min_improvement: float = 0.02,
-        keep_last_k: int = 3,
+        keep_last_k: int = 6,
         metric: str = "floor_recovery_eval_score",
         max_uncertainty: float = 0.5,
         require_recovery_pos_in: tuple[float, float] = (0.05, 0.95),
+        # Phase A4 P5 (2026-06-10): teacher-gate fix knobs.
+        allow_first_promotion: bool = True,
+        min_eval_size: int = 512,
+        pos_rate_low: float = 0.001,
+        pos_rate_high: float = 0.999,
     ) -> None:
         self.enabled = bool(enabled)
         self.workspace_root = Path(workspace_root)
@@ -168,13 +185,22 @@ class TeacherManager:
         self.metric = str(metric)
         self.max_uncertainty = float(max_uncertainty)
         self.require_recovery_pos_in = tuple(require_recovery_pos_in)
+        # Phase A4 P5 (2026-06-10): teacher-gate fix knobs.
+        self.allow_first_promotion = bool(allow_first_promotion)
+        self.min_eval_size = max(0, int(min_eval_size))
+        self.pos_rate_low = float(pos_rate_low)
+        self.pos_rate_high = float(pos_rate_high)
 
         self.teacher_dir = (
             self.workspace_root / "world_model_teachers" / f"policy_{self.policy_idx:02d}"
         )
         if self.enabled:
             self.teacher_dir.mkdir(parents=True, exist_ok=True)
-        self.index_path = self.teacher_dir / "teacher_index.json"
+        # Phase A4 P5 (2026-06-10): canonical name is ``index.json``.
+        # ``teacher_index.json`` is read once for backward compat.
+        self.index_path = self.teacher_dir / "index.json"
+        self.events_path = self.teacher_dir / "teacher_eval_events.jsonl"
+        self._legacy_index_path = self.teacher_dir / "teacher_index.json"
 
         self._last_eval_frame: int = -1
         self._candidates: list[TeacherSnapshot] = []
@@ -182,24 +208,45 @@ class TeacherManager:
         # Audit counters.
         self.promotions: int = 0
         self.rejections: int = 0
+        self.eval_attempts: int = 0
         self.last_promotion_reason: str = ""
         self.last_rejection_reason: str = ""
+        self.last_eval_score: float = 0.0
+        self.last_improvement: float = 0.0
+        self.last_target_degenerate: bool = False
+        self.last_no_eval_data: bool = False
+        self.last_eval_buffer_size: int = 0
 
-        if self.enabled and self.index_path.exists():
+        for path in (self.index_path, self._legacy_index_path):
+            if not (self.enabled and path.exists()):
+                continue
             try:
-                data = json.loads(self.index_path.read_text())
-                cur = data.get("current")
-                if cur and Path(cur.get("path", "")).exists():
-                    metrics = TeacherEvalMetrics(**cur.get("metrics", {}))
-                    self._current_teacher = TeacherSnapshot(
-                        path=Path(cur["path"]),
-                        frame=int(cur.get("frame", 0)),
-                        global_step=int(cur.get("global_step", 0)),
-                        score=float(cur.get("score", float("-inf"))),
-                        metrics=metrics,
-                    )
+                data = json.loads(path.read_text())
             except Exception:
-                self._current_teacher = None
+                continue
+            cur = data.get("current")
+            if cur and Path(cur.get("path", "")).exists():
+                # Filter to TeacherEvalMetrics-known fields so legacy
+                # payloads with extra components do not crash __init__.
+                allowed = set(TeacherEvalMetrics().__dict__.keys())
+                metrics = TeacherEvalMetrics(
+                    **{k: v for k, v in (cur.get("metrics") or {}).items()
+                       if k in allowed}
+                )
+                self._current_teacher = TeacherSnapshot(
+                    path=Path(cur["path"]),
+                    frame=int(cur.get("frame", 0)),
+                    global_step=int(cur.get("global_step", 0)),
+                    score=float(cur.get("score", float("-inf"))),
+                    metrics=metrics,
+                )
+            audit = data.get("audit") or {}
+            self.promotions = int(audit.get("promotions", self.promotions))
+            self.rejections = int(audit.get("rejections", self.rejections))
+            self.eval_attempts = int(
+                audit.get("eval_attempts", self.eval_attempts)
+            )
+            break
 
     # ------------------------------------------------------------------
     # Snapshot management
@@ -231,10 +278,11 @@ class TeacherManager:
         payload["frame"] = int(env_frames)
         payload["timestamp"] = time.time()
         torch.save(payload, str(path))
-        # Trim old candidates beyond keep_last_k * 2 (keep some slack so
-        # rejected snapshots are preserved for offline analysis).
+        # Phase A4 P5 (2026-06-10): keep exactly ``keep_last_k`` snapshots
+        # (no ×2 slack). Default 6 means six latest candidates retained
+        # for offline forensics — including rejected ones.
         all_snaps = sorted(self.teacher_dir.glob("wm_teacher_step_*.pt"))
-        keep = self.keep_last_k * 2
+        keep = max(1, int(self.keep_last_k))
         if len(all_snaps) > keep:
             for victim in all_snaps[: -keep]:
                 try:
@@ -257,7 +305,12 @@ class TeacherManager:
         floor_tol_threshold: float = 0.02,
         floor_tol_floor: float = 0.012,
     ) -> TeacherEvalMetrics:
-        """Run the model on every batch in the buffer; return aggregate metrics."""
+        """Run the model on every batch in the buffer; return aggregate metrics.
+
+        Phase A4 P5 (2026-06-10): also captures per-horizon pos_rate from
+        ``compute_aux_loss``'s float-metric companion (when present) so the
+        promotion gate can reason about head-level non-degeneracy.
+        """
         device = torch.device(device)
         if not eval_buffer.batches:
             return TeacherEvalMetrics()
@@ -270,18 +323,36 @@ class TeacherManager:
             agg_d_hat_mse: list[float] = []
             agg_value_mse: list[float] = []
             recovery_pos: list[float] = []
-            horizon_pos: list[float] = []
-            drop_pos: list[float] = []
+            # Per-horizon pos_rate accumulators. Keys are integer h_steps
+            # (typically 4, 8). Only populated when the model's
+            # compute_aux_loss returns the float-metric dict variant.
+            horizon_success_pos: dict[int, list[float]] = {}
+            drop_risk_pos: dict[int, list[float]] = {}
             n_total = 0
             has_nan = False
             for batch in eval_buffer.batches:
                 b = batch.to(device)
-                losses = model.compute_aux_loss(
-                    b,
-                    floor_aware_weighting=True,
-                    floor_tol_threshold=float(floor_tol_threshold),
-                    floor_tol_floor=float(floor_tol_floor),
-                )
+                # Some models return a float-metric dict separately when
+                # ``return_metrics`` is requested; otherwise compute_aux_loss
+                # returns a tensor dict only. Try the metrics path first.
+                metrics_floats: dict[str, float] = {}
+                try:
+                    losses = model.compute_aux_loss(
+                        b,
+                        floor_aware_weighting=True,
+                        floor_tol_threshold=float(floor_tol_threshold),
+                        floor_tol_floor=float(floor_tol_floor),
+                        return_metrics=True,
+                    )
+                    if isinstance(losses, tuple) and len(losses) == 2:
+                        losses, metrics_floats = losses  # type: ignore[assignment]
+                except TypeError:
+                    losses = model.compute_aux_loss(
+                        b,
+                        floor_aware_weighting=True,
+                        floor_tol_threshold=float(floor_tol_threshold),
+                        floor_tol_floor=float(floor_tol_floor),
+                    )
                 # Each loss key is a 0-dim tensor.
                 rec = losses.get("loss_recovery")
                 if rec is None:
@@ -293,7 +364,7 @@ class TeacherManager:
                 if rec_pos is not None:
                     rp, _ = _safe_isfinite_mean(rec_pos)
                     recovery_pos.append(rp)
-                # horizon / drop heads (h8 + h16)
+                # horizon / drop heads (h4 + h8 by default)
                 horizon_vals = []
                 drop_vals = []
                 for k, t in losses.items():
@@ -309,6 +380,20 @@ class TeacherManager:
                     agg_horizon.append(sum(horizon_vals) / len(horizon_vals))
                 if drop_vals:
                     agg_drop.append(sum(drop_vals) / len(drop_vals))
+                # Capture per-horizon pos_rate from the float-metric dict.
+                for mk, mv in metrics_floats.items():
+                    if mk.startswith("horizon_success_pos_rate_h"):
+                        try:
+                            h = int(mk.replace("horizon_success_pos_rate_h", ""))
+                        except ValueError:
+                            continue
+                        horizon_success_pos.setdefault(h, []).append(float(mv))
+                    elif mk.startswith("drop_risk_pos_rate_h"):
+                        try:
+                            h = int(mk.replace("drop_risk_pos_rate_h", ""))
+                        except ValueError:
+                            continue
+                        drop_risk_pos.setdefault(h, []).append(float(mv))
                 # d_hat_trend MSE comes from loss_task_error.
                 te, n_te = _safe_isfinite_mean(losses.get("loss_task_error"))
                 has_nan = has_nan or n_te
@@ -326,6 +411,24 @@ class TeacherManager:
                 sum(recovery_pos) / max(1, len(recovery_pos))
             ) if recovery_pos else 0.0
 
+            def _avg(d: dict[int, list[float]], key: int) -> float:
+                vals = d.get(key, [])
+                return float(sum(vals) / max(1, len(vals))) if vals else 0.0
+
+            hs_h4 = _avg(horizon_success_pos, 4)
+            hs_h8 = _avg(horizon_success_pos, 8)
+            dr_h4 = _avg(drop_risk_pos, 4)
+            dr_h8 = _avg(drop_risk_pos, 8)
+            # Aggregate horizon/drop pos rate (legacy field).
+            all_hs = [v for vs in horizon_success_pos.values() for v in vs]
+            all_dr = [v for vs in drop_risk_pos.values() for v in vs]
+            horizon_pos_rate_legacy = (
+                float(sum(all_hs) / len(all_hs)) if all_hs else 0.0
+            )
+            drop_pos_rate_legacy = (
+                float(sum(all_dr) / len(all_dr)) if all_dr else 0.0
+            )
+
             score = -(
                 recovery_bce
                 + horizon_bce
@@ -340,8 +443,13 @@ class TeacherManager:
                 d_hat_trend_mse=d_hat_mse,
                 value_mse=value_mse,
                 recovery_pos_rate=recovery_pos_rate,
-                horizon_pos_rate=0.0,
-                drop_pos_rate=0.0,
+                horizon_pos_rate=horizon_pos_rate_legacy,
+                drop_pos_rate=drop_pos_rate_legacy,
+                horizon_success_pos_rate_h4=hs_h4,
+                horizon_success_pos_rate_h8=hs_h8,
+                drop_risk_pos_rate_h4=dr_h4,
+                drop_risk_pos_rate_h8=dr_h8,
+                uncertainty=0.0,
                 n_samples=n_total,
                 has_nan=has_nan,
                 components={
@@ -351,12 +459,66 @@ class TeacherManager:
                     "d_hat_trend_mse": d_hat_mse,
                     "value_mse": value_mse,
                     "score": float(score),
+                    "horizon_success_pos_rate_h4": hs_h4,
+                    "horizon_success_pos_rate_h8": hs_h8,
+                    "drop_risk_pos_rate_h4": dr_h4,
+                    "drop_risk_pos_rate_h8": dr_h8,
                 },
             )
             return metrics
         finally:
             if model_was_training:
                 model.train()
+
+    # ------------------------------------------------------------------
+    # Promotion
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Helpers — head-level non-degeneracy
+    # ------------------------------------------------------------------
+
+    def _is_pos_rate_degenerate(self, value: float) -> bool:
+        """Pos-rate is degenerate when outside ``(low, high)`` (inclusive).
+
+        Default range (0.001, 0.999) only rejects truly-saturated targets;
+        anything strictly between is considered to carry signal.
+        """
+        v = float(value)
+        return v <= float(self.pos_rate_low) or v >= float(self.pos_rate_high)
+
+    def _classify_target_degeneracy(
+        self, m: TeacherEvalMetrics
+    ) -> tuple[bool, dict[str, bool]]:
+        """Return (fully_degenerate, per-head dict).
+
+        Phase A4 P5 (2026-06-10): a target is *fully* degenerate when ALL
+        of the task heads (horizon-success h4 & h8) are saturated. The
+        recovery head pos rate is reported but does not by itself force
+        a rejection (drop is naturally rare; recovery is naturally weak
+        before hard-floor). This is the primary non-degenerate check.
+        """
+        per_head = {
+            "horizon_success_h4": self._is_pos_rate_degenerate(
+                m.horizon_success_pos_rate_h4
+            ),
+            "horizon_success_h8": self._is_pos_rate_degenerate(
+                m.horizon_success_pos_rate_h8
+            ),
+            "drop_risk_h4": self._is_pos_rate_degenerate(
+                m.drop_risk_pos_rate_h4
+            ),
+            "drop_risk_h8": self._is_pos_rate_degenerate(
+                m.drop_risk_pos_rate_h8
+            ),
+            "recovery": self._is_pos_rate_degenerate(m.recovery_pos_rate),
+        }
+        # Fully degenerate when BOTH horizon-success heads are saturated.
+        # Drop_risk is excluded from the hard check because drop is rare.
+        fully = bool(
+            per_head["horizon_success_h4"] and per_head["horizon_success_h8"]
+        )
+        return fully, per_head
 
     # ------------------------------------------------------------------
     # Promotion
@@ -370,31 +532,95 @@ class TeacherManager:
         env_frames: int,
         global_step: int,
     ) -> tuple[bool, str]:
-        """Conservative promotion gate (Item 5).
+        """Conservative promotion gate.
 
-        Returns (promoted, reason).
-        Reasons (rejection): nan, recovery_bce_worse, horizon_bce_worse,
-        drop_bce_worse, d_hat_trend_worse, recovery_pos_degenerate,
-        score_below_threshold. Reasons (acceptance): "first_teacher",
-        "improved".
+        Phase A4 P5 (2026-06-10) gate logic:
+          1. ``manager_disabled`` short circuit.
+          2. ``nan`` reject.
+          3. ``no_eval_data`` reject when ``n_samples < min_eval_size``
+             (typically because the eval buffer was empty).
+          4. ``high_uncertainty`` reject when ``uncertainty > max_uncertainty``.
+          5. **Primary** non-degenerate check uses horizon-success pos
+             rates (h4 & h8). If BOTH are saturated → ``target_fully_degenerate``.
+             ``recovery_pos_rate`` saturation only emits a warning and is
+             *not* a hard reject for the first teacher.
+          6. First-teacher path:
+             * If ``allow_first_promotion=True`` → promote with reason
+               ``first_teacher``.
+             * If ``allow_first_promotion=False`` → reject with reason
+               ``first_promotion_disabled``.
+          7. Second+ teacher: keep the conservative non-degradation gate
+             (recovery_bce, horizon_bce, drop_bce, d_hat_trend_mse) plus
+             ``promote_min_improvement`` on the score. Recovery_bce/etc.
+             non-degradation tolerance is unchanged.
+
+        Persistence side-effect: every call appends to
+        ``teacher_eval_events.jsonl`` and rewrites ``index.json`` with the
+        current audit state, regardless of whether promotion happened.
         """
         self._last_eval_frame = int(env_frames)
+        self.eval_attempts += 1
+        self.last_eval_score = float(candidate_metrics.score)
+        self.last_no_eval_data = False
+        prev_score = (
+            float(self._current_teacher.score)
+            if self._current_teacher is not None else float("nan")
+        )
+        improvement = (
+            float(candidate_metrics.score) - prev_score
+            if self._current_teacher is not None else 0.0
+        )
+        self.last_improvement = improvement
+
+        def _finalize(promoted: bool, reason: str) -> tuple[bool, str]:
+            if promoted:
+                self.promotions += 1
+                self.last_promotion_reason = reason
+            else:
+                self.rejections += 1
+                self.last_rejection_reason = reason
+            self._write_index()
+            self._append_event(
+                env_frames=env_frames,
+                candidate_path=candidate_path,
+                metrics=candidate_metrics,
+                promoted=promoted,
+                reason=reason,
+                improvement=improvement,
+                prev_score=prev_score,
+            )
+            return promoted, reason
+
         if not self.enabled:
             self.last_rejection_reason = "manager_disabled"
             return False, "manager_disabled"
+
+        # 2) NaN rejection.
         if candidate_metrics.has_nan:
-            self.rejections += 1
-            self.last_rejection_reason = "nan"
-            return False, "nan"
-        # Non-degenerate recovery target check.
-        lo, hi = self.require_recovery_pos_in
-        if not (
-            float(lo) <= float(candidate_metrics.recovery_pos_rate) <= float(hi)
-        ):
-            self.rejections += 1
-            self.last_rejection_reason = "recovery_pos_degenerate"
-            return False, "recovery_pos_degenerate"
+            return _finalize(False, "nan")
+
+        # 3) Min-eval-size gate (no_eval_data).
+        self.last_eval_buffer_size = int(candidate_metrics.n_samples)
+        if int(candidate_metrics.n_samples) < int(self.min_eval_size):
+            self.last_no_eval_data = True
+            return _finalize(False, "no_eval_data")
+
+        # 4) Uncertainty gate.
+        if float(candidate_metrics.uncertainty) > float(self.max_uncertainty):
+            return _finalize(False, "high_uncertainty")
+
+        # 5) Target non-degeneracy via horizon-success pos rates.
+        fully_degenerate, _per_head = self._classify_target_degeneracy(
+            candidate_metrics
+        )
+        self.last_target_degenerate = bool(fully_degenerate)
+        if fully_degenerate:
+            return _finalize(False, "target_fully_degenerate")
+
+        # 6) First-teacher path.
         if self._current_teacher is None:
+            if not self.allow_first_promotion:
+                return _finalize(False, "first_promotion_disabled")
             self._current_teacher = TeacherSnapshot(
                 path=candidate_path,
                 frame=int(env_frames),
@@ -402,34 +628,23 @@ class TeacherManager:
                 score=float(candidate_metrics.score),
                 metrics=candidate_metrics,
             )
-            self.promotions += 1
-            self.last_promotion_reason = "first_teacher"
-            self._write_index()
-            return True, "first_teacher"
+            return _finalize(True, "first_teacher")
+
+        # 7) Conservative non-degradation gate for second+ teacher.
         prev = self._current_teacher.metrics
         if candidate_metrics.recovery_bce > prev.recovery_bce + 1e-8:
-            self.rejections += 1
-            self.last_rejection_reason = "recovery_bce_worse"
-            return False, "recovery_bce_worse"
+            return _finalize(False, "recovery_bce_worse")
         if candidate_metrics.horizon_success_bce > prev.horizon_success_bce + 1e-8:
-            self.rejections += 1
-            self.last_rejection_reason = "horizon_bce_worse"
-            return False, "horizon_bce_worse"
+            return _finalize(False, "horizon_bce_worse")
         if candidate_metrics.drop_risk_bce > prev.drop_risk_bce + 1e-8:
-            self.rejections += 1
-            self.last_rejection_reason = "drop_bce_worse"
-            return False, "drop_bce_worse"
+            return _finalize(False, "drop_bce_worse")
         if candidate_metrics.d_hat_trend_mse > prev.d_hat_trend_mse + 1e-3:
-            self.rejections += 1
-            self.last_rejection_reason = "d_hat_trend_worse"
-            return False, "d_hat_trend_worse"
+            return _finalize(False, "d_hat_trend_worse")
         if (
             float(candidate_metrics.score)
             < float(prev.score) + float(self.promote_min_improvement)
         ):
-            self.rejections += 1
-            self.last_rejection_reason = "score_below_threshold"
-            return False, "score_below_threshold"
+            return _finalize(False, "score_below_threshold")
         # Promote.
         self._current_teacher = TeacherSnapshot(
             path=candidate_path,
@@ -438,34 +653,130 @@ class TeacherManager:
             score=float(candidate_metrics.score),
             metrics=candidate_metrics,
         )
-        self.promotions += 1
-        self.last_promotion_reason = "improved"
+        return _finalize(True, "improved")
+
+    # ------------------------------------------------------------------
+    # No-eval-data path (called from train.py when the buffer is empty)
+    # ------------------------------------------------------------------
+
+    def record_no_eval_data(
+        self,
+        *,
+        env_frames: int,
+        eval_buffer_size: int,
+    ) -> tuple[bool, str]:
+        """Persist a 'no_eval_data' attempt without invoking the model.
+
+        ``train.py`` calls this when ``len(eval_buffer)==0`` so we still
+        increment the attempt counter, write index.json, and append an
+        events row — the user requirement (A.1, A.2) for *every* attempt.
+        """
+        self._last_eval_frame = int(env_frames)
+        self.eval_attempts += 1
+        self.last_eval_score = 0.0
+        self.last_improvement = 0.0
+        self.last_target_degenerate = False
+        self.last_no_eval_data = True
+        self.last_eval_buffer_size = int(max(0, eval_buffer_size))
+        if not self.enabled:
+            self.last_rejection_reason = "manager_disabled"
+            return False, "manager_disabled"
+        self.rejections += 1
+        self.last_rejection_reason = "no_eval_data"
         self._write_index()
-        return True, "improved"
+        self._append_event(
+            env_frames=env_frames,
+            candidate_path=None,
+            metrics=TeacherEvalMetrics(),
+            promoted=False,
+            reason="no_eval_data",
+            improvement=0.0,
+            prev_score=float("nan"),
+        )
+        return False, "no_eval_data"
 
     def current_teacher(self) -> Optional[TeacherSnapshot]:
         return self._current_teacher
 
     def _write_index(self) -> None:
-        if not self.enabled or self._current_teacher is None:
+        """Phase A4 P5 (2026-06-10): write index.json on EVERY eval attempt.
+
+        Unlike the legacy implementation that only wrote on promotion, we
+        now persist eval state regardless of outcome so the analyzer can
+        reconstruct rejection history. ``current`` may be null when no
+        teacher has ever been promoted.
+        """
+        if not self.enabled:
             return
         try:
-            payload = {
-                "policy_idx": int(self.policy_idx),
-                "current": {
+            current_payload: Optional[dict[str, Any]] = None
+            if self._current_teacher is not None:
+                current_payload = {
                     "path": str(self._current_teacher.path),
                     "frame": int(self._current_teacher.frame),
                     "global_step": int(self._current_teacher.global_step),
                     "score": float(self._current_teacher.score),
                     "metrics": self._current_teacher.metrics.to_json(),
-                    "promotion_count": int(self.promotions),
-                },
+                }
+            cur_metrics = (
+                self._current_teacher.metrics
+                if self._current_teacher is not None
+                else None
+            )
+            payload = {
+                "policy_idx": int(self.policy_idx),
+                "current": current_payload,
+                "current_teacher_step": int(
+                    self._current_teacher.frame
+                    if self._current_teacher is not None else -1
+                ),
+                "current_teacher_path": str(
+                    self._current_teacher.path
+                    if self._current_teacher is not None else ""
+                ),
+                "is_teacher_valid": bool(self._current_teacher is not None),
                 "audit": {
                     "promotions": int(self.promotions),
                     "rejections": int(self.rejections),
+                    "eval_attempts": int(self.eval_attempts),
                     "last_promotion_reason": str(self.last_promotion_reason),
                     "last_rejection_reason": str(self.last_rejection_reason),
                 },
+                # Top-level fields requested by the user spec (A.1).
+                "eval_attempt_count": int(self.eval_attempts),
+                "promotion_count": int(self.promotions),
+                "rejection_count": int(self.rejections),
+                "last_eval_frame": int(self._last_eval_frame),
+                "last_eval_score": float(self.last_eval_score),
+                "last_rejected_reason": str(self.last_rejection_reason),
+                "last_promoted_reason": str(self.last_promotion_reason),
+                "eval_buffer_size": int(self.last_eval_buffer_size),
+                "recovery_pos_rate": (
+                    float(cur_metrics.recovery_pos_rate)
+                    if cur_metrics is not None else 0.0
+                ),
+                "horizon_success_pos_rate_h4": (
+                    float(cur_metrics.horizon_success_pos_rate_h4)
+                    if cur_metrics is not None else 0.0
+                ),
+                "horizon_success_pos_rate_h8": (
+                    float(cur_metrics.horizon_success_pos_rate_h8)
+                    if cur_metrics is not None else 0.0
+                ),
+                "drop_risk_pos_rate_h4": (
+                    float(cur_metrics.drop_risk_pos_rate_h4)
+                    if cur_metrics is not None else 0.0
+                ),
+                "drop_risk_pos_rate_h8": (
+                    float(cur_metrics.drop_risk_pos_rate_h8)
+                    if cur_metrics is not None else 0.0
+                ),
+                "uncertainty": (
+                    float(cur_metrics.uncertainty)
+                    if cur_metrics is not None else 0.0
+                ),
+                "target_degenerate": bool(self.last_target_degenerate),
+                "no_eval_data": bool(self.last_no_eval_data),
                 "metric": str(self.metric),
                 "timestamp": time.time(),
             }
@@ -474,6 +785,62 @@ class TeacherManager:
             tmp.replace(self.index_path)
         except Exception as exc:  # pragma: no cover
             print(f"[wm-teacher] index write failed: {exc}")
+
+    def _append_event(
+        self,
+        *,
+        env_frames: int,
+        candidate_path: Optional[Path],
+        metrics: TeacherEvalMetrics,
+        promoted: bool,
+        reason: str,
+        improvement: float,
+        prev_score: float,
+    ) -> None:
+        """Append a single line to teacher_eval_events.jsonl (A.2)."""
+        if not self.enabled:
+            return
+        try:
+            row = {
+                "ts": time.time(),
+                "frame": int(env_frames),
+                "candidate_path": str(candidate_path) if candidate_path else "",
+                "eval_score": float(metrics.score),
+                "promoted": bool(promoted),
+                "rejected_reason": (
+                    str(reason) if not promoted else ""
+                ),
+                "promoted_reason": str(reason) if promoted else "",
+                "eval_buffer_size": int(self.last_eval_buffer_size),
+                "n_samples": int(metrics.n_samples),
+                "recovery_pos_rate": float(metrics.recovery_pos_rate),
+                "horizon_success_pos_rate_h4": float(
+                    metrics.horizon_success_pos_rate_h4
+                ),
+                "horizon_success_pos_rate_h8": float(
+                    metrics.horizon_success_pos_rate_h8
+                ),
+                "drop_risk_pos_rate_h4": float(metrics.drop_risk_pos_rate_h4),
+                "drop_risk_pos_rate_h8": float(metrics.drop_risk_pos_rate_h8),
+                "recovery_bce": float(metrics.recovery_bce),
+                "horizon_success_bce": float(metrics.horizon_success_bce),
+                "drop_risk_bce": float(metrics.drop_risk_bce),
+                "d_hat_trend_mse": float(metrics.d_hat_trend_mse),
+                "value_mse": float(metrics.value_mse),
+                "uncertainty": float(metrics.uncertainty),
+                "previous_teacher_score": (
+                    None if (prev_score != prev_score) else float(prev_score)
+                ),
+                "improvement": float(improvement),
+                "has_nan": bool(metrics.has_nan),
+                "target_degenerate": bool(self.last_target_degenerate),
+                "no_eval_data": bool(self.last_no_eval_data),
+            }
+            self.teacher_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.events_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except Exception as exc:  # pragma: no cover
+            print(f"[wm-teacher] event append failed: {exc}")
 
 
 __all__ = [

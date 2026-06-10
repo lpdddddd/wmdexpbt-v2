@@ -1,0 +1,4 @@
+status=restarting_pbt
+attempt=12
+pbt_manifest=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_belief_value_fastcurr_inherit_3b_20260609_045840/policy_04/pbt_restart.json
+start_time=2026-06-09T14:31:01+08:00

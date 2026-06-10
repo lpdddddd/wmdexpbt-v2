@@ -1,0 +1,21 @@
+{
+  "launcher": "start_regrasping_bayesian_no_h3_p2_1_3b.sh",
+  "profile": "track_c_bayesian_no_h3_3b",
+  "target_frames": 3000000000,
+  "max_iterations": 22889,
+  "num_policies": 6,
+  "base_seed": 42,
+  "wm_strategy_mode": "bayesian",
+  "wm_strategy_pool": [
+    "none",
+    "aux_mid",
+    "value_imag_h1"
+  ],
+  "cf_runner_enabled": true,
+  "cf_num_envs": 4096,
+  "cf_max_parallel_children": 2,
+  "cf_cuda_visible_devices": "4,5",
+  "cf_delta_metric": "nsucc",
+  "rollback_cooldown_frames": 200000000,
+  "max_consecutive_successes": 50
+}

@@ -344,7 +344,13 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         recovery_shadow_tol_threshold: Optional[float] = None,
         # Skip horizon heads whose horizon ≥ seq_len-1 (target undefined).
         horizon_skip_too_long: bool = True,
-    ) -> dict[str, torch.Tensor]:
+        # Phase A4 P5 (2026-06-10): when True, also returns the float-metric
+        # dict that previously only lived on ``self._last_metrics``. Used
+        # by TeacherManager.evaluate to read per-horizon pos rates without
+        # touching internal state. Default False keeps the legacy contract
+        # (tensor-only dict).
+        return_metrics: bool = False,
+    ) -> "dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, float]]":
         """Forward + losses. Returns dict with 'loss_total' and per-term keys."""
         if loss_weights is None:
             loss_weights = {
@@ -665,6 +671,8 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             result[f"loss_horizon_success_h{int(h_steps)}"] = lh
         for h_steps, ld in L_drop_risk.items():
             result[f"loss_drop_risk_h{int(h_steps)}"] = ld
+        if return_metrics:
+            return result, dict(self._last_metrics)
         return result
 
     # ------------------------------------------------------------------

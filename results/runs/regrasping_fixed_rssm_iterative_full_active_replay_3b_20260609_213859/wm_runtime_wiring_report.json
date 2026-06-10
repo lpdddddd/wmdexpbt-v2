@@ -1,0 +1,116 @@
+{
+  "run_dir": "/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_full_active_replay_3b_20260609_213859",
+  "workspace": "/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_full_active_replay_3b_20260609_213859/dexpbt_8gpu_ws",
+  "wm_imagined_dir_exists": false,
+  "teachers_dir_exists": false,
+  "per_policy": {
+    "0": {
+      "n": 53,
+      "last_frames": 1240072192,
+      "last_tolerance": 0.025859932937317788,
+      "last_nsucc_mean": 22.2913818359375,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 53
+      },
+      "floor_recovery_score_real_last": 42.32026689468593,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -42.32026689468593
+    },
+    "1": {
+      "n": 30,
+      "last_frames": 1140064256,
+      "last_tolerance": 0.036177423574778385,
+      "last_nsucc_mean": 30.644287109375,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 30
+      },
+      "floor_recovery_score_real_last": 55.66469319661458,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -55.66469319661458
+    },
+    "2": {
+      "n": 50,
+      "last_frames": 1260126208,
+      "last_tolerance": 0.026373341786013433,
+      "last_nsucc_mean": 28.438232421875,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 50
+      },
+      "floor_recovery_score_real_last": 49.871015099744156,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -49.871015099744156
+    },
+    "3": {
+      "n": 49,
+      "last_frames": 1180041216,
+      "last_tolerance": 0.024548991121503428,
+      "last_nsucc_mean": 28.20166015625,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 49
+      },
+      "floor_recovery_score_real_last": 50.8832455047587,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -50.8832455047587
+    },
+    "4": {
+      "n": 53,
+      "last_frames": 1280049152,
+      "last_tolerance": 0.02333858947592931,
+      "last_nsucc_mean": 23.79541015625,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 53
+      },
+      "floor_recovery_score_real_last": 45.51649423911564,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -45.51649423911564
+    },
+    "5": {
+      "n": 50,
+      "last_frames": 1220018176,
+      "last_tolerance": 0.031017618537425604,
+      "last_nsucc_mean": 31.416259765625,
+      "last_floor_stage": "none",
+      "wm_score_used_count": 0,
+      "wm_score_used_fraction": 0.0,
+      "wm_shadow_changed_selection_max": 0,
+      "fallback_reasons": {
+        "feature_off": 50
+      },
+      "floor_recovery_score_real_last": 56.659261067708336,
+      "floor_recovery_score_wm_last": 0.0,
+      "wm_score_delta_last": -56.659261067708336
+    }
+  },
+  "teachers": {},
+  "wm_imagined": {},
+  "wm_imagined_valid_count": 0,
+  "wm_imagined_total": 0,
+  "teacher_promoted_total": 0,
+  "teacher_rejected_total": 0,
+  "wm_score_used_total": 0,
+  "wm_shadow_changed_selection_max": 0,
+  "fallback_reason_histogram": {
+    "feature_off": 285
+  },
+  "verdict": "WM imagined evaluator: NOT WIRED at runtime. | Iterative teacher: NOT WIRED at runtime. | Active WM ranking: NEVER engaged (top fallback reason: [('feature_off', 285)])."
+}

@@ -738,12 +738,45 @@ parser.add_argument(
     help="min eval-score improvement required to promote a candidate.",
 )
 parser.add_argument(
-    "--seq_wm_teacher_keep_last_k", type=int, default=3,
-    help="number of teacher snapshots to keep on disk.",
+    "--seq_wm_teacher_keep_last_k", type=int, default=6,
+    help="number of teacher snapshots to keep on disk. Phase A4 P5 "
+    "(2026-06-10): default raised 3->6 so rejected candidates are "
+    "retained for offline forensics.",
 )
 parser.add_argument(
     "--seq_wm_teacher_metric", type=str, default="floor_recovery_eval_score",
     help="Metric driving teacher promotion. Currently only floor_recovery_eval_score.",
+)
+# Phase A4 P5 (2026-06-10): teacher-gate fix knobs.
+parser.add_argument(
+    "--seq_wm_teacher_allow_first_promotion",
+    action=argparse.BooleanOptionalAction, default=True,
+    help="When True, the first valid candidate is promoted even if no "
+    "previous teacher exists, provided gate (n_samples, uncertainty, "
+    "non-degenerate horizon-success target) is satisfied. Default True.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_min_eval_size", type=int, default=512,
+    help="Minimum eval buffer sample count (sum of batch starts) required "
+    "for a promotion attempt. Below this the attempt is rejected with "
+    "reason=no_eval_data and persisted to teacher_eval_events.jsonl.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_max_uncertainty", type=float, default=0.5,
+    help="Reject candidates whose imagined-eval uncertainty exceeds this. "
+    "Phase A4 P5: dedicated knob; the legacy `--pbt_wm_max_uncertainty` "
+    "is reused only as PBT-side gate.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_pos_rate_low", type=float, default=0.001,
+    help="Lower edge of the non-degenerate pos-rate range. Pos rates "
+    "<= low or >= high are saturated. Default 0.001 ensures only truly "
+    "degenerate targets are rejected.",
+)
+parser.add_argument(
+    "--seq_wm_teacher_pos_rate_high", type=float, default=0.999,
+    help="Upper edge of the non-degenerate pos-rate range. See "
+    "`--seq_wm_teacher_pos_rate_low`.",
 )
 # Part D: imagined evaluator.
 parser.add_argument(
@@ -1781,27 +1814,63 @@ def _run_wm_runtime_wiring(
                 out["teacher_promoted"] = 1.0 if promoted else 0.0
                 out["teacher_promotion_count"] = float(teacher.promotions)
                 out["teacher_rejection_count"] = float(teacher.rejections)
+                out["teacher_eval_attempt_count"] = float(teacher.eval_attempts)
                 out["teacher_eval_score"] = float(metrics_obj.score)
                 out["teacher_eval_recovery_pos"] = float(
                     metrics_obj.recovery_pos_rate
                 )
+                # Phase A4 P5 (2026-06-10): per-head pos rates and the
+                # gate-decision improvement so TB shows the live state.
+                out["teacher_horizon_pos_rate_h4"] = float(
+                    metrics_obj.horizon_success_pos_rate_h4
+                )
+                out["teacher_horizon_pos_rate_h8"] = float(
+                    metrics_obj.horizon_success_pos_rate_h8
+                )
+                out["teacher_drop_pos_rate_h4"] = float(
+                    metrics_obj.drop_risk_pos_rate_h4
+                )
+                out["teacher_drop_pos_rate_h8"] = float(
+                    metrics_obj.drop_risk_pos_rate_h8
+                )
+                out["teacher_eval_buffer_size"] = float(len(eval_buf))
+                out["teacher_n_samples"] = float(metrics_obj.n_samples)
+                out["teacher_uncertainty"] = float(metrics_obj.uncertainty)
+                out["teacher_improvement"] = float(teacher.last_improvement)
+                out["teacher_first_promotion"] = float(
+                    1.0 if (promoted and reason == "first_teacher") else 0.0
+                )
+                out["teacher_target_degenerate"] = float(
+                    1.0 if teacher.last_target_degenerate else 0.0
+                )
                 out["teacher_rejected_reason_hash"] = float(
                     hash(reason) % 1_000_003
                 )
+                out["teacher_no_eval_data"] = 0.0
                 if metrics_obj.has_nan:
-                    out["teacher_target_degenerate"] = 1.0
                     seq_wm_trainer._teacher_target_degenerate_total += 1
                 if promoted:
                     seq_wm_trainer._teacher_promoted_total += 1
-                lo, hi = teacher.require_recovery_pos_in
-                if not (lo <= metrics_obj.recovery_pos_rate <= hi):
-                    out["teacher_target_degenerate"] = 1.0
+                if teacher.last_target_degenerate:
                     seq_wm_trainer._teacher_target_degenerate_total += 1
             else:
+                # Phase A4 P5 (2026-06-10): record_no_eval_data() persists
+                # the attempt to index.json + events.jsonl so the analyzer
+                # can show every eval attempt — even those that were skipped
+                # because the buffer was empty.
+                buf_size = int(len(eval_buf) if eval_buf is not None else 0)
+                teacher.record_no_eval_data(
+                    env_frames=frames, eval_buffer_size=buf_size
+                )
                 out["teacher_no_eval_data"] = 1.0
+                out["teacher_eval_attempt_count"] = float(teacher.eval_attempts)
+                out["teacher_promotion_count"] = float(teacher.promotions)
+                out["teacher_rejection_count"] = float(teacher.rejections)
+                out["teacher_eval_buffer_size"] = float(buf_size)
+                out["teacher_rejected_reason_hash"] = float(
+                    hash("no_eval_data") % 1_000_003
+                )
                 seq_wm_trainer._teacher_no_eval_data_total += 1
-                # Mark eval frame so we do not re-attempt every epoch.
-                teacher._last_eval_frame = int(frames)
         except Exception as exc:
             out["teacher_error"] = 1.0
             out["teacher_rejected_reason_hash"] = float(
@@ -1817,13 +1886,14 @@ def _run_wm_runtime_wiring(
             seq_wm_trainer._teacher_no_eval_data_total
         )
 
-    # Always emit current teacher step (-1 if no teacher yet).
+    # Always emit current teacher step (-1 if no teacher yet). Phase A4
+    # P5 also exposes ``teacher_current_teacher_step`` as canonical TB key.
     if teacher_enabled and teacher.current_teacher() is not None:
-        out["teacher_current_step"] = float(
-            teacher.current_teacher().frame
-        )
+        cur_step = float(teacher.current_teacher().frame)
     else:
-        out["teacher_current_step"] = -1.0
+        cur_step = -1.0
+    out["teacher_current_step"] = cur_step
+    out["teacher_current_teacher_step"] = cur_step
 
     # ----- Imagined evaluator -----
     if imagine_enabled:
@@ -3401,11 +3471,18 @@ def main():
                 ),
                 keep_last_k=int(args_cli.seq_wm_teacher_keep_last_k),
                 metric=str(args_cli.seq_wm_teacher_metric),
-                max_uncertainty=float(args_cli.pbt_wm_max_uncertainty),
+                max_uncertainty=float(args_cli.seq_wm_teacher_max_uncertainty),
                 require_recovery_pos_in=(
                     float(args_cli.seq_wm_teacher_require_recovery_pos_low),
                     float(args_cli.seq_wm_teacher_require_recovery_pos_high),
                 ),
+                # Phase A4 P5 (2026-06-10): gate-fix knobs.
+                allow_first_promotion=bool(
+                    args_cli.seq_wm_teacher_allow_first_promotion
+                ),
+                min_eval_size=int(args_cli.seq_wm_teacher_min_eval_size),
+                pos_rate_low=float(args_cli.seq_wm_teacher_pos_rate_low),
+                pos_rate_high=float(args_cli.seq_wm_teacher_pos_rate_high),
             )
             seq_wm_trainer._floor_eval_buffer = FloorRecoveryEvalBuffer(
                 capacity=int(args_cli.seq_wm_teacher_eval_buffer_capacity)

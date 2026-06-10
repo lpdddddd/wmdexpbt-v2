@@ -1,0 +1,6 @@
+status=stopped
+attempt=1
+attempt_name=attempt_1_2026-06-08_10-00-48
+end_time=2026-06-08T12:31:43+08:00
+exit_code=0
+checkpoint=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_00/rl_games/attempt_1_2026-06-08_10-00-48/nn/last_DexPBTKukaAllegroLSTMPPO_ep_6112_rew__30085.412_.pth

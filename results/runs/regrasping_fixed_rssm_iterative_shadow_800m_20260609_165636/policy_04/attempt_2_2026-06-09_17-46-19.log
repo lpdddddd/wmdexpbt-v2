@@ -1,0 +1,1017 @@
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /root/autodl-tmp/wmdexpbt/runtime_root/src/IsaacLab/apps/isaaclab.python.headless.kit
+Loading user config located at: '/root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/user.config.json'
+[Info] [carb] Logging to file: /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/logs/Kit/Isaac-Sim/5.1/kit_20260609_174619.log
+2026-06-09T09:46:20Z [108ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-06-09T09:46:20Z [153ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libMaterialXRenderHw.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-09T09:46:20Z [160ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libMaterialXRenderGlsl.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-09T09:46:20Z [166ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/libusd_usdBakeMtlx.so. Error: libXt.so.6: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-09T09:46:20Z [190ms] [Error] [omni.ext.plugin] Could not load the dynamic library from /root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/lib/python3.11/site-packages/isaacsim/kit/data/Kit/Isaac-Sim/5.1/exts/3/omni.iray.libs-0.0.0+69cbf6ad.lx64.r/bin/iray/libneuray.so. Error: libGLU.so.1: cannot open shared object file: No such file or directory (note that this may be caused by a dependent library)
+2026-06-09T09:46:20Z [331ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-09T09:46:20Z [466ms] [Warning] [carb] Acquiring non optional plugin interface which is not listed as dependency: [omni::physx::IPhysxBenchmarks v1.0] (plugin: <default plugin>), by client: omni.physics.physx.plugin. Add it to CARB_PLUGIN_IMPL_DEPS() macro of a client.
+2026-06-09T09:46:20Z [474ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-09T09:46:22Z [2,668ms] [Warning] [carb.cudainterop.plugin] CUDA_VISIBLE_DEVICES environment variable is set.
+2026-06-09T09:46:22Z [2,688ms] [Warning] [carb.cudainterop.plugin] Note CUDA device enumeration and Omniverse device enumeration are different.
+2026-06-09T09:46:22Z [2,688ms] [Warning] [carb.cudainterop.plugin] Setting CUDA_VISIBLE_DEVICES can lead to undesired behavior or crashes.
+2026-06-09T09:46:22Z [2,927ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,927ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,929ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,929ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,930ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,930ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,931ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,931ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 4090
+2026-06-09T09:46:22Z [2,934ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 595.58.03     | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | c2635b2e.. |
+|     |                                  |        |     |            | 51        |            |
+|---------------------------------------------------------------------------------------------|
+| 1   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 061e5739.. |
+|     |                                  |        |     |            | 63        |            |
+|---------------------------------------------------------------------------------------------|
+| 2   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | f3a886af.. |
+|     |                                  |        |     |            | 64        |            |
+|---------------------------------------------------------------------------------------------|
+| 3   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 68079924.. |
+|     |                                  |        |     |            | d0        |            |
+|---------------------------------------------------------------------------------------------|
+| 4   | NVIDIA GeForce RTX 4090          | Yes: 0 |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | 8aaeb606.. |
+|     |                                  |        |     |            | e1        |            |
+|---------------------------------------------------------------------------------------------|
+| 5   | NVIDIA GeForce RTX 4090          |        |     | 49386   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2684      | a977c546.. |
+|     |                                  |        |     |            | e2        |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 5.15.0-78-generic
+| Processor: Intel(R) Xeon(R) Gold 6459C
+| Bare Metal Cores: 64 | Bare Metal Logical Cores: 128
+| Core Usage Quota: 72
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 589824 | Free Memory: 545176
+| Total Page/Swap (MB): 0 | Free Page/Swap: 0
+|---------------------------------------------------------------------------------------------|
+2026-06-09T09:46:23Z [3,604ms] [Warning] [gpu.foundation.plugin] PCIe link width current (8) and maximum (16) for device 4 don't match.
+2026-06-09T09:46:23Z [3,654ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+[train] policy_idx=4 base_seed=42 effective_seed=4042
+[INFO] Logging to: /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19
+
+[36m======================================================================================[0m
+[36m[1m[INFO][IsaacLab]: Logging to file: /tmp/isaaclab/logs/isaaclab_2026-06-09_17-46-25.log[0m
+[36m======================================================================================[0m
+
+[33m17:46:25 [simulation_context.py] WARNING: The `enable_external_forces_every_iteration` parameter in the PhysxCfg is set to False. If you are experiencing noisy velocities, consider enabling this flag. You may need to slightly increase the number of velocity iterations (setting it to 1 or 2 rather than 0), together with this flag, to improve the accuracy of velocity updates.[0m
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : 4042
+	Physics step-size     : 0.016666666666666666
+	Rendering step-size   : 0.016666666666666666
+	Environment step-size : 0.016666666666666666
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_7/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_7/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_6/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_6/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_2/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_5/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_5/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_1/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_4/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_4/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_0/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/iiwa7_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/iiwa7_link_3/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_0/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_2/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_0/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_1/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_1/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/palm_link/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/palm_link/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_2/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_3/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_0/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_1/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/thumb_link_0/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/thumb_link_0/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_3/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_3/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_3/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_3/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/index_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/index_link_2/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/middle_link_1/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/middle_link_1/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/ring_link_2/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/ring_link_2/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+2026-06-09T09:46:25Z [5,456ms] [Warning] [omni.usd] Warning: in _ReportErrors at line 3172 of /builds/omniverse/usd-ci/USD/pxr/usd/usd/stage.cpp -- In </World/envs/env_0/Robot/ee_link/allegro_mount/visuals/materials>: Could not open asset @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/materials.usd@ for reference introduced by @/root/autodl-tmp/wmdexpbt/runtime_root/cache/isaac_assets/5.1/Isaac/IsaacLab/Robots/KukaAllegro/Props/visuals.usd@</Root/allegro_mount/materials>. (recomposing stage on stage @anon:0x55dcbabe0280:World0.usd@ <0x55dcbabe5560>)
+
+[INFO]: Time taken for scene creation : 7.462692 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 8192
+	Environment spacing   : 1.2
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : []
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 9.212422 seconds
+[INFO]: Completed setting up the environment...
+[RESUME] PBT restart from source_policy=0: success_tolerance=0.075, initial_tolerance=0.075, target_tolerance=0.01, last_curriculum_update=0, frame_since_restart=29328, curriculum_freeze_steps_after_restart=12208
+[SeqWM] Loaded checkpoint from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/000/wm_seq_checkpoints/wm_seq_latest.pt (src=rssm_belief_value, reason=same_strategy)
+[SeqWM] enabled: strategy=rssm_belief_value, obs_dim=92, action_dim=23, seq_len=16, seq_batch_size=1024, lambda_total=0.05, value_detach=False
+[Posterior] Loaded shared posterior from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/wm_posterior_latest.json
+[WM] init: strategy=rssm_belief_value, ensemble=3, cf=False
+self.seed = 4042
+[train] policy_idx=4 env_randomization_hash=d50c78aa793f81af
+Exact experiment name requested from command line: attempt_2_2026-06-09_17-46-19
+seq_length: 16
+current training device: cuda:0
+build mlp: 768
+RunningMeanStd:  (1,)
+RunningMeanStd:  (92,)
+[SeqWM] Connected to A2CAgent: strategy=rssm_belief_value, backbone=RSSMLiteWorldModel, seq_len=16, seq_batch_size=1024
+=> loading checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/restart_p4/000012.pth'
+[WM] torch.compile disabled
+2026-06-09T09:46:43Z [23,736ms] [Warning] [omni.physx.fabric.plugin] FabricManager::initializePointInstancer mismatched prototypes on point instancer: /Visuals/goal_marker.
+fps step: 104729 fps step and policy inference: 91448 fps total: 61451 epoch: 1834/6112 frames: 240123904
+fps step: 247650 fps step and policy inference: 224541 fps total: 126830 epoch: 1835/6112 frames: 240254976
+fps step: 167500 fps step and policy inference: 154074 fps total: 96497 epoch: 1836/6112 frames: 240386048
+saving next best rewards:  [332.68674]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 144988 fps step and policy inference: 135442 fps total: 88497 epoch: 1837/6112 frames: 240517120
+fps step: 238734 fps step and policy inference: 218285 fps total: 167919 epoch: 1838/6112 frames: 240648192
+fps step: 233626 fps step and policy inference: 213080 fps total: 145209 epoch: 1839/6112 frames: 240779264
+saving next best rewards:  [384.20627]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 220460 fps step and policy inference: 203469 fps total: 110850 epoch: 1840/6112 frames: 240910336
+saving next best rewards:  [473.84296]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 213743 fps step and policy inference: 196115 fps total: 96425 epoch: 1841/6112 frames: 241041408
+saving next best rewards:  [516.2141]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 217523 fps step and policy inference: 199598 fps total: 102753 epoch: 1842/6112 frames: 241172480
+saving next best rewards:  [520.9179]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 201733 fps step and policy inference: 186129 fps total: 109382 epoch: 1843/6112 frames: 241303552
+saving next best rewards:  [543.078]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 167919 fps step and policy inference: 156258 fps total: 98940 epoch: 1844/6112 frames: 241434624
+saving next best rewards:  [569.5048]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 190572 fps step and policy inference: 176407 fps total: 108546 epoch: 1845/6112 frames: 241565696
+saving next best rewards:  [570.813]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 190800 fps step and policy inference: 176484 fps total: 114044 epoch: 1846/6112 frames: 241696768
+saving next best rewards:  [695.1082]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 198627 fps step and policy inference: 183461 fps total: 124344 epoch: 1847/6112 frames: 241827840
+saving next best rewards:  [1098.842]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 203032 fps step and policy inference: 186897 fps total: 100787 epoch: 1848/6112 frames: 241958912
+saving next best rewards:  [1604.495]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 216396 fps step and policy inference: 198935 fps total: 107254 epoch: 1849/6112 frames: 242089984
+saving next best rewards:  [1758.6893]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 195138 fps step and policy inference: 180583 fps total: 104966 epoch: 1850/6112 frames: 242221056
+saving next best rewards:  [1918.4097]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 210036 fps step and policy inference: 194611 fps total: 127016 epoch: 1851/6112 frames: 242352128
+saving next best rewards:  [1975.5247]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 189786 fps step and policy inference: 175983 fps total: 104143 epoch: 1852/6112 frames: 242483200
+fps step: 188190 fps step and policy inference: 174723 fps total: 121030 epoch: 1853/6112 frames: 242614272
+fps step: 219192 fps step and policy inference: 201712 fps total: 120828 epoch: 1854/6112 frames: 242745344
+fps step: 194384 fps step and policy inference: 177631 fps total: 103302 epoch: 1855/6112 frames: 242876416
+saving next best rewards:  [2028.8678]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 218055 fps step and policy inference: 201009 fps total: 106819 epoch: 1856/6112 frames: 243007488
+saving next best rewards:  [2591.565]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 199797 fps step and policy inference: 184709 fps total: 118822 epoch: 1857/6112 frames: 243138560
+saving next best rewards:  [2748.5093]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 186848 fps step and policy inference: 172995 fps total: 100787 epoch: 1858/6112 frames: 243269632
+saving next best rewards:  [2860.129]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 164609 fps step and policy inference: 153836 fps total: 86650 epoch: 1859/6112 frames: 243400704
+fps step: 165576 fps step and policy inference: 153337 fps total: 88715 epoch: 1860/6112 frames: 243531776
+fps step: 177755 fps step and policy inference: 164265 fps total: 98714 epoch: 1861/6112 frames: 243662848
+fps step: 191922 fps step and policy inference: 176923 fps total: 106046 epoch: 1862/6112 frames: 243793920
+fps step: 181407 fps step and policy inference: 167116 fps total: 102151 epoch: 1863/6112 frames: 243924992
+saving next best rewards:  [3289.534]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 201555 fps step and policy inference: 186557 fps total: 105349 epoch: 1864/6112 frames: 244056064
+saving next best rewards:  [3651.1685]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 205462 fps step and policy inference: 189410 fps total: 104103 epoch: 1865/6112 frames: 244187136
+saving next best rewards:  [4013.3914]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 203150 fps step and policy inference: 188126 fps total: 113291 epoch: 1866/6112 frames: 244318208
+fps step: 197357 fps step and policy inference: 181684 fps total: 104658 epoch: 1867/6112 frames: 244449280
+fps step: 172242 fps step and policy inference: 159445 fps total: 94632 epoch: 1868/6112 frames: 244580352
+fps step: 187120 fps step and policy inference: 172547 fps total: 107970 epoch: 1869/6112 frames: 244711424
+fps step: 196697 fps step and policy inference: 180294 fps total: 105450 epoch: 1870/6112 frames: 244842496
+fps step: 186499 fps step and policy inference: 171065 fps total: 99573 epoch: 1871/6112 frames: 244973568
+fps step: 193038 fps step and policy inference: 177191 fps total: 99699 epoch: 1872/6112 frames: 245104640
+fps step: 178666 fps step and policy inference: 164492 fps total: 97653 epoch: 1873/6112 frames: 245235712
+saving next best rewards:  [4196.269]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 208072 fps step and policy inference: 191375 fps total: 103474 epoch: 1874/6112 frames: 245366784
+saving next best rewards:  [4243.8154]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 205085 fps step and policy inference: 190142 fps total: 96480 epoch: 1875/6112 frames: 245497856
+saving next best rewards:  [4498.9526]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 195859 fps step and policy inference: 181124 fps total: 98452 epoch: 1876/6112 frames: 245628928
+saving next best rewards:  [4661.561]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 180363 fps step and policy inference: 167765 fps total: 88180 epoch: 1877/6112 frames: 245760000
+saving next best rewards:  [4692.2295]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 179336 fps step and policy inference: 166700 fps total: 89704 epoch: 1878/6112 frames: 245891072
+fps step: 176638 fps step and policy inference: 162795 fps total: 91787 epoch: 1879/6112 frames: 246022144
+fps step: 185206 fps step and policy inference: 170324 fps total: 99811 epoch: 1880/6112 frames: 246153216
+saving next best rewards:  [4934.671]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 207903 fps step and policy inference: 192021 fps total: 113869 epoch: 1881/6112 frames: 246284288
+saving next best rewards:  [5378.2617]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 198829 fps step and policy inference: 185042 fps total: 116213 epoch: 1882/6112 frames: 246415360
+saving next best rewards:  [5462.831]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 198551 fps step and policy inference: 184114 fps total: 114561 epoch: 1883/6112 frames: 246546432
+fps step: 216025 fps step and policy inference: 199454 fps total: 121233 epoch: 1884/6112 frames: 246677504
+saving next best rewards:  [5587.58]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 213925 fps step and policy inference: 197815 fps total: 116501 epoch: 1885/6112 frames: 246808576
+saving next best rewards:  [5914.741]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 212161 fps step and policy inference: 196226 fps total: 121322 epoch: 1886/6112 frames: 246939648
+saving next best rewards:  [6165.3887]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 204395 fps step and policy inference: 189242 fps total: 122044 epoch: 1887/6112 frames: 247070720
+fps step: 215890 fps step and policy inference: 197511 fps total: 108787 epoch: 1888/6112 frames: 247201792
+fps step: 193467 fps step and policy inference: 178995 fps total: 120825 epoch: 1889/6112 frames: 247332864
+fps step: 169175 fps step and policy inference: 156268 fps total: 98423 epoch: 1890/6112 frames: 247463936
+fps step: 160961 fps step and policy inference: 148638 fps total: 92688 epoch: 1891/6112 frames: 247595008
+fps step: 168355 fps step and policy inference: 155521 fps total: 91184 epoch: 1892/6112 frames: 247726080
+fps step: 185644 fps step and policy inference: 170918 fps total: 100339 epoch: 1893/6112 frames: 247857152
+fps step: 184785 fps step and policy inference: 169762 fps total: 106654 epoch: 1894/6112 frames: 247988224
+fps step: 145643 fps step and policy inference: 135368 fps total: 82216 epoch: 1895/6112 frames: 248119296
+saving next best rewards:  [6493.8926]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 150348 fps step and policy inference: 141064 fps total: 84061 epoch: 1896/6112 frames: 248250368
+fps step: 150141 fps step and policy inference: 139235 fps total: 91483 epoch: 1897/6112 frames: 248381440
+saving next best rewards:  [6607.232]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 169221 fps step and policy inference: 157345 fps total: 101770 epoch: 1898/6112 frames: 248512512
+saving next best rewards:  [6854.4136]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 172539 fps step and policy inference: 160796 fps total: 108221 epoch: 1899/6112 frames: 248643584
+saving next best rewards:  [6965.809]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 205383 fps step and policy inference: 188900 fps total: 103390 epoch: 1900/6112 frames: 248774656
+saving next best rewards:  [7194.9785]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 200318 fps step and policy inference: 185613 fps total: 103795 epoch: 1901/6112 frames: 248905728
+fps step: 160019 fps step and policy inference: 147731 fps total: 85494 epoch: 1902/6112 frames: 249036800
+saving next best rewards:  [7404.5737]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211190 fps step and policy inference: 195145 fps total: 110979 epoch: 1903/6112 frames: 249167872
+fps step: 155866 fps step and policy inference: 144761 fps total: 88879 epoch: 1904/6112 frames: 249298944
+fps step: 156375 fps step and policy inference: 145044 fps total: 102113 epoch: 1905/6112 frames: 249430016
+saving next best rewards:  [7548.7847]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 164704 fps step and policy inference: 153807 fps total: 93899 epoch: 1906/6112 frames: 249561088
+saving next best rewards:  [7680.228]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 129016 fps step and policy inference: 121833 fps total: 77223 epoch: 1907/6112 frames: 249692160
+saving next best rewards:  [8170.779]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 151297 fps step and policy inference: 141763 fps total: 90990 epoch: 1908/6112 frames: 249823232
+fps step: 159547 fps step and policy inference: 148391 fps total: 94809 epoch: 1909/6112 frames: 249954304
+saving next best rewards:  [8207.646]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 198777 fps step and policy inference: 182811 fps total: 105091 epoch: 1910/6112 frames: 250085376
+fps step: 183411 fps step and policy inference: 168794 fps total: 96843 epoch: 1911/6112 frames: 250216448
+fps step: 186909 fps step and policy inference: 172040 fps total: 99159 epoch: 1912/6112 frames: 250347520
+saving next best rewards:  [8405.585]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 176050 fps step and policy inference: 163687 fps total: 94349 epoch: 1913/6112 frames: 250478592
+fps step: 143677 fps step and policy inference: 133906 fps total: 82579 epoch: 1914/6112 frames: 250609664
+saving next best rewards:  [8627.1875]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 148969 fps step and policy inference: 139611 fps total: 91759 epoch: 1915/6112 frames: 250740736
+saving next best rewards:  [8740.135]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 174565 fps step and policy inference: 162214 fps total: 100752 epoch: 1916/6112 frames: 250871808
+saving next best rewards:  [8749.969]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192315 fps step and policy inference: 178597 fps total: 100350 epoch: 1917/6112 frames: 251002880
+saving next best rewards:  [8928.304]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 210071 fps step and policy inference: 193365 fps total: 102136 epoch: 1918/6112 frames: 251133952
+saving next best rewards:  [8979.414]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 232263 fps step and policy inference: 212716 fps total: 114637 epoch: 1919/6112 frames: 251265024
+saving next best rewards:  [8993.431]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 195921 fps step and policy inference: 181667 fps total: 95734 epoch: 1920/6112 frames: 251396096
+saving next best rewards:  [9406.528]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 187231 fps step and policy inference: 173518 fps total: 98433 epoch: 1921/6112 frames: 251527168
+fps step: 151369 fps step and policy inference: 140932 fps total: 98248 epoch: 1922/6112 frames: 251658240
+fps step: 146622 fps step and policy inference: 136676 fps total: 84742 epoch: 1923/6112 frames: 251789312
+saving next best rewards:  [9630.689]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 169882 fps step and policy inference: 158222 fps total: 88342 epoch: 1924/6112 frames: 251920384
+saving next best rewards:  [9817.699]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 181895 fps step and policy inference: 169928 fps total: 105594 epoch: 1925/6112 frames: 252051456
+fps step: 177271 fps step and policy inference: 164198 fps total: 104220 epoch: 1926/6112 frames: 252182528
+fps step: 205230 fps step and policy inference: 188120 fps total: 105987 epoch: 1927/6112 frames: 252313600
+saving next best rewards:  [9841.66]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 204871 fps step and policy inference: 188244 fps total: 102204 epoch: 1928/6112 frames: 252444672
+fps step: 198254 fps step and policy inference: 181869 fps total: 106307 epoch: 1929/6112 frames: 252575744
+saving next best rewards:  [10423.058]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 200172 fps step and policy inference: 184702 fps total: 94899 epoch: 1930/6112 frames: 252706816
+fps step: 170122 fps step and policy inference: 157191 fps total: 90833 epoch: 1931/6112 frames: 252837888
+saving next best rewards:  [10701.929]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 154348 fps step and policy inference: 144632 fps total: 97127 epoch: 1932/6112 frames: 252968960
+saving next best rewards:  [10770.322]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 172594 fps step and policy inference: 160899 fps total: 98179 epoch: 1933/6112 frames: 253100032
+fps step: 178557 fps step and policy inference: 165384 fps total: 110500 epoch: 1934/6112 frames: 253231104
+fps step: 176549 fps step and policy inference: 163574 fps total: 100905 epoch: 1935/6112 frames: 253362176
+fps step: 184967 fps step and policy inference: 170261 fps total: 108532 epoch: 1936/6112 frames: 253493248
+saving next best rewards:  [10833.331]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 204566 fps step and policy inference: 189420 fps total: 109066 epoch: 1937/6112 frames: 253624320
+saving next best rewards:  [11106.305]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 180255 fps step and policy inference: 167491 fps total: 94951 epoch: 1938/6112 frames: 253755392
+saving next best rewards:  [11153.434]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 170147 fps step and policy inference: 158401 fps total: 93893 epoch: 1939/6112 frames: 253886464
+saving next best rewards:  [11154.6]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 162799 fps step and policy inference: 152079 fps total: 88378 epoch: 1940/6112 frames: 254017536
+fps step: 151475 fps step and policy inference: 140566 fps total: 83498 epoch: 1941/6112 frames: 254148608
+fps step: 160383 fps step and policy inference: 148721 fps total: 96898 epoch: 1942/6112 frames: 254279680
+fps step: 147676 fps step and policy inference: 137770 fps total: 85995 epoch: 1943/6112 frames: 254410752
+saving next best rewards:  [11175.375]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 156547 fps step and policy inference: 146704 fps total: 86784 epoch: 1944/6112 frames: 254541824
+saving next best rewards:  [11932.152]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 141894 fps step and policy inference: 132902 fps total: 79661 epoch: 1945/6112 frames: 254672896
+fps step: 155804 fps step and policy inference: 144184 fps total: 86749 epoch: 1946/6112 frames: 254803968
+fps step: 152208 fps step and policy inference: 141408 fps total: 82844 epoch: 1947/6112 frames: 254935040
+fps step: 156706 fps step and policy inference: 145417 fps total: 85739 epoch: 1948/6112 frames: 255066112
+fps step: 170627 fps step and policy inference: 157386 fps total: 92732 epoch: 1949/6112 frames: 255197184
+fps step: 166887 fps step and policy inference: 154544 fps total: 95903 epoch: 1950/6112 frames: 255328256
+fps step: 166009 fps step and policy inference: 153457 fps total: 92772 epoch: 1951/6112 frames: 255459328
+saving next best rewards:  [11971.255]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192508 fps step and policy inference: 178512 fps total: 101977 epoch: 1952/6112 frames: 255590400
+saving next best rewards:  [12180.277]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 187388 fps step and policy inference: 173850 fps total: 102003 epoch: 1953/6112 frames: 255721472
+saving next best rewards:  [12342.706]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 174825 fps step and policy inference: 162511 fps total: 94099 epoch: 1954/6112 frames: 255852544
+fps step: 150470 fps step and policy inference: 139800 fps total: 90329 epoch: 1955/6112 frames: 255983616
+fps step: 151932 fps step and policy inference: 140524 fps total: 85797 epoch: 1956/6112 frames: 256114688
+fps step: 185192 fps step and policy inference: 170614 fps total: 100508 epoch: 1957/6112 frames: 256245760
+fps step: 189161 fps step and policy inference: 175823 fps total: 112765 epoch: 1958/6112 frames: 256376832
+fps step: 181872 fps step and policy inference: 168393 fps total: 98796 epoch: 1959/6112 frames: 256507904
+fps step: 172056 fps step and policy inference: 160506 fps total: 99300 epoch: 1960/6112 frames: 256638976
+fps step: 157562 fps step and policy inference: 147015 fps total: 88342 epoch: 1961/6112 frames: 256770048
+fps step: 174033 fps step and policy inference: 161695 fps total: 93929 epoch: 1962/6112 frames: 256901120
+saving next best rewards:  [12776.157]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 184865 fps step and policy inference: 172073 fps total: 94514 epoch: 1963/6112 frames: 257032192
+saving next best rewards:  [13025.538]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 174736 fps step and policy inference: 162649 fps total: 105388 epoch: 1964/6112 frames: 257163264
+fps step: 176503 fps step and policy inference: 164545 fps total: 99503 epoch: 1965/6112 frames: 257294336
+fps step: 156529 fps step and policy inference: 145289 fps total: 88916 epoch: 1966/6112 frames: 257425408
+fps step: 159872 fps step and policy inference: 148142 fps total: 89859 epoch: 1967/6112 frames: 257556480
+saving next best rewards:  [13249.806]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 159902 fps step and policy inference: 149735 fps total: 101266 epoch: 1968/6112 frames: 257687552
+fps step: 167856 fps step and policy inference: 155203 fps total: 90308 epoch: 1969/6112 frames: 257818624
+fps step: 161127 fps step and policy inference: 149405 fps total: 110530 epoch: 1970/6112 frames: 257949696
+fps step: 197294 fps step and policy inference: 183618 fps total: 113157 epoch: 1971/6112 frames: 258080768
+fps step: 188668 fps step and policy inference: 173367 fps total: 96771 epoch: 1972/6112 frames: 258211840
+fps step: 156140 fps step and policy inference: 145198 fps total: 92536 epoch: 1973/6112 frames: 258342912
+saving next best rewards:  [13423.934]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 177870 fps step and policy inference: 165612 fps total: 110898 epoch: 1974/6112 frames: 258473984
+fps step: 181778 fps step and policy inference: 167919 fps total: 105300 epoch: 1975/6112 frames: 258605056
+fps step: 176100 fps step and policy inference: 162918 fps total: 99186 epoch: 1976/6112 frames: 258736128
+fps step: 183371 fps step and policy inference: 168141 fps total: 97897 epoch: 1977/6112 frames: 258867200
+fps step: 175942 fps step and policy inference: 162860 fps total: 103633 epoch: 1978/6112 frames: 258998272
+fps step: 174570 fps step and policy inference: 161425 fps total: 100462 epoch: 1979/6112 frames: 259129344
+fps step: 181677 fps step and policy inference: 167693 fps total: 98854 epoch: 1980/6112 frames: 259260416
+fps step: 172055 fps step and policy inference: 160049 fps total: 98056 epoch: 1981/6112 frames: 259391488
+saving next best rewards:  [13599.367]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 174878 fps step and policy inference: 162696 fps total: 99794 epoch: 1982/6112 frames: 259522560
+fps step: 165311 fps step and policy inference: 152718 fps total: 100232 epoch: 1983/6112 frames: 259653632
+saving next best rewards:  [14268.723]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 193491 fps step and policy inference: 180327 fps total: 103490 epoch: 1984/6112 frames: 259784704
+fps step: 162512 fps step and policy inference: 150739 fps total: 100118 epoch: 1985/6112 frames: 259915776
+fps step: 178119 fps step and policy inference: 164789 fps total: 96883 epoch: 1986/6112 frames: 260046848
+fps step: 155898 fps step and policy inference: 144553 fps total: 89053 epoch: 1987/6112 frames: 260177920
+fps step: 152596 fps step and policy inference: 141663 fps total: 101192 epoch: 1988/6112 frames: 260308992
+fps step: 183225 fps step and policy inference: 170017 fps total: 110815 epoch: 1989/6112 frames: 260440064
+fps step: 191909 fps step and policy inference: 176817 fps total: 114134 epoch: 1990/6112 frames: 260571136
+fps step: 195208 fps step and policy inference: 179020 fps total: 105093 epoch: 1991/6112 frames: 260702208
+fps step: 177576 fps step and policy inference: 163360 fps total: 101848 epoch: 1992/6112 frames: 260833280
+fps step: 203665 fps step and policy inference: 187317 fps total: 116956 epoch: 1993/6112 frames: 260964352
+fps step: 175731 fps step and policy inference: 161923 fps total: 98606 epoch: 1994/6112 frames: 261095424
+fps step: 161968 fps step and policy inference: 149854 fps total: 91067 epoch: 1995/6112 frames: 261226496
+fps step: 185648 fps step and policy inference: 170641 fps total: 101396 epoch: 1996/6112 frames: 261357568
+fps step: 174875 fps step and policy inference: 161070 fps total: 100434 epoch: 1997/6112 frames: 261488640
+fps step: 156087 fps step and policy inference: 144513 fps total: 89376 epoch: 1998/6112 frames: 261619712
+fps step: 169478 fps step and policy inference: 156157 fps total: 94130 epoch: 1999/6112 frames: 261750784
+fps step: 163766 fps step and policy inference: 151077 fps total: 104852 epoch: 2000/6112 frames: 261881856
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/last_DexPBTKukaAllegroLSTMPPO_ep_2000_rew_14068.801.pth'
+fps step: 178184 fps step and policy inference: 164507 fps total: 103140 epoch: 2001/6112 frames: 262012928
+saving next best rewards:  [14428.113]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 176693 fps step and policy inference: 163784 fps total: 99169 epoch: 2002/6112 frames: 262144000
+fps step: 165237 fps step and policy inference: 152325 fps total: 92085 epoch: 2003/6112 frames: 262275072
+fps step: 163924 fps step and policy inference: 151802 fps total: 96236 epoch: 2004/6112 frames: 262406144
+saving next best rewards:  [14575.299]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 184027 fps step and policy inference: 170571 fps total: 106860 epoch: 2005/6112 frames: 262537216
+saving next best rewards:  [14744.107]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 182223 fps step and policy inference: 168691 fps total: 97849 epoch: 2006/6112 frames: 262668288
+fps step: 158914 fps step and policy inference: 147135 fps total: 88634 epoch: 2007/6112 frames: 262799360
+saving next best rewards:  [14851.967]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 171368 fps step and policy inference: 159435 fps total: 93887 epoch: 2008/6112 frames: 262930432
+fps step: 160535 fps step and policy inference: 148507 fps total: 92410 epoch: 2009/6112 frames: 263061504
+saving next best rewards:  [15218.662]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 175610 fps step and policy inference: 163664 fps total: 93631 epoch: 2010/6112 frames: 263192576
+fps step: 153641 fps step and policy inference: 142162 fps total: 91963 epoch: 2011/6112 frames: 263323648
+saving next best rewards:  [16183.71]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 175120 fps step and policy inference: 162997 fps total: 96793 epoch: 2012/6112 frames: 263454720
+fps step: 181405 fps step and policy inference: 166921 fps total: 113415 epoch: 2013/6112 frames: 263585792
+saving next best rewards:  [16324.89]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 213904 fps step and policy inference: 197005 fps total: 108941 epoch: 2014/6112 frames: 263716864
+saving next best rewards:  [16561.574]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 196717 fps step and policy inference: 181861 fps total: 102307 epoch: 2015/6112 frames: 263847936
+fps step: 173109 fps step and policy inference: 159306 fps total: 105938 epoch: 2016/6112 frames: 263979008
+fps step: 174716 fps step and policy inference: 161409 fps total: 95767 epoch: 2017/6112 frames: 264110080
+fps step: 179824 fps step and policy inference: 166285 fps total: 107493 epoch: 2018/6112 frames: 264241152
+fps step: 164809 fps step and policy inference: 152466 fps total: 97167 epoch: 2019/6112 frames: 264372224
+fps step: 191161 fps step and policy inference: 175773 fps total: 119646 epoch: 2020/6112 frames: 264503296
+fps step: 215679 fps step and policy inference: 196720 fps total: 133623 epoch: 2021/6112 frames: 264634368
+fps step: 241888 fps step and policy inference: 221407 fps total: 143066 epoch: 2022/6112 frames: 264765440
+fps step: 241051 fps step and policy inference: 220803 fps total: 142991 epoch: 2023/6112 frames: 264896512
+fps step: 241605 fps step and policy inference: 220720 fps total: 148931 epoch: 2024/6112 frames: 265027584
+saving next best rewards:  [17062.738]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 208950 fps step and policy inference: 192476 fps total: 126105 epoch: 2025/6112 frames: 265158656
+fps step: 226272 fps step and policy inference: 207408 fps total: 141024 epoch: 2026/6112 frames: 265289728
+fps step: 231672 fps step and policy inference: 212235 fps total: 151394 epoch: 2027/6112 frames: 265420800
+fps step: 221499 fps step and policy inference: 204068 fps total: 118214 epoch: 2028/6112 frames: 265551872
+fps step: 237845 fps step and policy inference: 216260 fps total: 133241 epoch: 2029/6112 frames: 265682944
+fps step: 248378 fps step and policy inference: 225631 fps total: 142793 epoch: 2030/6112 frames: 265814016
+fps step: 205762 fps step and policy inference: 188702 fps total: 127603 epoch: 2031/6112 frames: 265945088
+fps step: 241782 fps step and policy inference: 221901 fps total: 135693 epoch: 2032/6112 frames: 266076160
+fps step: 215792 fps step and policy inference: 198125 fps total: 137546 epoch: 2033/6112 frames: 266207232
+fps step: 201789 fps step and policy inference: 186802 fps total: 135597 epoch: 2034/6112 frames: 266338304
+fps step: 220983 fps step and policy inference: 202216 fps total: 142831 epoch: 2035/6112 frames: 266469376
+fps step: 213351 fps step and policy inference: 195841 fps total: 138977 epoch: 2036/6112 frames: 266600448
+fps step: 211396 fps step and policy inference: 193763 fps total: 127210 epoch: 2037/6112 frames: 266731520
+saving next best rewards:  [17428.633]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 242101 fps step and policy inference: 221070 fps total: 137484 epoch: 2038/6112 frames: 266862592
+fps step: 203468 fps step and policy inference: 186497 fps total: 117367 epoch: 2039/6112 frames: 266993664
+fps step: 218897 fps step and policy inference: 199735 fps total: 144884 epoch: 2040/6112 frames: 267124736
+fps step: 211163 fps step and policy inference: 195341 fps total: 133727 epoch: 2041/6112 frames: 267255808
+fps step: 225589 fps step and policy inference: 207719 fps total: 150115 epoch: 2042/6112 frames: 267386880
+fps step: 208483 fps step and policy inference: 190974 fps total: 112700 epoch: 2043/6112 frames: 267517952
+fps step: 150028 fps step and policy inference: 139196 fps total: 88419 epoch: 2044/6112 frames: 267649024
+saving next best rewards:  [17576.812]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 152015 fps step and policy inference: 142541 fps total: 86831 epoch: 2045/6112 frames: 267780096
+fps step: 134706 fps step and policy inference: 125716 fps total: 84626 epoch: 2046/6112 frames: 267911168
+fps step: 140466 fps step and policy inference: 130976 fps total: 83576 epoch: 2047/6112 frames: 268042240
+fps step: 173692 fps step and policy inference: 159967 fps total: 114384 epoch: 2048/6112 frames: 268173312
+saving next best rewards:  [17772.646]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 224665 fps step and policy inference: 206043 fps total: 138147 epoch: 2049/6112 frames: 268304384
+fps step: 221006 fps step and policy inference: 202524 fps total: 142715 epoch: 2050/6112 frames: 268435456
+saving next best rewards:  [18045.564]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 184441 fps step and policy inference: 171296 fps total: 105416 epoch: 2051/6112 frames: 268566528
+fps step: 161002 fps step and policy inference: 148577 fps total: 89631 epoch: 2052/6112 frames: 268697600
+fps step: 163416 fps step and policy inference: 151101 fps total: 97448 epoch: 2053/6112 frames: 268828672
+saving next best rewards:  [18061.107]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 172262 fps step and policy inference: 159984 fps total: 97654 epoch: 2054/6112 frames: 268959744
+fps step: 169227 fps step and policy inference: 156216 fps total: 101384 epoch: 2055/6112 frames: 269090816
+fps step: 156389 fps step and policy inference: 144993 fps total: 91087 epoch: 2056/6112 frames: 269221888
+fps step: 152990 fps step and policy inference: 141772 fps total: 89533 epoch: 2057/6112 frames: 269352960
+saving next best rewards:  [18159.637]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 159797 fps step and policy inference: 149189 fps total: 94167 epoch: 2058/6112 frames: 269484032
+saving next best rewards:  [18539.24]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 186342 fps step and policy inference: 172808 fps total: 95260 epoch: 2059/6112 frames: 269615104
+fps step: 179110 fps step and policy inference: 164580 fps total: 91195 epoch: 2060/6112 frames: 269746176
+saving next best rewards:  [19751.832]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 182545 fps step and policy inference: 168955 fps total: 103697 epoch: 2061/6112 frames: 269877248
+fps step: 163642 fps step and policy inference: 151261 fps total: 98932 epoch: 2062/6112 frames: 270008320
+fps step: 172202 fps step and policy inference: 158910 fps total: 91554 epoch: 2063/6112 frames: 270139392
+fps step: 165434 fps step and policy inference: 152737 fps total: 92322 epoch: 2064/6112 frames: 270270464
+fps step: 171315 fps step and policy inference: 157931 fps total: 91291 epoch: 2065/6112 frames: 270401536
+fps step: 172075 fps step and policy inference: 159176 fps total: 93526 epoch: 2066/6112 frames: 270532608
+fps step: 154069 fps step and policy inference: 143029 fps total: 90614 epoch: 2067/6112 frames: 270663680
+fps step: 155722 fps step and policy inference: 143997 fps total: 87782 epoch: 2068/6112 frames: 270794752
+fps step: 158850 fps step and policy inference: 147350 fps total: 92671 epoch: 2069/6112 frames: 270925824
+fps step: 163170 fps step and policy inference: 150313 fps total: 91461 epoch: 2070/6112 frames: 271056896
+fps step: 185723 fps step and policy inference: 172731 fps total: 104638 epoch: 2071/6112 frames: 271187968
+fps step: 166840 fps step and policy inference: 154060 fps total: 103499 epoch: 2072/6112 frames: 271319040
+fps step: 161806 fps step and policy inference: 149372 fps total: 95880 epoch: 2073/6112 frames: 271450112
+fps step: 170878 fps step and policy inference: 157897 fps total: 93828 epoch: 2074/6112 frames: 271581184
+fps step: 174331 fps step and policy inference: 160883 fps total: 105908 epoch: 2075/6112 frames: 271712256
+fps step: 180322 fps step and policy inference: 166588 fps total: 102523 epoch: 2076/6112 frames: 271843328
+fps step: 179131 fps step and policy inference: 164961 fps total: 95982 epoch: 2077/6112 frames: 271974400
+fps step: 156377 fps step and policy inference: 144770 fps total: 96827 epoch: 2078/6112 frames: 272105472
+fps step: 175647 fps step and policy inference: 162255 fps total: 93910 epoch: 2079/6112 frames: 272236544
+fps step: 162701 fps step and policy inference: 150149 fps total: 92603 epoch: 2080/6112 frames: 272367616
+saving next best rewards:  [20193.012]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 164803 fps step and policy inference: 153748 fps total: 92468 epoch: 2081/6112 frames: 272498688
+fps step: 175944 fps step and policy inference: 162420 fps total: 98117 epoch: 2082/6112 frames: 272629760
+fps step: 166057 fps step and policy inference: 152791 fps total: 94497 epoch: 2083/6112 frames: 272760832
+fps step: 172844 fps step and policy inference: 160149 fps total: 96805 epoch: 2084/6112 frames: 272891904
+fps step: 151304 fps step and policy inference: 140191 fps total: 88199 epoch: 2085/6112 frames: 273022976
+fps step: 162936 fps step and policy inference: 150412 fps total: 92080 epoch: 2086/6112 frames: 273154048
+saving next best rewards:  [20260.32]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 180603 fps step and policy inference: 167564 fps total: 97966 epoch: 2087/6112 frames: 273285120
+fps step: 168903 fps step and policy inference: 155798 fps total: 92946 epoch: 2088/6112 frames: 273416192
+fps step: 162594 fps step and policy inference: 150223 fps total: 89044 epoch: 2089/6112 frames: 273547264
+saving next best rewards:  [22154.975]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211962 fps step and policy inference: 194097 fps total: 109221 epoch: 2090/6112 frames: 273678336
+fps step: 156031 fps step and policy inference: 144860 fps total: 97229 epoch: 2091/6112 frames: 273809408
+fps step: 169087 fps step and policy inference: 156400 fps total: 99997 epoch: 2092/6112 frames: 273940480
+fps step: 149434 fps step and policy inference: 138555 fps total: 86103 epoch: 2093/6112 frames: 274071552
+fps step: 167088 fps step and policy inference: 154129 fps total: 94170 epoch: 2094/6112 frames: 274202624
+fps step: 165037 fps step and policy inference: 152498 fps total: 104077 epoch: 2095/6112 frames: 274333696
+fps step: 191451 fps step and policy inference: 176143 fps total: 104258 epoch: 2096/6112 frames: 274464768
+fps step: 177055 fps step and policy inference: 162920 fps total: 100976 epoch: 2097/6112 frames: 274595840
+fps step: 170904 fps step and policy inference: 157686 fps total: 92528 epoch: 2098/6112 frames: 274726912
+fps step: 189738 fps step and policy inference: 174034 fps total: 100261 epoch: 2099/6112 frames: 274857984
+fps step: 167113 fps step and policy inference: 154176 fps total: 95794 epoch: 2100/6112 frames: 274989056
+fps step: 161459 fps step and policy inference: 149585 fps total: 106653 epoch: 2101/6112 frames: 275120128
+fps step: 148809 fps step and policy inference: 138437 fps total: 86116 epoch: 2102/6112 frames: 275251200
+fps step: 149532 fps step and policy inference: 138798 fps total: 87320 epoch: 2103/6112 frames: 275382272
+fps step: 147537 fps step and policy inference: 137219 fps total: 88187 epoch: 2104/6112 frames: 275513344
+fps step: 132829 fps step and policy inference: 124093 fps total: 80476 epoch: 2105/6112 frames: 275644416
+fps step: 148713 fps step and policy inference: 138079 fps total: 84710 epoch: 2106/6112 frames: 275775488
+fps step: 153249 fps step and policy inference: 142283 fps total: 91251 epoch: 2107/6112 frames: 275906560
+fps step: 156432 fps step and policy inference: 145710 fps total: 91957 epoch: 2108/6112 frames: 276037632
+fps step: 157424 fps step and policy inference: 146818 fps total: 101855 epoch: 2109/6112 frames: 276168704
+fps step: 171521 fps step and policy inference: 159761 fps total: 101315 epoch: 2110/6112 frames: 276299776
+fps step: 164982 fps step and policy inference: 152371 fps total: 94005 epoch: 2111/6112 frames: 276430848
+fps step: 166700 fps step and policy inference: 154080 fps total: 94385 epoch: 2112/6112 frames: 276561920
+fps step: 169566 fps step and policy inference: 156269 fps total: 96082 epoch: 2113/6112 frames: 276692992
+fps step: 162459 fps step and policy inference: 150252 fps total: 91099 epoch: 2114/6112 frames: 276824064
+fps step: 160669 fps step and policy inference: 148628 fps total: 89606 epoch: 2115/6112 frames: 276955136
+fps step: 162063 fps step and policy inference: 150081 fps total: 94001 epoch: 2116/6112 frames: 277086208
+fps step: 204419 fps step and policy inference: 188482 fps total: 118242 epoch: 2117/6112 frames: 277217280
+fps step: 161487 fps step and policy inference: 150115 fps total: 94972 epoch: 2118/6112 frames: 277348352
+fps step: 155636 fps step and policy inference: 144467 fps total: 89675 epoch: 2119/6112 frames: 277479424
+saving next best rewards:  [22420.906]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 174496 fps step and policy inference: 162342 fps total: 107117 epoch: 2120/6112 frames: 277610496
+fps step: 181330 fps step and policy inference: 167587 fps total: 101137 epoch: 2121/6112 frames: 277741568
+fps step: 223404 fps step and policy inference: 203406 fps total: 119504 epoch: 2122/6112 frames: 277872640
+fps step: 185095 fps step and policy inference: 170091 fps total: 96431 epoch: 2123/6112 frames: 278003712
+fps step: 167590 fps step and policy inference: 154758 fps total: 95149 epoch: 2124/6112 frames: 278134784
+fps step: 169066 fps step and policy inference: 156130 fps total: 96797 epoch: 2125/6112 frames: 278265856
+fps step: 169038 fps step and policy inference: 155998 fps total: 92690 epoch: 2126/6112 frames: 278396928
+fps step: 184445 fps step and policy inference: 169663 fps total: 109719 epoch: 2127/6112 frames: 278528000
+fps step: 162298 fps step and policy inference: 149667 fps total: 99064 epoch: 2128/6112 frames: 278659072
+fps step: 161508 fps step and policy inference: 150242 fps total: 102030 epoch: 2129/6112 frames: 278790144
+saving next best rewards:  [22433.014]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 190782 fps step and policy inference: 175748 fps total: 115335 epoch: 2130/6112 frames: 278921216
+fps step: 155023 fps step and policy inference: 144696 fps total: 103308 epoch: 2131/6112 frames: 279052288
+fps step: 173532 fps step and policy inference: 161618 fps total: 111281 epoch: 2132/6112 frames: 279183360
+fps step: 177904 fps step and policy inference: 166002 fps total: 113198 epoch: 2133/6112 frames: 279314432
+fps step: 158568 fps step and policy inference: 148093 fps total: 91602 epoch: 2134/6112 frames: 279445504
+fps step: 173789 fps step and policy inference: 160269 fps total: 104011 epoch: 2135/6112 frames: 279576576
+fps step: 163187 fps step and policy inference: 150987 fps total: 91474 epoch: 2136/6112 frames: 279707648
+fps step: 168374 fps step and policy inference: 155148 fps total: 95944 epoch: 2137/6112 frames: 279838720
+fps step: 157991 fps step and policy inference: 146500 fps total: 89504 epoch: 2138/6112 frames: 279969792
+fps step: 144331 fps step and policy inference: 134424 fps total: 85170 epoch: 2139/6112 frames: 280100864
+fps step: 166969 fps step and policy inference: 154322 fps total: 97688 epoch: 2140/6112 frames: 280231936
+fps step: 171467 fps step and policy inference: 158338 fps total: 97634 epoch: 2141/6112 frames: 280363008
+saving next best rewards:  [22697.78]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 189160 fps step and policy inference: 175177 fps total: 105680 epoch: 2142/6112 frames: 280494080
+saving next best rewards:  [23031.615]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 183791 fps step and policy inference: 170435 fps total: 99268 epoch: 2143/6112 frames: 280625152
+saving next best rewards:  [24271.379]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 185332 fps step and policy inference: 172116 fps total: 111437 epoch: 2144/6112 frames: 280756224
+fps step: 172411 fps step and policy inference: 159622 fps total: 101991 epoch: 2145/6112 frames: 280887296
+fps step: 179453 fps step and policy inference: 166236 fps total: 98063 epoch: 2146/6112 frames: 281018368
+fps step: 155751 fps step and policy inference: 144089 fps total: 90787 epoch: 2147/6112 frames: 281149440
+fps step: 162161 fps step and policy inference: 149812 fps total: 92058 epoch: 2148/6112 frames: 281280512
+fps step: 195895 fps step and policy inference: 180813 fps total: 108404 epoch: 2149/6112 frames: 281411584
+fps step: 194398 fps step and policy inference: 178470 fps total: 115690 epoch: 2150/6112 frames: 281542656
+fps step: 169661 fps step and policy inference: 156864 fps total: 113828 epoch: 2151/6112 frames: 281673728
+fps step: 169534 fps step and policy inference: 156439 fps total: 93463 epoch: 2152/6112 frames: 281804800
+fps step: 164468 fps step and policy inference: 151606 fps total: 95996 epoch: 2153/6112 frames: 281935872
+fps step: 164429 fps step and policy inference: 151759 fps total: 99917 epoch: 2154/6112 frames: 282066944
+fps step: 157487 fps step and policy inference: 146100 fps total: 89085 epoch: 2155/6112 frames: 282198016
+fps step: 165759 fps step and policy inference: 152563 fps total: 97396 epoch: 2156/6112 frames: 282329088
+fps step: 165962 fps step and policy inference: 153217 fps total: 95837 epoch: 2157/6112 frames: 282460160
+fps step: 175810 fps step and policy inference: 162315 fps total: 94576 epoch: 2158/6112 frames: 282591232
+fps step: 167460 fps step and policy inference: 154517 fps total: 94150 epoch: 2159/6112 frames: 282722304
+fps step: 176302 fps step and policy inference: 162291 fps total: 98728 epoch: 2160/6112 frames: 282853376
+fps step: 168506 fps step and policy inference: 155650 fps total: 95479 epoch: 2161/6112 frames: 282984448
+fps step: 161740 fps step and policy inference: 149501 fps total: 90171 epoch: 2162/6112 frames: 283115520
+fps step: 160781 fps step and policy inference: 148422 fps total: 89764 epoch: 2163/6112 frames: 283246592
+fps step: 163361 fps step and policy inference: 151481 fps total: 92824 epoch: 2164/6112 frames: 283377664
+fps step: 174829 fps step and policy inference: 161228 fps total: 100904 epoch: 2165/6112 frames: 283508736
+saving next best rewards:  [24951.297]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 184974 fps step and policy inference: 171616 fps total: 102148 epoch: 2166/6112 frames: 283639808
+fps step: 174965 fps step and policy inference: 160620 fps total: 96262 epoch: 2167/6112 frames: 283770880
+fps step: 177222 fps step and policy inference: 162919 fps total: 97295 epoch: 2168/6112 frames: 283901952
+fps step: 196153 fps step and policy inference: 182036 fps total: 111680 epoch: 2169/6112 frames: 284033024
+fps step: 178379 fps step and policy inference: 164857 fps total: 114528 epoch: 2170/6112 frames: 284164096
+fps step: 191404 fps step and policy inference: 176700 fps total: 112160 epoch: 2171/6112 frames: 284295168
+fps step: 182103 fps step and policy inference: 168251 fps total: 113323 epoch: 2172/6112 frames: 284426240
+saving next best rewards:  [25066.387]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 188433 fps step and policy inference: 174812 fps total: 108452 epoch: 2173/6112 frames: 284557312
+fps step: 187634 fps step and policy inference: 173279 fps total: 102537 epoch: 2174/6112 frames: 284688384
+fps step: 178632 fps step and policy inference: 165336 fps total: 101341 epoch: 2175/6112 frames: 284819456
+fps step: 169715 fps step and policy inference: 156606 fps total: 103211 epoch: 2176/6112 frames: 284950528
+fps step: 173359 fps step and policy inference: 160321 fps total: 109543 epoch: 2177/6112 frames: 285081600
+fps step: 168503 fps step and policy inference: 155294 fps total: 94586 epoch: 2178/6112 frames: 285212672
+fps step: 178264 fps step and policy inference: 164437 fps total: 109925 epoch: 2179/6112 frames: 285343744
+fps step: 177026 fps step and policy inference: 162997 fps total: 99325 epoch: 2180/6112 frames: 285474816
+fps step: 175178 fps step and policy inference: 161225 fps total: 107806 epoch: 2181/6112 frames: 285605888
+fps step: 165393 fps step and policy inference: 152997 fps total: 102158 epoch: 2182/6112 frames: 285736960
+fps step: 157710 fps step and policy inference: 146445 fps total: 90512 epoch: 2183/6112 frames: 285868032
+fps step: 174495 fps step and policy inference: 161320 fps total: 98610 epoch: 2184/6112 frames: 285999104
+fps step: 172703 fps step and policy inference: 159202 fps total: 94279 epoch: 2185/6112 frames: 286130176
+fps step: 165353 fps step and policy inference: 152894 fps total: 95229 epoch: 2186/6112 frames: 286261248
+fps step: 193333 fps step and policy inference: 178534 fps total: 105452 epoch: 2187/6112 frames: 286392320
+fps step: 182127 fps step and policy inference: 167469 fps total: 104148 epoch: 2188/6112 frames: 286523392
+fps step: 175688 fps step and policy inference: 161947 fps total: 109597 epoch: 2189/6112 frames: 286654464
+fps step: 170702 fps step and policy inference: 157650 fps total: 105788 epoch: 2190/6112 frames: 286785536
+fps step: 189036 fps step and policy inference: 175277 fps total: 126405 epoch: 2191/6112 frames: 286916608
+fps step: 177715 fps step and policy inference: 163324 fps total: 103280 epoch: 2192/6112 frames: 287047680
+fps step: 183532 fps step and policy inference: 169481 fps total: 115223 epoch: 2193/6112 frames: 287178752
+fps step: 177714 fps step and policy inference: 164091 fps total: 105469 epoch: 2194/6112 frames: 287309824
+fps step: 177694 fps step and policy inference: 163578 fps total: 96906 epoch: 2195/6112 frames: 287440896
+fps step: 167249 fps step and policy inference: 154286 fps total: 92743 epoch: 2196/6112 frames: 287571968
+fps step: 177405 fps step and policy inference: 164569 fps total: 97147 epoch: 2197/6112 frames: 287703040
+saving next best rewards:  [26944.648]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 179267 fps step and policy inference: 166509 fps total: 97780 epoch: 2198/6112 frames: 287834112
+fps step: 163719 fps step and policy inference: 151496 fps total: 91671 epoch: 2199/6112 frames: 287965184
+fps step: 174697 fps step and policy inference: 160973 fps total: 105211 epoch: 2200/6112 frames: 288096256
+fps step: 155338 fps step and policy inference: 144793 fps total: 92721 epoch: 2201/6112 frames: 288227328
+fps step: 159881 fps step and policy inference: 148077 fps total: 96420 epoch: 2202/6112 frames: 288358400
+saving next best rewards:  [29941.432]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 176829 fps step and policy inference: 164287 fps total: 95348 epoch: 2203/6112 frames: 288489472
+saving next best rewards:  [29957.041]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 187224 fps step and policy inference: 173611 fps total: 98497 epoch: 2204/6112 frames: 288620544
+fps step: 170317 fps step and policy inference: 157398 fps total: 95472 epoch: 2205/6112 frames: 288751616
+saving next best rewards:  [30003.678]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 183056 fps step and policy inference: 170571 fps total: 99001 epoch: 2206/6112 frames: 288882688
+fps step: 156502 fps step and policy inference: 144731 fps total: 100233 epoch: 2207/6112 frames: 289013760
+fps step: 166820 fps step and policy inference: 154356 fps total: 100052 epoch: 2208/6112 frames: 289144832
+saving next best rewards:  [31847.143]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 205046 fps step and policy inference: 190437 fps total: 118200 epoch: 2209/6112 frames: 289275904
+saving next best rewards:  [32244.035]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192444 fps step and policy inference: 178214 fps total: 122118 epoch: 2210/6112 frames: 289406976
+saving next best rewards:  [32949.344]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 211676 fps step and policy inference: 196325 fps total: 115046 epoch: 2211/6112 frames: 289538048
+saving next best rewards:  [33862.586]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 178460 fps step and policy inference: 165658 fps total: 103292 epoch: 2212/6112 frames: 289669120
+saving next best rewards:  [34880.332]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 189155 fps step and policy inference: 176749 fps total: 112392 epoch: 2213/6112 frames: 289800192
+fps step: 186102 fps step and policy inference: 171455 fps total: 101542 epoch: 2214/6112 frames: 289931264
+fps step: 168231 fps step and policy inference: 155059 fps total: 93087 epoch: 2215/6112 frames: 290062336
+[best-archive/r_meta] new peak from policy 4 iter=14 r_meta_raw=0.29999998211860657 nsucc_mean=13.03369140625 nsucc_max=50.0
+[best-archive/nsucc] new peak from policy 4 iter=14 r_meta_raw=0.29999998211860657 nsucc_mean=13.03369140625 nsucc_max=50.0
+[Posterior] Loaded shared posterior from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/wm_posterior_latest.json
+Policy 4: DexPBT tier=top rank=0/6 obj=0.3000 (split=1/3/2)
+Policy 4: top tier -- keep training
+fps step: 168335 fps step and policy inference: 155573 fps total: 90985 epoch: 2216/6112 frames: 290193408
+fps step: 170042 fps step and policy inference: 157014 fps total: 99228 epoch: 2217/6112 frames: 290324480
+fps step: 168435 fps step and policy inference: 155367 fps total: 91148 epoch: 2218/6112 frames: 290455552
+saving next best rewards:  [37758.01]
+=> saving checkpoint '/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_04/rl_games/attempt_2_2026-06-09_17-46-19/nn/DexPBTKukaAllegroLSTMPPO.pth'
+fps step: 192778 fps step and policy inference: 178516 fps total: 104193 epoch: 2219/6112 frames: 290586624
+fps step: 168717 fps step and policy inference: 155606 fps total: 92977 epoch: 2220/6112 frames: 290717696
+fps step: 177804 fps step and policy inference: 164156 fps total: 99003 epoch: 2221/6112 frames: 290848768
+fps step: 173527 fps step and policy inference: 159783 fps total: 99236 epoch: 2222/6112 frames: 290979840
+fps step: 172632 fps step and policy inference: 159287 fps total: 100811 epoch: 2223/6112 frames: 291110912
+fps step: 177363 fps step and policy inference: 162974 fps total: 108848 epoch: 2224/6112 frames: 291241984
+fps step: 171551 fps step and policy inference: 158306 fps total: 92367 epoch: 2225/6112 frames: 291373056
+fps step: 165614 fps step and policy inference: 152996 fps total: 95115 epoch: 2226/6112 frames: 291504128
+fps step: 165430 fps step and policy inference: 152818 fps total: 95210 epoch: 2227/6112 frames: 291635200
+fps step: 168971 fps step and policy inference: 156163 fps total: 102448 epoch: 2228/6112 frames: 291766272
+fps step: 216411 fps step and policy inference: 199024 fps total: 116669 epoch: 2229/6112 frames: 291897344
+fps step: 182241 fps step and policy inference: 167875 fps total: 98076 epoch: 2230/6112 frames: 292028416
+fps step: 174260 fps step and policy inference: 160311 fps total: 98664 epoch: 2231/6112 frames: 292159488
+fps step: 159513 fps step and policy inference: 147457 fps total: 91642 epoch: 2232/6112 frames: 292290560
+fps step: 166003 fps step and policy inference: 153282 fps total: 111825 epoch: 2233/6112 frames: 292421632
+fps step: 199467 fps step and policy inference: 183861 fps total: 109195 epoch: 2234/6112 frames: 292552704
+fps step: 177209 fps step and policy inference: 163904 fps total: 96300 epoch: 2235/6112 frames: 292683776
+fps step: 174322 fps step and policy inference: 160486 fps total: 95957 epoch: 2236/6112 frames: 292814848
+fps step: 170756 fps step and policy inference: 157666 fps total: 94263 epoch: 2237/6112 frames: 292945920
+fps step: 161220 fps step and policy inference: 148718 fps total: 90796 epoch: 2238/6112 frames: 293076992
+fps step: 164003 fps step and policy inference: 151535 fps total: 94874 epoch: 2239/6112 frames: 293208064
+fps step: 153068 fps step and policy inference: 142083 fps total: 98731 epoch: 2240/6112 frames: 293339136
+fps step: 164540 fps step and policy inference: 152724 fps total: 93524 epoch: 2241/6112 frames: 293470208
+fps step: 164964 fps step and policy inference: 152450 fps total: 92736 epoch: 2242/6112 frames: 293601280
+fps step: 170641 fps step and policy inference: 156846 fps total: 92610 epoch: 2243/6112 frames: 293732352
+fps step: 174240 fps step and policy inference: 160342 fps total: 94473 epoch: 2244/6112 frames: 293863424
+fps step: 167719 fps step and policy inference: 154997 fps total: 95075 epoch: 2245/6112 frames: 293994496
+fps step: 161447 fps step and policy inference: 149465 fps total: 92719 epoch: 2246/6112 frames: 294125568
+fps step: 182079 fps step and policy inference: 168655 fps total: 115338 epoch: 2247/6112 frames: 294256640
+fps step: 183455 fps step and policy inference: 169967 fps total: 102635 epoch: 2248/6112 frames: 294387712
+fps step: 173858 fps step and policy inference: 160191 fps total: 97374 epoch: 2249/6112 frames: 294518784
+fps step: 222538 fps step and policy inference: 203906 fps total: 138259 epoch: 2250/6112 frames: 294649856
+fps step: 156058 fps step and policy inference: 145472 fps total: 92572 epoch: 2251/6112 frames: 294780928
+fps step: 187250 fps step and policy inference: 173017 fps total: 109679 epoch: 2252/6112 frames: 294912000
+fps step: 211937 fps step and policy inference: 193985 fps total: 138326 epoch: 2253/6112 frames: 295043072
+fps step: 207956 fps step and policy inference: 191517 fps total: 124250 epoch: 2254/6112 frames: 295174144
+fps step: 200101 fps step and policy inference: 185088 fps total: 110989 epoch: 2255/6112 frames: 295305216
+fps step: 179922 fps step and policy inference: 165847 fps total: 116137 epoch: 2256/6112 frames: 295436288
+fps step: 180045 fps step and policy inference: 166203 fps total: 104701 epoch: 2257/6112 frames: 295567360
+fps step: 179307 fps step and policy inference: 164815 fps total: 100621 epoch: 2258/6112 frames: 295698432
+fps step: 188566 fps step and policy inference: 173903 fps total: 105081 epoch: 2259/6112 frames: 295829504
+fps step: 200642 fps step and policy inference: 183871 fps total: 113960 epoch: 2260/6112 frames: 295960576
+fps step: 187562 fps step and policy inference: 172931 fps total: 101125 epoch: 2261/6112 frames: 296091648
+fps step: 201679 fps step and policy inference: 185647 fps total: 113581 epoch: 2262/6112 frames: 296222720
+fps step: 185013 fps step and policy inference: 170880 fps total: 110039 epoch: 2263/6112 frames: 296353792
+fps step: 149258 fps step and policy inference: 138764 fps total: 89229 epoch: 2264/6112 frames: 296484864
+fps step: 164817 fps step and policy inference: 151891 fps total: 94386 epoch: 2265/6112 frames: 296615936
+fps step: 164753 fps step and policy inference: 152543 fps total: 96957 epoch: 2266/6112 frames: 296747008
+fps step: 167548 fps step and policy inference: 155160 fps total: 101934 epoch: 2267/6112 frames: 296878080
+fps step: 180746 fps step and policy inference: 167256 fps total: 103770 epoch: 2268/6112 frames: 297009152
+fps step: 196748 fps step and policy inference: 180956 fps total: 111886 epoch: 2269/6112 frames: 297140224
+fps step: 191404 fps step and policy inference: 175919 fps total: 113069 epoch: 2270/6112 frames: 297271296
+fps step: 181927 fps step and policy inference: 168017 fps total: 108510 epoch: 2271/6112 frames: 297402368
+fps step: 173544 fps step and policy inference: 160197 fps total: 103011 epoch: 2272/6112 frames: 297533440
+fps step: 183567 fps step and policy inference: 171116 fps total: 125323 epoch: 2273/6112 frames: 297664512
+fps step: 175667 fps step and policy inference: 162467 fps total: 106855 epoch: 2274/6112 frames: 297795584
+fps step: 192176 fps step and policy inference: 176749 fps total: 116939 epoch: 2275/6112 frames: 297926656
+fps step: 218986 fps step and policy inference: 201774 fps total: 118652 epoch: 2276/6112 frames: 298057728
+fps step: 175751 fps step and policy inference: 162514 fps total: 109056 epoch: 2277/6112 frames: 298188800
+fps step: 173478 fps step and policy inference: 160574 fps total: 105201 epoch: 2278/6112 frames: 298319872
+fps step: 196054 fps step and policy inference: 180921 fps total: 117158 epoch: 2279/6112 frames: 298450944
+fps step: 206140 fps step and policy inference: 189918 fps total: 131492 epoch: 2280/6112 frames: 298582016
+fps step: 192430 fps step and policy inference: 177494 fps total: 112746 epoch: 2281/6112 frames: 298713088
+fps step: 185415 fps step and policy inference: 169861 fps total: 104272 epoch: 2282/6112 frames: 298844160
+fps step: 198091 fps step and policy inference: 181148 fps total: 102907 epoch: 2283/6112 frames: 298975232
+fps step: 214990 fps step and policy inference: 196020 fps total: 105043 epoch: 2284/6112 frames: 299106304
+fps step: 191491 fps step and policy inference: 175967 fps total: 110588 epoch: 2285/6112 frames: 299237376
+fps step: 187047 fps step and policy inference: 172923 fps total: 105681 epoch: 2286/6112 frames: 299368448
+fps step: 184032 fps step and policy inference: 170202 fps total: 103659 epoch: 2287/6112 frames: 299499520
+fps step: 173623 fps step and policy inference: 160485 fps total: 101945 epoch: 2288/6112 frames: 299630592
+fps step: 180949 fps step and policy inference: 167453 fps total: 104526 epoch: 2289/6112 frames: 299761664
+fps step: 183539 fps step and policy inference: 169354 fps total: 107957 epoch: 2290/6112 frames: 299892736
+[best-archive/nsucc] new peak from policy 4 iter=15 r_meta_raw=0.14999999105930328 nsucc_mean=15.5147705078125 nsucc_max=50.0
+[best-archive/stable] new peak from policy 4 iter=15 r_meta_raw=0.14999999105930328 nsucc_mean=15.5147705078125 nsucc_max=50.0
+[Posterior] Loaded shared posterior from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/wm_posterior_latest.json
+Policy 4: DexPBT tier=mid rank=2/6 obj=0.1500 (split=1/3/2)
+Policy 4: skip self-restart (mid tier) -- disabled_by_default (self_restart_count=0, last_self_restart_frame=-1000000000000000000)
+fps step: 177051 fps step and policy inference: 164039 fps total: 95135 epoch: 2291/6112 frames: 300023808
+fps step: 169252 fps step and policy inference: 156388 fps total: 97640 epoch: 2292/6112 frames: 300154880
+fps step: 188520 fps step and policy inference: 173183 fps total: 98322 epoch: 2293/6112 frames: 300285952
+fps step: 174644 fps step and policy inference: 160784 fps total: 96951 epoch: 2294/6112 frames: 300417024
+fps step: 185834 fps step and policy inference: 170816 fps total: 98936 epoch: 2295/6112 frames: 300548096
+fps step: 182574 fps step and policy inference: 167491 fps total: 98013 epoch: 2296/6112 frames: 300679168
+fps step: 170417 fps step and policy inference: 156912 fps total: 96941 epoch: 2297/6112 frames: 300810240
+fps step: 180582 fps step and policy inference: 165753 fps total: 97981 epoch: 2298/6112 frames: 300941312
+fps step: 162184 fps step and policy inference: 150183 fps total: 95180 epoch: 2299/6112 frames: 301072384
+fps step: 167099 fps step and policy inference: 154180 fps total: 93492 epoch: 2300/6112 frames: 301203456
+fps step: 155216 fps step and policy inference: 143753 fps total: 86293 epoch: 2301/6112 frames: 301334528
+fps step: 147546 fps step and policy inference: 136809 fps total: 84762 epoch: 2302/6112 frames: 301465600
+fps step: 152080 fps step and policy inference: 141066 fps total: 92354 epoch: 2303/6112 frames: 301596672
+fps step: 166344 fps step and policy inference: 154784 fps total: 98880 epoch: 2304/6112 frames: 301727744
+fps step: 151585 fps step and policy inference: 140832 fps total: 88653 epoch: 2305/6112 frames: 301858816
+fps step: 153432 fps step and policy inference: 142558 fps total: 88520 epoch: 2306/6112 frames: 301989888
+fps step: 173000 fps step and policy inference: 160229 fps total: 100050 epoch: 2307/6112 frames: 302120960
+fps step: 158662 fps step and policy inference: 146113 fps total: 90256 epoch: 2308/6112 frames: 302252032
+fps step: 176053 fps step and policy inference: 162232 fps total: 95179 epoch: 2309/6112 frames: 302383104
+fps step: 165042 fps step and policy inference: 152095 fps total: 98927 epoch: 2310/6112 frames: 302514176
+fps step: 164737 fps step and policy inference: 152476 fps total: 95273 epoch: 2311/6112 frames: 302645248
+fps step: 187653 fps step and policy inference: 172164 fps total: 107948 epoch: 2312/6112 frames: 302776320
+fps step: 190949 fps step and policy inference: 175843 fps total: 120621 epoch: 2313/6112 frames: 302907392
+fps step: 196453 fps step and policy inference: 182060 fps total: 115510 epoch: 2314/6112 frames: 303038464
+fps step: 184551 fps step and policy inference: 169774 fps total: 100204 epoch: 2315/6112 frames: 303169536
+fps step: 195639 fps step and policy inference: 179911 fps total: 113066 epoch: 2316/6112 frames: 303300608
+fps step: 166002 fps step and policy inference: 153459 fps total: 92556 epoch: 2317/6112 frames: 303431680
+fps step: 161090 fps step and policy inference: 148747 fps total: 92214 epoch: 2318/6112 frames: 303562752
+fps step: 162996 fps step and policy inference: 150713 fps total: 96063 epoch: 2319/6112 frames: 303693824
+fps step: 171876 fps step and policy inference: 158635 fps total: 97268 epoch: 2320/6112 frames: 303824896
+fps step: 169294 fps step and policy inference: 156358 fps total: 102172 epoch: 2321/6112 frames: 303955968
+fps step: 176559 fps step and policy inference: 163362 fps total: 115141 epoch: 2322/6112 frames: 304087040
+fps step: 185112 fps step and policy inference: 171618 fps total: 108778 epoch: 2323/6112 frames: 304218112
+fps step: 175149 fps step and policy inference: 161403 fps total: 96960 epoch: 2324/6112 frames: 304349184
+fps step: 178906 fps step and policy inference: 164834 fps total: 100057 epoch: 2325/6112 frames: 304480256
+fps step: 172874 fps step and policy inference: 159508 fps total: 98997 epoch: 2326/6112 frames: 304611328
+fps step: 231995 fps step and policy inference: 211936 fps total: 126292 epoch: 2327/6112 frames: 304742400
+fps step: 209568 fps step and policy inference: 192751 fps total: 125764 epoch: 2328/6112 frames: 304873472
+fps step: 183173 fps step and policy inference: 169409 fps total: 108572 epoch: 2329/6112 frames: 305004544
+fps step: 168096 fps step and policy inference: 155327 fps total: 98532 epoch: 2330/6112 frames: 305135616
+fps step: 210510 fps step and policy inference: 194048 fps total: 126000 epoch: 2331/6112 frames: 305266688
+fps step: 218438 fps step and policy inference: 201846 fps total: 131062 epoch: 2332/6112 frames: 305397760
+fps step: 191872 fps step and policy inference: 176903 fps total: 115548 epoch: 2333/6112 frames: 305528832
+fps step: 181285 fps step and policy inference: 167708 fps total: 101039 epoch: 2334/6112 frames: 305659904
+fps step: 166989 fps step and policy inference: 153925 fps total: 95121 epoch: 2335/6112 frames: 305790976
+fps step: 175287 fps step and policy inference: 161473 fps total: 94541 epoch: 2336/6112 frames: 305922048
+fps step: 172763 fps step and policy inference: 158985 fps total: 95604 epoch: 2337/6112 frames: 306053120
+fps step: 174928 fps step and policy inference: 160836 fps total: 112323 epoch: 2338/6112 frames: 306184192
+fps step: 188635 fps step and policy inference: 173581 fps total: 104720 epoch: 2339/6112 frames: 306315264
+fps step: 181691 fps step and policy inference: 166433 fps total: 100896 epoch: 2340/6112 frames: 306446336
+fps step: 175535 fps step and policy inference: 161475 fps total: 105228 epoch: 2341/6112 frames: 306577408
+fps step: 177198 fps step and policy inference: 163210 fps total: 98022 epoch: 2342/6112 frames: 306708480
+fps step: 176509 fps step and policy inference: 162737 fps total: 94608 epoch: 2343/6112 frames: 306839552
+fps step: 174312 fps step and policy inference: 160540 fps total: 99717 epoch: 2344/6112 frames: 306970624
+fps step: 174560 fps step and policy inference: 160805 fps total: 97912 epoch: 2345/6112 frames: 307101696
+fps step: 164006 fps step and policy inference: 152723 fps total: 112067 epoch: 2346/6112 frames: 307232768
+fps step: 171731 fps step and policy inference: 158985 fps total: 109260 epoch: 2347/6112 frames: 307363840
+fps step: 154846 fps step and policy inference: 143988 fps total: 90718 epoch: 2348/6112 frames: 307494912
+fps step: 175512 fps step and policy inference: 162099 fps total: 95939 epoch: 2349/6112 frames: 307625984
+fps step: 149537 fps step and policy inference: 138939 fps total: 93324 epoch: 2350/6112 frames: 307757056
+fps step: 186337 fps step and policy inference: 172290 fps total: 121602 epoch: 2351/6112 frames: 307888128
+fps step: 204039 fps step and policy inference: 189381 fps total: 133002 epoch: 2352/6112 frames: 308019200
+fps step: 185466 fps step and policy inference: 172361 fps total: 118936 epoch: 2353/6112 frames: 308150272
+fps step: 246630 fps step and policy inference: 225906 fps total: 151005 epoch: 2354/6112 frames: 308281344
+fps step: 236310 fps step and policy inference: 216639 fps total: 134397 epoch: 2355/6112 frames: 308412416
+fps step: 224576 fps step and policy inference: 205956 fps total: 138297 epoch: 2356/6112 frames: 308543488
+fps step: 210098 fps step and policy inference: 193348 fps total: 128822 epoch: 2357/6112 frames: 308674560
+fps step: 215350 fps step and policy inference: 196002 fps total: 130772 epoch: 2358/6112 frames: 308805632
+fps step: 217293 fps step and policy inference: 199946 fps total: 132552 epoch: 2359/6112 frames: 308936704
+fps step: 236596 fps step and policy inference: 217062 fps total: 137485 epoch: 2360/6112 frames: 309067776
+fps step: 238206 fps step and policy inference: 217317 fps total: 140474 epoch: 2361/6112 frames: 309198848
+fps step: 236549 fps step and policy inference: 216194 fps total: 145027 epoch: 2362/6112 frames: 309329920
+fps step: 240196 fps step and policy inference: 219609 fps total: 139448 epoch: 2363/6112 frames: 309460992
+fps step: 248059 fps step and policy inference: 224573 fps total: 149845 epoch: 2364/6112 frames: 309592064
+fps step: 243127 fps step and policy inference: 222484 fps total: 137874 epoch: 2365/6112 frames: 309723136
+fps step: 189673 fps step and policy inference: 175867 fps total: 105493 epoch: 2366/6112 frames: 309854208
+fps step: 165866 fps step and policy inference: 153472 fps total: 94963 epoch: 2367/6112 frames: 309985280
+fps step: 199303 fps step and policy inference: 183102 fps total: 121280 epoch: 2368/6112 frames: 310116352
+fps step: 195583 fps step and policy inference: 179267 fps total: 108529 epoch: 2369/6112 frames: 310247424
+fps step: 212142 fps step and policy inference: 193541 fps total: 132795 epoch: 2370/6112 frames: 310378496
+fps step: 197878 fps step and policy inference: 182000 fps total: 117515 epoch: 2371/6112 frames: 310509568
+fps step: 167705 fps step and policy inference: 155804 fps total: 92342 epoch: 2372/6112 frames: 310640640
+fps step: 167176 fps step and policy inference: 155181 fps total: 89872 epoch: 2373/6112 frames: 310771712
+fps step: 162083 fps step and policy inference: 150298 fps total: 90947 epoch: 2374/6112 frames: 310902784
+fps step: 164931 fps step and policy inference: 152545 fps total: 89539 epoch: 2375/6112 frames: 311033856
+fps step: 168310 fps step and policy inference: 155742 fps total: 101761 epoch: 2376/6112 frames: 311164928
+fps step: 166241 fps step and policy inference: 153536 fps total: 91844 epoch: 2377/6112 frames: 311296000
+fps step: 181270 fps step and policy inference: 166938 fps total: 95935 epoch: 2378/6112 frames: 311427072
+fps step: 193367 fps step and policy inference: 178379 fps total: 101316 epoch: 2379/6112 frames: 311558144
+fps step: 168775 fps step and policy inference: 155608 fps total: 91854 epoch: 2380/6112 frames: 311689216
+fps step: 160631 fps step and policy inference: 148348 fps total: 90437 epoch: 2381/6112 frames: 311820288
+fps step: 171288 fps step and policy inference: 157599 fps total: 93303 epoch: 2382/6112 frames: 311951360
+fps step: 156371 fps step and policy inference: 144673 fps total: 87414 epoch: 2383/6112 frames: 312082432
+fps step: 176968 fps step and policy inference: 163801 fps total: 94261 epoch: 2384/6112 frames: 312213504
+fps step: 169247 fps step and policy inference: 156076 fps total: 93018 epoch: 2385/6112 frames: 312344576
+fps step: 164058 fps step and policy inference: 151374 fps total: 91945 epoch: 2386/6112 frames: 312475648
+fps step: 169369 fps step and policy inference: 156318 fps total: 92279 epoch: 2387/6112 frames: 312606720
+fps step: 180015 fps step and policy inference: 165885 fps total: 100602 epoch: 2388/6112 frames: 312737792
+fps step: 170485 fps step and policy inference: 157500 fps total: 94320 epoch: 2389/6112 frames: 312868864
+fps step: 170695 fps step and policy inference: 157040 fps total: 91922 epoch: 2390/6112 frames: 312999936
+fps step: 170109 fps step and policy inference: 156777 fps total: 92402 epoch: 2391/6112 frames: 313131008
+fps step: 160326 fps step and policy inference: 147953 fps total: 87685 epoch: 2392/6112 frames: 313262080
+fps step: 167989 fps step and policy inference: 155226 fps total: 92451 epoch: 2393/6112 frames: 313393152
+fps step: 163830 fps step and policy inference: 151635 fps total: 88253 epoch: 2394/6112 frames: 313524224
+fps step: 161767 fps step and policy inference: 149421 fps total: 89583 epoch: 2395/6112 frames: 313655296
+fps step: 159387 fps step and policy inference: 147288 fps total: 89437 epoch: 2396/6112 frames: 313786368
+fps step: 156770 fps step and policy inference: 145032 fps total: 95758 epoch: 2397/6112 frames: 313917440
+fps step: 151289 fps step and policy inference: 140088 fps total: 89045 epoch: 2398/6112 frames: 314048512
+fps step: 155590 fps step and policy inference: 143950 fps total: 90146 epoch: 2399/6112 frames: 314179584
+fps step: 167251 fps step and policy inference: 154144 fps total: 92118 epoch: 2400/6112 frames: 314310656
+fps step: 160592 fps step and policy inference: 148347 fps total: 90110 epoch: 2401/6112 frames: 314441728
+fps step: 169501 fps step and policy inference: 156780 fps total: 95313 epoch: 2402/6112 frames: 314572800
+fps step: 157022 fps step and policy inference: 144897 fps total: 90482 epoch: 2403/6112 frames: 314703872
+fps step: 160794 fps step and policy inference: 148423 fps total: 87391 epoch: 2404/6112 frames: 314834944
+fps step: 172502 fps step and policy inference: 159214 fps total: 91388 epoch: 2405/6112 frames: 314966016
+fps step: 157106 fps step and policy inference: 145336 fps total: 87454 epoch: 2406/6112 frames: 315097088
+fps step: 153833 fps step and policy inference: 142677 fps total: 96074 epoch: 2407/6112 frames: 315228160
+fps step: 164857 fps step and policy inference: 152742 fps total: 97564 epoch: 2408/6112 frames: 315359232
+fps step: 158121 fps step and policy inference: 146342 fps total: 97370 epoch: 2409/6112 frames: 315490304
+fps step: 161985 fps step and policy inference: 149855 fps total: 93165 epoch: 2410/6112 frames: 315621376
+fps step: 160115 fps step and policy inference: 147854 fps total: 89289 epoch: 2411/6112 frames: 315752448
+fps step: 153890 fps step and policy inference: 142629 fps total: 86593 epoch: 2412/6112 frames: 315883520
+fps step: 147118 fps step and policy inference: 136709 fps total: 85019 epoch: 2413/6112 frames: 316014592
+fps step: 151059 fps step and policy inference: 140353 fps total: 87700 epoch: 2414/6112 frames: 316145664
+fps step: 169258 fps step and policy inference: 156865 fps total: 93920 epoch: 2415/6112 frames: 316276736
+fps step: 180865 fps step and policy inference: 166741 fps total: 112052 epoch: 2416/6112 frames: 316407808
+fps step: 202320 fps step and policy inference: 188448 fps total: 114875 epoch: 2417/6112 frames: 316538880
+fps step: 165979 fps step and policy inference: 153081 fps total: 91926 epoch: 2418/6112 frames: 316669952
+fps step: 160598 fps step and policy inference: 148052 fps total: 89684 epoch: 2419/6112 frames: 316801024
+fps step: 169133 fps step and policy inference: 156094 fps total: 92886 epoch: 2420/6112 frames: 316932096
+fps step: 171157 fps step and policy inference: 157578 fps total: 94237 epoch: 2421/6112 frames: 317063168
+fps step: 157606 fps step and policy inference: 145630 fps total: 90324 epoch: 2422/6112 frames: 317194240
+fps step: 160337 fps step and policy inference: 148316 fps total: 90146 epoch: 2423/6112 frames: 317325312
+fps step: 161503 fps step and policy inference: 148947 fps total: 88262 epoch: 2424/6112 frames: 317456384
+fps step: 158857 fps step and policy inference: 146826 fps total: 90998 epoch: 2425/6112 frames: 317587456
+fps step: 177049 fps step and policy inference: 163623 fps total: 96559 epoch: 2426/6112 frames: 317718528
+fps step: 153069 fps step and policy inference: 141536 fps total: 87364 epoch: 2427/6112 frames: 317849600
+fps step: 167620 fps step and policy inference: 154526 fps total: 98720 epoch: 2428/6112 frames: 317980672
+fps step: 164105 fps step and policy inference: 152040 fps total: 91651 epoch: 2429/6112 frames: 318111744
+fps step: 157625 fps step and policy inference: 145980 fps total: 91260 epoch: 2430/6112 frames: 318242816
+fps step: 154810 fps step and policy inference: 143518 fps total: 87091 epoch: 2431/6112 frames: 318373888
+fps step: 145976 fps step and policy inference: 135637 fps total: 84284 epoch: 2432/6112 frames: 318504960
+fps step: 159125 fps step and policy inference: 147044 fps total: 89790 epoch: 2433/6112 frames: 318636032
+fps step: 172271 fps step and policy inference: 159623 fps total: 97049 epoch: 2434/6112 frames: 318767104
+fps step: 160042 fps step and policy inference: 148219 fps total: 89593 epoch: 2435/6112 frames: 318898176
+fps step: 162075 fps step and policy inference: 150170 fps total: 95991 epoch: 2436/6112 frames: 319029248
+fps step: 159753 fps step and policy inference: 147676 fps total: 92594 epoch: 2437/6112 frames: 319160320
+fps step: 181647 fps step and policy inference: 166965 fps total: 102195 epoch: 2438/6112 frames: 319291392
+fps step: 169955 fps step and policy inference: 156999 fps total: 101550 epoch: 2439/6112 frames: 319422464
+fps step: 165501 fps step and policy inference: 152817 fps total: 91782 epoch: 2440/6112 frames: 319553536
+fps step: 162298 fps step and policy inference: 150129 fps total: 90071 epoch: 2441/6112 frames: 319684608
+fps step: 157781 fps step and policy inference: 146015 fps total: 89492 epoch: 2442/6112 frames: 319815680
+fps step: 159794 fps step and policy inference: 147597 fps total: 89552 epoch: 2443/6112 frames: 319946752
+[best-archive/nsucc] new peak from policy 4 iter=16 r_meta_raw=0.07769230753183365 nsucc_mean=15.84521484375 nsucc_max=50.0
+[Posterior] Loaded shared posterior from /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/wm_posterior_latest.json
+Policy 4: DexPBT tier=bottom rank=4/6 obj=0.0777 (split=1/3/2)
+Policy 4: source_selection tier=strict_stable_live action=copy checkpoint_type=latest_healthy strict=[0] relaxed=[] strict_filter={} relaxed_filter={} archive_reason=not_attempted
+[WM] Fixed-strategy mode: keeping wm_strategy=rssm_belief_value (no posterior sample)
+Policy 4: DexPBT bottom restart from policy 0 with checkpoint /root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/dexpbt_8gpu_ws/restart_p4/000016.pth — requesting supervisor restart (exit code 42)

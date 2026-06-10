@@ -1,0 +1,1 @@
+/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/policy_02/rl_games/attempt_4_2026-06-08_11-49-48/nn/last_DexPBTKukaAllegroLSTMPPO_ep_6112_rew__18786.54_.pth

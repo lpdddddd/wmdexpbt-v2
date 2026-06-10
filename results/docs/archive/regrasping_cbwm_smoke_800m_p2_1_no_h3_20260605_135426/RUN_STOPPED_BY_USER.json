@@ -1,0 +1,66 @@
+{
+  "run_id": "regrasping_cbwm_smoke_800m_p2_1_no_h3_20260605_135426",
+  "stop_time": "2026-06-05T22:01+0800",
+  "stopped_policy": [1],
+  "reason": "smoke conclusion reached; p1 outlier not worth waiting",
+  "completed_policies": [0, 2, 3, 4, 5],
+  "partial_policies": [1],
+  "p1_partial_state": {
+    "last_observed_frame_m": 440.0,
+    "last_observed_nsucc_mean": 12.2431640625,
+    "peak_nsucc_mean": 19.2171630859375,
+    "peak_frame_m": 380.1,
+    "supervisor_attempts": 6,
+    "cross_restart_count": 3,
+    "recovery_restart_count": 1
+  },
+  "population_summary_completed_only": {
+    "policies": [0, 2, 3, 4, 5],
+    "mean_end_mean": 12.698,
+    "median_end_mean": 9.104,
+    "max_end_mean": 22.08,
+    "min_end_mean": 7.258,
+    "mean_peak_mean": 13.717,
+    "median_peak_mean": 11.221,
+    "min_retention_pct": 76.52,
+    "median_retention_pct": 94.35
+  },
+  "population_summary_all_observed": {
+    "policies": [0, 1, 2, 3, 4, 5],
+    "p1_status": "partial",
+    "mean_end_mean": 12.622,
+    "median_end_mean": 10.673,
+    "max_end_mean": 22.08,
+    "min_end_mean": 7.258,
+    "mean_peak_mean": 14.634,
+    "median_peak_mean": 13.842,
+    "note": "p1 end_mean snapshot is at 440M, not 800M; counts as observed not completed"
+  },
+  "pbt_replacement_audit": {
+    "cross_restart_lifetime_max": 8,
+    "recovery_restart_lifetime_max": 4,
+    "cross_restart_latest_tick": 5,
+    "recovery_restart_latest_tick": 3,
+    "self_restart_total": 0,
+    "startup_hang_total": 0,
+    "note": "lifetime_max counts unique cross/recovery events seen in any tick; latest_tick reflects the final cumulative counter and is lower for p1 (partial) due to interleaved curve rows from multiple writers"
+  },
+  "config": {
+    "wm_strategy_mode": "fixed",
+    "fixed_wm_strategy": "value_imag_h1",
+    "value_imag_h3_disabled": true,
+    "cf_runner_enabled": false,
+    "crosscopy_tolerance_mode": "last_mastered",
+    "rollback_cooldown_frames": 50000000,
+    "max_active": 2,
+    "inter_launch_delay_s": 90,
+    "startup_timeout_s": 900,
+    "max_consecutive_successes": 50
+  },
+  "next_steps": {
+    "report": "SMOKE_P2_REPORT.md (regenerated with bug fixes)",
+    "audit": "P1_OUTLIER_AUDIT.md",
+    "next_smoke_launcher": "results/start_regrasping_fixed_h1_p2_1_smoke_800m.sh",
+    "formal_launcher": "results/start_regrasping_fixed_h1_p2_1_formal_5b.sh"
+  }
+}
