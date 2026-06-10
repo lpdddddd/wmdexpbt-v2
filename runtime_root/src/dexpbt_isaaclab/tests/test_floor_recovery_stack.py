@@ -708,6 +708,55 @@ class FloorRecoveryEvalBufferTest(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(len(buf), 0)
 
+    def test_accepts_when_tol_below_relaxed_record_threshold(self):
+        buf = FloorRecoveryEvalBuffer(capacity=2)
+        T, B = 2, 2
+        tol = torch.full((T, B), 0.075)
+        batch = SequenceBatch(
+            obs=torch.zeros(T, B, 4),
+            action=torch.zeros(T, B, 2),
+            reward=torch.zeros(T, B),
+            done=torch.zeros(T, B),
+            next_obs=torch.zeros(T, B, 4),
+            returns=torch.zeros(T, B),
+            valid_mask=torch.ones(T, B),
+            segment_id=torch.zeros(T, B, dtype=torch.long),
+            success_tolerance_seq=tol,
+        )
+        accepted = buf.record_candidate(
+            batch, floor_tol_threshold=0.20, require_floor_signal=True
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(len(buf), 1)
+
+
+class TeacherEvalBufferAuxWiringTest(unittest.TestCase):
+    def test_extract_success_tolerance_from_env_attrs(self):
+        from dexpbt_isaaclab.world_model.wm_aux_buffer import (
+            EXTENDED_SEQ_AUX_FIELDS,
+            extract_step_aux,
+        )
+
+        aux = extract_step_aux(
+            {},
+            device="cpu",
+            env_attrs={"success_tolerance": 0.075},
+            fields=EXTENDED_SEQ_AUX_FIELDS,
+        )
+        self.assertIn("aux_success_tolerance", aux)
+        self.assertAlmostEqual(float(aux["aux_success_tolerance"].mean()), 0.075)
+
+    def test_train_registers_extended_aux_when_teacher_enabled(self):
+        train_text = (
+            Path(__file__).parent.parent
+            / "dexpbt_isaaclab"
+            / "scripts"
+            / "train.py"
+        ).read_text()
+        self.assertIn("EXTENDED_SEQ_AUX_FIELDS", train_text)
+        self.assertIn("seq_wm_enable_iterative_teacher", train_text)
+        self.assertIn('"success_tolerance"', train_text)
+
 
 # =========================================================================
 # Section 8: Phase A4 P4 wired (2026-06-10) — runtime wiring tests.

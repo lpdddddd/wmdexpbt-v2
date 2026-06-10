@@ -1423,7 +1423,11 @@ from dexpbt_isaaclab.world_model.seq_policy_aux import (
     register_actor_mlp_capture,
     register_shared_to_aux_critic_capture,
 )
-from dexpbt_isaaclab.world_model.wm_aux_buffer import register_seq_aux_fields
+from dexpbt_isaaclab.world_model.wm_aux_buffer import (
+    DEFAULT_SEQ_AUX_FIELDS,
+    EXTENDED_SEQ_AUX_FIELDS,
+    register_seq_aux_fields,
+)
 from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
 from dexpbt_isaaclab.world_model.transformer_lite import TransformerLiteWorldModel
 # Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
@@ -2036,7 +2040,9 @@ def _patch_actor_train_for_seq_wm(
 
     def patched_init_tensors(*args, **kwargs):
         original_init_tensors(*args, **kwargs)
-        register_seq_aux_fields(actor.experience_buffer)
+        register_seq_aux_fields(
+            actor.experience_buffer, fields=seq_aux_collector.fields
+        )
         # Re-bind play_steps_rnn here — init_tensors does not rebind it,
         # but defensive: ensure our patched version stays installed even
         # after any rl_games hooks reset it.
@@ -3530,21 +3536,43 @@ def main():
             seq_wm_trainer._wm_imagine_dir = None
 
         # Aux collector + env wrap (must happen BEFORE RlGamesVecEnvWrapper).
+        # Phase A4 P5b (2026-06-10): register/collect task-aware aux fields
+        # (incl. aux_success_tolerance) whenever task aux OR the iterative
+        # teacher stack is enabled. Without success_tolerance in the PPO
+        # buffer the FloorRecoveryEvalBuffer never fills and teacher eval
+        # always rejects with no_eval_data.
+        seq_aux_fields = (
+            EXTENDED_SEQ_AUX_FIELDS
+            if (
+                bool(args_cli.seq_wm_use_task_aux_inputs)
+                or bool(args_cli.seq_wm_enable_iterative_teacher)
+            )
+            else DEFAULT_SEQ_AUX_FIELDS
+        )
         seq_aux_collector = SeqAuxCollector(
             num_envs=env.unwrapped.num_envs,
             horizon_length=int(agent_cfg["params"]["config"].get("horizon_length", 16)),
             device=rl_device,
+            fields=seq_aux_fields,
         )
 
         def _seq_env_attrs(e):
             # Used by SeqAuxInterceptorEnv to read per-env env attributes
-            # (lifted_object, successes) that are not exposed via infos.
+            # (lifted_object, successes, success_tolerance, ...) that are
+            # not exposed via infos["wm"].
             inner = getattr(e, "unwrapped", e)
             d: dict = {}
-            for name in ("lifted_object", "successes"):
+            for name in (
+                "lifted_object",
+                "successes",
+                "success_tolerance",
+                "closest_d_hat",
+            ):
                 v = getattr(inner, name, None)
                 if v is not None:
                     d[name] = v
+            if "lifted_object" in d:
+                d["picked"] = d["lifted_object"]
             return d
 
         env = SeqAuxInterceptorEnv(env, seq_aux_collector,

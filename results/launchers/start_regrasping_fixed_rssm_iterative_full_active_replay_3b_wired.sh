@@ -94,6 +94,16 @@ SEQ_WM_HORIZON_STEPS="${SEQ_WM_HORIZON_STEPS:-4,8}"
 SEQ_WM_RECOVERY_HORIZON="${SEQ_WM_RECOVERY_HORIZON:-8}"
 SEQ_WM_RECOVERY_SHADOW_TOL_THRESHOLD="${SEQ_WM_RECOVERY_SHADOW_TOL_THRESHOLD:-0.04}"
 
+# Phase A4 P5/P5b (2026-06-10): teacher-gate fix knobs (validated on
+# relaxed 600M smoke). record_below_tol stays 0.04 for floor-stage
+# production; aux_success_tolerance wiring fix in train.py ensures the
+# eval buffer fills once tol <= threshold.
+SEQ_WM_TEACHER_KEEP_LAST_K="${SEQ_WM_TEACHER_KEEP_LAST_K:-6}"
+SEQ_WM_TEACHER_MIN_EVAL_SIZE="${SEQ_WM_TEACHER_MIN_EVAL_SIZE:-512}"
+SEQ_WM_TEACHER_MAX_UNCERTAINTY="${SEQ_WM_TEACHER_MAX_UNCERTAINTY:-0.5}"
+SEQ_WM_TEACHER_POS_RATE_LOW="${SEQ_WM_TEACHER_POS_RATE_LOW:-0.001}"
+SEQ_WM_TEACHER_POS_RATE_HIGH="${SEQ_WM_TEACHER_POS_RATE_HIGH:-0.999}"
+
 export DEXPBT_MAX_ACTIVE="${DEXPBT_MAX_ACTIVE:-2}"
 export DEXPBT_INTER_LAUNCH_DELAY_S="${DEXPBT_INTER_LAUNCH_DELAY_S:-90}"
 export DEXPBT_STARTUP_TIMEOUT_S="${DEXPBT_STARTUP_TIMEOUT_S:-900}"
@@ -135,7 +145,13 @@ seq_wm_enable_iterative_teacher=true
 seq_wm_enable_imagined_evaluator=true
 seq_wm_imagine_action_mode=recorded
 seq_wm_replay_prioritize_floor_recovery=true
-runtime_wiring=teacher_manager+imagined_evaluator+observer_disk_refresh
+seq_wm_teacher_allow_first_promotion=true
+seq_wm_teacher_keep_last_k=${SEQ_WM_TEACHER_KEEP_LAST_K}
+seq_wm_teacher_min_eval_size=${SEQ_WM_TEACHER_MIN_EVAL_SIZE}
+seq_wm_teacher_max_uncertainty=${SEQ_WM_TEACHER_MAX_UNCERTAINTY}
+seq_wm_teacher_pos_rate_low=${SEQ_WM_TEACHER_POS_RATE_LOW}
+seq_wm_teacher_pos_rate_high=${SEQ_WM_TEACHER_POS_RATE_HIGH}
+runtime_wiring=teacher_manager+imagined_evaluator+observer_disk_refresh+teacher_gate_fix+aux_tolerance_wiring
 EOF
 
 source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"
@@ -237,11 +253,16 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --seq_wm_enable_iterative_teacher \
   --seq_wm_teacher_eval_interval_frames 50000000 \
   --seq_wm_teacher_promote_min_improvement 0.02 \
-  --seq_wm_teacher_keep_last_k 3 \
+  --seq_wm_teacher_keep_last_k "$SEQ_WM_TEACHER_KEEP_LAST_K" \
   --seq_wm_teacher_eval_buffer_capacity 8 \
   --seq_wm_teacher_record_below_tol 0.04 \
-  --seq_wm_teacher_require_recovery_pos_low 0.05 \
-  --seq_wm_teacher_require_recovery_pos_high 0.95 \
+  --seq_wm_teacher_require_recovery_pos_low "$SEQ_WM_TEACHER_POS_RATE_LOW" \
+  --seq_wm_teacher_require_recovery_pos_high "$SEQ_WM_TEACHER_POS_RATE_HIGH" \
+  --seq_wm_teacher_allow_first_promotion \
+  --seq_wm_teacher_min_eval_size "$SEQ_WM_TEACHER_MIN_EVAL_SIZE" \
+  --seq_wm_teacher_max_uncertainty "$SEQ_WM_TEACHER_MAX_UNCERTAINTY" \
+  --seq_wm_teacher_pos_rate_low "$SEQ_WM_TEACHER_POS_RATE_LOW" \
+  --seq_wm_teacher_pos_rate_high "$SEQ_WM_TEACHER_POS_RATE_HIGH" \
   --seq_wm_enable_imagined_evaluator \
   --seq_wm_imagine_horizons "$SEQ_WM_HORIZON_STEPS" \
   --seq_wm_imagine_action_mode recorded \
