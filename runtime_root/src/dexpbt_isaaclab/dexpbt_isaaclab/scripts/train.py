@@ -1379,6 +1379,39 @@ parser.add_argument(
     "--wm_floorcritic_use_drop_risk",
     action=argparse.BooleanOptionalAction, default=True,
 )
+
+# ----------------------------------------------------------------------
+# ERD-MPC (Elite-Recovery Distillation): action-conditioned recovery scorer
+# + candidate-action search + actor-mu distillation. Default-off.
+# ----------------------------------------------------------------------
+parser.add_argument("--erd_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--erd_horizons", type=str, default="4,8")
+parser.add_argument("--erd_candidate_k", type=int, default=32)
+parser.add_argument("--erd_action_noise_std", type=float, default=0.15)
+parser.add_argument("--erd_max_action_delta", type=float, default=0.5)
+parser.add_argument("--erd_noise_cap_by_tol", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--erd_score_success_weight", type=float, default=1.0)
+parser.add_argument("--erd_score_improve_weight", type=float, default=0.7)
+parser.add_argument("--erd_score_drop_weight", type=float, default=1.5)
+parser.add_argument("--erd_scorer_loss_weight", type=float, default=0.01)
+parser.add_argument("--erd_distill_loss_weight", type=float, default=0.03)
+parser.add_argument("--erd_floor_distill_loss_weight", type=float, default=0.05)
+parser.add_argument("--erd_hard_floor_distill_loss_weight", type=float, default=0.08)
+parser.add_argument("--erd_start_tol", type=float, default=0.04)
+parser.add_argument("--erd_floor_tol", type=float, default=0.02)
+parser.add_argument("--erd_hard_floor_tol", type=float, default=0.012)
+parser.add_argument("--erd_dhat_improve_margin", type=float, default=0.005)
+parser.add_argument("--erd_drop_dhat_margin", type=float, default=0.01)
+parser.add_argument("--erd_near_success_mult", type=float, default=2.0)
+parser.add_argument("--erd_max_grad_ratio", type=float, default=0.2)
+parser.add_argument("--erd_auto_scale_by_grad_ratio", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--erd_only_lifted", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--erd_min_risky_fraction", type=float, default=0.02)
+parser.add_argument("--erd_start_after_frames", type=int, default=200000000)
+parser.add_argument("--erd_scorer_warmup_iters", type=int, default=2000)
+parser.add_argument("--erd_min_score_margin", type=float, default=0.05)
+parser.add_argument("--erd_min_target_valid_fraction", type=float, default=0.2)
+parser.add_argument("--erd_max_drop_prob_for_teacher", type=float, default=0.5)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -1519,6 +1552,15 @@ from dexpbt_isaaclab.world_model.floorcritic import (
     compute_floorcritic_loss,
     register_actor_mlp_grad_probe,
     register_floorcritic_capture,
+)
+from dexpbt_isaaclab.world_model.elite_recovery_distill import (
+    ERDBridge,
+    ERDConfig,
+    ERDTargetBuilder,
+    attach_erd_modules,
+    compute_erd_loss,
+    register_erd_actor_mlp_grad_probe,
+    register_erd_capture,
 )
 
 
@@ -2243,6 +2285,27 @@ def _patch_actor_train_for_seq_wm(
                 print(f"[FloorCritic] target cache build failed: {_fc_exc}")
                 fc_bridge.cache = None
 
+        erd_bridge = getattr(seq_wm_trainer, "_erd_bridge", None)
+        erd_builder = getattr(seq_wm_trainer, "_erd_target_builder", None)
+        if erd_bridge is not None and erd_builder is not None:
+            erd_bridge.capture.reset()
+            try:
+                td = actor.experience_buffer.tensor_dict
+                erd_cache = erd_builder.build(
+                    d_hat=td["aux_d_hat"],
+                    success_cnt=td["aux_success_cnt"],
+                    success_tol=td["aux_success_tolerance"],
+                    failure=td.get("aux_failure"),
+                    lifted=td.get("aux_lifted"),
+                    dones=td["dones"],
+                    actions=td["actions"],
+                    generation=rollout_state["generation"],
+                )
+                erd_bridge.cache = erd_cache
+            except Exception as _erd_exc:
+                print(f"[ERD] target cache build failed: {_erd_exc}")
+                erd_bridge.cache = None
+
         if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
             seq_distill_bridge.feature_capture.reset()
@@ -2458,6 +2521,46 @@ def _patch_actor_train_for_seq_wm(
                         try:
                             tb_writer.add_scalar(
                                 f"wm_floorcritic/pos_rate_{key}", float(pr), frames
+                            )
+                        except Exception:
+                            pass
+
+                erd_bridge_log = getattr(seq_wm_trainer, "_erd_bridge", None)
+                if erd_bridge_log is not None:
+                    eb = erd_bridge_log
+                    erd_scalars = {
+                        "active": eb.last_active,
+                        "scorer_active": eb.last_scorer_active,
+                        "distill_active": eb.last_distill_active,
+                        "distill_block_reason": float(eb.last_distill_block_reason),
+                        "risky_fraction": eb.last_risky_fraction,
+                        "scorer_loss": eb.last_scorer_loss,
+                        "distill_loss": eb.last_distill_loss,
+                        "total_loss": eb.last_total_loss,
+                        "best_score": eb.last_best_score,
+                        "current_actor_score": eb.last_actor_score,
+                        "score_margin": eb.last_score_margin,
+                        "best_success_prob": eb.last_best_success_prob,
+                        "best_improve_prob": eb.last_best_improve_prob,
+                        "best_drop_prob": eb.last_best_drop_prob,
+                        "actor_success_prob": eb.last_actor_success_prob,
+                        "actor_drop_prob": eb.last_actor_drop_prob,
+                        "action_delta_norm": eb.last_action_delta_norm,
+                        "distill_grad_ratio": eb.last_distill_grad_ratio,
+                        "auto_scale_factor": eb.last_auto_scale_factor,
+                        "target_valid_fraction": eb.last_target_valid_fraction,
+                        "scorer_warmup_iters_done": float(eb.scorer_warmup_iters_done),
+                        "candidate_k": float(eb.cfg.candidate_k),
+                    }
+                    for k, v in erd_scalars.items():
+                        try:
+                            tb_writer.add_scalar(f"erd/{k}", float(v), frames)
+                        except Exception:
+                            pass
+                    for key, pr in eb.last_pos_rate.items():
+                        try:
+                            tb_writer.add_scalar(
+                                f"erd/target_pos_rate_{key}", float(pr), frames
                             )
                         except Exception:
                             pass
@@ -2745,6 +2848,19 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
     if hasattr(agent, "set_stats_weights"):
         agent.set_stats_weights(ckpt)
 
+    erd_bridge = getattr(agent, "_erd_bridge", None)
+    if erd_bridge is not None and getattr(erd_bridge, "scorer", None) is not None:
+        erd_sd = ckpt.get("erd_scorer")
+        if isinstance(erd_sd, dict):
+            result = erd_bridge.scorer.load_state_dict(erd_sd, strict=False)
+            print(
+                "[ERD] restore: loaded scorer "
+                f"(missing={len(result.missing_keys)}, "
+                f"unexpected={len(result.unexpected_keys)})"
+            )
+        else:
+            print("[ERD] restore: no erd_scorer in checkpoint; using fresh scorer")
+
     if "epoch" in ckpt:
         agent.epoch_num = ckpt["epoch"]
     if "frame" in ckpt:
@@ -2860,6 +2976,24 @@ def _patch_model_get_aux_loss_for_floorcritic(model, floorcritic_bridge):
             merged.update(base)
             return merged if merged else None
         return fc_loss_dict if fc_loss_dict else None
+
+    model.get_aux_loss = patched_get_aux_loss
+
+
+def _patch_model_get_aux_loss_for_erd(model, erd_bridge):
+    """Install ERD-MPC losses into rl_games' get_aux_loss hook."""
+    original_get_aux_loss = model.get_aux_loss
+
+    def patched_get_aux_loss():
+        agent = getattr(erd_bridge, "agent_ref", None)
+        frames = int(getattr(agent, "frame", 0) or 0) if agent is not None else 0
+        erd_loss_dict = compute_erd_loss(erd_bridge, frames=frames)
+        base = original_get_aux_loss()
+        if base is not None:
+            merged = dict(erd_loss_dict)
+            merged.update(base)
+            return merged if merged else None
+        return erd_loss_dict if erd_loss_dict else None
 
     model.get_aux_loss = patched_get_aux_loss
 
@@ -3228,6 +3362,38 @@ class _WmEnabledRunner(Runner):
                     f"detach={fc_cfg.should_detach} heads={fc_cfg.head_keys()}"
                 )
 
+            erd_cfg = getattr(self.seq_wm_trainer, "_erd_cfg", None)
+            if erd_cfg is not None and erd_cfg.enabled:
+                erd_bridge = ERDBridge(cfg=erd_cfg)
+                erd_bridge.agent_ref = agent
+                erd_bridge.scorer = attach_erd_modules(
+                    optimizer=agent.optimizer,
+                    cfg=erd_cfg,
+                    device=next(agent.model.parameters()).device,
+                )
+                self._erd_hook_handle = register_erd_capture(
+                    agent.model, erd_bridge.capture
+                )
+                self._erd_grad_probe_handle = register_erd_actor_mlp_grad_probe(
+                    agent.model, erd_bridge
+                )
+                _patch_model_get_aux_loss_for_erd(agent.model, erd_bridge)
+                self.seq_wm_trainer._erd_bridge = erd_bridge
+                agent._erd_bridge = erd_bridge
+                print(
+                    f"[ERD] enabled: horizons={erd_cfg.horizons} "
+                    f"candidate_k={erd_cfg.candidate_k} "
+                    f"noise={erd_cfg.action_noise_std} "
+                    f"delta_cap={erd_cfg.max_action_delta} "
+                    f"scorer_w={erd_cfg.scorer_loss_weight} "
+                    f"distill_w={erd_cfg.distill_loss_weight}/"
+                    f"{erd_cfg.floor_distill_loss_weight}/"
+                    f"{erd_cfg.hard_floor_distill_loss_weight} "
+                    f"warmup_frames={erd_cfg.start_after_frames} "
+                    f"warmup_iters={erd_cfg.scorer_warmup_iters} "
+                    f"max_grad_ratio={erd_cfg.max_grad_ratio}"
+                )
+
             _patch_actor_train_for_seq_wm(
                 agent,
                 self.seq_wm_trainer,
@@ -3252,7 +3418,9 @@ class _WmEnabledRunner(Runner):
 
         # Restore weights if checkpoint specified — AFTER aux_value_head is registered
         ckpt_path = args.get("checkpoint")
-        if wm_trainer is not None and ckpt_path:
+        if ckpt_path and (
+            wm_trainer is not None or getattr(agent, "_erd_bridge", None) is not None
+        ):
             _wm_safe_restore(agent, ckpt_path)
         else:
             torch_runner._restore(agent, args)
@@ -3569,6 +3737,41 @@ def main():
                 "populated critic feature under rl_games separate=False; "
                 "degrading to actor_mlp_out_shared."
             )
+    _erd_horizons = tuple(
+        int(s.strip())
+        for s in str(args_cli.erd_horizons or "").split(",")
+        if s.strip()
+    ) or (4, 8)
+    erd_cfg = ERDConfig(
+        enabled=bool(args_cli.erd_enable),
+        horizons=_erd_horizons,
+        candidate_k=int(args_cli.erd_candidate_k),
+        action_noise_std=float(args_cli.erd_action_noise_std),
+        max_action_delta=float(args_cli.erd_max_action_delta),
+        noise_cap_by_tol=bool(args_cli.erd_noise_cap_by_tol),
+        score_success_weight=float(args_cli.erd_score_success_weight),
+        score_improve_weight=float(args_cli.erd_score_improve_weight),
+        score_drop_weight=float(args_cli.erd_score_drop_weight),
+        scorer_loss_weight=float(args_cli.erd_scorer_loss_weight),
+        distill_loss_weight=float(args_cli.erd_distill_loss_weight),
+        floor_distill_loss_weight=float(args_cli.erd_floor_distill_loss_weight),
+        hard_floor_distill_loss_weight=float(args_cli.erd_hard_floor_distill_loss_weight),
+        start_tol=float(args_cli.erd_start_tol),
+        floor_tol=float(args_cli.erd_floor_tol),
+        hard_floor_tol=float(args_cli.erd_hard_floor_tol),
+        dhat_improve_margin=float(args_cli.erd_dhat_improve_margin),
+        drop_dhat_margin=float(args_cli.erd_drop_dhat_margin),
+        near_success_mult=float(args_cli.erd_near_success_mult),
+        max_grad_ratio=float(args_cli.erd_max_grad_ratio),
+        auto_scale_by_grad_ratio=bool(args_cli.erd_auto_scale_by_grad_ratio),
+        only_lifted=bool(args_cli.erd_only_lifted),
+        min_risky_fraction=float(args_cli.erd_min_risky_fraction),
+        start_after_frames=int(args_cli.erd_start_after_frames),
+        scorer_warmup_iters=int(args_cli.erd_scorer_warmup_iters),
+        min_score_margin=float(args_cli.erd_min_score_margin),
+        min_target_valid_fraction=float(args_cli.erd_min_target_valid_fraction),
+        max_drop_prob_for_teacher=float(args_cli.erd_max_drop_prob_for_teacher),
+    )
     is_sequence_strategy = (
         args_cli.enable_wm and args_cli.wm_strategy in SEQUENCE_STRATEGIES
     )
@@ -3587,6 +3790,7 @@ def main():
             action_dim = int(action_space.shape[0])
         except Exception:
             action_dim = 23
+        erd_cfg.action_dim = int(action_dim)
 
         # Phase A4 P4 (2026-06-09): horizon list parser (Part B / D).
         def _parse_int_list(spec: str) -> tuple[int, ...]:
@@ -3723,6 +3927,13 @@ def main():
         )
         seq_wm_trainer._floorcritic_generation = 0
 
+        seq_wm_trainer._erd_cfg = erd_cfg
+        seq_wm_trainer._erd_bridge = None
+        seq_wm_trainer._erd_target_builder = (
+            ERDTargetBuilder(erd_cfg) if erd_cfg.enabled else None
+        )
+        seq_wm_trainer._erd_generation = 0
+
         # ------------------------------------------------------------------
         # Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
         # teacher manager (Part C) + short-horizon imagined evaluator
@@ -3815,6 +4026,7 @@ def main():
                 bool(args_cli.seq_wm_use_task_aux_inputs)
                 or bool(args_cli.seq_wm_enable_iterative_teacher)
                 or bool(args_cli.wm_floorcritic_enable)
+                or bool(args_cli.erd_enable)
             )
             else DEFAULT_SEQ_AUX_FIELDS
         )

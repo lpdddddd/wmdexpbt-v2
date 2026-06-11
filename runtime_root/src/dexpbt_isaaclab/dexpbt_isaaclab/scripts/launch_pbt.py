@@ -707,6 +707,15 @@ def main() -> None:
             "--no-wm_floorcritic_use_dhat_improve",
             "--wm_floorcritic_use_drop_risk",
             "--no-wm_floorcritic_use_drop_risk",
+            # ERD-MPC boolean toggles.
+            "--erd_enable",
+            "--no-erd_enable",
+            "--erd_auto_scale_by_grad_ratio",
+            "--no-erd_auto_scale_by_grad_ratio",
+            "--erd_only_lifted",
+            "--no-erd_only_lifted",
+            "--erd_noise_cap_by_tol",
+            "--no-erd_noise_cap_by_tol",
         }
         extra = list(args.extra)
         i = 0

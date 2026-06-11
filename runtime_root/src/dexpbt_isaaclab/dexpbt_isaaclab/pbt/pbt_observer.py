@@ -4897,6 +4897,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         meta_tmp = self.curr_policy_workspace / f"{prefix}.json.tmp"
         meta_path = self.curr_policy_workspace / f"{prefix}.json"
         algo_state = self.algo.get_full_state_weights()
+        erd_bridge = getattr(self.algo, "_erd_bridge", None)
+        erd_scorer = getattr(erd_bridge, "scorer", None) if erd_bridge is not None else None
+        if erd_scorer is not None:
+            algo_state["erd_scorer"] = erd_scorer.state_dict()
         # Atomic save: write to .tmp first, then rename. Avoids half-written .pth
         # being picked up by a peer's _load_population_checkpoints during SIGKILL restart.
         torch.save(algo_state, ckpt_tmp)
