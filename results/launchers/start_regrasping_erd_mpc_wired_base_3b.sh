@@ -214,7 +214,6 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --erd_min_score_margin 0.05 \
   --erd_min_target_valid_fraction 0.2 \
   --erd_max_drop_prob_for_teacher 0.5 \
-  --no-experimental_rssm_floor_recovery_stack \
   --pbt_early_collapse_detect \
   --early_collapse_drop_ratio 0.3 \
   --early_collapse_patience 1 \

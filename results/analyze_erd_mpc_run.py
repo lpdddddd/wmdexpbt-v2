@@ -35,10 +35,25 @@ ERD_TAGS = [
     "erd/actor_success_prob",
     "erd/actor_drop_prob",
     "erd/action_delta_norm",
+    "erd/raw_mu_abs_mean",
+    "erd/raw_mu_clip_fraction",
+    "erd/candidate_clip_fraction",
     "erd/distill_grad_ratio",
     "erd/auto_scale_factor",
     "erd/target_valid_fraction",
+    "erd/scorer_warmup_iters_done",
 ]
+
+BLOCK_REASON_NAMES = {
+    0: "ok",
+    1: "warmup_frames",
+    2: "warmup_iters",
+    3: "low_valid_fraction",
+    4: "low_margin",
+    5: "drop_risk_high",
+    6: "no_risky",
+    7: "tol_above_start",
+}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -67,6 +82,24 @@ def _stats(values: list[float]) -> dict[str, float]:
         "max": max(vals),
         "last": vals[-1],
     }
+
+
+def _block_reason_hist(values: list[float]) -> dict[str, int]:
+    hist: dict[str, int] = {}
+    for v in values:
+        if v != v:
+            continue
+        reason = int(round(float(v)))
+        name = BLOCK_REASON_NAMES.get(reason, f"unknown_{reason}")
+        hist[name] = hist.get(name, 0) + 1
+    return hist
+
+
+def _top_block_reason(hist: dict[str, int]) -> str | None:
+    blocked = {k: v for k, v in hist.items() if k != "ok" and v > 0}
+    if not blocked:
+        return None
+    return max(blocked.items(), key=lambda kv: kv[1])[0]
 
 
 def _collect_tb(summary_dirs: list[Path]) -> dict[str, list[tuple[int, float]]]:
@@ -120,6 +153,16 @@ def _policy_summary(run_dir: Path, pid: int) -> dict[str, Any]:
         out[tag.split("/", 1)[1]] = _stats(vals)
     out["scorer_active_points"] = sum(1 for _, v in tb.get("erd/scorer_active", []) if v > 0)
     out["distill_active_points"] = sum(1 for _, v in tb.get("erd/distill_active", []) if v > 0)
+    block_vals = [v for _, v in tb.get("erd/distill_block_reason", [])]
+    block_hist = _block_reason_hist(block_vals)
+    out["distill_block_reason_histogram"] = block_hist
+    out["top_block_reason"] = _top_block_reason(block_hist)
+    total_blocked = sum(v for k, v in block_hist.items() if k != "ok")
+    out["blocked_reason_percent"] = {
+        k: (100.0 * v / float(total_blocked))
+        for k, v in block_hist.items()
+        if k != "ok" and total_blocked > 0
+    }
     out["pos_rate_last"] = {
         tag.split("erd/target_pos_rate_", 1)[1]: vals[-1][1]
         for tag, vals in tb.items()
@@ -134,7 +177,15 @@ def analyze(run_dir: Path, baseline: Path | None = None) -> dict[str, Any]:
     peaks = [p.get("nsucc_peak") for p in policies if "nsucc_peak" in p]
     rec_notes = []
     if sum(p.get("distill_active_points", 0) for p in policies) == 0:
-        rec_notes.append("ERD distillation never activated; inspect warmup/gates.")
+        top_reasons = [
+            p.get("top_block_reason")
+            for p in policies
+            if p.get("top_block_reason") is not None
+        ]
+        reason = max(set(top_reasons), key=top_reasons.count) if top_reasons else "unknown"
+        rec_notes.append(
+            f"ERD distillation never activated; top block reason: {reason}."
+        )
     margins = [
         p.get("score_margin", {}).get("last", 0.0)
         for p in policies
@@ -142,6 +193,24 @@ def analyze(run_dir: Path, baseline: Path | None = None) -> dict[str, Any]:
     ]
     if margins and max(margins) <= 1e-6:
         rec_notes.append("Score margin is near zero; candidate search may be useless.")
+    raw_clip = [
+        p.get("raw_mu_clip_fraction", {}).get("max", 0.0)
+        for p in policies
+        if p.get("raw_mu_clip_fraction", {}).get("n", 0)
+    ]
+    if raw_clip and max(raw_clip) > 0.2:
+        rec_notes.append(
+            "Raw mu clip fraction exceeded 0.2; ERD is strongly interacting with action bounds."
+        )
+    cand_clip = [
+        p.get("candidate_clip_fraction", {}).get("max", 0.0)
+        for p in policies
+        if p.get("candidate_clip_fraction", {}).get("n", 0)
+    ]
+    if cand_clip and max(cand_clip) > 0.2:
+        rec_notes.append(
+            "Candidate clip fraction is high; action noise or delta cap may be too aggressive."
+        )
     ratios = [
         p.get("distill_grad_ratio", {}).get("max", 0.0)
         for p in policies
@@ -196,9 +265,15 @@ def _write_md(report: dict[str, Any], out_dir: Path) -> None:
             f"- tol end/min: {p.get('tol_end', 1.0):.4f} / {p.get('tol_min', 1.0):.4f}",
             f"- scorer_active_points: {p.get('scorer_active_points', 0)}",
             f"- distill_active_points: {p.get('distill_active_points', 0)}",
+            f"- distill_block_reason_histogram: {p.get('distill_block_reason_histogram', {})}",
+            f"- blocked_reason_percent: {p.get('blocked_reason_percent', {})}",
             f"- risky_fraction: {p.get('risky_fraction', {})}",
             f"- score_margin: {p.get('score_margin', {})}",
             f"- action_delta_norm: {p.get('action_delta_norm', {})}",
+            f"- raw_mu_abs_mean: {p.get('raw_mu_abs_mean', {})}",
+            f"- raw_mu_clip_fraction: {p.get('raw_mu_clip_fraction', {})}",
+            f"- candidate_clip_fraction: {p.get('candidate_clip_fraction', {})}",
+            f"- scorer_warmup_iters_done: {p.get('scorer_warmup_iters_done', {})}",
             f"- distill_grad_ratio: {p.get('distill_grad_ratio', {})}",
             f"- auto_scale_factor: {p.get('auto_scale_factor', {})}",
             f"- pos_rate_last: {p.get('pos_rate_last', {})}",

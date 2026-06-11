@@ -4901,6 +4901,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         erd_scorer = getattr(erd_bridge, "scorer", None) if erd_bridge is not None else None
         if erd_scorer is not None:
             algo_state["erd_scorer"] = erd_scorer.state_dict()
+            algo_state["erd_scorer_warmup_iters_done"] = int(
+                getattr(erd_bridge, "scorer_warmup_iters_done", 0)
+            )
         # Atomic save: write to .tmp first, then rename. Avoids half-written .pth
         # being picked up by a peer's _load_population_checkpoints during SIGKILL restart.
         torch.save(algo_state, ckpt_tmp)

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from dexpbt_isaaclab.world_model.elite_recovery_distill import (
+    BLOCK_OK,
     BLOCK_LOW_MARGIN,
     BLOCK_TOL_ABOVE_START,
     BLOCK_WARMUP_FRAMES,
@@ -58,6 +59,22 @@ class _Agent:
         self.frame = frame
 
 
+class _FlatActionScorer(nn.Module):
+    def __init__(self, cfg: ERDConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.bias = nn.Parameter(torch.zeros(()))
+
+    def forward(self, feat, action):
+        ref = action.sum(dim=-1) * 0.0 + feat.sum(dim=-1) * 0.0 + self.bias
+        out = {}
+        for h in self.cfg.horizons:
+            out[f"success_h{h}"] = ref
+            out[f"improve_h{h}"] = ref
+            out[f"drop_h{h}"] = ref - 10.0
+        return out
+
+
 def _cache(cfg: ERDConfig, T=6, N=2, action_dim=4):
     d_hat = torch.tensor(
         [
@@ -104,6 +121,33 @@ class TestERDTargets(unittest.TestCase):
         self.assertGreater(cache.pos_rate["drop_h2"], 0.0)
         # flat[n*T+t] -> n=0, t=1 sees future success at t=3 inside h=2.
         self.assertEqual(cache.targets_flat["success_h2"][1].item(), 1.0)
+
+    def test_cache_actions_flat_clamped_to_env_usable_space(self):
+        cfg = ERDConfig(enabled=True, horizons=(2,), action_dim=4)
+        T, N = 5, 1
+        d = torch.ones(T, N, 1) * 0.01
+        s = torch.zeros(T, N, 1)
+        tol = torch.ones(T, N, 1) * 0.01
+        dones = torch.zeros(T, N)
+        actions = torch.tensor(
+            [[[-2.0, -1.2, 1.2, 2.0]]] * T,
+            dtype=torch.float32,
+        )
+        cache = ERDTargetBuilder(cfg).build(
+            d_hat=d,
+            success_cnt=s,
+            success_tol=tol,
+            failure=torch.zeros_like(d),
+            lifted=torch.ones_like(d),
+            dones=dones,
+            actions=actions,
+            generation=1,
+        )
+        self.assertTrue(torch.all(cache.actions_flat <= 1.0))
+        self.assertTrue(torch.all(cache.actions_flat >= -1.0))
+        self.assertTrue(
+            torch.allclose(cache.actions_flat[0], torch.tensor([-1.0, -1.0, 1.0, 1.0]))
+        )
 
     def test_done_boundary_and_overflow_mask(self):
         cfg = ERDConfig(enabled=True, horizons=(2,), action_dim=4)
@@ -254,6 +298,97 @@ class TestComputeLoss(unittest.TestCase):
         scorer = attach_erd_modules(optimizer=opt, cfg=cfg)
         self.assertIsInstance(scorer, ERDActionScorer)
         self.assertEqual(len(opt.param_groups), before + 1)
+
+    def test_compute_erd_loss_distill_active_has_actor_grad(self):
+        torch.manual_seed(0)
+        cfg = ERDConfig(
+            enabled=True,
+            horizons=(2,),
+            feature_dim=16,
+            action_dim=4,
+            candidate_k=1,
+            scorer_loss_weight=0.0,
+            distill_loss_weight=1.0,
+            floor_distill_loss_weight=1.0,
+            hard_floor_distill_loss_weight=1.0,
+            start_after_frames=0,
+            scorer_warmup_iters=0,
+            min_target_valid_fraction=0.0,
+            min_risky_fraction=0.0,
+            min_score_margin=-1.0,
+            max_drop_prob_for_teacher=1.0,
+            auto_scale_by_grad_ratio=False,
+        )
+        model = _MockModel()
+        with torch.no_grad():
+            model.a2c_network.mu.weight.fill_(0.05)
+            model.a2c_network.mu.bias.fill_(1.5)
+        cap = ERDCapture()
+        register_erd_capture(model, cap)
+        obs = torch.randn(4, 12)
+        model(obs)
+        scorer = _FlatActionScorer(cfg)
+        bridge = ERDBridge(cfg=cfg, scorer=scorer, capture=cap)
+        bridge.agent_ref = _Agent(model, (0, 4), frame=0)
+        bridge.cache = _cache(cfg, T=6, N=2, action_dim=4)
+        bridge.ppo_grad_ema = 1000.0
+
+        loss = compute_erd_loss(bridge, frames=0)
+        self.assertIn("erd_total", loss)
+        self.assertEqual(bridge.last_distill_active, 1.0)
+        self.assertEqual(bridge.last_distill_block_reason, BLOCK_OK)
+        self.assertGreater(bridge.last_raw_mu_clip_fraction, 0.0)
+
+        loss["erd_total"].backward()
+
+        def grad_norm(params):
+            total = 0.0
+            for p in params:
+                if p.grad is not None:
+                    total += float(p.grad.detach().norm().item() ** 2)
+            return total ** 0.5
+
+        self.assertGreater(grad_norm(model.a2c_network.mu.parameters()), 0.0)
+        self.assertGreater(grad_norm(model.a2c_network.actor_mlp.parameters()), 0.0)
+        self.assertLessEqual(grad_norm(scorer.parameters()), 1e-9)
+
+    def test_raw_mu_clip_logging_and_delta_norm_use_clipped_base(self):
+        cfg = ERDConfig(
+            enabled=True,
+            horizons=(2,),
+            feature_dim=16,
+            action_dim=4,
+            candidate_k=1,
+            scorer_loss_weight=0.01,
+            distill_loss_weight=1.0,
+            floor_distill_loss_weight=1.0,
+            hard_floor_distill_loss_weight=1.0,
+            start_after_frames=0,
+            scorer_warmup_iters=0,
+            min_target_valid_fraction=0.0,
+            min_risky_fraction=0.0,
+            min_score_margin=-1.0,
+            max_drop_prob_for_teacher=1.0,
+            auto_scale_by_grad_ratio=False,
+        )
+        model = _MockModel()
+        with torch.no_grad():
+            model.a2c_network.mu.weight.fill_(0.01)
+            model.a2c_network.mu.bias.fill_(2.0)
+        cap = ERDCapture()
+        register_erd_capture(model, cap)
+        model(torch.randn(4, 12))
+        bridge = ERDBridge(cfg=cfg, scorer=_FlatActionScorer(cfg), capture=cap)
+        bridge.agent_ref = _Agent(model, (0, 4), frame=0)
+        bridge.cache = _cache(cfg, T=6, N=2, action_dim=4)
+
+        loss = compute_erd_loss(bridge, frames=0)
+        self.assertIn("erd_total", loss)
+        self.assertGreater(bridge.last_raw_mu_abs_mean, 1.0)
+        self.assertEqual(bridge.last_raw_mu_clip_fraction, 1.0)
+        # K=1 picks the clipped actor mean; delta is measured from the clipped base,
+        # not from raw out-of-bounds mu.
+        self.assertLessEqual(bridge.last_action_delta_norm, 1e-9)
 
 
 if __name__ == "__main__":

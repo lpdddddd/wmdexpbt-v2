@@ -9,6 +9,13 @@ action-level: the distillation path updates the actor ``mu`` head.
 All rollout targets use the same rl_games flattening convention as
 FloorCritic: ``flat[n * T + t] = x[t, n]`` so ``PPODataset.last_range`` slices
 align to the live minibatch.
+
+Action-space convention: ERD trains its scorer and searches candidates in the
+clipped, env-usable action space ``[-1, 1]``. Rollout actions are clamped before
+entering the cache so scorer supervision is aligned with actions the env can
+execute. Distillation intentionally pulls the live actor ``mu`` toward the
+clipped best candidate, so diagnostics below track how often raw ``mu`` and
+candidates interact with the action bounds.
 """
 
 from __future__ import annotations
@@ -254,6 +261,7 @@ class ERDActionScorer(nn.Module):
         self.heads = nn.ModuleDict({key: nn.Linear(hidden, 1) for key in cfg.head_keys()})
 
     def forward(self, feat: torch.Tensor, action: torch.Tensor) -> dict[str, torch.Tensor]:
+        # Scorer inputs are env-usable clipped actions, not unbounded policy means.
         action = action.clamp(-1.0, 1.0)
         h = self.trunk(torch.cat([feat, action], dim=-1))
         return {key: head(h).squeeze(-1) for key, head in self.heads.items()}
@@ -348,6 +356,9 @@ class ERDBridge:
     last_actor_success_prob: float = 0.0
     last_actor_drop_prob: float = 0.0
     last_action_delta_norm: float = 0.0
+    last_raw_mu_abs_mean: float = 0.0
+    last_raw_mu_clip_fraction: float = 0.0
+    last_candidate_clip_fraction: float = 0.0
     last_distill_grad_ratio: float = 0.0
     last_auto_scale_factor: float = 1.0
     last_target_valid_fraction: float = 0.0
@@ -378,6 +389,9 @@ class ERDBridge:
         self.last_actor_success_prob = 0.0
         self.last_actor_drop_prob = 0.0
         self.last_action_delta_norm = 0.0
+        self.last_raw_mu_abs_mean = 0.0
+        self.last_raw_mu_clip_fraction = 0.0
+        self.last_candidate_clip_fraction = 0.0
         self.last_distill_grad_ratio = 0.0
         self.last_auto_scale_factor = 1.0
         self.last_target_valid_fraction = 0.0
@@ -479,20 +493,32 @@ def _noise_std_for_tol(cfg: ERDConfig, tol_mean: float) -> float:
     return std
 
 
-def generate_candidate_actions(
+def _generate_candidate_actions_with_clip_fraction(
     actor_mu: torch.Tensor, cfg: ERDConfig, tol_mean: float
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, float]:
     B, A = actor_mu.shape
     K = int(cfg.candidate_k)
+    # Candidate search operates around the clipped actor mean used by the env.
     base = actor_mu.detach().clamp(-1.0, 1.0)
     if K == 1:
-        return base[:, None, :]
+        return base[:, None, :], 0.0
     std = _noise_std_for_tol(cfg, tol_mean)
     noise = torch.randn(B, K - 1, A, device=actor_mu.device, dtype=actor_mu.dtype) * std
     max_delta = float(cfg.max_action_delta)
     noise = noise.clamp(-max_delta, max_delta)
-    pert = (base[:, None, :] + noise).clamp(-1.0, 1.0)
-    return torch.cat([base[:, None, :], pert], dim=1)
+    pert_pre_clamp = base[:, None, :] + noise
+    clip_fraction = float((pert_pre_clamp.detach().abs() > 1.0).float().mean().item())
+    pert = pert_pre_clamp.clamp(-1.0, 1.0)
+    return torch.cat([base[:, None, :], pert], dim=1), clip_fraction
+
+
+def generate_candidate_actions(
+    actor_mu: torch.Tensor, cfg: ERDConfig, tol_mean: float
+) -> torch.Tensor:
+    cand, _clip_fraction = _generate_candidate_actions_with_clip_fraction(
+        actor_mu, cfg, tol_mean
+    )
+    return cand
 
 
 def _estimate_distill_feature_grad_norm(
@@ -596,9 +622,17 @@ def compute_erd_loss(bridge: ERDBridge, frames: int = 0) -> dict[str, torch.Tens
         mu_act = getattr(a2c, "mu_act", None)
         if mu_act is not None:
             mu_live = mu_act(mu_live)
+        with torch.no_grad():
+            bridge.last_raw_mu_abs_mean = float(mu_live.detach().abs().mean().item())
+            bridge.last_raw_mu_clip_fraction = float(
+                (mu_live.detach().abs() > 1.0).float().mean().item()
+            )
         feat_r = feat[risky]
         mu_r = mu_live[risky]
-        cand = generate_candidate_actions(mu_r, cfg, cache.tol_mean)
+        cand, candidate_clip_fraction = _generate_candidate_actions_with_clip_fraction(
+            mu_r, cfg, cache.tol_mean
+        )
+        bridge.last_candidate_clip_fraction = float(candidate_clip_fraction)
         B, K, A = cand.shape
         with torch.no_grad():
             feat_rep = feat_r.detach()[:, None, :].expand(B, K, feat_r.shape[-1]).reshape(B * K, -1)

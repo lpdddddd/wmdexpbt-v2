@@ -2546,6 +2546,9 @@ def _patch_actor_train_for_seq_wm(
                         "actor_success_prob": eb.last_actor_success_prob,
                         "actor_drop_prob": eb.last_actor_drop_prob,
                         "action_delta_norm": eb.last_action_delta_norm,
+                        "raw_mu_abs_mean": eb.last_raw_mu_abs_mean,
+                        "raw_mu_clip_fraction": eb.last_raw_mu_clip_fraction,
+                        "candidate_clip_fraction": eb.last_candidate_clip_fraction,
                         "distill_grad_ratio": eb.last_distill_grad_ratio,
                         "auto_scale_factor": eb.last_auto_scale_factor,
                         "target_valid_fraction": eb.last_target_valid_fraction,
@@ -2860,6 +2863,15 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
             )
         else:
             print("[ERD] restore: no erd_scorer in checkpoint; using fresh scorer")
+        warmup_done = ckpt.get("erd_scorer_warmup_iters_done")
+        if warmup_done is not None:
+            erd_bridge.scorer_warmup_iters_done = int(warmup_done)
+            print(
+                "[ERD] restore: scorer warmup iters done="
+                f"{erd_bridge.scorer_warmup_iters_done}"
+            )
+        else:
+            print("[ERD] restore: no scorer warmup counter in checkpoint; using 0")
 
     if "epoch" in ckpt:
         agent.epoch_num = ckpt["epoch"]
