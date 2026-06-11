@@ -690,6 +690,23 @@ def main() -> None:
             # Phase A4 P5 (2026-06-10): teacher-gate fix toggles.
             "--seq_wm_teacher_allow_first_promotion",
             "--no-seq_wm_teacher_allow_first_promotion",
+            # FloorCritic (Real-target) boolean toggles.
+            "--wm_floorcritic_enable",
+            "--no-wm_floorcritic_enable",
+            "--wm_floorcritic_auto_scale_by_grad_ratio",
+            "--no-wm_floorcritic_auto_scale_by_grad_ratio",
+            "--wm_floorcritic_actor_detach",
+            "--no-wm_floorcritic_actor_detach",
+            "--wm_floorcritic_update_actor",
+            "--no-wm_floorcritic_update_actor",
+            "--wm_floorcritic_use_success",
+            "--no-wm_floorcritic_use_success",
+            "--wm_floorcritic_use_near_success",
+            "--no-wm_floorcritic_use_near_success",
+            "--wm_floorcritic_use_dhat_improve",
+            "--no-wm_floorcritic_use_dhat_improve",
+            "--wm_floorcritic_use_drop_risk",
+            "--no-wm_floorcritic_use_drop_risk",
         }
         extra = list(args.extra)
         i = 0

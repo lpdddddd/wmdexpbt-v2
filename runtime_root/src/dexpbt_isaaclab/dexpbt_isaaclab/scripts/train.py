@@ -1310,6 +1310,75 @@ parser.add_argument(
     "Default 256 (matches actor_mlp_out width; sub-tower output "
     "stays at 256 so seq_aux_value_head requires no change).",
 )
+
+# ----------------------------------------------------------------------
+# FloorCritic (Real-target) — task-progress auxiliary critic learning.
+# Default-off: with --no-wm_floorcritic_enable (the default) NOTHING is
+# constructed, hooked, or patched, so behaviour is bit-for-bit unchanged.
+# See results/FLOORCRITIC_IMPLEMENTATION_PLAN.md.
+# ----------------------------------------------------------------------
+parser.add_argument(
+    "--wm_floorcritic_enable",
+    action=argparse.BooleanOptionalAction, default=False,
+    help="Enable Real-target FloorCritic auxiliary critic heads (default off).",
+)
+parser.add_argument(
+    "--wm_floorcritic_feature_source",
+    type=str, default="actor_mlp_out_detached",
+    choices=["actor_mlp_out_detached", "actor_mlp_out_shared", "critic_feature"],
+    help="Aux tower input. detached=Phase0 (actor_grad_blocked); shared=Phase1 "
+    "(regularises shared backbone, never connects mu head); critic_feature "
+    "degrades to shared under rl_games separate=False.",
+)
+parser.add_argument(
+    "--wm_floorcritic_max_grad_ratio", type=float, default=0.1,
+    help="Upper bound on ||grad_FC|| / ||grad_PPO|| on the shared feature "
+    "(shared mode only). Above this the FC loss is auto-scaled down.",
+)
+parser.add_argument(
+    "--wm_floorcritic_auto_scale_by_grad_ratio",
+    action=argparse.BooleanOptionalAction, default=True,
+    help="Auto-scale FC loss so its backbone grad stays within max_grad_ratio.",
+)
+parser.add_argument("--wm_floorcritic_start_tol", type=float, default=0.04)
+parser.add_argument("--wm_floorcritic_floor_tol", type=float, default=0.02)
+parser.add_argument("--wm_floorcritic_hard_floor_tol", type=float, default=0.012)
+parser.add_argument(
+    "--wm_floorcritic_horizons", type=str, default="4,8",
+    help="Comma-separated horizons for FC targets (e.g. 4,8).",
+)
+parser.add_argument("--wm_floorcritic_weight", type=float, default=0.005)
+parser.add_argument("--wm_floorcritic_floor_weight", type=float, default=0.01)
+parser.add_argument("--wm_floorcritic_hard_floor_weight", type=float, default=0.02)
+parser.add_argument("--wm_floorcritic_near_success_mult", type=float, default=1.5)
+parser.add_argument("--wm_floorcritic_dhat_improve_margin", type=float, default=0.005)
+parser.add_argument("--wm_floorcritic_drop_dhat_margin", type=float, default=0.01)
+parser.add_argument(
+    "--wm_floorcritic_actor_detach",
+    action=argparse.BooleanOptionalAction, default=True,
+    help="Compat/redundant detach switch; feature_source is authoritative.",
+)
+parser.add_argument(
+    "--wm_floorcritic_update_actor",
+    action=argparse.BooleanOptionalAction, default=False,
+    help="Experimental: allow non-detached feature (still never connects mu).",
+)
+parser.add_argument(
+    "--wm_floorcritic_use_success",
+    action=argparse.BooleanOptionalAction, default=True,
+)
+parser.add_argument(
+    "--wm_floorcritic_use_near_success",
+    action=argparse.BooleanOptionalAction, default=True,
+)
+parser.add_argument(
+    "--wm_floorcritic_use_dhat_improve",
+    action=argparse.BooleanOptionalAction, default=True,
+)
+parser.add_argument(
+    "--wm_floorcritic_use_drop_risk",
+    action=argparse.BooleanOptionalAction, default=True,
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -1440,6 +1509,17 @@ from dexpbt_isaaclab.world_model.wm_teacher_manager import (
     TeacherManager,
 )
 from dexpbt_isaaclab.world_model.wm_imagined_evaluator import WMImaginedEvaluator
+# FloorCritic (Real-target) — default-off auxiliary critic heads. Import is
+# cheap (no torch model construction at import time).
+from dexpbt_isaaclab.world_model.floorcritic import (
+    FloorCriticBridge,
+    FloorCriticConfig,
+    FloorCriticTargetBuilder,
+    attach_floorcritic_heads,
+    compute_floorcritic_loss,
+    register_actor_mlp_grad_probe,
+    register_floorcritic_capture,
+)
 
 
 # ----------------------------------------------------------------------
@@ -2138,6 +2218,31 @@ def _patch_actor_train_for_seq_wm(
         capture["last_d_hat"] = last_d_hat_t
         capture["last_success_count"] = last_success_t
         rollout_state["generation"] += 1
+
+        # FloorCritic: build the per-rollout (T,N) target cache NOW (after the
+        # aux copy, before PPO's minibatch loop / get_aux_loss). Reset the
+        # feature capture so a stale tensor cannot be reused. No-op when the
+        # bridge / target builder is absent (FloorCritic disabled).
+        fc_bridge = getattr(seq_wm_trainer, "_floorcritic_bridge", None)
+        fc_builder = getattr(seq_wm_trainer, "_floorcritic_target_builder", None)
+        if fc_bridge is not None and fc_builder is not None:
+            fc_bridge.capture.reset()
+            try:
+                td = actor.experience_buffer.tensor_dict
+                fc_cache = fc_builder.build(
+                    d_hat=td["aux_d_hat"],
+                    success_cnt=td["aux_success_cnt"],
+                    success_tol=td["aux_success_tolerance"],
+                    failure=td.get("aux_failure"),
+                    lifted=td.get("aux_lifted"),
+                    dones=td["dones"],
+                    generation=rollout_state["generation"],
+                )
+                fc_bridge.cache = fc_cache
+            except Exception as _fc_exc:
+                print(f"[FloorCritic] target cache build failed: {_fc_exc}")
+                fc_bridge.cache = None
+
         if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
             seq_distill_bridge.feature_capture.reset()
@@ -2313,6 +2418,50 @@ def _patch_actor_train_for_seq_wm(
                         tb_writer.add_scalar(tag, float(v), frames)
                     except Exception:
                         pass
+
+                # FloorCritic per-rollout logging snapshot.
+                fc_bridge_log = getattr(
+                    seq_wm_trainer, "_floorcritic_bridge", None
+                )
+                if fc_bridge_log is not None:
+                    fcb = fc_bridge_log
+                    fc_scalars = {
+                        "active": fcb.last_active,
+                        "lambda": fcb.last_lambda,
+                        "loss_total": fcb.last_loss_total,
+                        "feature_source_id": float(fcb.cfg.feature_source_id),
+                        "target_valid_fraction": fcb.last_valid_fraction,
+                        "fc_grad_ratio_to_ppo_grad": fcb.last_fc_grad_ratio,
+                        "auto_scale_factor": fcb.last_auto_scale_factor,
+                        "shared_backbone_grad_from_fc": fcb.last_fc_feat_grad_norm,
+                        "actor_head_grad_from_fc": 0.0,
+                        "value_head_grad_from_fc": 0.0,
+                        "actor_grad_blocked": 1.0 if fcb.last_actor_grad_blocked else 0.0,
+                        "aux_head_grad_norm": fcb.last_aux_head_grad_norm,
+                        "critic_grad_norm": fcb.last_fc_feat_grad_norm,
+                    }
+                    for k, v in fc_scalars.items():
+                        try:
+                            tb_writer.add_scalar(
+                                f"wm_floorcritic/{k}", float(v), frames
+                            )
+                        except Exception:
+                            pass
+                    for key, lv in fcb.last_losses.items():
+                        try:
+                            tb_writer.add_scalar(
+                                f"wm_floorcritic/loss_{key}", float(lv), frames
+                            )
+                        except Exception:
+                            pass
+                    for key, pr in fcb.last_pos_rate.items():
+                        try:
+                            tb_writer.add_scalar(
+                                f"wm_floorcritic/pos_rate_{key}", float(pr), frames
+                            )
+                        except Exception:
+                            pass
+
                 if seq_distill_bridge is not None:
                     cfg = seq_distill_bridge.cfg
                     cache_meta = (
@@ -2693,6 +2842,28 @@ def _patch_model_get_aux_loss_for_seq(model, seq_distill_bridge: "SeqDistillBrid
     model.get_aux_loss = patched_get_aux_loss
 
 
+def _patch_model_get_aux_loss_for_floorcritic(model, floorcritic_bridge):
+    """Install the FloorCritic loss into rl_games' get_aux_loss hook.
+
+    Chained: wraps whatever ``model.get_aux_loss`` is currently set to (the
+    base method or the seq-distill patch), so FloorCritic and seq distill can
+    coexist. The FloorCritic loss is added under key ``floorcritic_total`` and
+    rl_games' ``calc_gradients`` adds it to the PPO loss before ``backward()``.
+    """
+    original_get_aux_loss = model.get_aux_loss
+
+    def patched_get_aux_loss():
+        fc_loss_dict = compute_floorcritic_loss(floorcritic_bridge)
+        base = original_get_aux_loss()
+        if base is not None:
+            merged = dict(fc_loss_dict)
+            merged.update(base)
+            return merged if merged else None
+        return fc_loss_dict if fc_loss_dict else None
+
+    model.get_aux_loss = patched_get_aux_loss
+
+
 def _is_wm_strategy_compatible(src_strategy: str | None, dst_strategy: str) -> tuple[bool, str]:
     src = str(src_strategy or "unknown")
     dst = str(dst_strategy)
@@ -3021,6 +3192,42 @@ class _WmEnabledRunner(Runner):
                     f"corr_threshold={seq_policy_cfg.teacher_corr_threshold} "
                     f"ramp_frames={seq_policy_cfg.ramp_frames}"
                 )
+
+            # FloorCritic (Real-target) — independent hook + get_aux_loss
+            # patch, chained AFTER the seq-distill patch so both can coexist.
+            fc_cfg = getattr(self.seq_wm_trainer, "_floorcritic_cfg", None)
+            if fc_cfg is not None and fc_cfg.enabled:
+                fc_bridge = FloorCriticBridge(cfg=fc_cfg)
+                fc_bridge.agent_ref = agent
+                fc_bridge.heads = attach_floorcritic_heads(
+                    optimizer=agent.optimizer,
+                    cfg=fc_cfg,
+                    device=next(agent.model.parameters()).device,
+                )
+                # Independent feature capture (separate container from the
+                # seq-distill capture; both target a2c_network.actor_mlp).
+                self._floorcritic_hook_handle = register_floorcritic_capture(
+                    agent.model, fc_bridge.capture
+                )
+                # Backward probe for grad-ratio (shared mode auto-scale).
+                if fc_cfg.effective_feature_source == "actor_mlp_out_shared":
+                    self._floorcritic_grad_probe_handle = (
+                        register_actor_mlp_grad_probe(agent.model, fc_bridge)
+                    )
+                # Chain get_aux_loss: wrap whatever is currently installed
+                # (base model method or the seq-distill patch).
+                _patch_model_get_aux_loss_for_floorcritic(agent.model, fc_bridge)
+                self.seq_wm_trainer._floorcritic_bridge = fc_bridge
+                print(
+                    f"[FloorCritic] enabled: feature_source={fc_cfg.feature_source} "
+                    f"(eff={fc_cfg.effective_feature_source}) "
+                    f"weight={fc_cfg.weight}/{fc_cfg.floor_weight}/{fc_cfg.hard_floor_weight} "
+                    f"horizons={fc_cfg.horizons} "
+                    f"max_grad_ratio={fc_cfg.max_grad_ratio} "
+                    f"auto_scale={fc_cfg.auto_scale_by_grad_ratio} "
+                    f"detach={fc_cfg.should_detach} heads={fc_cfg.head_keys()}"
+                )
+
             _patch_actor_train_for_seq_wm(
                 agent,
                 self.seq_wm_trainer,
@@ -3314,6 +3521,54 @@ def main():
             args_cli.seq_wm_aux_critic_subtower_hidden
         ),
     )
+    # FloorCritic config (Real-target). Default-off; enabled only by the
+    # explicit --wm_floorcritic_enable flag.
+    _fc_horizons = tuple(
+        int(s.strip())
+        for s in str(args_cli.wm_floorcritic_horizons or "").split(",")
+        if s.strip()
+    ) or (4, 8)
+    floorcritic_cfg = FloorCriticConfig(
+        enabled=bool(args_cli.wm_floorcritic_enable),
+        feature_source=str(args_cli.wm_floorcritic_feature_source),
+        max_grad_ratio=float(args_cli.wm_floorcritic_max_grad_ratio),
+        auto_scale_by_grad_ratio=bool(
+            args_cli.wm_floorcritic_auto_scale_by_grad_ratio
+        ),
+        start_tol=float(args_cli.wm_floorcritic_start_tol),
+        floor_tol=float(args_cli.wm_floorcritic_floor_tol),
+        hard_floor_tol=float(args_cli.wm_floorcritic_hard_floor_tol),
+        horizons=_fc_horizons,
+        weight=float(args_cli.wm_floorcritic_weight),
+        floor_weight=float(args_cli.wm_floorcritic_floor_weight),
+        hard_floor_weight=float(args_cli.wm_floorcritic_hard_floor_weight),
+        near_success_mult=float(args_cli.wm_floorcritic_near_success_mult),
+        dhat_improve_margin=float(args_cli.wm_floorcritic_dhat_improve_margin),
+        drop_dhat_margin=float(args_cli.wm_floorcritic_drop_dhat_margin),
+        actor_detach=bool(args_cli.wm_floorcritic_actor_detach),
+        update_actor=bool(args_cli.wm_floorcritic_update_actor),
+        use_success=bool(args_cli.wm_floorcritic_use_success),
+        use_near_success=bool(args_cli.wm_floorcritic_use_near_success),
+        use_dhat_improve=bool(args_cli.wm_floorcritic_use_dhat_improve),
+        use_drop_risk=bool(args_cli.wm_floorcritic_use_drop_risk),
+    )
+    if floorcritic_cfg.enabled:
+        # feature_source is authoritative; warn on conflicting compat flags.
+        if (
+            floorcritic_cfg.feature_source == "actor_mlp_out_shared"
+            and bool(args_cli.wm_floorcritic_actor_detach)
+        ):
+            print(
+                "[FloorCritic] WARNING: feature_source=actor_mlp_out_shared but "
+                "actor_detach=true; feature_source wins -> NOT detaching "
+                "(shared backbone will receive FC gradient)."
+            )
+        if floorcritic_cfg.feature_source == "critic_feature":
+            print(
+                "[FloorCritic] WARNING: feature_source=critic_feature has no "
+                "populated critic feature under rl_games separate=False; "
+                "degrading to actor_mlp_out_shared."
+            )
     is_sequence_strategy = (
         args_cli.enable_wm and args_cli.wm_strategy in SEQUENCE_STRATEGIES
     )
@@ -3455,6 +3710,19 @@ def main():
             strategy=args_cli.wm_strategy,
         )
 
+        # FloorCritic: attach cfg + (lazy) bridge/target-builder on the trainer
+        # so both the runner wiring (head/hook/patch) and the patched
+        # play_steps_rnn (per-rollout target cache) can reach them. Bridge is
+        # created in _WmEnabledRunner.run_train once the agent exists.
+        seq_wm_trainer._floorcritic_cfg = floorcritic_cfg
+        seq_wm_trainer._floorcritic_bridge = None
+        seq_wm_trainer._floorcritic_target_builder = (
+            FloorCriticTargetBuilder(floorcritic_cfg)
+            if floorcritic_cfg.enabled
+            else None
+        )
+        seq_wm_trainer._floorcritic_generation = 0
+
         # ------------------------------------------------------------------
         # Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
         # teacher manager (Part C) + short-horizon imagined evaluator
@@ -3546,6 +3814,7 @@ def main():
             if (
                 bool(args_cli.seq_wm_use_task_aux_inputs)
                 or bool(args_cli.seq_wm_enable_iterative_teacher)
+                or bool(args_cli.wm_floorcritic_enable)
             )
             else DEFAULT_SEQ_AUX_FIELDS
         )
