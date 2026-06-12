@@ -11,6 +11,7 @@ from dexpbt_isaaclab.world_model.rssm_lite import (
     RSSMLiteWorldModel,
     RSSMState,
     IMAGINE_PRIOR_ROLLOUT,
+    IMAGINE_STOCHASTIC_PRIOR_ROLLOUT,
     IMAGINE_FIXED_BELIEF_FALLBACK,
 )
 
@@ -78,6 +79,42 @@ class TestImagineStep(unittest.TestCase):
         self.assertFalse(torch.allclose(ns1.belief, ns2.belief))
         # belief should actually move from the start
         self.assertFalse(torch.allclose(ns1.belief, belief))
+
+    def test_imagine_step_deterministic_default_unchanged(self):
+        m = _model()
+        belief = torch.randn(4, m.belief_dim)
+        action = torch.randn(4, 4).clamp(-1, 1)
+        ns1, p1 = m.imagine_step(belief, action)
+        ns2, p2 = m.imagine_step(belief, action, deterministic=True)
+        self.assertEqual(p1.get("imagine_mode"), IMAGINE_PRIOR_ROLLOUT)
+        self.assertEqual(p2.get("imagine_mode"), IMAGINE_PRIOR_ROLLOUT)
+        self.assertTrue(torch.allclose(ns1.belief, ns2.belief))
+
+    def test_imagine_step_stochastic_shape(self):
+        m = _model()
+        belief = torch.randn(5, m.belief_dim)
+        action = torch.randn(5, 4).clamp(-1, 1)
+        ns, preds = m.imagine_step(belief, action, deterministic=False, sample_temperature=1.0)
+        self.assertEqual(tuple(ns.belief.shape), (5, m.belief_dim))
+        self.assertEqual(preds.get("imagine_mode"), IMAGINE_STOCHASTIC_PRIOR_ROLLOUT)
+
+    def test_imagine_step_stochastic_changes_latent_with_fixed_prior_std(self):
+        m = _model()
+        belief = torch.randn(3, m.belief_dim)
+        action = torch.randn(3, 4).clamp(-1, 1)
+        torch.manual_seed(0)
+        ns1, _ = m.imagine_step(belief, action, deterministic=False, sample_temperature=1.0)
+        torch.manual_seed(1)
+        ns2, _ = m.imagine_step(belief, action, deterministic=False, sample_temperature=1.0)
+        self.assertFalse(torch.allclose(ns1.belief, ns2.belief))
+
+    def test_imagine_step_no_grad_stochastic(self):
+        m = _model()
+        belief = torch.randn(4, m.belief_dim, requires_grad=True)
+        action = torch.randn(4, 4, requires_grad=True).clamp(-1, 1)
+        ns, preds = m.imagine_step(belief, action, deterministic=False)
+        self.assertFalse(ns.belief.requires_grad)
+        self.assertFalse(preds["prior_std_mean"].requires_grad)
 
     def test_imagine_step_fixed_belief_fallback_if_no_prior(self):
         # A stub model without gru/prior_net but with the heads -> fallback.

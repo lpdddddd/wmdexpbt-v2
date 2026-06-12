@@ -34,7 +34,7 @@ class _ToyRSSM:
     def get_state_from_belief(self, belief):
         return RSSMState(belief=belief, deter=belief[:, :D // 2], stoch=belief[:, D // 2:])
 
-    def imagine_step(self, state, action):
+    def imagine_step(self, state, action, *, deterministic=True, sample_temperature=1.0, **kwargs):
         if not isinstance(state, RSSMState):
             state = self.get_state_from_belief(state)
         belief = state.belief

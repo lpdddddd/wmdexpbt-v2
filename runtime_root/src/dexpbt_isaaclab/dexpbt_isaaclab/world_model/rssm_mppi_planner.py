@@ -26,6 +26,7 @@ so the run is still informative.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -266,13 +267,47 @@ class RSSMMPPIConfig:
     w_action_smoothness: float = 0.05
     w_action_delta: float = 0.02
 
+    w_action_delta: float = 0.02
+
     fail_fast: bool = False
+
+    # Stochastic risk-sensitive MPPI (default off -> deterministic path unchanged).
+    stochastic_rollouts: bool = False
+    num_latent_samples: int = 1
+    sample_temperature: float = 1.0
+    risk_beta: float = 0.0
+    drop_cvar_alpha: float = 0.25
+    drop_cvar_weight: float = 0.0
+    uncertainty_cvar_weight: float = 0.0
+    score_aggregation: str = "mean"  # mean | mean_minus_std | cvar
+    max_rollout_batch: int = 65536
 
     def __post_init__(self) -> None:
         self.horizon = max(1, int(self.horizon))
         self.num_sequences = max(1, int(self.num_sequences))
         self.num_elite = max(1, min(int(self.num_elite), int(self.num_sequences)))
         self.cem_iters = max(1, int(self.cem_iters))
+        self.num_latent_samples = max(1, int(self.num_latent_samples))
+        self.max_rollout_batch = max(1, int(self.max_rollout_batch))
+        agg = str(self.score_aggregation or "mean").strip().lower()
+        if agg not in ("mean", "mean_minus_std", "cvar"):
+            agg = "mean"
+        self.score_aggregation = agg
+
+
+def _tail_mean(x: torch.Tensor, alpha: float, largest: bool) -> torch.Tensor:
+    """Tail mean over the last dimension of ``x`` shaped ``[..., M]``.
+
+    When ``largest=True`` returns the mean of the top ``ceil(alpha*M)`` values
+    (worst-case tail for drop/uncertainty). When ``largest=False`` returns the
+    mean of the bottom tail (conservative score CVaR).
+    """
+    if x.dim() < 2:
+        raise ValueError(f"_tail_mean expects at least 2 dims; got {tuple(x.shape)}")
+    m = int(x.shape[-1])
+    k = max(1, int(math.ceil(float(alpha) * m)))
+    vals, _ = torch.topk(x, k, dim=-1, largest=bool(largest))
+    return vals.mean(dim=-1)
 
 
 class RSSMMPPIPlanner:
@@ -293,6 +328,15 @@ class RSSMMPPIPlanner:
         self.last_high_uncertainty_fraction = 0.0
         self.last_num_sequences = 0
         self.last_horizon = 0
+        self.last_stochastic_rollouts = 0.0
+        self.last_num_latent_samples = 0.0
+        self.last_sample_temperature = 0.0
+        self.last_score_std = 0.0
+        self.last_drop_cvar = 0.0
+        self.last_uncertainty_cvar = 0.0
+        self.last_risk_adjusted_margin = 0.0
+        self.last_risk_beta = 0.0
+        self.last_drop_cvar_weight = 0.0
 
     # ---- helpers --------------------------------------------------------
     def _inactive(self, reason: int, B: int, A: int, actor_action: torch.Tensor, dev, dtype) -> dict:
@@ -351,20 +395,21 @@ class RSSMMPPIPlanner:
         seq = torch.cat(blocks, dim=1).clamp(-1.0, 1.0)  # [B, Ktot, H, A]
         return seq, 0
 
-    @torch.no_grad()
-    def _rollout_and_score(
-        self, *, belief_flat: torch.Tensor, seq: torch.Tensor, actor_action: torch.Tensor, rssm_model
-    ) -> dict:
-        """Roll each [B,Ktot,H,A] sequence through the prior and score it."""
+    def _flat_rollout_scores(
+        self,
+        *,
+        belief_flat: torch.Tensor,
+        seq_flat: torch.Tensor,
+        actor_action_flat: torch.Tensor,
+        rssm_model,
+        deterministic: bool,
+        sample_temperature: float,
+    ) -> dict[str, torch.Tensor | str]:
+        """Roll ``seq_flat[N,H,A]`` from ``belief_flat[N,D]``; return per-row scores."""
         cfg = self.cfg
-        B, K, H, A = seq.shape
-        dev, dtype = seq.device, seq.dtype
-        D = int(belief_flat.shape[-1])
-
-        belief_rep = belief_flat[:, None, :].expand(B, K, D).reshape(B * K, D)
-        state = rssm_model.get_state_from_belief(belief_rep)
-        seq_bk = seq.reshape(B * K, H, A)
-
+        n, h, a = int(seq_flat.shape[0]), int(seq_flat.shape[1]), int(seq_flat.shape[2])
+        dev, dtype = seq_flat.device, seq_flat.dtype
+        state = rssm_model.get_state_from_belief(belief_flat)
         succ_steps: list[torch.Tensor] = []
         drop_steps: list[torch.Tensor] = []
         rec_steps: list[torch.Tensor] = []
@@ -373,19 +418,24 @@ class RSSMMPPIPlanner:
         unc_steps: list[torch.Tensor] = []
         imagine_mode = "none"
 
-        for h in range(H):
-            action_h = seq_bk[:, h, :]
-            state, preds = rssm_model.imagine_step(state, action_h)
+        for step in range(h):
+            action_h = seq_flat[:, step, :]
+            state, preds = rssm_model.imagine_step(
+                state,
+                action_h,
+                deterministic=deterministic,
+                sample_temperature=float(sample_temperature),
+            )
             imagine_mode = str(preds.get("imagine_mode", imagine_mode))
-            zeros = torch.zeros(B * K, device=dev, dtype=dtype)
-            succ_steps.append(preds.get("success", zeros).reshape(B * K).to(dtype))
-            drop_steps.append(preds.get("drop", zeros).reshape(B * K).to(dtype))
-            rec_steps.append(preds.get("recovery", zeros).reshape(B * K).to(dtype))
-            value_steps.append(preds.get("value", zeros).reshape(B * K).to(dtype))
-            task_delta_steps.append(preds.get("task_error_delta", zeros).reshape(B * K).to(dtype))
-            unc_steps.append(preds.get("prior_std_mean", zeros).reshape(B * K).to(dtype))
+            zeros = torch.zeros(n, device=dev, dtype=dtype)
+            succ_steps.append(preds.get("success", zeros).reshape(n).to(dtype))
+            drop_steps.append(preds.get("drop", zeros).reshape(n).to(dtype))
+            rec_steps.append(preds.get("recovery", zeros).reshape(n).to(dtype))
+            value_steps.append(preds.get("value", zeros).reshape(n).to(dtype))
+            task_delta_steps.append(preds.get("task_error_delta", zeros).reshape(n).to(dtype))
+            unc_steps.append(preds.get("prior_std_mean", zeros).reshape(n).to(dtype))
 
-        succ = torch.stack(succ_steps, dim=0)        # [H, B*K]
+        succ = torch.stack(succ_steps, dim=0)
         drop = torch.stack(drop_steps, dim=0)
         rec = torch.stack(rec_steps, dim=0)
         value = torch.stack(value_steps, dim=0)
@@ -396,17 +446,15 @@ class RSSMMPPIPlanner:
         drop_max = drop.max(dim=0).values
         rec_mean = rec.mean(dim=0)
         value_last = value[-1]
-        # task improvement: predicted cumulative decrease in d_hat
         task_improve = -task_delta.sum(dim=0)
         unc_mean = unc.mean(dim=0)
 
-        # action regularizers
-        actor_rep = actor_action[:, None, :].expand(B, K, A).reshape(B * K, A)
-        a_delta = ((seq_bk - actor_rep[:, None, :]) ** 2).sum(dim=-1).sum(dim=1)  # [B*K]
-        if H > 1:
-            smooth = ((seq_bk[:, 1:, :] - seq_bk[:, :-1, :]) ** 2).sum(dim=-1).sum(dim=1)
+        actor_rep = actor_action_flat
+        a_delta = ((seq_flat - actor_rep[:, None, :]) ** 2).sum(dim=-1).sum(dim=1)
+        if h > 1:
+            smooth = ((seq_flat[:, 1:, :] - seq_flat[:, :-1, :]) ** 2).sum(dim=-1).sum(dim=1)
         else:
-            smooth = torch.zeros(B * K, device=dev, dtype=dtype)
+            smooth = torch.zeros(n, device=dev, dtype=dtype)
 
         score = (
             cfg.w_success * succ_max
@@ -417,9 +465,174 @@ class RSSMMPPIPlanner:
             - cfg.w_uncertainty * unc_mean
             - cfg.w_action_smoothness * smooth
             - cfg.w_action_delta * a_delta
-        ).reshape(B, K)
-        unc_bk = unc_mean.reshape(B, K)
-        return {"score": score, "uncertainty": unc_bk, "imagine_mode": imagine_mode}
+        )
+        return {
+            "score": score,
+            "drop_max": drop_max,
+            "unc_mean": unc_mean,
+            "imagine_mode": imagine_mode,
+        }
+
+    def _rollout_batch(
+        self,
+        *,
+        belief_flat: torch.Tensor,
+        seq_flat: torch.Tensor,
+        actor_action_flat: torch.Tensor,
+        rssm_model,
+        deterministic: bool,
+        sample_temperature: float,
+    ) -> dict[str, torch.Tensor | str]:
+        """Chunked wrapper around ``_flat_rollout_scores`` for large ``N``."""
+        cfg = self.cfg
+        n = int(seq_flat.shape[0])
+        chunk = int(cfg.max_rollout_batch)
+        if n <= chunk:
+            return self._flat_rollout_scores(
+                belief_flat=belief_flat,
+                seq_flat=seq_flat,
+                actor_action_flat=actor_action_flat,
+                rssm_model=rssm_model,
+                deterministic=deterministic,
+                sample_temperature=sample_temperature,
+            )
+        scores: list[torch.Tensor] = []
+        drops: list[torch.Tensor] = []
+        uncs: list[torch.Tensor] = []
+        imagine_mode = "none"
+        for start in range(0, n, chunk):
+            end = min(n, start + chunk)
+            part = self._flat_rollout_scores(
+                belief_flat=belief_flat[start:end],
+                seq_flat=seq_flat[start:end],
+                actor_action_flat=actor_action_flat[start:end],
+                rssm_model=rssm_model,
+                deterministic=deterministic,
+                sample_temperature=sample_temperature,
+            )
+            scores.append(part["score"])
+            drops.append(part["drop_max"])
+            uncs.append(part["unc_mean"])
+            imagine_mode = str(part.get("imagine_mode", imagine_mode))
+        return {
+            "score": torch.cat(scores, dim=0),
+            "drop_max": torch.cat(drops, dim=0),
+            "unc_mean": torch.cat(uncs, dim=0),
+            "imagine_mode": imagine_mode,
+        }
+
+    def _aggregate_sample_scores(
+        self,
+        *,
+        score_samples: torch.Tensor,
+        drop_samples: torch.Tensor,
+        unc_samples: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Risk-sensitive aggregation over latent samples ``[..., M]``."""
+        cfg = self.cfg
+        b, k, m = score_samples.shape
+        score_mean = score_samples.mean(dim=-1)
+        if m > 1:
+            score_std = score_samples.std(dim=-1, unbiased=False)
+            drop_cvar = _tail_mean(drop_samples, cfg.drop_cvar_alpha, largest=True)
+            unc_cvar = _tail_mean(unc_samples, cfg.drop_cvar_alpha, largest=True)
+        else:
+            score_std = torch.zeros(b, k, device=score_samples.device, dtype=score_samples.dtype)
+            drop_cvar = drop_samples.squeeze(-1)
+            unc_cvar = unc_samples.squeeze(-1)
+
+        if cfg.score_aggregation == "cvar":
+            score_final = _tail_mean(score_samples, cfg.drop_cvar_alpha, largest=False)
+        elif cfg.score_aggregation == "mean_minus_std":
+            score_final = (
+                score_mean
+                - float(cfg.risk_beta) * score_std
+                - float(cfg.drop_cvar_weight) * drop_cvar
+                - float(cfg.uncertainty_cvar_weight) * unc_cvar
+            )
+        else:
+            score_final = score_mean
+
+        unc_final = unc_cvar if m > 1 else unc_samples.squeeze(-1)
+        return {
+            "score": score_final,
+            "uncertainty": unc_final,
+            "score_std": score_std,
+            "drop_cvar": drop_cvar,
+            "uncertainty_cvar": unc_cvar,
+        }
+
+    @torch.no_grad()
+    def _rollout_and_score(
+        self, *, belief_flat: torch.Tensor, seq: torch.Tensor, actor_action: torch.Tensor, rssm_model
+    ) -> dict:
+        """Roll each [B,Ktot,H,A] sequence through the prior and score it."""
+        cfg = self.cfg
+        b, k, h, a = seq.shape
+        dev, dtype = seq.device, seq.dtype
+        d = int(belief_flat.shape[-1])
+        use_stochastic = bool(cfg.stochastic_rollouts and int(cfg.num_latent_samples) > 1)
+        m = int(cfg.num_latent_samples) if use_stochastic else 1
+        deterministic = not use_stochastic
+
+        if use_stochastic:
+            belief_rep = (
+                belief_flat[:, None, None, :]
+                .expand(b, k, m, d)
+                .reshape(b * k * m, d)
+            )
+            seq_flat = (
+                seq[:, :, None, :, :]
+                .expand(b, k, m, h, a)
+                .reshape(b * k * m, h, a)
+            )
+            actor_rep = (
+                actor_action[:, None, None, :]
+                .expand(b, k, m, a)
+                .reshape(b * k * m, a)
+            )
+        else:
+            belief_rep = belief_flat[:, None, :].expand(b, k, d).reshape(b * k, d)
+            seq_flat = seq.reshape(b * k, h, a)
+            actor_rep = actor_action[:, None, :].expand(b, k, a).reshape(b * k, a)
+
+        flat = self._rollout_batch(
+            belief_flat=belief_rep,
+            seq_flat=seq_flat,
+            actor_action_flat=actor_rep,
+            rssm_model=rssm_model,
+            deterministic=deterministic,
+            sample_temperature=float(cfg.sample_temperature),
+        )
+        imagine_mode = str(flat.get("imagine_mode", "none"))
+
+        if use_stochastic:
+            score_s = flat["score"].reshape(b, k, m)
+            drop_s = flat["drop_max"].reshape(b, k, m)
+            unc_s = flat["unc_mean"].reshape(b, k, m)
+            agg = self._aggregate_sample_scores(
+                score_samples=score_s, drop_samples=drop_s, unc_samples=unc_s
+            )
+            return {
+                "score": agg["score"],
+                "uncertainty": agg["uncertainty"],
+                "score_std": agg["score_std"],
+                "drop_cvar": agg["drop_cvar"],
+                "uncertainty_cvar": agg["uncertainty_cvar"],
+                "imagine_mode": imagine_mode,
+            }
+
+        score = flat["score"].reshape(b, k)
+        unc_bk = flat["unc_mean"].reshape(b, k)
+        zeros_bk = torch.zeros(b, k, device=dev, dtype=dtype)
+        return {
+            "score": score,
+            "uncertainty": unc_bk,
+            "score_std": zeros_bk,
+            "drop_cvar": flat["drop_max"].reshape(b, k),
+            "uncertainty_cvar": unc_bk,
+            "imagine_mode": imagine_mode,
+        }
 
     # ---- main entry -----------------------------------------------------
     @torch.no_grad()
@@ -438,6 +651,13 @@ class RSSMMPPIPlanner:
         self.last_mode = cfg.mode
         self.last_num_sequences = 0
         self.last_horizon = int(cfg.horizon)
+        self.last_stochastic_rollouts = 1.0 if (
+            cfg.stochastic_rollouts and int(cfg.num_latent_samples) > 1
+        ) else 0.0
+        self.last_num_latent_samples = float(cfg.num_latent_samples)
+        self.last_sample_temperature = float(cfg.sample_temperature)
+        self.last_risk_beta = float(cfg.risk_beta)
+        self.last_drop_cvar_weight = float(cfg.drop_cvar_weight)
 
         if not cfg.enabled or cfg.mode == "off":
             return self._inactive(MPPI_DISABLED, B, A, actor_action, dev, dtype)
@@ -481,6 +701,9 @@ class RSSMMPPIPlanner:
 
             score = last["score"]              # [B, Ktot]
             unc = last["uncertainty"]          # [B, Ktot]
+            score_std_bk = last.get("score_std")
+            drop_cvar_bk = last.get("drop_cvar")
+            unc_cvar_bk = last.get("uncertainty_cvar")
             self.last_imagine_mode = last["imagine_mode"]
             self.last_num_sequences = int(seq.shape[1])
 
@@ -491,6 +714,16 @@ class RSSMMPPIPlanner:
             best_seq = seq[rows, best_idx]            # [B, H, A]
             best_action = best_seq[:, 0, :]
             margin = best_score - actor_score
+            actor_score_std = (
+                score_std_bk[:, 0]
+                if isinstance(score_std_bk, torch.Tensor)
+                else torch.zeros(B, device=dev, dtype=dtype)
+            )
+            risk_adjusted_margin = margin - float(cfg.risk_beta) * (
+                score_std_bk[rows, best_idx] - actor_score_std
+                if isinstance(score_std_bk, torch.Tensor)
+                else torch.zeros(B, device=dev, dtype=dtype)
+            )
             best_unc = unc[rows, best_idx]
             first_delta = (best_action - actor_action).norm(dim=-1)
 
@@ -499,6 +732,19 @@ class RSSMMPPIPlanner:
             self.last_score_margin = float(margin.mean().item())
             self.last_uncertainty = float(best_unc.mean().item())
             self.last_best_first_action_delta = float(first_delta.mean().item())
+            if isinstance(score_std_bk, torch.Tensor):
+                self.last_score_std = float(score_std_bk[rows, best_idx].mean().item())
+            else:
+                self.last_score_std = 0.0
+            if isinstance(drop_cvar_bk, torch.Tensor):
+                self.last_drop_cvar = float(drop_cvar_bk[rows, best_idx].mean().item())
+            else:
+                self.last_drop_cvar = 0.0
+            if isinstance(unc_cvar_bk, torch.Tensor):
+                self.last_uncertainty_cvar = float(unc_cvar_bk[rows, best_idx].mean().item())
+            else:
+                self.last_uncertainty_cvar = 0.0
+            self.last_risk_adjusted_margin = float(risk_adjusted_margin.mean().item())
             self.last_high_uncertainty_fraction = float(
                 (best_unc > float(cfg.uncertainty_threshold)).float().mean().item()
             )
@@ -516,6 +762,9 @@ class RSSMMPPIPlanner:
                 out = self._inactive(MPPI_HIGH_UNCERTAINTY, B, A, actor_action, dev, dtype)
                 out.update({
                     "uncertainty": best_unc, "score_margin": margin,
+                    "risk_adjusted_score_margin": risk_adjusted_margin,
+                    "score_std": score_std_bk[rows, best_idx] if isinstance(score_std_bk, torch.Tensor) else None,
+                    "drop_cvar": drop_cvar_bk[rows, best_idx] if isinstance(drop_cvar_bk, torch.Tensor) else None,
                     "best_score": best_score, "actor_score": actor_score,
                     "imagine_mode": self.last_imagine_mode,
                 })
@@ -526,6 +775,9 @@ class RSSMMPPIPlanner:
                 out = self._inactive(MPPI_LOW_MARGIN, B, A, actor_action, dev, dtype)
                 out.update({
                     "uncertainty": best_unc, "score_margin": margin,
+                    "risk_adjusted_score_margin": risk_adjusted_margin,
+                    "score_std": score_std_bk[rows, best_idx] if isinstance(score_std_bk, torch.Tensor) else None,
+                    "drop_cvar": drop_cvar_bk[rows, best_idx] if isinstance(drop_cvar_bk, torch.Tensor) else None,
                     "best_score": best_score, "actor_score": actor_score,
                     "best_action": best_action, "best_sequence": best_seq,
                     "best_first_action_delta": first_delta,
@@ -543,6 +795,10 @@ class RSSMMPPIPlanner:
                 "best_score": best_score,
                 "actor_score": actor_score,
                 "score_margin": margin,
+                "risk_adjusted_score_margin": risk_adjusted_margin,
+                "score_std": score_std_bk[rows, best_idx] if isinstance(score_std_bk, torch.Tensor) else None,
+                "drop_cvar": drop_cvar_bk[rows, best_idx] if isinstance(drop_cvar_bk, torch.Tensor) else None,
+                "uncertainty_cvar": unc_cvar_bk[rows, best_idx] if isinstance(unc_cvar_bk, torch.Tensor) else None,
                 "uncertainty": best_unc,
                 "best_first_action_delta": first_delta,
                 "mode": cfg.mode,

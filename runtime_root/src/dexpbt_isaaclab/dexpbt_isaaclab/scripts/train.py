@@ -1503,6 +1503,20 @@ parser.add_argument("--eir_mppi_w_uncertainty", type=float, default=0.2)
 parser.add_argument("--eir_mppi_w_action_smoothness", type=float, default=0.05)
 parser.add_argument("--eir_mppi_w_action_delta", type=float, default=0.02)
 parser.add_argument("--eir_mppi_fail_fast", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_mppi_stochastic_rollouts", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_mppi_num_latent_samples", type=int, default=1)
+parser.add_argument("--eir_mppi_sample_temperature", type=float, default=1.0)
+parser.add_argument("--eir_mppi_risk_beta", type=float, default=0.0)
+parser.add_argument("--eir_mppi_drop_cvar_alpha", type=float, default=0.25)
+parser.add_argument("--eir_mppi_drop_cvar_weight", type=float, default=0.0)
+parser.add_argument("--eir_mppi_uncertainty_cvar_weight", type=float, default=0.0)
+parser.add_argument(
+    "--eir_mppi_score_aggregation",
+    type=str,
+    default="mean",
+    choices=["mean", "mean_minus_std", "cvar"],
+)
+parser.add_argument("--eir_mppi_max_rollout_batch", type=int, default=65536)
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
@@ -2855,7 +2869,11 @@ def _patch_actor_train_for_seq_wm(
                         except Exception:
                             pass
                     # extra EIR scalars: rssm candidate injection + belief cache
-                    _imagine_code = {"prior_rollout": 0.0, "fixed_belief_fallback": 1.0}
+                    _imagine_code = {
+                        "prior_rollout": 0.0,
+                        "stochastic_prior_rollout": 1.0,
+                        "fixed_belief_fallback": 2.0,
+                    }
                     _bc = getattr(xb, "rssm_belief_cache", None)
                     extra_eir = {
                         "rssm_candidate_added": float(xb.last_rssm_candidate_added),
@@ -2875,7 +2893,7 @@ def _patch_actor_train_for_seq_wm(
                         mppi_scalars = {
                             "active": planner.last_active,
                             "mode": {"off": 0.0, "light": 1.0, "full": 2.0}.get(planner.last_mode, -1.0),
-                            "imagine_mode": _imagine_code.get(planner.last_imagine_mode, 2.0),
+                            "imagine_mode": _imagine_code.get(planner.last_imagine_mode, 3.0),
                             "best_score": planner.last_best_score,
                             "actor_score": planner.last_actor_score,
                             "score_margin": planner.last_score_margin,
@@ -2886,6 +2904,17 @@ def _patch_actor_train_for_seq_wm(
                             "high_uncertainty_fraction": planner.last_high_uncertainty_fraction,
                             "sequence_horizon": float(planner.last_horizon),
                             "num_sequences": float(planner.last_num_sequences),
+                            "stochastic_rollouts": float(planner.last_stochastic_rollouts),
+                            "num_latent_samples": float(planner.last_num_latent_samples),
+                            "sample_temperature": float(planner.last_sample_temperature),
+                            "score_std": float(planner.last_score_std),
+                            "score_std_mean": float(planner.last_score_std),
+                            "drop_cvar": float(planner.last_drop_cvar),
+                            "drop_cvar_mean": float(planner.last_drop_cvar),
+                            "uncertainty_cvar": float(planner.last_uncertainty_cvar),
+                            "risk_adjusted_score_margin": float(planner.last_risk_adjusted_margin),
+                            "risk_beta": float(planner.last_risk_beta),
+                            "drop_cvar_weight": float(planner.last_drop_cvar_weight),
                             "belief_cache_valid": float(bool(_bc is not None and getattr(_bc, "valid", False))),
                             "belief_cache_rows": float(getattr(_bc, "rows", 0) if _bc is not None else 0),
                             "belief_cache_dim": float(getattr(_bc, "belief_dim", 0) if _bc is not None else 0),
@@ -4758,6 +4787,15 @@ def main():
             w_action_smoothness=float(args_cli.eir_mppi_w_action_smoothness),
             w_action_delta=float(args_cli.eir_mppi_w_action_delta),
             fail_fast=bool(args_cli.eir_mppi_fail_fast),
+            stochastic_rollouts=bool(args_cli.eir_mppi_stochastic_rollouts),
+            num_latent_samples=int(args_cli.eir_mppi_num_latent_samples),
+            sample_temperature=float(args_cli.eir_mppi_sample_temperature),
+            risk_beta=float(args_cli.eir_mppi_risk_beta),
+            drop_cvar_alpha=float(args_cli.eir_mppi_drop_cvar_alpha),
+            drop_cvar_weight=float(args_cli.eir_mppi_drop_cvar_weight),
+            uncertainty_cvar_weight=float(args_cli.eir_mppi_uncertainty_cvar_weight),
+            score_aggregation=str(args_cli.eir_mppi_score_aggregation),
+            max_rollout_batch=int(args_cli.eir_mppi_max_rollout_batch),
         )
         eir_broadcast_cfg = EliteBroadcastConfig(
             enabled=eir_enabled

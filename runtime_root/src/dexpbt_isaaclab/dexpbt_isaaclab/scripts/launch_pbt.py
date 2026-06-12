@@ -737,6 +737,8 @@ def main() -> None:
             "--no-eir_mppi_smooth_noise",
             "--eir_mppi_fail_fast",
             "--no-eir_mppi_fail_fast",
+            "--eir_mppi_stochastic_rollouts",
+            "--no-eir_mppi_stochastic_rollouts",
             "--eir_pbt_broadcast_elite_bank",
             "--no-eir_pbt_broadcast_elite_bank",
         }

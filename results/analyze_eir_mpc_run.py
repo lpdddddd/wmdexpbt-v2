@@ -46,7 +46,12 @@ MPPI_FALLBACK = {
     7: "low_margin", 8: "exception",
 }
 MPPI_MODE = {0.0: "off", 1.0: "light", 2.0: "full", -1.0: "unknown"}
-IMAGINE_MODE = {0.0: "prior_rollout", 1.0: "fixed_belief_fallback", 2.0: "none"}
+IMAGINE_MODE = {
+    0.0: "prior_rollout",
+    1.0: "stochastic_prior_rollout",
+    2.0: "fixed_belief_fallback",
+    3.0: "none",
+}
 BUCKET_NAMES = {
     0: "none/improve", 1: "none/success", 2: "floor/improve",
     3: "floor/success", 4: "hard/improve", 5: "hard/success",
@@ -295,6 +300,14 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         "rssm_best_first_action_delta_mean": _agg("eir_mppi/best_first_action_delta", "mean"),
         "mppi_low_margin_fraction_mean": _agg("eir_mppi/low_margin_fraction", "mean"),
         "mppi_high_uncertainty_fraction_mean": _agg("eir_mppi/high_uncertainty_fraction", "mean"),
+        "mppi_stochastic_rollouts_mean": _agg("eir_mppi/stochastic_rollouts", "mean"),
+        "mppi_num_latent_samples_last": _agg("eir_mppi/num_latent_samples"),
+        "mppi_score_std_mean": _agg("eir_mppi/score_std_mean", "mean"),
+        "mppi_drop_cvar_mean": _agg("eir_mppi/drop_cvar_mean", "mean"),
+        "mppi_uncertainty_cvar_mean": _agg("eir_mppi/uncertainty_cvar", "mean"),
+        "mppi_risk_adjusted_score_margin_mean": _agg("eir_mppi/risk_adjusted_score_margin", "mean"),
+        "mppi_risk_beta_last": _agg("eir_mppi/risk_beta"),
+        "mppi_drop_cvar_weight_last": _agg("eir_mppi/drop_cvar_weight"),
         # broadcast
         "broadcast_count_max": _agg("eir_pbt/broadcast_count", "max"),
         "bank_merge_count_max": _agg("eir_pbt/bank_merge_count", "max"),
@@ -361,6 +374,12 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         mppi_notes.append("mppi_active_but_never_selected: rssm candidate added but reranker never picked it")
     if imagine_total.get("fixed_belief_fallback", 0) > 0 and imagine_total.get("prior_rollout", 0) == 0:
         mppi_notes.append("mppi_fixed_belief_fallback_only: backbone has no usable prior transition (approximate H-step)")
+    stoch_frac = summary.get("mppi_stochastic_rollouts_mean") or 0.0
+    if stoch_frac > 0.5 and imagine_total.get("stochastic_prior_rollout", 0) == 0:
+        mppi_notes.append(
+            "mppi_stochastic_enabled_but_no_stochastic_rollout: stochastic_rollouts flag on but "
+            "imagine_mode never reported stochastic_prior_rollout"
+        )
     summary["mppi_notes"] = mppi_notes
     criteria["mppi_belief_cache_valid"] = bool(belief_valid > 0.0)
     criteria["mppi_active"] = bool(mppi_active > 0.0)

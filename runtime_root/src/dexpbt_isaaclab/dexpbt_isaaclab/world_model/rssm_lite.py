@@ -51,6 +51,7 @@ from .seq_wm_heads import PredictionHeads
 
 # Imagine-step modes (for EIR-MPC H-step planner provenance logging).
 IMAGINE_PRIOR_ROLLOUT = "prior_rollout"
+IMAGINE_STOCHASTIC_PRIOR_ROLLOUT = "stochastic_prior_rollout"
 IMAGINE_FIXED_BELIEF_FALLBACK = "fixed_belief_fallback"
 
 
@@ -878,6 +879,9 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         self,
         state: "RSSMState | torch.Tensor",
         action: torch.Tensor,
+        *,
+        deterministic: bool = True,
+        sample_temperature: float = 1.0,
     ) -> "tuple[RSSMState, dict[str, torch.Tensor]]":
         """Prior-only one-step latent rollout.
 
@@ -886,7 +890,8 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             (success/drop/recovery/task-error) plus the belief-only value head;
           * advances the latent with the *prior* (no posterior / no real
             future obs): ``h_{t+1} = GRU(concat(z_t, enc(a_t)), h_t)`` and
-            ``z_{t+1} = prior_mean(h_{t+1})``.
+            ``z_{t+1} = prior_mean(h_{t+1})`` when ``deterministic=True``, or
+            a reparameterised prior sample when ``deterministic=False``.
 
         Returns ``(next_state, preds)``. ``preds`` always carries a
         ``prior_std_mean`` uncertainty proxy and (when the heads exist)
@@ -935,11 +940,17 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             gru_in = torch.cat([state.stoch, a_emb], dim=-1)
             h_next = self.gru(gru_in, state.deter)
             prior_mu, prior_std = self._split_dist(self.prior_net(h_next))
-            z_next = prior_mu  # deterministic prior mean for stable scoring
+            if deterministic:
+                z_next = prior_mu
+                step_mode = IMAGINE_PRIOR_ROLLOUT
+            else:
+                eps = torch.randn_like(prior_std)
+                z_next = prior_mu + float(sample_temperature) * prior_std * eps
+                step_mode = IMAGINE_STOCHASTIC_PRIOR_ROLLOUT
             belief_next = torch.cat([h_next, z_next], dim=-1)
             next_state = RSSMState(belief=belief_next, deter=h_next, stoch=z_next)
             out["prior_std_mean"] = prior_std.mean(dim=-1).reshape(-1)
-            out["imagine_mode"] = IMAGINE_PRIOR_ROLLOUT
+            out["imagine_mode"] = step_mode
         else:
             next_state = RSSMState(belief=belief, deter=state.deter, stoch=state.stoch)
             out["prior_std_mean"] = belief.new_zeros(belief.shape[0])
@@ -950,4 +961,10 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         return dict(self._last_metrics)
 
 
-__all__ = ["RSSMLiteWorldModel", "RSSMState", "IMAGINE_PRIOR_ROLLOUT", "IMAGINE_FIXED_BELIEF_FALLBACK"]
+__all__ = [
+    "RSSMLiteWorldModel",
+    "RSSMState",
+    "IMAGINE_PRIOR_ROLLOUT",
+    "IMAGINE_STOCHASTIC_PRIOR_ROLLOUT",
+    "IMAGINE_FIXED_BELIEF_FALLBACK",
+]

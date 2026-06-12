@@ -372,6 +372,12 @@ class EIRBridge:
     rssm_belief_cache: Any = None
     last_mppi_active: float = 0.0
     last_mppi_belief_valid: float = 0.0
+    last_mppi_score_std: float = 0.0
+    last_mppi_drop_cvar: float = 0.0
+    last_mppi_uncertainty_cvar: float = 0.0
+    last_mppi_risk_adjusted_margin: float = 0.0
+    last_mppi_stochastic_rollouts: float = 0.0
+    last_mppi_num_latent_samples: float = 0.0
 
     scorer_warmup_iters_done: int = 0
 
@@ -491,6 +497,22 @@ def _maybe_rssm_candidate_action(
                 frames=int(frames),
             )
             bridge.last_mppi_active = 1.0 if out.get("active") else 0.0
+            bridge.last_mppi_stochastic_rollouts = float(
+                getattr(planner, "last_stochastic_rollouts", 0.0)
+            )
+            bridge.last_mppi_num_latent_samples = float(
+                getattr(planner, "last_num_latent_samples", 0.0)
+            )
+            bridge.last_mppi_score_std = float(getattr(planner, "last_score_std", 0.0))
+            bridge.last_mppi_drop_cvar = float(getattr(planner, "last_drop_cvar", 0.0))
+            bridge.last_mppi_uncertainty_cvar = float(
+                getattr(planner, "last_uncertainty_cvar", 0.0)
+            )
+            bridge.last_mppi_risk_adjusted_margin = float(
+                out.get("risk_adjusted_score_margin", torch.tensor(0.0)).mean().item()
+                if isinstance(out.get("risk_adjusted_score_margin"), torch.Tensor)
+                else getattr(planner, "last_risk_adjusted_margin", 0.0)
+            )
             if out.get("active") and out.get("best_action") is not None:
                 return out["best_action"]
             # planner ran but inactive (low margin / uncertain / disabled): do
