@@ -51,6 +51,8 @@ IMAGINE_MODE = {
     1.0: "stochastic_prior_rollout",
     2.0: "fixed_belief_fallback",
     3.0: "none",
+    4.0: "ensemble_prior_rollout",
+    5.0: "ensemble_stochastic_prior_rollout",
 }
 BUCKET_NAMES = {
     0: "none/improve", 1: "none/success", 2: "floor/improve",
@@ -308,6 +310,21 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         "mppi_risk_adjusted_score_margin_mean": _agg("eir_mppi/risk_adjusted_score_margin", "mean"),
         "mppi_risk_beta_last": _agg("eir_mppi/risk_beta"),
         "mppi_drop_cvar_weight_last": _agg("eir_mppi/drop_cvar_weight"),
+        # model ensemble MPPI
+        "mppi_use_model_ensemble_mean": _agg("eir_mppi/use_model_ensemble", "mean"),
+        "mppi_ensemble_size_last": _agg("eir_mppi/ensemble_size"),
+        "mppi_ensemble_valid_size_mean": _agg("eir_mppi/ensemble_valid_size", "mean"),
+        "mppi_ensemble_valid_size_last": _agg("eir_mppi/ensemble_valid_size"),
+        "mppi_ensemble_score_std_mean": _agg("eir_mppi/ensemble_score_std_mean", "mean"),
+        "mppi_ensemble_score_std_last": _agg("eir_mppi/ensemble_score_std"),
+        "mppi_ensemble_drop_worst_mean": _agg("eir_mppi/ensemble_drop_worst", "mean"),
+        "mppi_ensemble_uncertainty_worst_mean": _agg("eir_mppi/ensemble_uncertainty_worst", "mean"),
+        "mppi_belief_cache_ensemble_size_last": _agg("eir_mppi/belief_cache_ensemble_size"),
+        "mppi_belief_cache_ensemble_valid_size_mean": _agg("eir_mppi/belief_cache_ensemble_valid_size", "mean"),
+        "mppi_belief_cache_ensemble_partial_failure_mean": _agg("eir_mppi/belief_cache_ensemble_partial_failure_count", "mean"),
+        "seq_wm_ensemble_size_last": _agg("seq_wm_ensemble/size"),
+        "seq_wm_ensemble_loss_total_mean": _agg("seq_wm_ensemble/loss_total_mean", "mean"),
+        "seq_wm_ensemble_loss_total_std_mean": _agg("seq_wm_ensemble/loss_total_std", "mean"),
         # broadcast
         "broadcast_count_max": _agg("eir_pbt/broadcast_count", "max"),
         "bank_merge_count_max": _agg("eir_pbt/bank_merge_count", "max"),
@@ -384,6 +401,37 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
             "mppi_stochastic_enabled_but_no_stochastic_rollout: stochastic_rollouts flag on but "
             "imagine_mode never reported stochastic_prior_rollout"
         )
+    # ---- model ensemble MPPI notes ----
+    ens_use_frac = summary.get("mppi_use_model_ensemble_mean") or 0.0
+    ens_cfg_size = summary.get("mppi_ensemble_size_last") or 0.0
+    ens_valid_mean = summary.get("mppi_ensemble_valid_size_mean") or 0.0
+    ens_best_rssm = summary.get("best_source_frac_rssm_mean") or 0.0
+    ens_rssm_added = summary.get("rssm_candidate_added_mean") or 0.0
+    ens_imagine_total = (
+        imagine_total.get("ensemble_prior_rollout", 0)
+        + imagine_total.get("ensemble_stochastic_prior_rollout", 0)
+    )
+    if ens_cfg_size > 1.0:
+        if ens_valid_mean > 0.0 and ens_valid_mean < 2.0:
+            mppi_notes.append(
+                "ensemble_enabled_but_valid_size_lt_min: belief cache produced fewer than "
+                "ensemble_min_valid_models usable members"
+            )
+        if ens_use_frac <= 0.0 and ens_imagine_total == 0:
+            mppi_notes.append(
+                "ensemble_enabled_but_single_model_fallback_only: ensemble configured but MPPI "
+                "never used the ensemble scoring path (single-model fallback)"
+            )
+        if (summary.get("mppi_ensemble_score_std_mean") or 0.0) > 0.0 and ens_best_rssm > 0.0:
+            mppi_notes.append(
+                "ensemble_disagreement_high_and_rssm_selected: ensemble disagreement is non-zero "
+                "yet the RSSM candidate was still selected as best source"
+            )
+        if ens_rssm_added > 0.0 and ens_best_rssm <= 0.0:
+            mppi_notes.append(
+                "ensemble_candidate_added_but_never_selected: ensemble MPPI added an SRC_RSSM "
+                "candidate but the EIR reranker never picked it"
+            )
     summary["mppi_notes"] = mppi_notes
     criteria["mppi_belief_cache_valid"] = bool(belief_valid > 0.0)
     criteria["mppi_active"] = bool(mppi_active > 0.0)

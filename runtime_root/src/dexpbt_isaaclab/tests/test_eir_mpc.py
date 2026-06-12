@@ -341,7 +341,7 @@ class TestComputeEIRLoss(unittest.TestCase):
 class TestComputeEIRLossWithMPPI(unittest.TestCase):
     """Full H-step MPPI integration into compute_eir_loss."""
 
-    def _setup_with_mppi(self, *, planner_active=True, belief_valid=True):
+    def _setup_with_mppi(self, *, planner_active=True, belief_valid=True, ensemble=False):
         from dexpbt_isaaclab.world_model.rssm_lite import RSSMState
         from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
             RSSMMPPIConfig, RSSMMPPIPlanner,
@@ -381,14 +381,23 @@ class TestComputeEIRLossWithMPPI(unittest.TestCase):
             num_sequences=16, num_elite=4, cem_iters=1,
             min_sequence_margin=(-1.0 if planner_active else 1e6),
             uncertainty_threshold=1.0,
+            use_model_ensemble=bool(ensemble),
+            ensemble_min_valid_models=2,
         )
         bridge.rssm_planner = RSSMMPPIPlanner(cfg)
         bridge.rssm_model = _ToyModel()
+        belief_flat_ensemble = None
+        if ensemble:
+            bridge.rssm_models = [bridge.rssm_model, _ToyModel(), _ToyModel()]
+            belief_flat_ensemble = [torch.randn(B, belief_dim) for _ in range(3)]
         if belief_valid:
             bridge.rssm_belief_cache = RSSMBeliefCache(
                 belief_flat=torch.randn(B, belief_dim), state_flat=None,
                 frame=0, generation=0, rows=B, belief_dim=belief_dim,
                 valid=True, fallback_reason=BELIEF_OK, source="test",
+                belief_flat_ensemble=belief_flat_ensemble,
+                ensemble_size=(3 if ensemble else 1),
+                ensemble_valid_size=(3 if ensemble else 1),
             )
         else:
             bridge.rssm_belief_cache = RSSMBeliefCache.invalid(3)
@@ -428,6 +437,42 @@ class TestComputeEIRLossWithMPPI(unittest.TestCase):
         # belief cache invalid -> planner gets None belief -> inactive, no crash
         out = compute_eir_loss(bridge, frames=1000)
         self.assertEqual(bridge.last_rssm_candidate_added, 0.0)
+
+    def test_compute_eir_loss_passes_ensemble_beliefs_to_mppi(self):
+        bridge = self._setup_with_mppi(planner_active=True, belief_valid=True, ensemble=True)
+        compute_eir_loss(bridge, frames=1000)
+        # ensemble path actually engaged (>=2 valid members).
+        self.assertEqual(bridge.last_mppi_use_model_ensemble, 1.0)
+        self.assertGreaterEqual(bridge.last_mppi_ensemble_valid_size, 2.0)
+
+    def test_compute_eir_loss_ensemble_rssm_candidate_added(self):
+        from dexpbt_isaaclab.world_model.eir_mpc import SRC_RSSM
+        import dexpbt_isaaclab.world_model.eir_mpc as _eir
+
+        bridge = self._setup_with_mppi(planner_active=True, belief_valid=True, ensemble=True)
+        seen = {}
+        orig = _eir.rerank_candidates
+
+        def _spy(**kw):
+            seen["source_id"] = kw["source_id"]
+            return orig(**kw)
+
+        _eir.rerank_candidates = _spy
+        try:
+            compute_eir_loss(bridge, frames=1000)
+        finally:
+            _eir.rerank_candidates = orig
+        self.assertEqual(bridge.last_mppi_active, 1.0)
+        self.assertEqual(bridge.last_rssm_candidate_added, 1.0)
+        self.assertTrue(bool((seen["source_id"] == SRC_RSSM).any()))
+
+    def test_compute_eir_loss_ensemble_fallback_no_crash(self):
+        # ensemble requested but belief cache lacks ensemble beliefs -> single
+        # model fallback, must not crash and must not engage ensemble path.
+        bridge = self._setup_with_mppi(planner_active=True, belief_valid=True, ensemble=True)
+        bridge.rssm_belief_cache.belief_flat_ensemble = None
+        compute_eir_loss(bridge, frames=1000)
+        self.assertEqual(bridge.last_mppi_use_model_ensemble, 0.0)
 
 
 def _filled_bank(*, target):

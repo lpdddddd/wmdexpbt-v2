@@ -50,6 +50,14 @@ class RSSMBeliefCache:
     fallback_reason: int
     source: str
     aux_zero_filled: bool = False
+    # Optional per-member beliefs for the RSSM ensemble MPPI path. Index ``e``
+    # aligns with the ensemble model at the same index; a failed member is
+    # stored as ``None`` so the (model, belief) zip stays aligned. The primary
+    # ``belief_flat`` above is member 0 (kept for all single-model code).
+    belief_flat_ensemble: Optional[list[Optional[torch.Tensor]]] = None
+    ensemble_size: int = 1
+    ensemble_valid_size: int = 1
+    ensemble_partial_failure_count: int = 0
 
     @staticmethod
     def invalid(reason: int, *, frame: int = 0, generation: int = -1, source: str = "none") -> "RSSMBeliefCache":
@@ -66,6 +74,25 @@ class RSSMBeliefCache:
         if start < 0 or end > int(self.belief_flat.shape[0]) or end <= start:
             return None
         return self.belief_flat[start:end]
+
+    def slice_rows_ensemble(self, start: int, end: int) -> Optional[list[Optional[torch.Tensor]]]:
+        """Return ``[belief_flat_e[start:end]]`` (None entries preserved).
+
+        Returns None when the ensemble belief list is unavailable or the row
+        bounds are out of range, so callers fall back to the single model.
+        """
+        if not self.valid or not self.belief_flat_ensemble:
+            return None
+        out: list[Optional[torch.Tensor]] = []
+        for b in self.belief_flat_ensemble:
+            if b is None:
+                out.append(None)
+                continue
+            if start < 0 or end > int(b.shape[0]) or end <= start:
+                out.append(None)
+            else:
+                out.append(b[start:end])
+        return out
 
 
 def _squeeze_last1(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -85,6 +112,36 @@ def _flatten_tn(x: torch.Tensor) -> torch.Tensor:
     return x.permute(1, 0, *range(2, x.dim())).reshape(N * T, *rest)
 
 
+def _encode_model_flat(model: Any, batch: Any, T: int, N: int) -> Optional[torch.Tensor]:
+    """Encode one model -> flattened belief ``[T*N, D]`` or None on any failure."""
+    try:
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.no_grad():
+                try:
+                    belief_seq = model.encode_sequence(batch, deterministic=True)
+                except TypeError:
+                    belief_seq = model.encode_sequence(batch)
+        finally:
+            if was_training:
+                model.train()
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[EIR-belief] ensemble member encode failed: {exc}")
+        return None
+    if (
+        belief_seq is None
+        or belief_seq.dim() != 3
+        or belief_seq.shape[0] != T
+        or belief_seq.shape[1] != N
+    ):
+        return None
+    flat = _flatten_tn(belief_seq.detach()).contiguous()
+    if int(flat.shape[0]) != T * N:
+        return None
+    return flat
+
+
 def build_rssm_belief_cache(
     *,
     seq_wm_trainer: Any,
@@ -97,6 +154,7 @@ def build_rssm_belief_cache(
     generation: int,
     device: Any,
     enabled: bool = True,
+    ensemble_models: Optional[list[Any]] = None,
 ) -> RSSMBeliefCache:
     """Encode the current rollout into a flattened belief cache.
 
@@ -104,6 +162,13 @@ def build_rssm_belief_cache(
     ``SeqWMTrainer.compute_teacher_cache`` (no random sampling), then runs
     ``model.encode_sequence(..., deterministic=True)`` under ``no_grad`` and
     flattens with ``flat[n*T+t] = belief[t, n]``.
+
+    When ``ensemble_models`` is provided (length > 1) each member is encoded on
+    the same batch and its flattened belief is stored in
+    ``belief_flat_ensemble`` (index-aligned with ``ensemble_models``; a member
+    that fails to encode is stored as ``None``). The primary ``belief_flat`` is
+    always member 0's belief, so single-model callers are unaffected. A partial
+    ensemble failure never invalidates the cache.
     """
     if not enabled:
         return RSSMBeliefCache.invalid(BELIEF_DISABLED, frame=frames, generation=generation)
@@ -268,8 +333,38 @@ def build_rssm_belief_cache(
     if int(belief_flat.shape[0]) != T * N:
         return RSSMBeliefCache.invalid(BELIEF_SHAPE_MISMATCH, frame=frames, generation=generation)
 
+    # ---- optional ensemble member beliefs (MPPI scoring only) ----
+    belief_flat_ensemble: Optional[list] = None
+    ensemble_size = 1
+    ensemble_valid_size = 1
+    ensemble_partial_failure_count = 0
+    if ensemble_models is not None and len(ensemble_models) > 1:
+        ensemble_size = int(len(ensemble_models))
+        belief_flat_ensemble = []
+        for model_e in ensemble_models:
+            # reuse the primary encode for the member that IS the primary model
+            if model_e is model:
+                belief_flat_ensemble.append(belief_flat)
+                continue
+            belief_flat_e = _encode_model_flat(model_e, batch, T, N)
+            if belief_flat_e is None:
+                belief_flat_ensemble.append(None)
+                ensemble_partial_failure_count += 1
+                continue
+            belief_flat_ensemble.append(belief_flat_e)
+        ensemble_valid_size = int(sum(1 for b in belief_flat_ensemble if b is not None))
+        if ensemble_valid_size <= 1:
+            # not enough independent members survived: keep single-model cache.
+            belief_flat_ensemble = None
+            ensemble_size = 1
+            ensemble_valid_size = 1
+
     return RSSMBeliefCache(
         belief_flat=belief_flat,
+        belief_flat_ensemble=belief_flat_ensemble,
+        ensemble_size=ensemble_size,
+        ensemble_valid_size=ensemble_valid_size,
+        ensemble_partial_failure_count=int(ensemble_partial_failure_count),
         state_flat=None,
         frame=int(frames),
         generation=int(generation),

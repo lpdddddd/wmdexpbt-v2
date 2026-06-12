@@ -308,6 +308,71 @@ class TestEIRSmokePreflight(unittest.TestCase):
         self.assertTrue(planner.cfg.stochastic_rollouts)
         self.assertEqual(planner.cfg.num_latent_samples, 4)
 
+    def test_eir_mppi_ensemble_3b_preflight(self):
+        from dexpbt_isaaclab.world_model.rssm_belief_provider import (
+            build_rssm_belief_cache,
+            BELIEF_OK,
+        )
+        from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
+        from dexpbt_isaaclab.world_model.rssm_ensemble import (
+            RSSMEnsembleConfig,
+            RSSMEnsembleManager,
+        )
+        from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
+            RSSMMPPIConfig,
+            RSSMMPPIPlanner,
+        )
+
+        T, N, OBS, ACT = 6, 4, 12, 4
+        td = {
+            "obses": torch.randn(T, N, OBS),
+            "actions": torch.randn(T, N, ACT).clamp(-1, 1),
+            "rewards": torch.randn(T, N, 1),
+            "dones": torch.zeros(T, N, 1),
+            "aux_d_hat": torch.rand(T, N, 1),
+            "aux_failure": torch.zeros(T, N, 1),
+            "aux_lifted": torch.ones(T, N, 1),
+            "aux_success_cnt": torch.zeros(T, N, 1),
+            "aux_success_tolerance": torch.full((T, N, 1), 0.02),
+            "aux_picked": torch.zeros(T, N, 1),
+            "aux_dropped": torch.zeros(T, N, 1),
+            "aux_closest_d_hat": torch.rand(T, N, 1),
+        }
+        exp_buf = types.SimpleNamespace(tensor_dict=td)
+        members = [
+            RSSMLiteWorldModel(
+                obs_dim=OBS, action_dim=ACT, obs_embed_dim=32, action_embed_dim=16,
+                h_dim=24, z_dim=8, head_hidden=32, aux_dim=12, aux_embed_dim=16,
+            )
+            for _ in range(3)
+        ]
+        mgr = RSSMEnsembleManager(members, RSSMEnsembleConfig(enabled=True, size=3))
+        self.assertEqual(mgr.size, 3)
+        cache = build_rssm_belief_cache(
+            seq_wm_trainer=types.SimpleNamespace(model=members[0], device=torch.device("cpu")),
+            experience_buffer=exp_buf,
+            returns_full=torch.randn(T, N),
+            last_obs=torch.randn(N, OBS),
+            last_d_hat=torch.rand(N, 1),
+            last_success_count=torch.zeros(N, 1),
+            frames=1000, generation=1, device=torch.device("cpu"),
+            ensemble_models=mgr.models,
+        )
+        print("[EIR-MPPI ensemble preflight] belief_cache_valid + ensemble_valid_size>=2 expected")
+        self.assertTrue(cache.valid)
+        self.assertEqual(cache.fallback_reason, BELIEF_OK)
+        self.assertGreaterEqual(cache.ensemble_valid_size, 2)
+        planner = RSSMMPPIPlanner(
+            RSSMMPPIConfig(
+                enabled=True, mode="full", stochastic_rollouts=True,
+                num_latent_samples=2, start_after_frames=0,
+                use_model_ensemble=True, ensemble_size=3,
+                ensemble_min_valid_models=2,
+            )
+        )
+        self.assertTrue(planner.cfg.use_model_ensemble)
+        self.assertEqual(planner.cfg.ensemble_min_valid_models, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

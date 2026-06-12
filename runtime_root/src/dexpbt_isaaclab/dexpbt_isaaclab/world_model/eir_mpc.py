@@ -369,9 +369,16 @@ class EIRBridge:
     # candidate. All optional: missing -> light path -> elite/scorer fallback.
     rssm_planner: Any = None
     rssm_model: Any = None
+    # Optional list of independent RSSM models for the ensemble MPPI scoring
+    # path. None -> single-model MPPI (unchanged). Set only when
+    # --eir_mppi_use_model_ensemble is enabled.
+    rssm_models: Any = None
     rssm_belief_cache: Any = None
     last_mppi_active: float = 0.0
     last_mppi_belief_valid: float = 0.0
+    last_mppi_use_model_ensemble: float = 0.0
+    last_mppi_ensemble_valid_size: float = 0.0
+    last_mppi_ensemble_score_std: float = 0.0
     last_mppi_score_std: float = 0.0
     last_mppi_drop_cvar: float = 0.0
     last_mppi_uncertainty_cvar: float = 0.0
@@ -472,12 +479,25 @@ def _maybe_rssm_candidate_action(
 
     # ---- belief for risky rows from the per-rollout cache ----
     belief_r: Optional[torch.Tensor] = None
+    belief_r_ensemble: Optional[list] = None
     cache_obj = bridge.rssm_belief_cache
     if cache_obj is not None and getattr(cache_obj, "valid", False):
         bridge.last_mppi_belief_valid = 1.0
         sl = cache_obj.slice_rows(int(start), int(end))
         if sl is not None and int(sl.shape[0]) == int(risky.shape[0]):
             belief_r = sl[risky].to(device=dev, dtype=dtype)
+        # ensemble per-member beliefs for the risky rows (None entries kept)
+        if bridge.rssm_models is not None and hasattr(cache_obj, "slice_rows_ensemble"):
+            sl_ens = cache_obj.slice_rows_ensemble(int(start), int(end))
+            if sl_ens is not None:
+                tmp_list: list = []
+                for b in sl_ens:
+                    if b is None or int(b.shape[0]) != int(risky.shape[0]):
+                        tmp_list.append(None)
+                    else:
+                        tmp_list.append(b[risky].to(device=dev, dtype=dtype))
+                if any(x is not None for x in tmp_list):
+                    belief_r_ensemble = tmp_list
     # legacy provider (returns belief directly from features) as a secondary
     if belief_r is None and bridge.rssm_belief_provider is not None:
         try:
@@ -495,8 +515,19 @@ def _maybe_rssm_candidate_action(
                 candidate_actions=cand_out["cand"].detach(),
                 rssm_model=bridge.rssm_model,
                 frames=int(frames),
+                belief_flat_ensemble=belief_r_ensemble,
+                rssm_models=bridge.rssm_models,
             )
             bridge.last_mppi_active = 1.0 if out.get("active") else 0.0
+            bridge.last_mppi_use_model_ensemble = float(
+                getattr(planner, "last_use_model_ensemble", 0.0)
+            )
+            bridge.last_mppi_ensemble_valid_size = float(
+                getattr(planner, "last_ensemble_valid_size", 0.0)
+            )
+            bridge.last_mppi_ensemble_score_std = float(
+                getattr(planner, "last_ensemble_score_std", 0.0)
+            )
             bridge.last_mppi_stochastic_rollouts = float(
                 getattr(planner, "last_stochastic_rollouts", 0.0)
             )

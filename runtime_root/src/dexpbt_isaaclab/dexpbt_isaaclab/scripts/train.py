@@ -1517,6 +1517,19 @@ parser.add_argument(
     choices=["mean", "mean_minus_std", "cvar"],
 )
 parser.add_argument("--eir_mppi_max_rollout_batch", type=int, default=65536)
+# Full RSSM ensemble (MPPI scoring only). Default off -> single-model behaviour.
+parser.add_argument("--seq_wm_ensemble_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--seq_wm_ensemble_size", type=int, default=1)
+parser.add_argument("--seq_wm_ensemble_bootstrap", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--seq_wm_ensemble_bootstrap_keep_prob", type=float, default=0.8)
+parser.add_argument("--seq_wm_ensemble_save", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--seq_wm_ensemble_load_mode", type=str, default="reset", choices=["reset", "resume"])
+parser.add_argument("--eir_mppi_use_model_ensemble", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_mppi_ensemble_risk_beta", type=float, default=0.0)
+parser.add_argument("--eir_mppi_ensemble_drop_weight", type=float, default=0.0)
+parser.add_argument("--eir_mppi_ensemble_uncertainty_weight", type=float, default=0.0)
+parser.add_argument("--eir_mppi_ensemble_min_valid_models", type=int, default=2)
+parser.add_argument("--eir_mppi_ensemble_max_models_per_plan", type=int, default=3)
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
@@ -1708,6 +1721,10 @@ from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
     RSSMMPPIPlanner,
 )
 from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_cache
+from dexpbt_isaaclab.world_model.rssm_ensemble import (
+    RSSMEnsembleConfig,
+    RSSMEnsembleManager,
+)
 
 
 # ----------------------------------------------------------------------
@@ -2539,6 +2556,16 @@ def _patch_actor_train_for_seq_wm(
                         if _returns_full.shape[-1] == 1:
                             _returns_full = _returns_full.squeeze(-1)
                     _last_obs = actor.obs["obs"] if isinstance(actor.obs, dict) else actor.obs
+                    # ensemble member beliefs only when the bridge actually uses
+                    # the ensemble MPPI path (rssm_models set during wiring).
+                    _ens_models_for_cache = None
+                    _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
+                    if (
+                        getattr(eir_bridge, "rssm_models", None) is not None
+                        and _ens_mgr is not None
+                        and _ens_mgr.size > 1
+                    ):
+                        _ens_models_for_cache = _ens_mgr.models
                     eir_bridge.rssm_belief_cache = build_rssm_belief_cache(
                         seq_wm_trainer=seq_wm_trainer,
                         experience_buffer=actor.experience_buffer,
@@ -2550,6 +2577,7 @@ def _patch_actor_train_for_seq_wm(
                         generation=int(rollout_state.get("generation", -1)),
                         device=seq_wm_trainer.device,
                         enabled=True,
+                        ensemble_models=_ens_models_for_cache,
                     )
                 except Exception as _bc_exc:
                     print(f"[EIR-belief] cache build failed: {_bc_exc}")
@@ -2659,14 +2687,41 @@ def _patch_actor_train_for_seq_wm(
             last_success_count = capture.get("last_success_count")
 
             frames = int(getattr(actor, "frame", 0) or 0)
+            _returns_for_step = (
+                returns_full.squeeze(-1) if returns_full.shape[-1] == 1 else returns_full
+            )
             metrics = seq_wm_trainer.step(
                 experience_buffer=actor.experience_buffer,
                 frames=frames,
                 last_obs=last_obs_t,
-                returns_full=returns_full.squeeze(-1) if returns_full.shape[-1] == 1 else returns_full,
+                returns_full=_returns_for_step,
                 last_d_hat=last_d_hat,
                 last_success_count=last_success_count,
             )
+
+            # ---- ensemble member training (MPPI scoring ensemble only) ----
+            # Members 1..E-1 train on the SAME rollout but independently sampled
+            # sequence minibatches. Member 0 is the primary trainer stepped
+            # above. No-op when the ensemble is disabled.
+            _ens_trainers = getattr(seq_wm_trainer, "_rssm_ensemble_trainers", [seq_wm_trainer])
+            _ens_member_metrics: list[dict] = []
+            if len(_ens_trainers) > 1:
+                for _em_i, _em_trainer in enumerate(_ens_trainers):
+                    if _em_i == 0:
+                        _ens_member_metrics.append(metrics)
+                        continue
+                    try:
+                        _m = _em_trainer.step(
+                            experience_buffer=actor.experience_buffer,
+                            frames=frames,
+                            last_obs=last_obs_t,
+                            returns_full=_returns_for_step,
+                            last_d_hat=last_d_hat,
+                            last_success_count=last_success_count,
+                        )
+                        _ens_member_metrics.append(_m)
+                    except Exception as _em_exc:
+                        print(f"[RSSM-ensemble] member {_em_i} step failed: {_em_exc}")
 
             # ----------------------------------------------------------
             # Phase A4 P4 wired (2026-06-10): teacher eval + imagined eval.
@@ -2707,6 +2762,40 @@ def _patch_actor_train_for_seq_wm(
                             tb_writer.add_scalar(tag, float(v), frames)
                         except Exception:
                             pass
+            if tb_writer is not None and len(_ens_trainers) > 1:
+                # per-member + aggregate ensemble seq-WM training metrics.
+                _loss_totals: list[float] = []
+                for _em_i, _m in enumerate(_ens_member_metrics):
+                    if not isinstance(_m, dict):
+                        continue
+                    for _kk in ("loss_total", "loss_kl", "loss_success", "loss_recovery"):
+                        _vv = _m.get(_kk)
+                        if isinstance(_vv, (int, float)):
+                            try:
+                                tb_writer.add_scalar(
+                                    f"seq_wm_ensemble/member_{_em_i}/{_kk}",
+                                    float(_vv), frames,
+                                )
+                            except Exception:
+                                pass
+                    if isinstance(_m.get("loss_total"), (int, float)):
+                        _loss_totals.append(float(_m["loss_total"]))
+                try:
+                    import statistics as _stats
+                    tb_writer.add_scalar("seq_wm_ensemble/size", float(len(_ens_trainers)), frames)
+                    tb_writer.add_scalar("seq_wm_ensemble/train_active", 1.0, frames)
+                    if _loss_totals:
+                        tb_writer.add_scalar(
+                            "seq_wm_ensemble/loss_total_mean",
+                            float(sum(_loss_totals) / len(_loss_totals)), frames,
+                        )
+                        tb_writer.add_scalar(
+                            "seq_wm_ensemble/loss_total_std",
+                            float(_stats.pstdev(_loss_totals)) if len(_loss_totals) > 1 else 0.0,
+                            frames,
+                        )
+                except Exception:
+                    pass
             if tb_writer is not None:
                 for k, v in terminal_metrics.items():
                     try:
@@ -2873,6 +2962,8 @@ def _patch_actor_train_for_seq_wm(
                         "prior_rollout": 0.0,
                         "stochastic_prior_rollout": 1.0,
                         "fixed_belief_fallback": 2.0,
+                        "ensemble_prior_rollout": 4.0,
+                        "ensemble_stochastic_prior_rollout": 5.0,
                     }
                     _bc = getattr(xb, "rssm_belief_cache", None)
                     extra_eir = {
@@ -2924,6 +3015,25 @@ def _patch_actor_train_for_seq_wm(
                             "belief_cache_aux_zero_filled": float(
                                 bool(getattr(_bc, "aux_zero_filled", False)) if _bc is not None else 0.0
                             ),
+                            "belief_cache_ensemble_size": float(
+                                getattr(_bc, "ensemble_size", 1) if _bc is not None else 1
+                            ),
+                            "belief_cache_ensemble_valid_size": float(
+                                getattr(_bc, "ensemble_valid_size", 1) if _bc is not None else 1
+                            ),
+                            "belief_cache_ensemble_partial_failure_count": float(
+                                getattr(_bc, "ensemble_partial_failure_count", 0) if _bc is not None else 0
+                            ),
+                            "use_model_ensemble": float(getattr(planner, "last_use_model_ensemble", 0.0)),
+                            "ensemble_size": float(getattr(planner, "last_ensemble_size", 0.0)),
+                            "ensemble_valid_size": float(getattr(planner, "last_ensemble_valid_size", 0.0)),
+                            "ensemble_score_std": float(getattr(planner, "last_ensemble_score_std", 0.0)),
+                            "ensemble_score_std_mean": float(getattr(planner, "last_ensemble_score_std", 0.0)),
+                            "ensemble_drop_worst": float(getattr(planner, "last_ensemble_drop_worst", 0.0)),
+                            "ensemble_uncertainty_worst": float(getattr(planner, "last_ensemble_uncertainty_worst", 0.0)),
+                            "ensemble_risk_beta": float(getattr(planner, "last_ensemble_risk_beta", 0.0)),
+                            "ensemble_drop_weight": float(getattr(planner, "last_ensemble_drop_weight", 0.0)),
+                            "ensemble_uncertainty_weight": float(getattr(planner, "last_ensemble_uncertainty_weight", 0.0)),
                         }
                         for k, v in mppi_scalars.items():
                             try:
@@ -3157,6 +3267,15 @@ def _patch_actor_train_for_seq_wm(
                     save_dir.mkdir(parents=True, exist_ok=True)
                     payload = seq_wm_trainer.state_dict()
                     payload["frames"] = frames
+                    # Minimal ensemble checkpoint: member model state_dicts only
+                    # (optimizers reset on resume). Member 0 == primary model,
+                    # already covered by payload["model_state_dict"].
+                    _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
+                    if _ens_mgr is not None and _ens_mgr.size > 1 and _ens_mgr.cfg.save_ensemble:
+                        try:
+                            payload["rssm_ensemble"] = _ens_mgr.state_dict()
+                        except Exception as _ens_exc:
+                            print(f"[RSSM-ensemble] checkpoint export failed: {_ens_exc}")
                     tmp = save_dir / "wm_seq_latest.pt.tmp"
                     final = save_dir / "wm_seq_latest.pt"
                     torch.save(payload, tmp)
@@ -4064,6 +4183,24 @@ class _WmEnabledRunner(Runner):
                 if mppi_cfg is not None and mppi_cfg.enabled and _is_rssm:
                     eir_bridge.rssm_planner = RSSMMPPIPlanner(mppi_cfg)
                     eir_bridge.rssm_model = _wm_model
+                    # ensemble models for MPPI scoring (only when both the
+                    # ensemble manager exists AND --eir_mppi_use_model_ensemble
+                    # is set). Otherwise stays None -> single-model MPPI.
+                    _ens_mgr = getattr(self.seq_wm_trainer, "_rssm_ensemble_manager", None)
+                    if (
+                        getattr(mppi_cfg, "use_model_ensemble", False)
+                        and _ens_mgr is not None
+                        and _ens_mgr.size > 1
+                    ):
+                        eir_bridge.rssm_models = _ens_mgr.models
+                        print(
+                            f"[EIR-MPPI] model ensemble attached: size={_ens_mgr.size} "
+                            f"min_valid={mppi_cfg.ensemble_min_valid_models} "
+                            f"ens_risk_beta={mppi_cfg.ensemble_risk_beta} "
+                            f"ens_drop_w={mppi_cfg.ensemble_drop_weight}"
+                        )
+                    else:
+                        eir_bridge.rssm_models = None
                     print(
                         f"[EIR-MPPI] full H-step planner attached: "
                         f"H={mppi_cfg.horizon} K={mppi_cfg.num_sequences} "
@@ -4609,19 +4746,20 @@ def main():
         # RSSM uses 12 only when use_task_aux_inputs is True. The default
         # zero falls back to the legacy posterior input shape.
         rssm_aux_dim = 12 if seq_cfg.use_task_aux_inputs else 0
+        _rssm_model_kwargs = dict(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            free_nats=seq_cfg.free_nats,
+            with_value_head=with_value,
+            aux_dim=rssm_aux_dim,
+            aux_embed_dim=seq_cfg.aux_embed_dim,
+            with_horizon_heads=seq_cfg.use_horizon_heads,
+            horizon_steps=seq_cfg.horizon_steps,
+            with_recovery_head=seq_cfg.use_recovery_head,
+            recovery_horizon=seq_cfg.recovery_horizon,
+        )
         if args_cli.wm_strategy in RSSM_FAMILY:
-            seq_model = RSSMLiteWorldModel(
-                obs_dim=obs_dim,
-                action_dim=action_dim,
-                free_nats=seq_cfg.free_nats,
-                with_value_head=with_value,
-                aux_dim=rssm_aux_dim,
-                aux_embed_dim=seq_cfg.aux_embed_dim,
-                with_horizon_heads=seq_cfg.use_horizon_heads,
-                horizon_steps=seq_cfg.horizon_steps,
-                with_recovery_head=seq_cfg.use_recovery_head,
-                recovery_horizon=seq_cfg.recovery_horizon,
-            )
+            seq_model = RSSMLiteWorldModel(**_rssm_model_kwargs)
         elif args_cli.wm_strategy in TRANS_FAMILY:
             seq_model = TransformerLiteWorldModel(
                 obs_dim=obs_dim,
@@ -4641,6 +4779,58 @@ def main():
             device=rl_device,
             strategy=args_cli.wm_strategy,
         )
+
+        # ------------------------------------------------------------------
+        # Full RSSM ensemble (MPPI scoring only). Member 0 is the primary
+        # trainer above; members 1..E-1 are independent RSSM models with their
+        # own trainers/optimizers and per-member sampler RNG (bootstrap
+        # diversity). Disabled by default and for non-RSSM backbones, in which
+        # case the ensemble collapses to the single primary trainer and nothing
+        # downstream changes.
+        # ------------------------------------------------------------------
+        _ens_enable = bool(args_cli.seq_wm_ensemble_enable)
+        _ens_size = max(1, int(args_cli.seq_wm_ensemble_size))
+        seq_wm_trainer._rssm_ensemble_manager = None
+        seq_wm_trainer._rssm_ensemble_trainers = [seq_wm_trainer]
+        if _ens_enable and _ens_size > 1 and args_cli.wm_strategy in RSSM_FAMILY:
+            ensemble_cfg = RSSMEnsembleConfig(
+                enabled=True,
+                size=_ens_size,
+                use_bootstrap_masks=bool(args_cli.seq_wm_ensemble_bootstrap),
+                bootstrap_keep_prob=float(args_cli.seq_wm_ensemble_bootstrap_keep_prob),
+                device=str(rl_device),
+                save_ensemble=bool(args_cli.seq_wm_ensemble_save),
+                load_mode=str(args_cli.seq_wm_ensemble_load_mode),
+            )
+            ensemble_trainers = [seq_wm_trainer]
+            for _e in range(1, _ens_size):
+                # Each member is an independently-initialised RSSM with its own
+                # trainer/optimizer/sampler. Diversity comes from (a) independent
+                # random init and (b) independent sequence minibatches: members
+                # are stepped sequentially so each .sample() consumes fresh draws
+                # from the global RNG (no shared minibatch).
+                _member_model = RSSMLiteWorldModel(**_rssm_model_kwargs)
+                _member_trainer = SeqWMTrainer(
+                    model=_member_model,
+                    cfg=seq_cfg,
+                    device=rl_device,
+                    strategy=args_cli.wm_strategy,
+                )
+                ensemble_trainers.append(_member_trainer)
+            seq_wm_trainer._rssm_ensemble_manager = RSSMEnsembleManager(
+                [t.model for t in ensemble_trainers], ensemble_cfg
+            )
+            seq_wm_trainer._rssm_ensemble_trainers = ensemble_trainers
+            print(
+                f"[RSSM-ensemble] enabled: size={_ens_size} "
+                f"bootstrap={bool(args_cli.seq_wm_ensemble_bootstrap)} "
+                f"keep_prob={float(args_cli.seq_wm_ensemble_bootstrap_keep_prob)}"
+            )
+        elif _ens_enable and _ens_size > 1 and args_cli.wm_strategy not in RSSM_FAMILY:
+            print(
+                "[RSSM-ensemble] requested but backbone is not RSSM family; "
+                "ensemble disabled (single model)."
+            )
 
         # FloorCritic: attach cfg + (lazy) bridge/target-builder on the trainer
         # so both the runner wiring (head/hook/patch) and the patched
@@ -4802,6 +4992,13 @@ def main():
             uncertainty_cvar_weight=float(args_cli.eir_mppi_uncertainty_cvar_weight),
             score_aggregation=str(args_cli.eir_mppi_score_aggregation),
             max_rollout_batch=int(args_cli.eir_mppi_max_rollout_batch),
+            use_model_ensemble=bool(args_cli.eir_mppi_use_model_ensemble),
+            ensemble_size=int(args_cli.seq_wm_ensemble_size),
+            ensemble_risk_beta=float(args_cli.eir_mppi_ensemble_risk_beta),
+            ensemble_drop_weight=float(args_cli.eir_mppi_ensemble_drop_weight),
+            ensemble_uncertainty_weight=float(args_cli.eir_mppi_ensemble_uncertainty_weight),
+            ensemble_min_valid_models=int(args_cli.eir_mppi_ensemble_min_valid_models),
+            ensemble_max_models_per_plan=int(args_cli.eir_mppi_ensemble_max_models_per_plan),
         )
         eir_broadcast_cfg = EliteBroadcastConfig(
             enabled=eir_enabled
@@ -4984,6 +5181,21 @@ def main():
                         f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path} "
                         f"(src={src_strategy}, reason={compat_reason})"
                     )
+                    # ensemble members (model state_dicts only; optimizers reset).
+                    _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
+                    if _ens_mgr is not None and _ens_mgr.size > 1:
+                        if _ens_mgr.cfg.load_mode != "reset" and isinstance(
+                            payload.get("rssm_ensemble"), dict
+                        ):
+                            loaded = _ens_mgr.load_state_dict(
+                                payload["rssm_ensemble"], strict=False
+                            )
+                            print(f"[RSSM-ensemble] loaded {loaded} member(s) from checkpoint")
+                        else:
+                            print(
+                                "[RSSM-ensemble] no ensemble state loaded "
+                                f"(load_mode={_ens_mgr.cfg.load_mode}); fresh members"
+                            )
                 elif "model_state_dict" in payload:
                     print(
                         f"[SeqWM] skip warm-start from {wm_seq_ckpt_path}: "

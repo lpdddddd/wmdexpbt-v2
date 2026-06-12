@@ -286,6 +286,19 @@ class RSSMMPPIConfig:
     score_aggregation: str = "mean"  # mean | mean_minus_std | cvar
     max_rollout_batch: int = 65536
 
+    # Full RSSM ensemble for MPPI scoring only (default off -> single-model
+    # behaviour unchanged). Disagreement across independent RSSM members adds an
+    # epistemic-uncertainty penalty so a single over-optimistic model cannot
+    # push a harmful SRC_RSSM candidate.
+    use_model_ensemble: bool = False
+    ensemble_size: int = 1
+    ensemble_risk_beta: float = 0.0
+    ensemble_drop_weight: float = 0.0
+    ensemble_uncertainty_weight: float = 0.0
+    ensemble_min_valid_models: int = 2
+    ensemble_subsample_models: bool = False
+    ensemble_max_models_per_plan: int = 3
+
     def __post_init__(self) -> None:
         self.horizon = max(1, int(self.horizon))
         self.num_sequences = max(1, int(self.num_sequences))
@@ -293,6 +306,9 @@ class RSSMMPPIConfig:
         self.cem_iters = max(1, int(self.cem_iters))
         self.num_latent_samples = max(1, int(self.num_latent_samples))
         self.max_rollout_batch = max(1, int(self.max_rollout_batch))
+        self.ensemble_size = max(1, int(self.ensemble_size))
+        self.ensemble_min_valid_models = max(1, int(self.ensemble_min_valid_models))
+        self.ensemble_max_models_per_plan = max(1, int(self.ensemble_max_models_per_plan))
         agg = str(self.score_aggregation or "mean").strip().lower()
         if agg not in ("mean", "mean_minus_std", "cvar"):
             agg = "mean"
@@ -342,6 +358,16 @@ class RSSMMPPIPlanner:
         self.last_risk_adjusted_margin = 0.0
         self.last_risk_beta = 0.0
         self.last_drop_cvar_weight = 0.0
+        # ensemble MPPI scoring telemetry
+        self.last_use_model_ensemble = 0.0
+        self.last_ensemble_size = 0.0
+        self.last_ensemble_valid_size = 0.0
+        self.last_ensemble_score_std = 0.0
+        self.last_ensemble_drop_worst = 0.0
+        self.last_ensemble_uncertainty_worst = 0.0
+        self.last_ensemble_risk_beta = 0.0
+        self.last_ensemble_drop_weight = 0.0
+        self.last_ensemble_uncertainty_weight = 0.0
 
     # ---- helpers --------------------------------------------------------
     def _inactive(self, reason: int, B: int, A: int, actor_action: torch.Tensor, dev, dtype) -> dict:
@@ -562,6 +588,9 @@ class RSSMMPPIPlanner:
         unc_final = unc_cvar if m > 1 else unc_samples.squeeze(-1)
         return {
             "score": score_final,
+            # raw mean over latent samples, BEFORE single-model risk penalties.
+            # Used by the ensemble path to avoid double-counting risk terms.
+            "score_mean": score_mean,
             "uncertainty": unc_final,
             "score_std": score_std,
             "drop_cvar": drop_cvar,
@@ -621,6 +650,7 @@ class RSSMMPPIPlanner:
             )
             return {
                 "score": agg["score"],
+                "score_mean": agg["score_mean"],
                 "uncertainty": agg["uncertainty"],
                 "score_std": agg["score_std"],
                 "drop_cvar": agg["drop_cvar"],
@@ -633,11 +663,91 @@ class RSSMMPPIPlanner:
         zeros_bk = torch.zeros(b, k, device=dev, dtype=dtype)
         return {
             "score": score,
+            "score_mean": score,
             "uncertainty": unc_bk,
             "score_std": zeros_bk,
             "drop_cvar": flat["drop_max"].reshape(b, k),
             "uncertainty_cvar": unc_bk,
             "imagine_mode": imagine_mode,
+        }
+
+    @torch.no_grad()
+    def _rollout_and_score_ensemble(
+        self,
+        *,
+        belief_flat_list: list[torch.Tensor],
+        seq: torch.Tensor,
+        actor_action: torch.Tensor,
+        rssm_models: list,
+    ) -> dict:
+        """Score each sequence with an RSSM ensemble (model-disagreement).
+
+        Each member's per-sequence ``score_mean`` (raw mean over latent
+        samples, no single-model risk penalty) and its latent std / drop /
+        uncertainty are collected, then risk terms are applied ONCE across the
+        ensemble so there is no double-counting with the single-model path.
+        """
+        cfg = self.cfg
+        b, k, _h, _a = seq.shape
+        dev, dtype = seq.device, seq.dtype
+
+        score_list: list[torch.Tensor] = []
+        latent_std_list: list[torch.Tensor] = []
+        drop_list: list[torch.Tensor] = []
+        unc_list: list[torch.Tensor] = []
+        imagine_mode = "none"
+        for model_e, belief_e in zip(rssm_models, belief_flat_list):
+            out_e = self._rollout_and_score(
+                belief_flat=belief_e,
+                seq=seq,
+                actor_action=actor_action,
+                rssm_model=model_e,
+            )
+            score_list.append(out_e["score_mean"])  # raw mean, no risk penalty
+            latent_std_list.append(out_e["score_std"])
+            drop_list.append(out_e["drop_cvar"])
+            unc_list.append(out_e["uncertainty"])
+            imagine_mode = str(out_e.get("imagine_mode", imagine_mode))
+
+        e = len(score_list)
+        score_stack = torch.stack(score_list, dim=-1)          # [B,K,E]
+        latent_std_stack = torch.stack(latent_std_list, dim=-1)
+        drop_stack = torch.stack(drop_list, dim=-1)
+        unc_stack = torch.stack(unc_list, dim=-1)
+
+        score_mean = score_stack.mean(dim=-1)                  # [B,K]
+        ensemble_score_std = (
+            score_stack.std(dim=-1, unbiased=False)
+            if e > 1 else torch.zeros(b, k, device=dev, dtype=dtype)
+        )
+        latent_score_std = latent_std_stack.mean(dim=-1)
+        drop_ensemble_worst = drop_stack.max(dim=-1).values
+        unc_ensemble_worst = unc_stack.max(dim=-1).values
+
+        score_final = (
+            score_mean
+            - float(cfg.risk_beta) * latent_score_std
+            - float(cfg.ensemble_risk_beta) * ensemble_score_std
+            - float(cfg.drop_cvar_weight) * drop_ensemble_worst
+            - float(cfg.ensemble_drop_weight) * drop_ensemble_worst
+            - float(cfg.uncertainty_cvar_weight) * unc_ensemble_worst
+            - float(cfg.ensemble_uncertainty_weight) * unc_ensemble_worst
+        )
+
+        stochastic = "stochastic" in imagine_mode
+        ens_mode = (
+            "ensemble_stochastic_prior_rollout" if stochastic
+            else "ensemble_prior_rollout"
+        )
+        return {
+            "score": score_final,
+            "uncertainty": unc_ensemble_worst,
+            "score_std": latent_score_std,
+            "ensemble_score_std": ensemble_score_std,
+            "drop_cvar": drop_ensemble_worst,
+            "uncertainty_cvar": unc_ensemble_worst,
+            "ensemble_valid_size": e,
+            "imagine_mode": ens_mode,
         }
 
     # ---- main entry -----------------------------------------------------
@@ -650,6 +760,8 @@ class RSSMMPPIPlanner:
         candidate_actions: torch.Tensor,
         rssm_model,
         frames: int,
+        belief_flat_ensemble: Optional[list] = None,
+        rssm_models: Optional[list] = None,
     ) -> dict:
         cfg = self.cfg
         B, A = actor_action.shape
@@ -664,6 +776,12 @@ class RSSMMPPIPlanner:
         self.last_sample_temperature = float(cfg.sample_temperature)
         self.last_risk_beta = float(cfg.risk_beta)
         self.last_drop_cvar_weight = float(cfg.drop_cvar_weight)
+        self.last_use_model_ensemble = 0.0
+        self.last_ensemble_size = float(cfg.ensemble_size)
+        self.last_ensemble_valid_size = 0.0
+        self.last_ensemble_risk_beta = float(cfg.ensemble_risk_beta)
+        self.last_ensemble_drop_weight = float(cfg.ensemble_drop_weight)
+        self.last_ensemble_uncertainty_weight = float(cfg.ensemble_uncertainty_weight)
 
         if not cfg.enabled or cfg.mode == "off":
             return self._inactive(MPPI_DISABLED, B, A, actor_action, dev, dtype)
@@ -678,6 +796,49 @@ class RSSMMPPIPlanner:
         if int(belief_flat.shape[0]) != B:
             return self._inactive(MPPI_NO_BELIEF, B, A, actor_action, dev, dtype)
 
+        # ---- decide single-model vs ensemble scoring ----
+        ens_models: list = []
+        ens_beliefs: list = []
+        use_ensemble = False
+        if (
+            cfg.use_model_ensemble
+            and rssm_models is not None
+            and belief_flat_ensemble is not None
+            and len(rssm_models) == len(belief_flat_ensemble)
+            and len(rssm_models) > 1
+        ):
+            for model_e, belief_e in zip(rssm_models, belief_flat_ensemble):
+                if (
+                    model_e is not None
+                    and belief_e is not None
+                    and hasattr(model_e, "get_state_from_belief")
+                    and hasattr(model_e, "imagine_step")
+                    and int(belief_e.shape[0]) == B
+                ):
+                    ens_models.append(model_e)
+                    ens_beliefs.append(belief_e.to(device=dev, dtype=dtype))
+            if cfg.ensemble_subsample_models and len(ens_models) > int(cfg.ensemble_max_models_per_plan):
+                ens_models = ens_models[: int(cfg.ensemble_max_models_per_plan)]
+                ens_beliefs = ens_beliefs[: int(cfg.ensemble_max_models_per_plan)]
+            use_ensemble = len(ens_models) >= int(cfg.ensemble_min_valid_models)
+
+        def _score_seq(seq_in: torch.Tensor) -> dict:
+            if use_ensemble:
+                return self._rollout_and_score_ensemble(
+                    belief_flat_list=ens_beliefs,
+                    seq=seq_in,
+                    actor_action=actor_action,
+                    rssm_models=ens_models,
+                )
+            return self._rollout_and_score(
+                belief_flat=belief_flat, seq=seq_in, actor_action=actor_action,
+                rssm_model=rssm_model,
+            )
+
+        if use_ensemble:
+            self.last_use_model_ensemble = 1.0
+            self.last_ensemble_valid_size = float(len(ens_models))
+
         try:
             belief_flat = belief_flat.to(device=dev, dtype=dtype)
             H = int(cfg.horizon)
@@ -689,10 +850,7 @@ class RSSMMPPIPlanner:
                 seq, _actor_idx = self._build_sequences(
                     actor_action, candidate_actions, mean_seq, std
                 )
-                last = self._rollout_and_score(
-                    belief_flat=belief_flat, seq=seq, actor_action=actor_action,
-                    rssm_model=rssm_model,
-                )
+                last = _score_seq(seq)
                 if it < int(cfg.cem_iters) - 1:
                     # CEM refit: take top num_elite, update mean over their steps,
                     # decay std, then resample on the next iter.
@@ -710,6 +868,7 @@ class RSSMMPPIPlanner:
             score_std_bk = last.get("score_std")
             drop_cvar_bk = last.get("drop_cvar")
             unc_cvar_bk = last.get("uncertainty_cvar")
+            ensemble_score_std_bk = last.get("ensemble_score_std")
             self.last_imagine_mode = last["imagine_mode"]
             self.last_num_sequences = int(seq.shape[1])
 
@@ -746,6 +905,13 @@ class RSSMMPPIPlanner:
             else:
                 self.last_uncertainty_cvar = 0.0
             self.last_risk_adjusted_margin = float(risk_adjusted_margin.mean().item())
+            if use_ensemble and isinstance(ensemble_score_std_bk, torch.Tensor):
+                self.last_ensemble_score_std = float(ensemble_score_std_bk[rows, best_idx].mean().item())
+                self.last_ensemble_drop_worst = float(
+                    drop_cvar_bk[rows, best_idx].mean().item()
+                    if isinstance(drop_cvar_bk, torch.Tensor) else 0.0
+                )
+                self.last_ensemble_uncertainty_worst = float(best_unc.mean().item())
             self.last_high_uncertainty_fraction = float(
                 (best_unc > float(cfg.uncertainty_threshold)).float().mean().item()
             )
@@ -804,6 +970,12 @@ class RSSMMPPIPlanner:
                 "best_first_action_delta": first_delta,
                 "mode": cfg.mode,
                 "imagine_mode": self.last_imagine_mode,
+                "use_model_ensemble": float(self.last_use_model_ensemble),
+                "ensemble_valid_size": float(self.last_ensemble_valid_size),
+                "ensemble_score_std": (
+                    ensemble_score_std_bk[rows, best_idx]
+                    if isinstance(ensemble_score_std_bk, torch.Tensor) else None
+                ),
             }
         except Exception as exc:  # pragma: no cover - defensive
             if cfg.fail_fast:
