@@ -86,6 +86,70 @@ class TestBeliefCache(unittest.TestCase):
         self.assertTrue(cache.valid)
         self.assertEqual(cache.fallback_reason, BELIEF_OK)
 
+    def test_rssm_belief_cache_with_aux_dim_12_valid(self):
+        model = RSSMLiteWorldModel(
+            obs_dim=OBS, action_dim=ACT, obs_embed_dim=32, action_embed_dim=16,
+            h_dim=24, z_dim=8, head_hidden=32, aux_dim=12, aux_embed_dim=16,
+            with_horizon_heads=True, with_recovery_head=True,
+        )
+        cache = build_rssm_belief_cache(
+            seq_wm_trainer=_trainer(model),
+            experience_buffer=_exp_buffer(with_task_aux=True),
+            returns_full=torch.randn(T, N),
+            last_obs=torch.randn(N, OBS),
+            last_d_hat=torch.rand(N, 1),
+            last_success_count=torch.zeros(N, 1),
+            frames=1000,
+            generation=2,
+            device=torch.device("cpu"),
+        )
+        self.assertTrue(cache.valid)
+        self.assertEqual(cache.fallback_reason, BELIEF_OK)
+        self.assertEqual(int(cache.belief_flat.shape[0]), T * N)
+        self.assertEqual(cache.belief_dim, model.belief_dim)
+
+    def test_rssm_belief_cache_flatten_alignment_still_holds_with_aux(self):
+        class _StubModel(nn.Module):
+            belief_dim = 3
+
+            def get_state_from_belief(self, b):
+                return b
+
+            class _Heads:
+                pass
+
+            heads = _Heads()
+            aux_dim = 12
+
+            def encode_sequence(self, batch, deterministic=False):
+                T_, N_ = batch.T, batch.B
+                assert batch.aux_scalars is not None
+                assert batch.aux_scalars.shape[-1] == 12
+                out = torch.zeros(T_, N_, self.belief_dim)
+                for t in range(T_):
+                    for n in range(N_):
+                        out[t, n, 0] = float(n * T_ + t)
+                return out
+
+        model = _StubModel()
+        cache = build_rssm_belief_cache(
+            seq_wm_trainer=_trainer(model),
+            experience_buffer=_exp_buffer(with_task_aux=True),
+            returns_full=torch.randn(T, N),
+            last_obs=torch.randn(N, OBS),
+            last_d_hat=torch.rand(N, 1),
+            last_success_count=torch.zeros(N, 1),
+            frames=0,
+            generation=0,
+            device=torch.device("cpu"),
+        )
+        self.assertTrue(cache.valid)
+        for t in range(T):
+            for n in range(N):
+                self.assertAlmostEqual(
+                    float(cache.belief_flat[n * T + t, 0]), float(n * T + t)
+                )
+
     def test_flatten_alignment(self):
         # Stub model whose encode_sequence writes belief_seq[t,n,0]=n*T+t so we
         # can verify flat[n*T+t] picks the right row.

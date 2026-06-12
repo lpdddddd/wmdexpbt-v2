@@ -32,6 +32,12 @@ BELIEF_STALE = 7
 BELIEF_NO_HEADS = 8
 
 
+def _aux_field_missing(experience_buffer: Any, name: str) -> bool:
+    from .wm_aux_buffer import read_aux_full
+
+    return read_aux_full(experience_buffer, name) is None
+
+
 @dataclass
 class RSSMBeliefCache:
     belief_flat: Optional[torch.Tensor]
@@ -43,6 +49,7 @@ class RSSMBeliefCache:
     valid: bool
     fallback_reason: int
     source: str
+    aux_zero_filled: bool = False
 
     @staticmethod
     def invalid(reason: int, *, frame: int = 0, generation: int = -1, source: str = "none") -> "RSSMBeliefCache":
@@ -173,9 +180,20 @@ def build_rssm_belief_cache(
 
         aux_scalars = None
         success_tolerance_seq = None
+        aux_zero_filled = False
         aux_dim = int(getattr(model, "aux_dim", 0) or 0)
         if aux_dim > 0:
             from .seq_wm_sampler import build_rollout_aux_scalars
+
+            optional_aux_names = (
+                "aux_success_tolerance",
+                "aux_picked",
+                "aux_dropped",
+                "aux_closest_d_hat",
+            )
+            aux_zero_filled = any(
+                _aux_field_missing(experience_buffer, name) for name in optional_aux_names
+            )
 
             aux_scalars = build_rollout_aux_scalars(
                 T=T,
@@ -201,6 +219,10 @@ def build_rssm_belief_cache(
                     BELIEF_SHAPE_MISMATCH, frame=frames, generation=generation
                 )
             success_tolerance_seq = succtol_2d
+            if aux_zero_filled:
+                print(
+                    "[EIR-belief] some task aux buffer fields missing; zero-filled aux_scalars"
+                )
 
         batch = SequenceBatch(
             obs=obs_full, action=action_full, reward=reward_2d, done=done_2d,
@@ -210,6 +232,9 @@ def build_rssm_belief_cache(
             valid_mask=valid_mask, segment_id=segment_id,
             aux_scalars=aux_scalars,
             success_tolerance_seq=success_tolerance_seq,
+            picked=picked_2d,
+            dropped=dropped_2d,
+            closest_d_hat=closest_2d,
             meta={"horizon_length": T, "num_actors": N, "seq_len": T, "seq_batch_size": N},
         ).to(device)
     except Exception as exc:  # pragma: no cover - defensive
@@ -253,6 +278,7 @@ def build_rssm_belief_cache(
         valid=True,
         fallback_reason=BELIEF_OK,
         source="rssm_encode_sequence",
+        aux_zero_filled=bool(aux_zero_filled),
     )
 
 

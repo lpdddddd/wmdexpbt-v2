@@ -252,8 +252,12 @@ class RSSMMPPIConfig:
     smooth_noise: bool = True
 
     include_actor_sequence: bool = True
+    # ``include_elite_sequence`` / ``include_archive_sequence``: when True, repeat
+    # non-actor EIR candidate first-actions as fixed H-step sequences. The planner
+    # does not receive per-candidate ``source_id`` yet, so elite vs archive filtering
+    # is not implemented; all candidate columns except index 0 (actor) are included.
     include_elite_sequence: bool = True
-    include_archive_sequence: bool = True
+    include_archive_sequence: bool = True  # reserved; same path as elite until source_id wired
 
     uncertainty_threshold: float = 0.4
     min_sequence_margin: float = 0.02
@@ -322,6 +326,7 @@ class RSSMMPPIPlanner:
         self.last_best_score = 0.0
         self.last_actor_score = 0.0
         self.last_score_margin = 0.0
+        self.last_raw_score_margin = 0.0
         self.last_uncertainty = 0.0
         self.last_best_first_action_delta = 0.0
         self.last_low_margin_fraction = 0.0
@@ -375,10 +380,11 @@ class RSSMMPPIPlanner:
         actor_seq = actor_action[:, None, :].expand(B, H, A).unsqueeze(1)  # [B,1,H,A]
         blocks.append(actor_seq)
 
-        # candidate-derived repeated sequences (elite/archive/local first-actions)
-        if cfg.include_elite_sequence and candidate_actions is not None and candidate_actions.shape[1] > 0:
-            cand_seq = candidate_actions[:, :, None, :].expand(
-                B, candidate_actions.shape[1], H, A
+        # candidate-derived repeated sequences (skip column 0 = actor baseline)
+        if cfg.include_elite_sequence and candidate_actions is not None and candidate_actions.shape[1] > 1:
+            cand_for_seq = candidate_actions[:, 1:, :]
+            cand_seq = cand_for_seq[:, :, None, :].expand(
+                B, cand_for_seq.shape[1], H, A
             )
             blocks.append(cand_seq)
 
@@ -714,22 +720,17 @@ class RSSMMPPIPlanner:
             best_seq = seq[rows, best_idx]            # [B, H, A]
             best_action = best_seq[:, 0, :]
             margin = best_score - actor_score
-            actor_score_std = (
-                score_std_bk[:, 0]
-                if isinstance(score_std_bk, torch.Tensor)
-                else torch.zeros(B, device=dev, dtype=dtype)
-            )
-            risk_adjusted_margin = margin - float(cfg.risk_beta) * (
-                score_std_bk[rows, best_idx] - actor_score_std
-                if isinstance(score_std_bk, torch.Tensor)
-                else torch.zeros(B, device=dev, dtype=dtype)
-            )
+            # ``score`` is already risk-adjusted in ``_aggregate_sample_scores`` when
+            # stochastic / mean_minus_std / CVaR penalties are enabled.
+            raw_score_margin = margin
+            risk_adjusted_margin = margin
             best_unc = unc[rows, best_idx]
             first_delta = (best_action - actor_action).norm(dim=-1)
 
             self.last_best_score = float(best_score.mean().item())
             self.last_actor_score = float(actor_score.mean().item())
             self.last_score_margin = float(margin.mean().item())
+            self.last_raw_score_margin = float(raw_score_margin.mean().item())
             self.last_uncertainty = float(best_unc.mean().item())
             self.last_best_first_action_delta = float(first_delta.mean().item())
             if isinstance(score_std_bk, torch.Tensor):

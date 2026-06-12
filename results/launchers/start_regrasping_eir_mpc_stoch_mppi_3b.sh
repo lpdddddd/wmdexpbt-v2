@@ -126,7 +126,6 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --curriculum_fast_recovery_consolidation_frames 100000000 \
   --curriculum_fast_target_tolerance_800m 0.04 \
   --pbt_curriculum_inherit_mode source_safe \
-  --pbt_source_safe_recovery_consolidation_frames 50000000 \
   --pbt_source_safe_recovery_consolidation_frames 100000000 \
   --pbt_source_safe_min_mean 20.0 \
   --pbt_source_safe_min_retention 0.7 \

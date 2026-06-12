@@ -250,6 +250,45 @@ class TestStochasticMPPI(unittest.TestCase):
             self.assertFalse(out["score"].requires_grad)
             self.assertFalse(spy.call_args.kwargs["belief_flat"].requires_grad)
 
+    def test_mppi_risk_adjusted_margin_not_double_penalized(self):
+        planner = RSSMMPPIPlanner(
+            _cfg(
+                stochastic_rollouts=True,
+                num_latent_samples=8,
+                num_sequences=0,
+                include_elite_sequence=False,
+                score_aggregation="mean_minus_std",
+                risk_beta=1.0,
+                min_sequence_margin=-1.0,
+            )
+        )
+        actor = torch.zeros(1, A)
+        cand = torch.randn(1, 3, A).clamp(-1, 1)
+        out = planner.plan(
+            belief_flat=torch.randn(1, D),
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=_ToyRSSM(torch.zeros(A)),
+            frames=1000,
+        )
+        self.assertAlmostEqual(
+            planner.last_risk_adjusted_margin,
+            planner.last_score_margin,
+            places=5,
+        )
+
+    def test_mppi_actor_sequence_not_duplicated(self):
+        planner = RSSMMPPIPlanner(_cfg(num_sequences=4, horizon=3, include_elite_sequence=True))
+        actor = torch.zeros(2, A)
+        cand = torch.randn(2, 5, A).clamp(-1, 1)
+        seq, actor_idx = planner._build_sequences(
+            actor, cand, actor[:, None, :].expand(2, 3, A), std=0.1
+        )
+        self.assertEqual(actor_idx, 0)
+        self.assertEqual(seq.shape[1], 1 + (cand.shape[1] - 1) + 4)
+        self.assertTrue(torch.allclose(seq[:, 0, 0, :], actor))
+        self.assertTrue(torch.allclose(seq[:, 1, 0, :], cand[:, 1, :]))
+
 
 if __name__ == "__main__":
     unittest.main()

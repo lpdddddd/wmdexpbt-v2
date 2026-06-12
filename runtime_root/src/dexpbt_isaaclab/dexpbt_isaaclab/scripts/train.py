@@ -2918,6 +2918,12 @@ def _patch_actor_train_for_seq_wm(
                             "belief_cache_valid": float(bool(_bc is not None and getattr(_bc, "valid", False))),
                             "belief_cache_rows": float(getattr(_bc, "rows", 0) if _bc is not None else 0),
                             "belief_cache_dim": float(getattr(_bc, "belief_dim", 0) if _bc is not None else 0),
+                            "belief_cache_fallback_reason": float(
+                                getattr(_bc, "fallback_reason", -1) if _bc is not None else -1
+                            ),
+                            "belief_cache_aux_zero_filled": float(
+                                bool(getattr(_bc, "aux_zero_filled", False)) if _bc is not None else 0.0
+                            ),
                         }
                         for k, v in mppi_scalars.items():
                             try:

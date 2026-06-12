@@ -248,6 +248,66 @@ class TestEIRSmokePreflight(unittest.TestCase):
         self.assertNotEqual(res["fallback_reason"], APPLY_AUX_MISSING)
         self.assertNotEqual(res["fallback_reason"], APPLY_BEFORE_WARMUP)
 
+    def test_eir_mppi_stoch_preflight_belief_cache_and_planner(self):
+        from dexpbt_isaaclab.world_model.rssm_belief_provider import (
+            build_rssm_belief_cache,
+            BELIEF_OK,
+        )
+        from dexpbt_isaaclab.world_model.rssm_lite import RSSMLiteWorldModel
+        from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
+            RSSMMPPIConfig,
+            RSSMMPPIPlanner,
+        )
+
+        T, N, OBS, ACT = 6, 4, 12, 4
+        td = {
+            "obses": torch.randn(T, N, OBS),
+            "actions": torch.randn(T, N, ACT).clamp(-1, 1),
+            "rewards": torch.randn(T, N, 1),
+            "dones": torch.zeros(T, N, 1),
+            "aux_d_hat": torch.rand(T, N, 1),
+            "aux_failure": torch.zeros(T, N, 1),
+            "aux_lifted": torch.ones(T, N, 1),
+            "aux_success_cnt": torch.zeros(T, N, 1),
+            "aux_success_tolerance": torch.full((T, N, 1), 0.02),
+            "aux_picked": torch.zeros(T, N, 1),
+            "aux_dropped": torch.zeros(T, N, 1),
+            "aux_closest_d_hat": torch.rand(T, N, 1),
+        }
+        exp_buf = types.SimpleNamespace(tensor_dict=td)
+        model = RSSMLiteWorldModel(
+            obs_dim=OBS, action_dim=ACT, obs_embed_dim=32, action_embed_dim=16,
+            h_dim=24, z_dim=8, head_hidden=32, aux_dim=12, aux_embed_dim=16,
+        )
+        self.assertEqual(model.aux_dim, 12)
+        cache = build_rssm_belief_cache(
+            seq_wm_trainer=types.SimpleNamespace(model=model, device=torch.device("cpu")),
+            experience_buffer=exp_buf,
+            returns_full=torch.randn(T, N),
+            last_obs=torch.randn(N, OBS),
+            last_d_hat=torch.rand(N, 1),
+            last_success_count=torch.zeros(N, 1),
+            frames=1000,
+            generation=1,
+            device=torch.device("cpu"),
+        )
+        print("[EIR-MPPI preflight] belief_cache_valid expected under task_aux_inputs=True")
+        print("[EIR-MPPI preflight] stochastic_prior_rollout expected after warmup")
+        self.assertTrue(cache.valid)
+        self.assertEqual(cache.fallback_reason, BELIEF_OK)
+        self.assertIsNotNone(cache.belief_flat)
+        planner = RSSMMPPIPlanner(
+            RSSMMPPIConfig(
+                enabled=True,
+                mode="full",
+                stochastic_rollouts=True,
+                num_latent_samples=4,
+                start_after_frames=0,
+            )
+        )
+        self.assertTrue(planner.cfg.stochastic_rollouts)
+        self.assertEqual(planner.cfg.num_latent_samples, 4)
+
 
 if __name__ == "__main__":
     unittest.main()

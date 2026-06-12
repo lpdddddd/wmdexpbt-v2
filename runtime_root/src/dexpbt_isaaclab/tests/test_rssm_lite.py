@@ -70,6 +70,19 @@ class RSSMShapeAndForwardTest(unittest.TestCase):
                          (self.T, self.B, self.model.belief_dim))
         self.assertEqual(self.model.belief_dim, 24 + 8)
 
+    def test_rssm_encode_sequence_zero_aux_fallback_no_shape_mismatch(self):
+        model = RSSMLiteWorldModel(
+            obs_dim=self.obs_dim, action_dim=self.action_dim,
+            obs_embed_dim=32, action_embed_dim=16,
+            h_dim=24, z_dim=8, head_hidden=32, aux_dim=12, aux_embed_dim=16,
+        )
+        batch = _make_batch(self.T, self.B, self.obs_dim, self.action_dim)
+        belief = model.encode_sequence(batch, deterministic=True)
+        self.assertEqual(tuple(belief.shape), (self.T, self.B, model.belief_dim))
+        self.assertAlmostEqual(
+            float(model.report_metrics().get("encode_sequence_zero_aux_fallback", 0.0)), 1.0
+        )
+
     def test_compute_aux_loss_finite_and_backward(self):
         batch = _make_batch(self.T, self.B, self.obs_dim, self.action_dim, seed=1)
         out = self.model.compute_aux_loss(batch, beta_kl=0.1)

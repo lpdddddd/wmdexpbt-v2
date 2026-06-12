@@ -362,8 +362,13 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
     summary["mppi_imagine_mode_hist_total"] = imagine_total
     mppi_active = (summary.get("mppi_active_mean") or summary.get("rssm_active_mean") or 0.0)
     belief_valid = (summary.get("mppi_belief_cache_valid_mean") or summary.get("mppi_belief_valid_mean") or 0.0)
+    stoch_frac = summary.get("mppi_stochastic_rollouts_mean") or 0.0
     if belief_valid <= 0.0:
         mppi_notes.append("mppi_inactive_no_belief: belief cache never valid (non-RSSM backbone or encode failed)")
+        if stoch_frac > 0.5:
+            mppi_notes.append(
+                "MPPI disabled by invalid belief cache; check task-aux belief cache alignment."
+            )
     if mppi_fb_total.get("no_imagine_step", 0) > 0:
         mppi_notes.append("mppi_inactive_no_imagine_step: backbone lacked imagine_step")
     if mppi_fb_total.get("high_uncertainty", 0) > 0:
@@ -374,7 +379,6 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         mppi_notes.append("mppi_active_but_never_selected: rssm candidate added but reranker never picked it")
     if imagine_total.get("fixed_belief_fallback", 0) > 0 and imagine_total.get("prior_rollout", 0) == 0:
         mppi_notes.append("mppi_fixed_belief_fallback_only: backbone has no usable prior transition (approximate H-step)")
-    stoch_frac = summary.get("mppi_stochastic_rollouts_mean") or 0.0
     if stoch_frac > 0.5 and imagine_total.get("stochastic_prior_rollout", 0) == 0:
         mppi_notes.append(
             "mppi_stochastic_enabled_but_no_stochastic_rollout: stochastic_rollouts flag on but "

@@ -246,16 +246,26 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         act_emb_seq = self.action_encoder(batch.action.reshape(T * B, -1)).reshape(T, B, -1)
 
         # Phase A4 P4 (2026-06-09): optional aux scalar embedding (Part B).
-        # When the aux encoder is None or the batch lacks aux_scalars, the
-        # posterior input shape falls back to the legacy concat(h, obs_emb).
+        # When aux_encoder is active but aux_scalars are missing/misaligned, use
+        # a zero-aux fallback so posterior_net input shape stays consistent.
         aux_emb_seq: Optional[torch.Tensor] = None
-        if (
-            self.aux_encoder is not None
-            and batch.aux_scalars is not None
-            and batch.aux_scalars.shape[-1] == self.aux_dim
-        ):
-            aux_in = batch.aux_scalars.reshape(T * B, -1)
+        zero_aux_fallback = 0.0
+        if self.aux_encoder is not None:
+            if (
+                batch.aux_scalars is not None
+                and batch.aux_scalars.shape[-1] == self.aux_dim
+            ):
+                aux_in = batch.aux_scalars.reshape(T * B, -1)
+            else:
+                aux_in = torch.zeros(
+                    T * B,
+                    self.aux_dim,
+                    device=device,
+                    dtype=batch.obs.dtype,
+                )
+                zero_aux_fallback = 1.0
             aux_emb_seq = self.aux_encoder(aux_in).reshape(T, B, -1)
+        self._last_metrics["encode_sequence_zero_aux_fallback"] = zero_aux_fallback
 
         h = torch.zeros(B, self.h_dim, device=device, dtype=batch.obs.dtype)
         z = torch.zeros(B, self.z_dim, device=device, dtype=batch.obs.dtype)
