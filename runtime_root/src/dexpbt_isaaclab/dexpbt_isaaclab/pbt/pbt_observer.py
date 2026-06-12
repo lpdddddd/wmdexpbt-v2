@@ -947,6 +947,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._last_window_size: int = 0
         self._curriculum_update_count: int = 0
         self._metrics_dir = self.workspace / "metrics"
+        # EIR-MPC Phase D: PBT elite broadcast counters.
+        self._eir_broadcast_count: int = 0
+        self._eir_bank_merge_count: int = 0
         # Patch 5: in-memory trackers for peak archives. Loaded from disk
         # lazily in `after_init` so PBT workers that come up after a crash
         # respect existing peak files.
@@ -4165,6 +4168,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._write_training_curve_point(own_state, env_frames, own_curriculum, tier=point_tier)
         self._write_population_aggregate(population, env_frames)
 
+        # EIR-MPC Phase D: PBT elite broadcast. Both the consume (target side)
+        # and the broadcast (source side) run on EVERY PBT tick, independent of
+        # whether this worker is eliminated / restarted below (constraint 19.4).
+        try:
+            self._consume_eir_broadcast(env_frames)
+        except Exception as _eir_c_exc:  # pragma: no cover - never crash PBT
+            print(f"[EIR-broadcast] consume failed: {_eir_c_exc}")
+        try:
+            self._maybe_broadcast_elite(population, env_frames)
+        except Exception as _eir_b_exc:  # pragma: no cover - never crash PBT
+            print(f"[EIR-broadcast] broadcast failed: {_eir_b_exc}")
+
         if len(objectives) < max(2, self.num_policies // 2):
             print(f"Policy {self.policy_idx}: only {len(objectives)} objectives available, skip")
             return
@@ -4890,6 +4905,190 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             pass
         return out
 
+    def _eir_bridge_and_cfg(self):
+        """Return ``(eir_bridge, broadcast_cfg)`` or ``(None, None)``."""
+        bridge = getattr(self.algo, "_eir_bridge", None)
+        if bridge is None:
+            return None, None
+        cfg = getattr(bridge, "broadcast_cfg", None)
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return bridge, None
+        return bridge, cfg
+
+    def _pop_nsucc_means(
+        self, population: dict[int, dict[str, Any] | None]
+    ) -> dict[int, float]:
+        out: dict[int, float] = {}
+        for idx, st in population.items():
+            if st is None:
+                continue
+            try:
+                out[int(idx)] = float(st.get("nsucc_mean", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                out[int(idx)] = 0.0
+        return out
+
+    def _maybe_broadcast_elite(
+        self, population: dict[int, dict[str, Any] | None], env_frames: int
+    ) -> None:
+        """Source side: when this worker is a strong recovery performer, write a
+        broadcast payload (top bank entries + residual head + scorer) into the
+        bottom-k workers' mailboxes (constraint 19.4)."""
+        from dexpbt_isaaclab.world_model import eir_broadcast as _bc
+
+        bridge, cfg = self._eir_bridge_and_cfg()
+        if bridge is None or cfg is None:
+            return
+        bank = getattr(bridge, "bank", None)
+        bank_size = int(getattr(bank, "size", 0)) if bank is not None else 0
+        pop_nsucc = self._pop_nsucc_means(population)
+        pop_vals = list(pop_nsucc.values())
+        pop_mean = float(sum(pop_vals) / len(pop_vals)) if pop_vals else 0.0
+        source_nsucc = float(self.curr_nsucc_mean)
+
+        do_bc = _bc.should_broadcast(
+            source_nsucc, pop_mean, cfg=cfg, source_bank_size=bank_size
+        )
+        if self.writer is not None:
+            self.writer.add_scalar(
+                "eir_pbt/broadcast_eligible", 1.0 if do_bc else 0.0, env_frames
+            )
+            self.writer.add_scalar("eir_pbt/source_bank_size", float(bank_size), env_frames)
+        if not do_bc:
+            return
+
+        targets = _bc.select_broadcast_targets(
+            self.policy_idx, pop_nsucc, cfg=cfg
+        )
+        if not targets:
+            return
+        payload = _bc.build_broadcast_payload(
+            bridge,
+            cfg=cfg,
+            source_idx=int(self.policy_idx),
+            source_nsucc_mean=source_nsucc,
+            source_nsucc_max=float(self.curr_nsucc_max),
+            frame=int(env_frames),
+        )
+        n_written = 0
+        for tgt in targets:
+            try:
+                _bc.write_broadcast(self.workspace, tgt, payload)
+                n_written += 1
+                _bc.append_broadcast_event(
+                    self._metrics_dir,
+                    {
+                        "event": "broadcast",
+                        "source": int(self.policy_idx),
+                        "target": int(tgt),
+                        "frame": int(env_frames),
+                        "entries": int(payload.get("bank_entries", 0)),
+                        "source_nsucc_mean": source_nsucc,
+                        "pop_mean": pop_mean,
+                    },
+                )
+            except Exception as exc:  # pragma: no cover
+                print(f"[EIR-broadcast] write to policy {tgt} failed: {exc}")
+        self._eir_broadcast_count += n_written
+        if self.writer is not None:
+            self.writer.add_scalar(
+                "eir_pbt/broadcast_count", float(self._eir_broadcast_count), env_frames
+            )
+            self.writer.add_scalar(
+                "eir_pbt/broadcast_source_policy", float(self.policy_idx), env_frames
+            )
+            self.writer.add_scalar(
+                "eir_pbt/broadcast_bank_entries",
+                float(payload.get("bank_entries", 0)),
+                env_frames,
+            )
+        print(
+            f"[EIR-broadcast] policy {self.policy_idx} (nsucc_mean={source_nsucc:.1f}) "
+            f"broadcast {payload.get('bank_entries', 0)} bank entries to {targets}"
+        )
+
+    def _consume_eir_broadcast(self, env_frames: int) -> None:
+        """Target side: live-merge any payload addressed to this policy into the
+        running bridge each PBT tick (constraint 19.4)."""
+        from dexpbt_isaaclab.world_model import eir_broadcast as _bc
+
+        bridge, cfg = self._eir_bridge_and_cfg()
+        if cfg is None:
+            return
+        meta = _bc.read_broadcast(self.workspace, self.policy_idx)
+        consumed = 0.0
+        if self.writer is not None:
+            self.writer.add_scalar("eir_pbt/broadcast_pending", 1.0 if meta else 0.0, env_frames)
+        if meta is None:
+            return
+        mode = _bc.decide_consume_mode(bridge is not None)
+        if mode == _bc.CONSUME_LIVE:
+            payload = _bc.load_payload(meta)
+            summary = (
+                _bc.merge_payload_into_bridge(bridge, payload, cfg=cfg)
+                if payload is not None else {"merged_entries": 0}
+            )
+            _bc.mark_consumed(
+                self.workspace, self.policy_idx,
+                frame=int(meta.get("frame", 0)),
+                source_policy=int(meta.get("source_policy", -1)),
+                mode=mode,
+                merged_entries=int(summary.get("merged_entries", 0)),
+            )
+            self._eir_bank_merge_count += int(summary.get("merged_entries", 0))
+            consumed = 1.0
+            _bc.append_broadcast_event(
+                self._metrics_dir,
+                {
+                    "event": "consume",
+                    "source": int(meta.get("source_policy", -1)),
+                    "target": int(self.policy_idx),
+                    "frame": int(env_frames),
+                    "entries": int(summary.get("merged_entries", 0)),
+                    "mode": mode,
+                    "consumed": True,
+                },
+            )
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "eir_pbt/broadcast_consumed_source_policy",
+                    float(meta.get("source_policy", -1)), env_frames,
+                )
+                self.writer.add_scalar(
+                    "eir_pbt/broadcast_consumed_bank_entries",
+                    float(summary.get("merged_entries", 0)), env_frames,
+                )
+                self.writer.add_scalar(
+                    "eir_pbt/bank_merge_count",
+                    float(self._eir_bank_merge_count), env_frames,
+                )
+                self.writer.add_scalar(
+                    "eir_pbt/residual_head_copied",
+                    1.0 if summary.get("residual_copied") else 0.0, env_frames,
+                )
+            print(
+                f"[EIR-broadcast] policy {self.policy_idx} consumed "
+                f"{summary.get('merged_entries', 0)} entries from policy "
+                f"{meta.get('source_policy')} (mode={mode})"
+            )
+        else:
+            # forced-restart hand-off: leave the payload for the next process
+            # incarnation to consume on startup; record the deferral.
+            _bc.append_broadcast_event(
+                self._metrics_dir,
+                {
+                    "event": "consume",
+                    "source": int(meta.get("source_policy", -1)),
+                    "target": int(self.policy_idx),
+                    "frame": int(env_frames),
+                    "entries": 0,
+                    "mode": mode,
+                    "consumed": False,
+                },
+            )
+        if self.writer is not None:
+            self.writer.add_scalar("eir_pbt/broadcast_consumed", consumed, env_frames)
+
     def _save_workspace_checkpoint(self) -> dict[str, Any]:
         prefix = self._policy_checkpoint_prefix(self.pbt_iteration)
         checkpoint_path = self.curr_policy_workspace / f"{prefix}.pth"
@@ -4904,6 +5103,30 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             algo_state["erd_scorer_warmup_iters_done"] = int(
                 getattr(erd_bridge, "scorer_warmup_iters_done", 0)
             )
+        # EIR-MPC (Phase D): persist scorer / residual head / scorer warmup and a
+        # priority-capped slice of the elite bank INLINE in the .pth so a PBT
+        # restart that copies the source .pth inherits the source's recovery
+        # memory automatically (train.py `_wm_safe_restore` reloads these keys).
+        eir_bridge = getattr(self.algo, "_eir_bridge", None)
+        if eir_bridge is not None:
+            eir_scorer = getattr(eir_bridge, "scorer", None)
+            if eir_scorer is not None:
+                algo_state["eir_scorer"] = eir_scorer.state_dict()
+                algo_state["eir_scorer_warmup_iters_done"] = int(
+                    getattr(eir_bridge, "scorer_warmup_iters_done", 0)
+                )
+            _eir_rb = getattr(eir_bridge, "residual_bridge", None)
+            _eir_head = getattr(_eir_rb, "head", None) if _eir_rb is not None else None
+            if _eir_head is not None:
+                algo_state["eir_residual_head"] = _eir_head.state_dict()
+            _eir_bank = getattr(eir_bridge, "bank", None)
+            if _eir_bank is not None and getattr(_eir_bank, "size", 0) > 0:
+                _bcfg = getattr(eir_bridge, "broadcast_cfg", None)
+                _cap = int(getattr(_bcfg, "max_bank_merge_entries", 50000)) if _bcfg else 50000
+                try:
+                    algo_state["eir_elite_bank"] = _eir_bank.top_entries_state(_cap)
+                except Exception as _eir_bank_exc:  # pragma: no cover
+                    print(f"[EIR] checkpoint bank export failed: {_eir_bank_exc}")
         # Atomic save: write to .tmp first, then rename. Avoids half-written .pth
         # being picked up by a peer's _load_population_checkpoints during SIGKILL restart.
         torch.save(algo_state, ckpt_tmp)

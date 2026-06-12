@@ -1412,6 +1412,85 @@ parser.add_argument("--erd_scorer_warmup_iters", type=int, default=2000)
 parser.add_argument("--erd_min_score_margin", type=float, default=0.05)
 parser.add_argument("--erd_min_target_valid_fraction", type=float, default=0.2)
 parser.add_argument("--erd_max_drop_prob_for_teacher", type=float, default=0.5)
+
+# ----------------------------------------------------------------------
+# EIR-MPC (Elite-Imitation Recovery MPC). Full aggressive method: elite
+# recovery bank + elite candidate retrieval + gated recovery residual head
+# (with gated rollout apply) + light RSSM reranking. PBT elite broadcast is
+# wired separately in pbt_observer (Phase D). Default-off. When --eir_enable is
+# set, the legacy ERD raw-mu distill path is NOT attached (constraint 19.1):
+# EIR trains the residual head, never pulls main actor mu.
+# ----------------------------------------------------------------------
+parser.add_argument("--eir_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_use_elite_bank", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_use_recovery_residual", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_use_rssm_mppi", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_horizons", type=str, default="4,8")
+# elite bank
+parser.add_argument("--eir_elite_bank_size", type=int, default=500000)
+parser.add_argument("--eir_elite_sample_pool", type=int, default=4096)
+parser.add_argument("--eir_elite_knn_topk", type=int, default=32)
+parser.add_argument("--eir_elite_tol_threshold", type=float, default=0.02)
+parser.add_argument("--eir_elite_hard_tol_threshold", type=float, default=0.012)
+parser.add_argument("--eir_elite_near_success_mult", type=float, default=3.0)
+parser.add_argument("--eir_elite_min_priority", type=float, default=1.0)
+# candidates
+parser.add_argument("--eir_local_candidate_k", type=int, default=16)
+parser.add_argument("--eir_elite_candidate_k", type=int, default=32)
+parser.add_argument("--eir_archive_candidate_k", type=int, default=16)
+parser.add_argument("--eir_action_noise_std", type=float, default=0.15)
+parser.add_argument("--eir_max_action_delta", type=float, default=0.5)
+parser.add_argument("--eir_noise_cap_by_tol", action=argparse.BooleanOptionalAction, default=True)
+# reranking score weights / gates
+parser.add_argument("--eir_score_success_weight", type=float, default=1.0)
+parser.add_argument("--eir_score_improve_weight", type=float, default=0.7)
+parser.add_argument("--eir_score_recovery_weight", type=float, default=0.5)
+parser.add_argument("--eir_score_drop_weight", type=float, default=1.5)
+parser.add_argument("--eir_elite_priority_weight", type=float, default=0.2)
+parser.add_argument("--eir_elite_similarity_weight", type=float, default=0.1)
+parser.add_argument("--eir_action_delta_weight", type=float, default=0.05)
+parser.add_argument("--eir_clip_penalty_weight", type=float, default=0.1)
+parser.add_argument("--eir_min_score_margin", type=float, default=0.02)
+parser.add_argument("--eir_min_elite_margin", type=float, default=0.01)
+parser.add_argument("--eir_max_drop_prob_for_teacher", type=float, default=0.35)
+# staging
+parser.add_argument("--eir_start_tol", type=float, default=0.04)
+parser.add_argument("--eir_floor_tol", type=float, default=0.02)
+parser.add_argument("--eir_hard_floor_tol", type=float, default=0.012)
+parser.add_argument("--eir_near_success_mult", type=float, default=2.0)
+parser.add_argument("--eir_only_lifted", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_scorer_loss_weight", type=float, default=0.01)
+parser.add_argument("--eir_start_after_frames", type=int, default=200000000)
+parser.add_argument("--eir_scorer_warmup_iters", type=int, default=2000)
+parser.add_argument("--eir_min_target_valid_fraction", type=float, default=0.2)
+parser.add_argument("--eir_min_risky_fraction", type=float, default=0.02)
+# recovery residual head + rollout apply
+parser.add_argument("--eir_residual_scale", type=float, default=0.5)
+parser.add_argument("--eir_residual_distill_weight", type=float, default=0.05)
+parser.add_argument("--eir_residual_floor_distill_weight", type=float, default=0.08)
+parser.add_argument("--eir_residual_hard_floor_distill_weight", type=float, default=0.12)
+parser.add_argument("--eir_gate_sparsity_weight", type=float, default=0.001)
+parser.add_argument("--eir_delta_l2_weight", type=float, default=0.001)
+parser.add_argument("--eir_mu_base_detach", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_residual_apply_to_rollout", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_residual_apply_after_frames", type=int, default=300000000)
+parser.add_argument("--eir_residual_apply_alpha_mid", type=float, default=0.25)
+parser.add_argument("--eir_residual_apply_alpha_floor", type=float, default=0.5)
+parser.add_argument("--eir_residual_apply_alpha_hard_floor", type=float, default=0.75)
+parser.add_argument("--eir_residual_apply_tol_threshold", type=float, default=0.02)
+parser.add_argument("--eir_residual_near_success_mult", type=float, default=2.0)
+parser.add_argument("--eir_residual_gate_confidence_threshold", type=float, default=0.5)
+# light RSSM reranking
+parser.add_argument("--eir_mppi_start_after_frames", type=int, default=800000000)
+parser.add_argument("--eir_mppi_uncertainty_threshold", type=float, default=0.4)
+# PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
+# launchers can set them ahead of Phase D wiring).
+parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_pbt_broadcast_threshold_nsucc_mean", type=float, default=38.0)
+parser.add_argument("--eir_pbt_broadcast_gap_over_pop_mean", type=float, default=6.0)
+parser.add_argument("--eir_pbt_broadcast_to_bottom_k", type=int, default=3)
+parser.add_argument("--eir_pbt_freeze_elite_curriculum_frames", type=int, default=100000000)
+parser.add_argument("--eir_pbt_max_bank_merge_entries", type=int, default=50000)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -1557,10 +1636,38 @@ from dexpbt_isaaclab.world_model.elite_recovery_distill import (
     ERDBridge,
     ERDConfig,
     ERDTargetBuilder,
+    _flatten_tn as _erd_flatten_tn,
     attach_erd_modules,
     compute_erd_loss,
     register_erd_actor_mlp_grad_probe,
     register_erd_capture,
+)
+from dexpbt_isaaclab.world_model.eir_mpc import (
+    EIRBridge,
+    EIRConfig,
+    compute_eir_loss,
+)
+from dexpbt_isaaclab.world_model.eir_broadcast import (
+    EliteBroadcastConfig,
+    decide_consume_mode,
+    load_payload,
+    merge_payload_into_bridge,
+    mark_consumed,
+    read_broadcast,
+)
+from dexpbt_isaaclab.world_model.elite_recovery_bank import (
+    EliteRecoveryBank,
+    EliteRecoveryBankConfig,
+)
+from dexpbt_isaaclab.world_model.recovery_residual import (
+    RecoveryResidualBridge,
+    RecoveryResidualConfig,
+    attach_recovery_residual,
+    compute_rollout_residual_action,
+)
+from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
+    RSSMReranker,
+    RSSMRerankConfig,
 )
 
 
@@ -2306,6 +2413,66 @@ def _patch_actor_train_for_seq_wm(
                 print(f"[ERD] target cache build failed: {_erd_exc}")
                 erd_bridge.cache = None
 
+        eir_bridge = getattr(seq_wm_trainer, "_eir_bridge", None)
+        eir_builder = getattr(seq_wm_trainer, "_eir_target_builder", None)
+        if eir_bridge is not None and eir_builder is not None:
+            if eir_bridge.capture is not None:
+                eir_bridge.capture.reset()
+            try:
+                td = actor.experience_buffer.tensor_dict
+                eir_cache = eir_builder.build(
+                    d_hat=td["aux_d_hat"],
+                    success_cnt=td["aux_success_cnt"],
+                    success_tol=td["aux_success_tolerance"],
+                    failure=td.get("aux_failure"),
+                    lifted=td.get("aux_lifted"),
+                    dones=td["dones"],
+                    actions=td["actions"],
+                    generation=rollout_state["generation"],
+                )
+                eir_bridge.cache = eir_cache
+                # (19.2) full-rollout features -> elite bank update
+                if eir_bridge.bank is not None:
+                    feat_flat, fsrc = _eir_extract_rollout_features(
+                        actor.model, td, eir_bridge.eir_cfg.feature_dim
+                    )
+                    if feat_flat is not None:
+                        src_stats = {
+                            "source_policy_idx": float(getattr(args_cli, "policy_idx", -1)),
+                            "source_nsucc_mean": float(
+                                getattr(seq_wm_trainer, "_eir_source_nsucc_mean", 0.0)
+                            ),
+                            "source_nsucc_max": float(
+                                getattr(seq_wm_trainer, "_eir_source_nsucc_max", 0.0)
+                            ),
+                        }
+                        eir_bridge.bank.update_from_cache(
+                            eir_cache, feat_flat, source_stats=src_stats,
+                            frame=int(getattr(actor, "frame", 0) or 0),
+                        )
+                        eir_bridge.last_bank_feature_source = int(fsrc)
+                # (19.3) refresh per-step aux snapshot for rollout apply: use the
+                # latest window step per env (approx current state at next play).
+                res_bridge = eir_bridge.residual_bridge
+                if res_bridge is not None and res_bridge.cfg.enabled:
+                    try:
+                        dh = td["aux_d_hat"].float()
+                        tl = td["aux_success_tolerance"].float()
+                        lf = td.get("aux_lifted")
+                        # shape [T, N, (1)] -> last step [N]
+                        last_dh = dh[-1].reshape(-1)
+                        last_tl = tl[-1].reshape(-1)
+                        last_lf = lf[-1].reshape(-1).float() if lf is not None else None
+                        res_bridge.set_aux_snapshot(
+                            d_hat=last_dh, tol=last_tl, lifted=last_lf,
+                            frame=int(getattr(actor, "frame", 0) or 0),
+                        )
+                    except Exception:
+                        res_bridge.set_aux_snapshot(d_hat=None, tol=None, lifted=None, frame=0)
+            except Exception as _eir_exc:
+                print(f"[EIR] target cache / bank update failed: {_eir_exc}")
+                eir_bridge.cache = None
+
         if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
             seq_distill_bridge.feature_capture.reset()
@@ -2567,6 +2734,70 @@ def _patch_actor_train_for_seq_wm(
                             )
                         except Exception:
                             pass
+
+                eir_bridge_log = getattr(seq_wm_trainer, "_eir_bridge", None)
+                if eir_bridge_log is not None:
+                    xb = eir_bridge_log
+                    rb = xb.residual_bridge
+                    rr = xb.rssm_reranker
+                    eir_scalars = {
+                        "active": xb.last_active,
+                        "scorer_active": xb.last_scorer_active,
+                        "residual_active": xb.last_residual_active,
+                        "block_reason": float(xb.last_block_reason),
+                        "scorer_loss": xb.last_scorer_loss,
+                        "total_loss": xb.last_total_loss,
+                        "risky_fraction": xb.last_risky_fraction,
+                        "target_valid_fraction": xb.last_target_valid_fraction,
+                        "score_margin": xb.last_score_margin,
+                        "best_score": xb.last_best_score,
+                        "current_actor_score": xb.last_actor_score,
+                        "elite_similarity_mean": xb.last_elite_similarity_mean,
+                        "elite_action_delta_norm": xb.last_elite_action_delta_norm,
+                        "elite_bank_size": xb.last_elite_bank_size,
+                        "bank_feature_source": float(xb.last_bank_feature_source),
+                        "scorer_warmup_iters_done": float(xb.scorer_warmup_iters_done),
+                    }
+                    for k, v in (xb.last_candidate_source_frac or {}).items():
+                        eir_scalars[f"candidate_source_frac_{k}"] = float(v)
+                    for k, v in (xb.last_best_source_frac or {}).items():
+                        eir_scalars[f"best_source_frac_{k}"] = float(v)
+                    for k, v in (xb.last_bank_metrics or {}).items():
+                        eir_scalars[f"bank_{k}"] = float(v)
+                    if rb is not None:
+                        eir_scalars.update({
+                            "residual_loss": rb.last_residual_loss,
+                            "residual_gate_mean": rb.last_gate_mean,
+                            "residual_delta_norm": rb.last_delta_norm,
+                            "residual_action_delta_norm": rb.last_residual_action_delta_norm,
+                            "residual_score_margin": rb.last_residual_score_margin,
+                            "residual_best_source_frac_elite": rb.last_residual_best_source_frac_elite,
+                            "residual_apply_active": rb.last_apply_active,
+                            "residual_apply_fraction": rb.last_apply_fraction,
+                            "residual_apply_alpha": rb.last_apply_alpha,
+                            "residual_gate_mean_on_rollout": rb.last_gate_mean_on_rollout,
+                            "residual_apply_fallback_reason": float(rb.last_apply_fallback_reason),
+                        })
+                    for k, v in eir_scalars.items():
+                        try:
+                            tb_writer.add_scalar(f"eir/{k}", float(v), frames)
+                        except Exception:
+                            pass
+                    if rr is not None:
+                        rssm_scalars = {
+                            "active": rr.last_active,
+                            "best_score": rr.last_best_score,
+                            "actor_score": rr.last_actor_score,
+                            "score_margin": rr.last_score_margin,
+                            "uncertainty": rr.last_uncertainty,
+                            "best_first_action_delta": rr.last_best_first_action_delta,
+                            "fallback_reason": float(rr.last_fallback_reason),
+                        }
+                        for k, v in rssm_scalars.items():
+                            try:
+                                tb_writer.add_scalar(f"eir_mppi/{k}", float(v), frames)
+                            except Exception:
+                                pass
 
                 if seq_distill_bridge is not None:
                     cfg = seq_distill_bridge.cfg
@@ -2873,6 +3104,33 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
         else:
             print("[ERD] restore: no scorer warmup counter in checkpoint; using 0")
 
+    # EIR-MPC restore (train-side). The observer-side save of these keys is wired
+    # in Phase D; restore is tolerant of their absence.
+    eir_bridge = getattr(agent, "_eir_bridge", None)
+    if eir_bridge is not None:
+        if getattr(eir_bridge, "scorer", None) is not None:
+            sd = ckpt.get("eir_scorer")
+            if isinstance(sd, dict):
+                eir_bridge.scorer.load_state_dict(sd, strict=False)
+                print("[EIR] restore: loaded scorer")
+            warm = ckpt.get("eir_scorer_warmup_iters_done")
+            if warm is not None:
+                eir_bridge.scorer_warmup_iters_done = int(warm)
+        rb = getattr(eir_bridge, "residual_bridge", None)
+        if rb is not None and getattr(rb, "head", None) is not None:
+            rsd = ckpt.get("eir_residual_head")
+            if isinstance(rsd, dict):
+                rb.head.load_state_dict(rsd, strict=False)
+                print("[EIR] restore: loaded recovery residual head")
+        if getattr(eir_bridge, "bank", None) is not None:
+            bsd = ckpt.get("eir_elite_bank")
+            if isinstance(bsd, dict):
+                try:
+                    eir_bridge.bank.load_state_dict(bsd)
+                    print(f"[EIR] restore: loaded elite bank size={eir_bridge.bank.size}")
+                except Exception as _eir_b_exc:
+                    print(f"[EIR] restore: elite bank load failed: {_eir_b_exc}")
+
     if "epoch" in ckpt:
         agent.epoch_num = ckpt["epoch"]
     if "frame" in ckpt:
@@ -2988,6 +3246,172 @@ def _patch_model_get_aux_loss_for_floorcritic(model, floorcritic_bridge):
             merged.update(base)
             return merged if merged else None
         return fc_loss_dict if fc_loss_dict else None
+
+    model.get_aux_loss = patched_get_aux_loss
+
+
+def _eir_extract_rollout_features(model, td, feature_dim):
+    """Full-rollout actor feature extraction for the elite bank (constraint 19.2).
+
+    The ERD/EIR forward-capture hook only sees PPO *minibatch* features, so the
+    bank cannot reuse it. Here we recompute features over the whole rollout from
+    ``td['obses']`` with the SAME flatten convention as the target cache
+    (``flat[n*T+t]``), applying the model's obs normalization so the features
+    match what ``actor_mlp`` sees during the forward pass.
+
+    Returns ``(feature_flat[T*N, feature_dim], source_flag)`` where source_flag is
+    0 for actor_mlp features and 1 for the fallback retrieval key.
+    """
+    import torch as _torch
+
+    try:
+        obs = td.get("obses") if hasattr(td, "get") else td["obses"]
+        if obs is None:
+            raise KeyError("obses")
+        obs_flat = _erd_flatten_tn(obs.float())  # [T*N, obs_dim]
+        inner = model.model if hasattr(model, "model") else model
+        a2c = getattr(inner, "a2c_network", None)
+        if a2c is None or not hasattr(a2c, "actor_mlp"):
+            raise RuntimeError("no a2c_network.actor_mlp")
+        with _torch.no_grad():
+            obs_n = obs_flat
+            norm_fn = getattr(model, "norm_obs", None)
+            if callable(norm_fn):
+                try:
+                    obs_n = norm_fn(obs_flat)
+                except Exception:
+                    obs_n = obs_flat
+            feat = a2c.actor_mlp(obs_n).to(_torch.float32)
+        if feat.dim() == 2 and int(feat.shape[-1]) == int(feature_dim):
+            return feat.detach().cpu(), 0
+        raise RuntimeError(
+            f"feature width {tuple(feat.shape)} != feature_dim {feature_dim}"
+        )
+    except Exception as exc:
+        # Fallback retrieval key: pack normalized task context into a width-F key.
+        try:
+            d_hat = td["aux_d_hat"]
+            tol = td["aux_success_tolerance"]
+            lifted = td.get("aux_lifted") if hasattr(td, "get") else None
+            dh = _erd_flatten_tn(d_hat.float()).reshape(-1, 1)
+            tl = _erd_flatten_tn(tol.float()).reshape(-1, 1)
+            if lifted is not None:
+                lf = _erd_flatten_tn(lifted.float()).reshape(-1, 1)
+            else:
+                lf = _torch.ones_like(dh)
+            key = _torch.cat([dh, tl, lf, dh / (tl + 1e-6)], dim=-1)
+            n = key.shape[0]
+            fd = int(feature_dim)
+            if key.shape[-1] < fd:
+                key = _torch.cat([key, _torch.zeros(n, fd - key.shape[-1])], dim=-1)
+            else:
+                key = key[:, :fd]
+            print(f"[EIR] feature extraction fell back to task-context key: {exc}")
+            return key.detach().cpu(), 1
+        except Exception as exc2:
+            print(f"[EIR] feature extraction + fallback failed: {exc2}")
+            return None, 1
+
+
+def _install_eir_rollout_apply(agent, eir_bridge):
+    """Install the gated recovery-residual rollout apply (constraint 19.3).
+
+    Wraps the model forward so that ONLY at play time (``is_train`` False) and
+    ONLY when the residual apply gate fires (floor / hard-floor near-success +
+    warmup + aux available) the action mean is shifted by the residual. The shift
+    is applied identically to ``mus`` and ``actions`` so the sampled exploration
+    noise is preserved. Default-off and exception-safe: any failure falls back to
+    the unmodified policy output, so baseline behavior is never broken."""
+    import torch as _torch
+
+    model = agent.model
+    res_bridge = getattr(eir_bridge, "residual_bridge", None)
+    if res_bridge is None or res_bridge.head is None:
+        return
+    if getattr(model, "_eir_rollout_apply_installed", False):
+        return
+    orig_forward = model.forward
+
+    def wrapped_forward(input_dict, *a, **kw):
+        out = orig_forward(input_dict, *a, **kw)
+        try:
+            is_train = bool(input_dict.get("is_train", False)) if isinstance(input_dict, dict) else False
+            if (not is_train) and isinstance(out, dict) and "mus" in out and "actions" in out:
+                feat = getattr(eir_bridge.capture, "tensor", None)
+                mus = out["mus"]
+                if feat is not None and int(feat.shape[0]) == int(mus.shape[0]):
+                    frames = int(getattr(agent, "frame", 0) or 0)
+                    res = compute_rollout_residual_action(
+                        res_bridge, feat=feat.detach(), mu=mus.detach(), frames=frames
+                    )
+                    if bool(res["apply_mask"].any()):
+                        delta = (res["action"] - mus.detach())
+                        out["mus"] = mus + delta
+                        out["actions"] = out["actions"] + delta
+        except Exception:
+            pass
+        return out
+
+    model.forward = wrapped_forward
+    model._eir_rollout_apply_installed = True
+
+
+def _consume_eir_broadcast_on_startup(agent) -> None:
+    """Merge a pending PBT elite-broadcast payload addressed to this policy.
+
+    Runs once at process startup (constraint 19.4 forced-restart hand-off):
+    when the observer could not live-merge a payload into a running bridge it
+    leaves it in ``<workspace>/eir_broadcast/<policy_idx>.json`` for the next
+    process incarnation to pick up here.
+    """
+    eir_bridge = getattr(agent, "_eir_bridge", None)
+    if eir_bridge is None:
+        return
+    bcfg = getattr(eir_bridge, "broadcast_cfg", None)
+    if bcfg is None or not getattr(bcfg, "enabled", False):
+        return
+    workspace = Path(args_cli.workspace)
+    pidx = int(args_cli.policy_idx)
+    meta = read_broadcast(workspace, pidx)
+    if meta is None:
+        return
+    payload = load_payload(meta)
+    if payload is None:
+        return
+    summary = merge_payload_into_bridge(eir_bridge, payload, cfg=bcfg)
+    mark_consumed(
+        workspace,
+        pidx,
+        frame=int(meta.get("frame", 0)),
+        source_policy=int(meta.get("source_policy", -1)),
+        mode="restart",
+        merged_entries=int(summary.get("merged_entries", 0)),
+    )
+    print(
+        f"[EIR] startup consumed broadcast from policy "
+        f"{meta.get('source_policy')}: merged {summary.get('merged_entries')} "
+        f"bank entries, residual={summary.get('residual_copied')}, "
+        f"scorer={summary.get('scorer_copied')}"
+    )
+
+
+def _patch_model_get_aux_loss_for_eir(model, eir_bridge):
+    """Install EIR-MPC losses into rl_games' get_aux_loss hook.
+
+    Returns ``{"eir_total": ...}`` = scorer BCE + gated residual distill. The
+    main actor mu receives no direct gradient (constraint 19.1)."""
+    original_get_aux_loss = model.get_aux_loss
+
+    def patched_get_aux_loss():
+        agent = getattr(eir_bridge, "agent_ref", None)
+        frames = int(getattr(agent, "frame", 0) or 0) if agent is not None else 0
+        eir_loss_dict = compute_eir_loss(eir_bridge, frames=frames)
+        base = original_get_aux_loss()
+        if base is not None:
+            merged = dict(eir_loss_dict)
+            merged.update(base)
+            return merged if merged else None
+        return eir_loss_dict if eir_loss_dict else None
 
     model.get_aux_loss = patched_get_aux_loss
 
@@ -3375,7 +3799,9 @@ class _WmEnabledRunner(Runner):
                 )
 
             erd_cfg = getattr(self.seq_wm_trainer, "_erd_cfg", None)
-            if erd_cfg is not None and erd_cfg.enabled:
+            _eir_cfg_chk = getattr(self.seq_wm_trainer, "_eir_cfg", None)
+            _eir_on = bool(_eir_cfg_chk is not None and _eir_cfg_chk.enabled)
+            if erd_cfg is not None and erd_cfg.enabled and not _eir_on:
                 erd_bridge = ERDBridge(cfg=erd_cfg)
                 erd_bridge.agent_ref = agent
                 erd_bridge.scorer = attach_erd_modules(
@@ -3406,6 +3832,73 @@ class _WmEnabledRunner(Runner):
                     f"max_grad_ratio={erd_cfg.max_grad_ratio}"
                 )
 
+            # ---------------- EIR-MPC attach (supersedes ERD) ----------------
+            eir_cfg = getattr(self.seq_wm_trainer, "_eir_cfg", None)
+            if eir_cfg is not None and eir_cfg.enabled:
+                dev = next(agent.model.parameters()).device
+                eir_scorer_cfg = self.seq_wm_trainer._eir_scorer_cfg
+                eir_bridge = EIRBridge(eir_cfg=eir_cfg, erd_cfg=eir_scorer_cfg)
+                eir_bridge.agent_ref = agent
+                eir_bridge.scorer = attach_erd_modules(
+                    optimizer=agent.optimizer, cfg=eir_scorer_cfg, device=dev
+                )
+                # gated recovery residual head (separate optimizer group)
+                res_cfg = self.seq_wm_trainer._eir_residual_cfg
+                res_bridge = RecoveryResidualBridge(cfg=res_cfg)
+                if res_cfg.enabled:
+                    res_bridge.head = attach_recovery_residual(
+                        optimizer=agent.optimizer, cfg=res_cfg, device=dev
+                    )
+                eir_bridge.residual_bridge = res_bridge
+                # elite recovery bank (CPU-resident) + archive placeholder
+                bank_cfg = self.seq_wm_trainer._eir_bank_cfg
+                eir_bridge.bank = EliteRecoveryBank(bank_cfg) if bank_cfg.enabled else None
+                eir_bridge.archive_bank = None  # populated by PBT broadcast (Phase D)
+                # light RSSM reranker
+                rssm_cfg = self.seq_wm_trainer._eir_rssm_cfg
+                eir_bridge.rssm_reranker = RSSMReranker(rssm_cfg) if rssm_cfg.enabled else None
+                if eir_bridge.rssm_reranker is not None:
+                    # Wire the WM prediction heads so the reranker can rescore
+                    # candidate first-actions at a fixed belief. The per-row
+                    # belief provider stays None for now (a single-state /
+                    # window belief over the PPO minibatch needs an rssm_lite
+                    # encoder extension; documented as deferred). With predict_fn
+                    # set but no belief, the reranker reports MODEL_UNAVAILABLE
+                    # and contributes no candidates -- the safe fallback.
+                    _wm_model = getattr(self.seq_wm_trainer, "model", None)
+                    _heads = getattr(_wm_model, "heads", None)
+                    if _heads is not None and hasattr(_heads, "predict_transition"):
+                        eir_bridge.rssm_predict_fn = _heads.predict_transition
+                        if getattr(_heads, "has_value_head", False):
+                            eir_bridge.rssm_value_fn = _heads.predict_value
+                    eir_bridge.rssm_belief_provider = None
+                # PBT elite broadcast config (consumed by the observer / startup)
+                eir_bridge.broadcast_cfg = getattr(
+                    self.seq_wm_trainer, "_eir_broadcast_cfg", None
+                )
+                # reuse the actor_mlp forward capture for scorer + residual
+                eir_bridge.capture = ERDBridge(cfg=eir_scorer_cfg).capture
+                self._eir_hook_handle = register_erd_capture(
+                    agent.model, eir_bridge.capture
+                )
+                _patch_model_get_aux_loss_for_eir(agent.model, eir_bridge)
+                if res_cfg.enabled and res_cfg.apply_to_rollout:
+                    _install_eir_rollout_apply(agent, eir_bridge)
+                self.seq_wm_trainer._eir_bridge = eir_bridge
+                agent._eir_bridge = eir_bridge
+                print(
+                    f"[EIR] enabled: horizons={eir_cfg.horizons} "
+                    f"cand(local/elite/archive)={eir_cfg.local_candidate_k}/"
+                    f"{eir_cfg.elite_candidate_k}/{eir_cfg.archive_candidate_k} "
+                    f"bank={'on' if eir_bridge.bank is not None else 'off'} "
+                    f"residual={'on' if res_cfg.enabled else 'off'} "
+                    f"residual_apply={res_cfg.apply_to_rollout}@{res_cfg.apply_after_frames} "
+                    f"rssm_rerank={'on' if eir_bridge.rssm_reranker is not None else 'off'} "
+                    f"min_margin={eir_cfg.min_score_margin} "
+                    f"mu_base_detach={res_cfg.mu_base_detach} "
+                    f"(ERD raw-mu distill DISABLED)"
+                )
+
             _patch_actor_train_for_seq_wm(
                 agent,
                 self.seq_wm_trainer,
@@ -3431,12 +3924,22 @@ class _WmEnabledRunner(Runner):
         # Restore weights if checkpoint specified — AFTER aux_value_head is registered
         ckpt_path = args.get("checkpoint")
         if ckpt_path and (
-            wm_trainer is not None or getattr(agent, "_erd_bridge", None) is not None
+            wm_trainer is not None
+            or getattr(agent, "_erd_bridge", None) is not None
+            or getattr(agent, "_eir_bridge", None) is not None
         ):
             _wm_safe_restore(agent, ckpt_path)
         else:
             torch_runner._restore(agent, args)
         torch_runner._override_sigma(agent, args)
+
+        # EIR-MPC (Phase D, constraint 19.4): a forced-restart broadcast target
+        # consumes its mailbox on startup so a payload that could not be
+        # live-merged by the observer is still folded into the fresh process.
+        try:
+            _consume_eir_broadcast_on_startup(agent)
+        except Exception as _eir_bc_exc:  # pragma: no cover - never crash startup
+            print(f"[EIR] startup broadcast consume skipped: {_eir_bc_exc}")
 
         # Patch 3 (rev 2, 2026-05-30): reset training-loop counters BEFORE
         # `agent.train()` so a CF child that loaded a source checkpoint with
@@ -3947,6 +4450,130 @@ def main():
         seq_wm_trainer._erd_generation = 0
 
         # ------------------------------------------------------------------
+        # EIR-MPC config assembly. EIR reuses the ERD action scorer + target
+        # builder (same flatten convention) but routes the actor-improving
+        # signal through the gated residual head and harvests an elite bank.
+        # When EIR is enabled it SUPERSEDES the ERD raw-mu distill path.
+        # ------------------------------------------------------------------
+        _eir_horizons = tuple(
+            int(s.strip()) for s in str(args_cli.eir_horizons or "").split(",") if s.strip()
+        ) or (4, 8)
+        _eir_feature_dim = int(getattr(erd_cfg, "feature_dim", 256))
+        eir_enabled = bool(args_cli.eir_enable)
+        # EIR borrows an ERD scorer config (same scorer architecture / targets).
+        eir_scorer_cfg = ERDConfig(
+            enabled=eir_enabled,
+            horizons=_eir_horizons,
+            score_success_weight=float(args_cli.eir_score_success_weight),
+            score_improve_weight=float(args_cli.eir_score_improve_weight),
+            score_drop_weight=float(args_cli.eir_score_drop_weight),
+            start_tol=float(args_cli.eir_start_tol),
+            floor_tol=float(args_cli.eir_floor_tol),
+            hard_floor_tol=float(args_cli.eir_hard_floor_tol),
+            near_success_mult=float(args_cli.eir_near_success_mult),
+            only_lifted=bool(args_cli.eir_only_lifted),
+            min_risky_fraction=float(args_cli.eir_min_risky_fraction),
+            feature_dim=_eir_feature_dim,
+            action_dim=int(action_dim),
+        )
+        eir_cfg = EIRConfig(
+            enabled=eir_enabled,
+            horizons=_eir_horizons,
+            action_dim=int(action_dim),
+            feature_dim=_eir_feature_dim,
+            local_candidate_k=int(args_cli.eir_local_candidate_k),
+            elite_candidate_k=int(args_cli.eir_elite_candidate_k) if bool(args_cli.eir_use_elite_bank) else 0,
+            archive_candidate_k=int(args_cli.eir_archive_candidate_k) if bool(args_cli.eir_use_elite_bank) else 0,
+            action_noise_std=float(args_cli.eir_action_noise_std),
+            max_action_delta=float(args_cli.eir_max_action_delta),
+            noise_cap_by_tol=bool(args_cli.eir_noise_cap_by_tol),
+            score_success_weight=float(args_cli.eir_score_success_weight),
+            score_improve_weight=float(args_cli.eir_score_improve_weight),
+            score_recovery_weight=float(args_cli.eir_score_recovery_weight),
+            score_drop_weight=float(args_cli.eir_score_drop_weight),
+            elite_priority_weight=float(args_cli.eir_elite_priority_weight),
+            elite_similarity_weight=float(args_cli.eir_elite_similarity_weight),
+            action_delta_weight=float(args_cli.eir_action_delta_weight),
+            clip_penalty_weight=float(args_cli.eir_clip_penalty_weight),
+            min_score_margin=float(args_cli.eir_min_score_margin),
+            min_elite_margin=float(args_cli.eir_min_elite_margin),
+            max_drop_prob_for_teacher=float(args_cli.eir_max_drop_prob_for_teacher),
+            start_tol=float(args_cli.eir_start_tol),
+            floor_tol=float(args_cli.eir_floor_tol),
+            hard_floor_tol=float(args_cli.eir_hard_floor_tol),
+            near_success_mult=float(args_cli.eir_near_success_mult),
+            only_lifted=bool(args_cli.eir_only_lifted),
+            scorer_loss_weight=float(args_cli.eir_scorer_loss_weight),
+            start_after_frames=int(args_cli.eir_start_after_frames),
+            scorer_warmup_iters=int(args_cli.eir_scorer_warmup_iters),
+            min_target_valid_fraction=float(args_cli.eir_min_target_valid_fraction),
+            min_risky_fraction=float(args_cli.eir_min_risky_fraction),
+        )
+        eir_bank_cfg = EliteRecoveryBankConfig(
+            enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),
+            bank_size=int(args_cli.eir_elite_bank_size),
+            feature_dim=_eir_feature_dim,
+            action_dim=int(action_dim),
+            horizons=_eir_horizons,
+            sample_pool=int(args_cli.eir_elite_sample_pool),
+            knn_topk=int(args_cli.eir_elite_knn_topk),
+            tol_threshold=float(args_cli.eir_elite_tol_threshold),
+            hard_tol_threshold=float(args_cli.eir_elite_hard_tol_threshold),
+            near_success_mult=float(args_cli.eir_elite_near_success_mult),
+            min_priority=float(args_cli.eir_elite_min_priority),
+        )
+        eir_residual_cfg = RecoveryResidualConfig(
+            enabled=eir_enabled and bool(args_cli.eir_use_recovery_residual),
+            feature_dim=_eir_feature_dim,
+            action_dim=int(action_dim),
+            residual_scale=float(args_cli.eir_residual_scale),
+            mu_base_detach=bool(args_cli.eir_mu_base_detach),
+            distill_weight=float(args_cli.eir_residual_distill_weight),
+            floor_distill_weight=float(args_cli.eir_residual_floor_distill_weight),
+            hard_floor_distill_weight=float(args_cli.eir_residual_hard_floor_distill_weight),
+            gate_sparsity_weight=float(args_cli.eir_gate_sparsity_weight),
+            delta_l2_weight=float(args_cli.eir_delta_l2_weight),
+            apply_to_rollout=bool(args_cli.eir_residual_apply_to_rollout),
+            apply_after_frames=int(args_cli.eir_residual_apply_after_frames),
+            apply_alpha_mid=float(args_cli.eir_residual_apply_alpha_mid),
+            apply_alpha_floor=float(args_cli.eir_residual_apply_alpha_floor),
+            apply_alpha_hard_floor=float(args_cli.eir_residual_apply_alpha_hard_floor),
+            only_lifted=bool(args_cli.eir_only_lifted),
+            apply_tol_threshold=float(args_cli.eir_residual_apply_tol_threshold),
+            floor_tol=float(args_cli.eir_floor_tol),
+            hard_floor_tol=float(args_cli.eir_hard_floor_tol),
+            near_success_mult=float(args_cli.eir_residual_near_success_mult),
+            gate_confidence_threshold=float(args_cli.eir_residual_gate_confidence_threshold),
+        )
+        eir_rssm_cfg = RSSMRerankConfig(
+            enabled=eir_enabled and bool(args_cli.eir_use_rssm_mppi),
+            start_after_frames=int(args_cli.eir_mppi_start_after_frames),
+            uncertainty_threshold=float(args_cli.eir_mppi_uncertainty_threshold),
+        )
+        eir_broadcast_cfg = EliteBroadcastConfig(
+            enabled=eir_enabled
+            and bool(args_cli.eir_use_elite_bank)
+            and bool(args_cli.eir_pbt_broadcast_elite_bank),
+            threshold_nsucc_mean=float(args_cli.eir_pbt_broadcast_threshold_nsucc_mean),
+            gap_over_pop_mean=float(args_cli.eir_pbt_broadcast_gap_over_pop_mean),
+            bottom_k=int(args_cli.eir_pbt_broadcast_to_bottom_k),
+            max_bank_merge_entries=int(args_cli.eir_pbt_max_bank_merge_entries),
+            freeze_elite_curriculum_frames=int(
+                args_cli.eir_pbt_freeze_elite_curriculum_frames
+            ),
+        )
+        seq_wm_trainer._eir_cfg = eir_cfg
+        seq_wm_trainer._eir_scorer_cfg = eir_scorer_cfg
+        seq_wm_trainer._eir_bank_cfg = eir_bank_cfg
+        seq_wm_trainer._eir_residual_cfg = eir_residual_cfg
+        seq_wm_trainer._eir_rssm_cfg = eir_rssm_cfg
+        seq_wm_trainer._eir_broadcast_cfg = eir_broadcast_cfg
+        seq_wm_trainer._eir_bridge = None
+        seq_wm_trainer._eir_target_builder = (
+            ERDTargetBuilder(eir_scorer_cfg) if eir_enabled else None
+        )
+
+        # ------------------------------------------------------------------
         # Phase A4 P4 wired (2026-06-10): runtime wiring for the iterative
         # teacher manager (Part C) + short-horizon imagined evaluator
         # (Part D). Each is independently gated by its CLI flag and is a
@@ -4039,6 +4666,7 @@ def main():
                 or bool(args_cli.seq_wm_enable_iterative_teacher)
                 or bool(args_cli.wm_floorcritic_enable)
                 or bool(args_cli.erd_enable)
+                or bool(args_cli.eir_enable)
             )
             else DEFAULT_SEQ_AUX_FIELDS
         )
