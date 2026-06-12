@@ -76,6 +76,15 @@ export CARB_CRASH_REPORTER=0
 
 cd "${RUNTIME_ROOT}/src/dexpbt_isaaclab"
 
+echo "[EIR smoke preflight] running unit assertions..." | tee -a "$LOG"
+"${RUNTIME_ROOT}/envs/isaaclab311/bin/python" -m unittest \
+  tests.test_eir_smoke_preflight \
+  tests.test_eir_broadcast \
+  tests.test_recovery_residual \
+  tests.test_eir_mpc \
+  2>&1 | tee -a "$LOG"
+echo "[EIR smoke preflight] OK" | tee -a "$LOG"
+
 nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   "$RUN_DIR" \
   --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \

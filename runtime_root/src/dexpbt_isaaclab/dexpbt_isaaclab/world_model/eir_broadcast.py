@@ -50,6 +50,8 @@ class EliteBroadcastConfig:
     freeze_elite_curriculum_frames: int = 100_000_000
     # never broadcast a near-empty bank (no useful memory to spread)
     min_source_bank_size: int = 100
+    min_frames_between_broadcasts_per_source: int = 100_000_000
+    min_frames_between_broadcasts_per_target: int = 100_000_000
 
 
 def should_broadcast(
@@ -101,6 +103,69 @@ def _payload_path(workspace: Path | str, target_idx: int) -> Path:
 
 def _consumed_path(workspace: Path | str, target_idx: int) -> Path:
     return _mailbox_dir(workspace) / f"{int(target_idx):03d}.consumed.json"
+
+
+def _last_write_path(workspace: Path | str, target_idx: int) -> Path:
+    return _mailbox_dir(workspace) / f"{int(target_idx):03d}.last_write.json"
+
+
+def read_target_last_broadcast_frame(workspace: Path | str, target_idx: int) -> int:
+    """Return the env-frame of the last broadcast write to ``target_idx``."""
+    p = _last_write_path(workspace, target_idx)
+    if not p.exists():
+        return -1
+    try:
+        return int(json.loads(p.read_text()).get("frame", -1))
+    except Exception:
+        return -1
+
+
+def source_broadcast_allowed(
+    last_source_broadcast_frame: int,
+    current_frame: int,
+    *,
+    cfg: EliteBroadcastConfig,
+) -> bool:
+    """True when this source may broadcast again (per-source cooldown)."""
+    if int(last_source_broadcast_frame) < 0:
+        return True
+    return (
+        int(current_frame) - int(last_source_broadcast_frame)
+        >= int(cfg.min_frames_between_broadcasts_per_source)
+    )
+
+
+def target_broadcast_allowed(
+    workspace: Path | str,
+    target_idx: int,
+    current_frame: int,
+    *,
+    cfg: EliteBroadcastConfig,
+) -> bool:
+    """True when ``target_idx`` may receive a new payload (per-target cooldown)."""
+    last = read_target_last_broadcast_frame(workspace, target_idx)
+    if int(last) < 0:
+        return True
+    return (
+        int(current_frame) - int(last)
+        >= int(cfg.min_frames_between_broadcasts_per_target)
+    )
+
+
+def record_target_broadcast_write(
+    workspace: Path | str,
+    target_idx: int,
+    *,
+    frame: int,
+    source_policy: int,
+) -> None:
+    """Persist the last broadcast write time for per-target cooldown."""
+    d = _mailbox_dir(workspace)
+    d.mkdir(parents=True, exist_ok=True)
+    p = _last_write_path(workspace, target_idx)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"frame": int(frame), "source_policy": int(source_policy)}))
+    os.replace(tmp, p)
 
 
 def build_broadcast_payload(
@@ -175,6 +240,12 @@ def write_broadcast(
     }
     tmp_meta.write_text(json.dumps(meta))
     os.replace(tmp_meta, meta_path)
+    record_target_broadcast_write(
+        workspace,
+        target_idx,
+        frame=int(payload.get("frame", 0)),
+        source_policy=int(payload.get("source_policy", -1)),
+    )
     return meta_path
 
 

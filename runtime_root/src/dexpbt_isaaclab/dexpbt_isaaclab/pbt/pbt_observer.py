@@ -950,6 +950,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # EIR-MPC Phase D: PBT elite broadcast counters.
         self._eir_broadcast_count: int = 0
         self._eir_bank_merge_count: int = 0
+        self._eir_last_source_broadcast_frame: int = -1
         # Patch 5: in-memory trackers for peak archives. Loaded from disk
         # lazily in `after_init` so PBT workers that come up after a crash
         # respect existing peak files.
@@ -4949,19 +4950,39 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         do_bc = _bc.should_broadcast(
             source_nsucc, pop_mean, cfg=cfg, source_bank_size=bank_size
         )
+        source_cooled = _bc.source_broadcast_allowed(
+            self._eir_last_source_broadcast_frame, env_frames, cfg=cfg
+        )
         if self.writer is not None:
             self.writer.add_scalar(
                 "eir_pbt/broadcast_eligible", 1.0 if do_bc else 0.0, env_frames
             )
+            self.writer.add_scalar(
+                "eir_pbt/broadcast_source_cooled",
+                1.0 if source_cooled else 0.0,
+                env_frames,
+            )
             self.writer.add_scalar("eir_pbt/source_bank_size", float(bank_size), env_frames)
         if not do_bc:
+            return
+        if not source_cooled:
+            if self.writer is not None:
+                self.writer.add_scalar("eir_pbt/broadcast_cooldown_blocked", 1.0, env_frames)
             return
 
         targets = _bc.select_broadcast_targets(
             self.policy_idx, pop_nsucc, cfg=cfg
         )
+        targets = [
+            t for t in targets
+            if _bc.target_broadcast_allowed(self.workspace, t, env_frames, cfg=cfg)
+        ]
         if not targets:
+            if self.writer is not None:
+                self.writer.add_scalar("eir_pbt/broadcast_cooldown_blocked", 1.0, env_frames)
             return
+        if self.writer is not None:
+            self.writer.add_scalar("eir_pbt/broadcast_cooldown_blocked", 0.0, env_frames)
         payload = _bc.build_broadcast_payload(
             bridge,
             cfg=cfg,
@@ -4989,6 +5010,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 )
             except Exception as exc:  # pragma: no cover
                 print(f"[EIR-broadcast] write to policy {tgt} failed: {exc}")
+        if n_written > 0:
+            self._eir_last_source_broadcast_frame = int(env_frames)
         self._eir_broadcast_count += n_written
         if self.writer is not None:
             self.writer.add_scalar(

@@ -38,6 +38,7 @@ returns raw L_kl in the loss dict and the trainer multiplies.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -46,6 +47,27 @@ import torch.nn.functional as F
 
 from .seq_wm_base import SequenceBatch, SequenceWorldModelBase
 from .seq_wm_heads import PredictionHeads
+
+
+# Imagine-step modes (for EIR-MPC H-step planner provenance logging).
+IMAGINE_PRIOR_ROLLOUT = "prior_rollout"
+IMAGINE_FIXED_BELIEF_FALLBACK = "fixed_belief_fallback"
+
+
+@dataclass
+class RSSMState:
+    """Latent state carried across ``imagine_step`` calls.
+
+    ``belief`` is the concatenation consumed by the prediction heads. For the
+    RSSM-lite backbone ``deter`` is the GRU hidden ``h`` and ``stoch`` is the
+    stochastic latent ``z`` (``belief == concat(h, z)``). Backbones without an
+    explicit deterministic/stochastic split set ``deter``/``stoch`` to ``None``
+    and only carry ``belief`` (fixed-belief fallback rollout).
+    """
+
+    belief: torch.Tensor
+    deter: Optional[torch.Tensor] = None
+    stoch: Optional[torch.Tensor] = None
 
 
 def _mlp(in_dim: int, hidden: int, out_dim: int, n_hidden: int = 1) -> nn.Sequential:
@@ -820,8 +842,112 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             mask = mask * in_floor
         return target, mask
 
+    # ------------------------------------------------------------------
+    # EIR-MPC (Phase: full H-step MPPI): prior-only latent rollout API.
+    # These are inference-only helpers used by the RSSM-MPPI planner; they
+    # never touch the training graph (all under no_grad) and never look at
+    # future real observations.
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_prior_rollout(self) -> bool:
+        """True iff a real action-conditioned prior transition is available."""
+        return (
+            hasattr(self, "gru")
+            and hasattr(self, "prior_net")
+            and hasattr(self, "action_encoder")
+        )
+
+    def get_state_from_belief(self, belief: torch.Tensor) -> RSSMState:
+        """Split a belief ``[B, belief_dim]`` into an ``RSSMState``.
+
+        ``belief == concat(h[h_dim], z[z_dim])`` for RSSM-lite. When the width
+        does not match the expected split we keep the whole belief and leave
+        ``deter``/``stoch`` as ``None`` (fixed-belief fallback).
+        """
+        if belief.dim() != 2:
+            belief = belief.reshape(belief.shape[0], -1)
+        if int(belief.shape[-1]) == int(self.belief_dim):
+            h = belief[:, : self.h_dim]
+            z = belief[:, self.h_dim :]
+            return RSSMState(belief=belief, deter=h, stoch=z)
+        return RSSMState(belief=belief, deter=None, stoch=None)
+
+    @torch.no_grad()
+    def imagine_step(
+        self,
+        state: "RSSMState | torch.Tensor",
+        action: torch.Tensor,
+    ) -> "tuple[RSSMState, dict[str, torch.Tensor]]":
+        """Prior-only one-step latent rollout.
+
+        Given the current state (belief at ``b_t``) and an ``action a_t``:
+          * scores the transition with the (b_t, a_t)-conditioned heads
+            (success/drop/recovery/task-error) plus the belief-only value head;
+          * advances the latent with the *prior* (no posterior / no real
+            future obs): ``h_{t+1} = GRU(concat(z_t, enc(a_t)), h_t)`` and
+            ``z_{t+1} = prior_mean(h_{t+1})``.
+
+        Returns ``(next_state, preds)``. ``preds`` always carries a
+        ``prior_std_mean`` uncertainty proxy and (when the heads exist)
+        ``success``/``drop``/``recovery`` probabilities, ``value`` and
+        ``task_error_delta``. Falls back to a fixed belief (state unchanged)
+        when the backbone lacks a usable prior transition.
+        """
+        if not isinstance(state, RSSMState):
+            state = self.get_state_from_belief(state)
+        belief = state.belief
+        if belief.dim() != 2:
+            belief = belief.reshape(belief.shape[0], -1)
+        action = action.reshape(belief.shape[0], -1).to(belief.dtype)
+
+        preds = self.heads.predict_transition(belief, action)
+        out: dict[str, torch.Tensor] = {}
+        # head probabilities (mean over horizon heads when present)
+        succ_list: list[torch.Tensor] = []
+        drop_list: list[torch.Tensor] = []
+        horizon_logits = preds.get("horizon_logits")
+        if isinstance(horizon_logits, dict):
+            for _h, head_out in horizon_logits.items():
+                if "success" in head_out:
+                    succ_list.append(torch.sigmoid(head_out["success"]).reshape(-1))
+                if "drop" in head_out:
+                    drop_list.append(torch.sigmoid(head_out["drop"]).reshape(-1))
+        if succ_list:
+            out["success_stack"] = torch.stack(succ_list, dim=0)
+            out["success"] = out["success_stack"].mean(dim=0)
+        elif "success_logits" in preds:
+            out["success"] = torch.sigmoid(preds["success_logits"]).reshape(-1)
+        if drop_list:
+            out["drop"] = torch.stack(drop_list, dim=0).mean(dim=0)
+        if "recovery_logits" in preds:
+            out["recovery"] = torch.sigmoid(preds["recovery_logits"]).reshape(-1)
+        if "task_error_delta" in preds:
+            out["task_error_delta"] = preds["task_error_delta"].reshape(-1)
+        if self.heads.has_value_head:
+            v = self.heads.predict_value(belief)
+            if v is not None:
+                out["value"] = v.reshape(-1)
+
+        # advance latent via prior transition (or fixed-belief fallback)
+        if self.supports_prior_rollout and state.deter is not None and state.stoch is not None:
+            a_emb = self.action_encoder(action)
+            gru_in = torch.cat([state.stoch, a_emb], dim=-1)
+            h_next = self.gru(gru_in, state.deter)
+            prior_mu, prior_std = self._split_dist(self.prior_net(h_next))
+            z_next = prior_mu  # deterministic prior mean for stable scoring
+            belief_next = torch.cat([h_next, z_next], dim=-1)
+            next_state = RSSMState(belief=belief_next, deter=h_next, stoch=z_next)
+            out["prior_std_mean"] = prior_std.mean(dim=-1).reshape(-1)
+            out["imagine_mode"] = IMAGINE_PRIOR_ROLLOUT
+        else:
+            next_state = RSSMState(belief=belief, deter=state.deter, stoch=state.stoch)
+            out["prior_std_mean"] = belief.new_zeros(belief.shape[0])
+            out["imagine_mode"] = IMAGINE_FIXED_BELIEF_FALLBACK
+        return next_state, out
+
     def report_metrics(self) -> dict[str, float]:
         return dict(self._last_metrics)
 
 
-__all__ = ["RSSMLiteWorldModel"]
+__all__ = ["RSSMLiteWorldModel", "RSSMState", "IMAGINE_PRIOR_ROLLOUT", "IMAGINE_FIXED_BELIEF_FALLBACK"]

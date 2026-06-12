@@ -361,6 +361,17 @@ class EIRBridge:
     rssm_predict_fn: Any = None
     rssm_value_fn: Any = None
     last_rssm_candidate_added: float = 0.0
+    # Full H-step MPPI hooks (Phase: full MPPI). ``rssm_planner`` is an
+    # RSSMMPPIPlanner; ``rssm_model`` is the seq WM model exposing
+    # ``get_state_from_belief`` / ``imagine_step``; ``rssm_belief_cache`` is the
+    # per-rollout RSSMBeliefCache (built once in train.py). When present and
+    # active these supersede the light reranker for producing the SRC_RSSM
+    # candidate. All optional: missing -> light path -> elite/scorer fallback.
+    rssm_planner: Any = None
+    rssm_model: Any = None
+    rssm_belief_cache: Any = None
+    last_mppi_active: float = 0.0
+    last_mppi_belief_valid: float = 0.0
 
     scorer_warmup_iters_done: int = 0
 
@@ -383,6 +394,28 @@ class EIRBridge:
     last_elite_bank_size: float = 0.0
     last_bank_metrics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
+    bank_feature_update_count: int = 0
+    bank_feature_source_actor_count: int = 0
+    bank_feature_source_fallback_count: int = 0
+
+    def record_bank_feature_source(self, source_flag: int) -> None:
+        """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
+        self.bank_feature_update_count += 1
+        if int(source_flag) == 0:
+            self.bank_feature_source_actor_count += 1
+        else:
+            self.bank_feature_source_fallback_count += 1
+        self.last_bank_feature_source = int(source_flag)
+
+    @property
+    def bank_feature_source_actor_fraction(self) -> float:
+        n = int(self.bank_feature_update_count)
+        return float(self.bank_feature_source_actor_count) / float(n) if n > 0 else 0.0
+
+    @property
+    def bank_feature_source_fallback_fraction(self) -> float:
+        n = int(self.bank_feature_update_count)
+        return float(self.bank_feature_source_fallback_count) / float(n) if n > 0 else 0.0
 
     def reset_per_call(self) -> None:
         self.last_active = 0.0
@@ -406,6 +439,78 @@ def _stage_for_tol(eir_cfg: EIRConfig, tol_mean: float) -> Optional[int]:
         return 2
     if tol_mean <= float(eir_cfg.floor_tol):
         return 1
+    return None
+
+
+def _maybe_rssm_candidate_action(
+    bridge: EIRBridge,
+    *,
+    feat_r: torch.Tensor,
+    mu_r: torch.Tensor,
+    cand_out: dict[str, torch.Tensor],
+    start: int,
+    end: int,
+    risky: torch.Tensor,
+    frames: int,
+) -> Optional[torch.Tensor]:
+    """Produce the SRC_RSSM candidate first-action for the risky rows.
+
+    Tries full H-step MPPI first (planner + model + per-rollout belief cache),
+    then falls back to the light single-step reranker. Returns ``best_action
+    [B_risky, A]`` when a model-preferred action is available and active, else
+    ``None`` (candidate pool unchanged).
+    """
+    dev = cand_out["cand"].device
+    dtype = cand_out["cand"].dtype
+    mu_clamped = mu_r.detach().clamp(-1.0, 1.0)
+
+    # ---- belief for risky rows from the per-rollout cache ----
+    belief_r: Optional[torch.Tensor] = None
+    cache_obj = bridge.rssm_belief_cache
+    if cache_obj is not None and getattr(cache_obj, "valid", False):
+        bridge.last_mppi_belief_valid = 1.0
+        sl = cache_obj.slice_rows(int(start), int(end))
+        if sl is not None and int(sl.shape[0]) == int(risky.shape[0]):
+            belief_r = sl[risky].to(device=dev, dtype=dtype)
+    # legacy provider (returns belief directly from features) as a secondary
+    if belief_r is None and bridge.rssm_belief_provider is not None:
+        try:
+            belief_r = bridge.rssm_belief_provider(feat_r)
+        except Exception:
+            belief_r = None
+
+    # ---- FULL H-step MPPI ----
+    planner = bridge.rssm_planner
+    if planner is not None and bridge.rssm_model is not None:
+        try:
+            out = planner.plan(
+                belief_flat=belief_r,
+                actor_action=mu_clamped,
+                candidate_actions=cand_out["cand"].detach(),
+                rssm_model=bridge.rssm_model,
+                frames=int(frames),
+            )
+            bridge.last_mppi_active = 1.0 if out.get("active") else 0.0
+            if out.get("active") and out.get("best_action") is not None:
+                return out["best_action"]
+            # planner ran but inactive (low margin / uncertain / disabled): do
+            # NOT fall through to light if planner is the configured path.
+            return None
+        except Exception as exc:
+            print(f"[EIR-MPPI] planner failed, falling back to light: {exc}")
+
+    # ---- LIGHT single-step reranking fallback ----
+    rk = bridge.rssm_reranker
+    if rk is not None and bridge.rssm_predict_fn is not None:
+        rk_out = rk.score_candidates(
+            belief_flat=belief_r,
+            cand_actions=cand_out["cand"],
+            predict_fn=bridge.rssm_predict_fn,
+            value_fn=bridge.rssm_value_fn,
+            frames=int(frames),
+        )
+        if rk_out.get("active") and rk_out.get("best_action") is not None:
+            return rk_out["best_action"]
     return None
 
 
@@ -501,41 +606,37 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             mu_r, cfg=eir_cfg, bank=bridge.bank, archive_bank=bridge.archive_bank,
             feat_r=feat_r, tol_mean=cache.tol_mean, stage=stage,
         )
-        # Light RSSM reranking (Phase E wire-in): score the current candidate
-        # pool at a fixed belief and, when active, fold the model-preferred
-        # action back into the pool as an ``rssm`` source. Self-disables (no pool
-        # change) when no belief / predict_fn is available or uncertainty is high.
+        # RSSM candidate injection. Preference order:
+        #   1. FULL H-step MPPI (rssm_planner + rssm_model + per-rollout belief
+        #      cache): samples action sequences, prior-rolls them, scores, and
+        #      offers the best sequence's first action as an ``rssm`` candidate.
+        #   2. LIGHT single-step reranking (rssm_reranker + predict_fn): rescore
+        #      candidate first-actions at a fixed belief.
+        # Either way the action is only a CANDIDATE; the EIR reranker still
+        # chooses among actor/gaussian/elite/archive/rssm. Self-disables to no
+        # pool change when belief/model unavailable, uncertain, or low-margin.
         bridge.last_rssm_candidate_added = 0.0
-        rk = bridge.rssm_reranker
-        if rk is not None and bridge.rssm_predict_fn is not None:
-            belief = None
-            if bridge.rssm_belief_provider is not None:
-                try:
-                    belief = bridge.rssm_belief_provider(feat_r)
-                except Exception:
-                    belief = None
-            rk_out = rk.score_candidates(
-                belief_flat=belief,
-                cand_actions=cand_out["cand"],
-                predict_fn=bridge.rssm_predict_fn,
-                value_fn=bridge.rssm_value_fn,
-                frames=int(frames),
+        bridge.last_mppi_active = 0.0
+        bridge.last_mppi_belief_valid = 0.0
+        rssm_action = _maybe_rssm_candidate_action(
+            bridge, feat_r=feat_r, mu_r=mu_r, cand_out=cand_out,
+            start=start, end=end, risky=risky, frames=int(frames),
+        )
+        if rssm_action is not None:
+            ra = rssm_action.to(
+                device=cand_out["cand"].device, dtype=cand_out["cand"].dtype
+            ).clamp(-1.0, 1.0)[:, None, :]
+            Bc = ra.shape[0]
+            cand_out["cand"] = torch.cat([cand_out["cand"], ra], dim=1)
+            cand_out["source_id"] = torch.cat(
+                [cand_out["source_id"],
+                 torch.full((Bc, 1), SRC_RSSM, device=ra.device, dtype=torch.long)],
+                dim=1,
             )
-            if rk_out.get("active") and rk_out.get("best_action") is not None:
-                ra = rk_out["best_action"].to(
-                    device=cand_out["cand"].device, dtype=cand_out["cand"].dtype
-                ).clamp(-1.0, 1.0)[:, None, :]
-                Bc = ra.shape[0]
-                cand_out["cand"] = torch.cat([cand_out["cand"], ra], dim=1)
-                cand_out["source_id"] = torch.cat(
-                    [cand_out["source_id"],
-                     torch.full((Bc, 1), SRC_RSSM, device=ra.device, dtype=torch.long)],
-                    dim=1,
-                )
-                zk = torch.zeros(Bc, 1, device=ra.device, dtype=cand_out["priority"].dtype)
-                cand_out["priority"] = torch.cat([cand_out["priority"], zk], dim=1)
-                cand_out["similarity"] = torch.cat([cand_out["similarity"], zk.clone()], dim=1)
-                bridge.last_rssm_candidate_added = 1.0
+            zk = torch.zeros(Bc, 1, device=ra.device, dtype=cand_out["priority"].dtype)
+            cand_out["priority"] = torch.cat([cand_out["priority"], zk], dim=1)
+            cand_out["similarity"] = torch.cat([cand_out["similarity"], zk.clone()], dim=1)
+            bridge.last_rssm_candidate_added = 1.0
         rer = rerank_candidates(
             cand=cand_out["cand"], source_id=cand_out["source_id"],
             priority=cand_out["priority"], similarity=cand_out["similarity"],

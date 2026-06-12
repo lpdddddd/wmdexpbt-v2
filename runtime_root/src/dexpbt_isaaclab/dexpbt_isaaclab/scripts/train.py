@@ -1480,9 +1480,29 @@ parser.add_argument("--eir_residual_apply_alpha_hard_floor", type=float, default
 parser.add_argument("--eir_residual_apply_tol_threshold", type=float, default=0.02)
 parser.add_argument("--eir_residual_near_success_mult", type=float, default=2.0)
 parser.add_argument("--eir_residual_gate_confidence_threshold", type=float, default=0.5)
-# light RSSM reranking
+parser.add_argument("--eir_residual_apply_max_aux_age_frames", type=int, default=100000000)
+# RSSM reranking / full H-step MPPI
+parser.add_argument("--eir_mppi_mode", type=str, default="full", choices=["off", "light", "full"])
 parser.add_argument("--eir_mppi_start_after_frames", type=int, default=800000000)
 parser.add_argument("--eir_mppi_uncertainty_threshold", type=float, default=0.4)
+parser.add_argument("--eir_mppi_horizon", type=int, default=4)
+parser.add_argument("--eir_mppi_num_sequences", type=int, default=64)
+parser.add_argument("--eir_mppi_num_elite", type=int, default=8)
+parser.add_argument("--eir_mppi_cem_iters", type=int, default=1)
+parser.add_argument("--eir_mppi_action_noise_std", type=float, default=0.10)
+parser.add_argument("--eir_mppi_action_noise_decay", type=float, default=0.85)
+parser.add_argument("--eir_mppi_max_action_delta", type=float, default=0.5)
+parser.add_argument("--eir_mppi_smooth_noise", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_mppi_min_sequence_margin", type=float, default=0.02)
+parser.add_argument("--eir_mppi_w_success", type=float, default=1.0)
+parser.add_argument("--eir_mppi_w_recovery", type=float, default=0.8)
+parser.add_argument("--eir_mppi_w_drop", type=float, default=2.0)
+parser.add_argument("--eir_mppi_w_value", type=float, default=0.2)
+parser.add_argument("--eir_mppi_w_task_improve", type=float, default=0.5)
+parser.add_argument("--eir_mppi_w_uncertainty", type=float, default=0.2)
+parser.add_argument("--eir_mppi_w_action_smoothness", type=float, default=0.05)
+parser.add_argument("--eir_mppi_w_action_delta", type=float, default=0.02)
+parser.add_argument("--eir_mppi_fail_fast", action=argparse.BooleanOptionalAction, default=False)
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
@@ -1491,6 +1511,8 @@ parser.add_argument("--eir_pbt_broadcast_gap_over_pop_mean", type=float, default
 parser.add_argument("--eir_pbt_broadcast_to_bottom_k", type=int, default=3)
 parser.add_argument("--eir_pbt_freeze_elite_curriculum_frames", type=int, default=100000000)
 parser.add_argument("--eir_pbt_max_bank_merge_entries", type=int, default=50000)
+parser.add_argument("--eir_pbt_min_frames_between_broadcasts_per_source", type=int, default=100000000)
+parser.add_argument("--eir_pbt_min_frames_between_broadcasts_per_target", type=int, default=100000000)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -1668,7 +1690,10 @@ from dexpbt_isaaclab.world_model.recovery_residual import (
 from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
     RSSMReranker,
     RSSMRerankConfig,
+    RSSMMPPIConfig,
+    RSSMMPPIPlanner,
 )
+from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_cache
 
 
 # ----------------------------------------------------------------------
@@ -2450,7 +2475,8 @@ def _patch_actor_train_for_seq_wm(
                             eir_cache, feat_flat, source_stats=src_stats,
                             frame=int(getattr(actor, "frame", 0) or 0),
                         )
-                        eir_bridge.last_bank_feature_source = int(fsrc)
+                        eir_bridge.record_bank_feature_source(int(fsrc))
+                        eir_bridge.last_bank_metrics = eir_bridge.bank.metrics()
                 # (19.3) refresh per-step aux snapshot for rollout apply: use the
                 # latest window step per env (approx current state at next play).
                 res_bridge = eir_bridge.residual_bridge
@@ -2466,12 +2492,54 @@ def _patch_actor_train_for_seq_wm(
                         res_bridge.set_aux_snapshot(
                             d_hat=last_dh, tol=last_tl, lifted=last_lf,
                             frame=int(getattr(actor, "frame", 0) or 0),
+                            generation=int(rollout_state.get("generation", -1)),
                         )
                     except Exception:
                         res_bridge.set_aux_snapshot(d_hat=None, tol=None, lifted=None, frame=0)
             except Exception as _eir_exc:
                 print(f"[EIR] target cache / bank update failed: {_eir_exc}")
                 eir_bridge.cache = None
+
+            # Full H-step MPPI: build the per-rollout RSSM belief cache ONCE
+            # (deterministic full-rollout encode). compute_eir_loss slices it
+            # per minibatch; we never re-encode the RSSM per minibatch. Cleanly
+            # invalidated to a fallback cache on any failure / non-RSSM backbone.
+            _need_belief = (
+                getattr(eir_bridge, "rssm_planner", None) is not None
+                or getattr(eir_bridge, "rssm_reranker", None) is not None
+            )
+            if _need_belief:
+                try:
+                    T_b = int(actor.horizon_length)
+                    N_b = int(actor.num_actors * actor.num_agents)
+                    _returns_flat = bd.get("returns")
+                    _returns_full = None
+                    if _returns_flat is not None:
+                        _vs = _returns_flat.shape[-1] if _returns_flat.ndim == 2 else 1
+                        try:
+                            _returns_full = (
+                                _returns_flat.view(N_b, T_b, _vs).transpose(0, 1).contiguous()
+                            )
+                        except Exception:
+                            _returns_full = _returns_flat.view(T_b, N_b, _vs)
+                        if _returns_full.shape[-1] == 1:
+                            _returns_full = _returns_full.squeeze(-1)
+                    _last_obs = actor.obs["obs"] if isinstance(actor.obs, dict) else actor.obs
+                    eir_bridge.rssm_belief_cache = build_rssm_belief_cache(
+                        seq_wm_trainer=seq_wm_trainer,
+                        experience_buffer=actor.experience_buffer,
+                        returns_full=_returns_full,
+                        last_obs=_last_obs,
+                        last_d_hat=last_d_hat_t,
+                        last_success_count=last_success_t,
+                        frames=int(getattr(actor, "frame", 0) or 0),
+                        generation=int(rollout_state.get("generation", -1)),
+                        device=seq_wm_trainer.device,
+                        enabled=True,
+                    )
+                except Exception as _bc_exc:
+                    print(f"[EIR-belief] cache build failed: {_bc_exc}")
+                    eir_bridge.rssm_belief_cache = None
 
         if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
@@ -2756,6 +2824,9 @@ def _patch_actor_train_for_seq_wm(
                         "elite_action_delta_norm": xb.last_elite_action_delta_norm,
                         "elite_bank_size": xb.last_elite_bank_size,
                         "bank_feature_source": float(xb.last_bank_feature_source),
+                        "bank_feature_source_actor_fraction": xb.bank_feature_source_actor_fraction,
+                        "bank_feature_source_fallback_fraction": xb.bank_feature_source_fallback_fraction,
+                        "bank_feature_update_count": float(xb.bank_feature_update_count),
                         "scorer_warmup_iters_done": float(xb.scorer_warmup_iters_done),
                     }
                     for k, v in (xb.last_candidate_source_frac or {}).items():
@@ -2783,15 +2854,58 @@ def _patch_actor_train_for_seq_wm(
                             tb_writer.add_scalar(f"eir/{k}", float(v), frames)
                         except Exception:
                             pass
-                    if rr is not None:
+                    # extra EIR scalars: rssm candidate injection + belief cache
+                    _imagine_code = {"prior_rollout": 0.0, "fixed_belief_fallback": 1.0}
+                    _bc = getattr(xb, "rssm_belief_cache", None)
+                    extra_eir = {
+                        "rssm_candidate_added": float(xb.last_rssm_candidate_added),
+                        "mppi_active": float(xb.last_mppi_active),
+                        "mppi_belief_valid": float(xb.last_mppi_belief_valid),
+                        "bank_feature_source_actor_fraction": xb.bank_feature_source_actor_fraction,
+                        "bank_feature_source_fallback_fraction": xb.bank_feature_source_fallback_fraction,
+                    }
+                    for k, v in extra_eir.items():
+                        try:
+                            tb_writer.add_scalar(f"eir/{k}", float(v), frames)
+                        except Exception:
+                            pass
+                    # full H-step MPPI planner scalars (preferred); else light rr.
+                    planner = getattr(xb, "rssm_planner", None)
+                    if planner is not None:
+                        mppi_scalars = {
+                            "active": planner.last_active,
+                            "mode": {"off": 0.0, "light": 1.0, "full": 2.0}.get(planner.last_mode, -1.0),
+                            "imagine_mode": _imagine_code.get(planner.last_imagine_mode, 2.0),
+                            "best_score": planner.last_best_score,
+                            "actor_score": planner.last_actor_score,
+                            "score_margin": planner.last_score_margin,
+                            "uncertainty": planner.last_uncertainty,
+                            "best_first_action_delta": planner.last_best_first_action_delta,
+                            "fallback_reason": float(planner.last_fallback_reason),
+                            "low_margin_fraction": planner.last_low_margin_fraction,
+                            "high_uncertainty_fraction": planner.last_high_uncertainty_fraction,
+                            "sequence_horizon": float(planner.last_horizon),
+                            "num_sequences": float(planner.last_num_sequences),
+                            "belief_cache_valid": float(bool(_bc is not None and getattr(_bc, "valid", False))),
+                            "belief_cache_rows": float(getattr(_bc, "rows", 0) if _bc is not None else 0),
+                            "belief_cache_dim": float(getattr(_bc, "belief_dim", 0) if _bc is not None else 0),
+                        }
+                        for k, v in mppi_scalars.items():
+                            try:
+                                tb_writer.add_scalar(f"eir_mppi/{k}", float(v), frames)
+                            except Exception:
+                                pass
+                    elif rr is not None:
                         rssm_scalars = {
                             "active": rr.last_active,
+                            "mode": 1.0,  # light
                             "best_score": rr.last_best_score,
                             "actor_score": rr.last_actor_score,
                             "score_margin": rr.last_score_margin,
                             "uncertainty": rr.last_uncertainty,
                             "best_first_action_delta": rr.last_best_first_action_delta,
                             "fallback_reason": float(rr.last_fallback_reason),
+                            "belief_cache_valid": float(bool(_bc is not None and getattr(_bc, "valid", False))),
                         }
                         for k, v in rssm_scalars.items():
                             try:
@@ -3346,8 +3460,8 @@ def _install_eir_rollout_apply(agent, eir_bridge):
                     )
                     if bool(res["apply_mask"].any()):
                         delta = (res["action"] - mus.detach())
-                        out["mus"] = mus + delta
-                        out["actions"] = out["actions"] + delta
+                        out["mus"] = (mus + delta).clamp(-1.0, 1.0)
+                        out["actions"] = (out["actions"] + delta).clamp(-1.0, 1.0)
         except Exception:
             pass
         return out
@@ -3854,24 +3968,39 @@ class _WmEnabledRunner(Runner):
                 bank_cfg = self.seq_wm_trainer._eir_bank_cfg
                 eir_bridge.bank = EliteRecoveryBank(bank_cfg) if bank_cfg.enabled else None
                 eir_bridge.archive_bank = None  # populated by PBT broadcast (Phase D)
-                # light RSSM reranker
+                # RSSM reranking / full H-step MPPI.
                 rssm_cfg = self.seq_wm_trainer._eir_rssm_cfg
+                mppi_cfg = getattr(self.seq_wm_trainer, "_eir_mppi_cfg", None)
+                _wm_model = getattr(self.seq_wm_trainer, "model", None)
+                _is_rssm = _wm_model is not None and hasattr(_wm_model, "get_state_from_belief")
                 eir_bridge.rssm_reranker = RSSMReranker(rssm_cfg) if rssm_cfg.enabled else None
+                # full planner only when the backbone supports prior rollout
+                # (RSSM family). For non-RSSM backbones the planner stays off
+                # and the light reranker / elite fallback handles everything.
+                if mppi_cfg is not None and mppi_cfg.enabled and _is_rssm:
+                    eir_bridge.rssm_planner = RSSMMPPIPlanner(mppi_cfg)
+                    eir_bridge.rssm_model = _wm_model
+                    print(
+                        f"[EIR-MPPI] full H-step planner attached: "
+                        f"H={mppi_cfg.horizon} K={mppi_cfg.num_sequences} "
+                        f"cem_iters={mppi_cfg.cem_iters} start={mppi_cfg.start_after_frames} "
+                        f"prior_rollout={getattr(_wm_model, 'supports_prior_rollout', False)}"
+                    )
+                elif mppi_cfg is not None and mppi_cfg.enabled and not _is_rssm:
+                    print(
+                        "[EIR-MPPI] full mode requested but backbone is not RSSM "
+                        "(no get_state_from_belief); MPPI disabled, using light/elite fallback."
+                    )
+                # heads for the light reranker fallback (fixed-belief rescoring)
                 if eir_bridge.rssm_reranker is not None:
-                    # Wire the WM prediction heads so the reranker can rescore
-                    # candidate first-actions at a fixed belief. The per-row
-                    # belief provider stays None for now (a single-state /
-                    # window belief over the PPO minibatch needs an rssm_lite
-                    # encoder extension; documented as deferred). With predict_fn
-                    # set but no belief, the reranker reports MODEL_UNAVAILABLE
-                    # and contributes no candidates -- the safe fallback.
-                    _wm_model = getattr(self.seq_wm_trainer, "model", None)
                     _heads = getattr(_wm_model, "heads", None)
                     if _heads is not None and hasattr(_heads, "predict_transition"):
                         eir_bridge.rssm_predict_fn = _heads.predict_transition
                         if getattr(_heads, "has_value_head", False):
                             eir_bridge.rssm_value_fn = _heads.predict_value
-                    eir_bridge.rssm_belief_provider = None
+                # per-rollout belief cache is populated in patched_play_steps_rnn
+                eir_bridge.rssm_belief_provider = None
+                eir_bridge.rssm_belief_cache = None
                 # PBT elite broadcast config (consumed by the observer / startup)
                 eir_bridge.broadcast_cfg = getattr(
                     self.seq_wm_trainer, "_eir_broadcast_cfg", None
@@ -4544,11 +4673,42 @@ def main():
             hard_floor_tol=float(args_cli.eir_hard_floor_tol),
             near_success_mult=float(args_cli.eir_residual_near_success_mult),
             gate_confidence_threshold=float(args_cli.eir_residual_gate_confidence_threshold),
+            apply_max_aux_age_frames=int(args_cli.eir_residual_apply_max_aux_age_frames),
         )
+        _mppi_mode = str(args_cli.eir_mppi_mode)
+        _mppi_on = eir_enabled and bool(args_cli.eir_use_rssm_mppi) and _mppi_mode != "off"
+        # light reranker stays available as the fallback path (used when the
+        # full planner is disabled or cannot produce a belief).
         eir_rssm_cfg = RSSMRerankConfig(
-            enabled=eir_enabled and bool(args_cli.eir_use_rssm_mppi),
+            enabled=_mppi_on,
             start_after_frames=int(args_cli.eir_mppi_start_after_frames),
+            horizon=int(args_cli.eir_mppi_horizon),
+            num_sequences=int(args_cli.eir_mppi_num_sequences),
             uncertainty_threshold=float(args_cli.eir_mppi_uncertainty_threshold),
+        )
+        eir_mppi_cfg = RSSMMPPIConfig(
+            enabled=_mppi_on and _mppi_mode == "full",
+            mode=_mppi_mode,
+            start_after_frames=int(args_cli.eir_mppi_start_after_frames),
+            horizon=int(args_cli.eir_mppi_horizon),
+            num_sequences=int(args_cli.eir_mppi_num_sequences),
+            num_elite=int(args_cli.eir_mppi_num_elite),
+            cem_iters=int(args_cli.eir_mppi_cem_iters),
+            action_noise_std=float(args_cli.eir_mppi_action_noise_std),
+            action_noise_decay=float(args_cli.eir_mppi_action_noise_decay),
+            max_action_delta=float(args_cli.eir_mppi_max_action_delta),
+            smooth_noise=bool(args_cli.eir_mppi_smooth_noise),
+            uncertainty_threshold=float(args_cli.eir_mppi_uncertainty_threshold),
+            min_sequence_margin=float(args_cli.eir_mppi_min_sequence_margin),
+            w_success=float(args_cli.eir_mppi_w_success),
+            w_recovery=float(args_cli.eir_mppi_w_recovery),
+            w_drop=float(args_cli.eir_mppi_w_drop),
+            w_value=float(args_cli.eir_mppi_w_value),
+            w_task_improve=float(args_cli.eir_mppi_w_task_improve),
+            w_uncertainty=float(args_cli.eir_mppi_w_uncertainty),
+            w_action_smoothness=float(args_cli.eir_mppi_w_action_smoothness),
+            w_action_delta=float(args_cli.eir_mppi_w_action_delta),
+            fail_fast=bool(args_cli.eir_mppi_fail_fast),
         )
         eir_broadcast_cfg = EliteBroadcastConfig(
             enabled=eir_enabled
@@ -4561,12 +4721,19 @@ def main():
             freeze_elite_curriculum_frames=int(
                 args_cli.eir_pbt_freeze_elite_curriculum_frames
             ),
+            min_frames_between_broadcasts_per_source=int(
+                args_cli.eir_pbt_min_frames_between_broadcasts_per_source
+            ),
+            min_frames_between_broadcasts_per_target=int(
+                args_cli.eir_pbt_min_frames_between_broadcasts_per_target
+            ),
         )
         seq_wm_trainer._eir_cfg = eir_cfg
         seq_wm_trainer._eir_scorer_cfg = eir_scorer_cfg
         seq_wm_trainer._eir_bank_cfg = eir_bank_cfg
         seq_wm_trainer._eir_residual_cfg = eir_residual_cfg
         seq_wm_trainer._eir_rssm_cfg = eir_rssm_cfg
+        seq_wm_trainer._eir_mppi_cfg = eir_mppi_cfg
         seq_wm_trainer._eir_broadcast_cfg = eir_broadcast_cfg
         seq_wm_trainer._eir_bridge = None
         seq_wm_trainer._eir_target_builder = (

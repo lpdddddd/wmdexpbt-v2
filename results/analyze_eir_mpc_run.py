@@ -39,6 +39,14 @@ RSSM_FALLBACK = {
     0: "ok", 1: "disabled", 2: "before_start", 3: "model_unavailable",
     4: "no_heads", 5: "high_uncertainty",
 }
+# full H-step MPPI planner fallback reasons (eir_mppi/fallback_reason)
+MPPI_FALLBACK = {
+    0: "ok", 1: "disabled", 2: "before_start", 3: "no_belief",
+    4: "no_rssm_model", 5: "no_imagine_step", 6: "high_uncertainty",
+    7: "low_margin", 8: "exception",
+}
+MPPI_MODE = {0.0: "off", 1.0: "light", 2.0: "full", -1.0: "unknown"}
+IMAGINE_MODE = {0.0: "prior_rollout", 1.0: "fixed_belief_fallback", 2.0: "none"}
 BUCKET_NAMES = {
     0: "none/improve", 1: "none/success", 2: "floor/improve",
     3: "floor/success", 4: "hard/improve", 5: "hard/success",
@@ -191,7 +199,13 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
                 tb.get("eir/residual_apply_fallback_reason", []), RESIDUAL_APPLY_FALLBACK
             ),
             "rssm_fallback_hist": _hist_from_steps(
-                tb.get("eir_mppi/fallback_reason", []), RSSM_FALLBACK
+                tb.get("eir_mppi/fallback_reason", []), MPPI_FALLBACK
+            ),
+            "mppi_imagine_mode_hist": _hist_from_steps(
+                tb.get("eir_mppi/imagine_mode", []), IMAGINE_MODE
+            ),
+            "mppi_mode_hist": _hist_from_steps(
+                tb.get("eir_mppi/mode", []), MPPI_MODE
             ),
             "bank_buckets": buckets,
             "eir_tags": key_tags,
@@ -240,6 +254,12 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         "elite_acceptance_rate_mean": _agg("eir/bank_elite_acceptance_rate"),
         "elite_priority_mean": _agg("eir/bank_elite_priority_mean", "mean"),
         "bank_feature_source_mean": _agg("eir/bank_feature_source", "mean"),
+        "bank_feature_source_actor_fraction_mean": _agg(
+            "eir/bank_feature_source_actor_fraction", "mean"
+        ),
+        "bank_feature_source_fallback_fraction_mean": _agg(
+            "eir/bank_feature_source_fallback_fraction", "mean"
+        ),
         # candidates
         "score_margin_median_of_means": _agg("eir/score_margin", "mean"),
         "best_source_frac_elite_mean": _agg("eir/best_source_frac_elite"),
@@ -254,10 +274,27 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         "residual_gate_mean": _agg("eir/residual_gate_mean", "mean"),
         "residual_apply_fraction_mean": _agg("eir/residual_apply_fraction", "mean"),
         "residual_apply_active_max": _agg("eir/residual_apply_active", "max"),
-        # rssm
+        # candidate-source fraction for rssm (how often rssm enters the pool)
+        "candidate_source_frac_rssm_mean": _agg("eir/candidate_source_frac_rssm"),
+        "rssm_candidate_added_mean": _agg("eir/rssm_candidate_added"),
+        # rssm / full H-step MPPI
         "rssm_active_mean": _agg("eir_mppi/active"),
+        "mppi_active_mean": _agg("eir/mppi_active"),
+        "mppi_belief_valid_mean": _agg("eir/mppi_belief_valid"),
+        "mppi_belief_cache_valid_mean": _agg("eir_mppi/belief_cache_valid"),
+        "mppi_belief_cache_rows_last": _agg("eir_mppi/belief_cache_rows"),
+        "mppi_belief_cache_dim_last": _agg("eir_mppi/belief_cache_dim"),
+        "mppi_mode_last": _agg("eir_mppi/mode"),
+        "mppi_imagine_mode_last": _agg("eir_mppi/imagine_mode"),
+        "mppi_horizon_last": _agg("eir_mppi/sequence_horizon"),
+        "mppi_num_sequences_last": _agg("eir_mppi/num_sequences"),
         "rssm_score_margin_mean": _agg("eir_mppi/score_margin", "mean"),
+        "rssm_best_score_mean": _agg("eir_mppi/best_score", "mean"),
+        "rssm_actor_score_mean": _agg("eir_mppi/actor_score", "mean"),
         "rssm_uncertainty_mean": _agg("eir_mppi/uncertainty", "mean"),
+        "rssm_best_first_action_delta_mean": _agg("eir_mppi/best_first_action_delta", "mean"),
+        "mppi_low_margin_fraction_mean": _agg("eir_mppi/low_margin_fraction", "mean"),
+        "mppi_high_uncertainty_fraction_mean": _agg("eir_mppi/high_uncertainty_fraction", "mean"),
         # broadcast
         "broadcast_count_max": _agg("eir_pbt/broadcast_count", "max"),
         "bank_merge_count_max": _agg("eir_pbt/bank_merge_count", "max"),
@@ -283,6 +320,12 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
     failures = []
     if not criteria["elite_bank_nonempty"]:
         failures.append("elite_bank_empty: no elite transitions harvested (check risky gate / tol staging)")
+    fb_frac = summary.get("bank_feature_source_fallback_fraction_mean")
+    if fb_frac is not None and fb_frac > 0.5:
+        failures.append(
+            "bank_feature_fallback_dominates: elite bank mostly uses task-context keys "
+            f"(fallback_fraction={fb_frac:.2f}); KNN retrieval quality may be degraded"
+        )
     if not criteria["best_source_elite_archive_gt_0.2"]:
         failures.append("low_elite_best_source: best action rarely from elite/archive (candidate margin too weak)")
     if not criteria["score_margin_ge_0.02"]:
@@ -291,6 +334,37 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         failures.append("eir_inactive: aux loss never fired (warmup/valid-fraction/risky gate blocking)")
     if criteria["broadcast_fired"] and not criteria["broadcast_helped_targets"]:
         failures.append("broadcast_no_lift: payloads delivered but targets did not improve within 100M")
+
+    # ---- RSSM-MPPI classification (informational; not blocking) ----
+    mppi_notes = []
+    # aggregate fallback histogram across policies
+    mppi_fb_total: dict[str, int] = {}
+    imagine_total: dict[str, int] = {}
+    for p in per_policy.values():
+        for k, v in (p.get("rssm_fallback_hist") or {}).items():
+            mppi_fb_total[k] = mppi_fb_total.get(k, 0) + int(v)
+        for k, v in (p.get("mppi_imagine_mode_hist") or {}).items():
+            imagine_total[k] = imagine_total.get(k, 0) + int(v)
+    summary["mppi_fallback_hist_total"] = mppi_fb_total
+    summary["mppi_imagine_mode_hist_total"] = imagine_total
+    mppi_active = (summary.get("mppi_active_mean") or summary.get("rssm_active_mean") or 0.0)
+    belief_valid = (summary.get("mppi_belief_cache_valid_mean") or summary.get("mppi_belief_valid_mean") or 0.0)
+    if belief_valid <= 0.0:
+        mppi_notes.append("mppi_inactive_no_belief: belief cache never valid (non-RSSM backbone or encode failed)")
+    if mppi_fb_total.get("no_imagine_step", 0) > 0:
+        mppi_notes.append("mppi_inactive_no_imagine_step: backbone lacked imagine_step")
+    if mppi_fb_total.get("high_uncertainty", 0) > 0:
+        mppi_notes.append("mppi_high_uncertainty: planner gated out on prior uncertainty")
+    if mppi_fb_total.get("low_margin", 0) > 0 and mppi_active <= 0.0:
+        mppi_notes.append("mppi_active_but_low_margin: planner ran but margin below threshold (no candidate appended)")
+    if mppi_active > 0.0 and (summary.get("best_source_frac_rssm_mean") or 0.0) <= 0.0:
+        mppi_notes.append("mppi_active_but_never_selected: rssm candidate added but reranker never picked it")
+    if imagine_total.get("fixed_belief_fallback", 0) > 0 and imagine_total.get("prior_rollout", 0) == 0:
+        mppi_notes.append("mppi_fixed_belief_fallback_only: backbone has no usable prior transition (approximate H-step)")
+    summary["mppi_notes"] = mppi_notes
+    criteria["mppi_belief_cache_valid"] = bool(belief_valid > 0.0)
+    criteria["mppi_active"] = bool(mppi_active > 0.0)
+    criteria["mppi_contributed_best_source"] = bool((summary.get("best_source_frac_rssm_mean") or 0.0) > 0.0)
 
     if not failures and (criteria["best_source_elite_archive_gt_0.2"] and criteria["score_margin_ge_0.02"]):
         recommendation = "continue"
@@ -314,9 +388,14 @@ def analyze(run_dir, out_dir, ws_name=None, num_policies=None):
         lines.append("### Failures")
         for fmsg in failures:
             lines.append(f"- {fmsg}")
+    mppi_notes = summary.get("mppi_notes") or []
+    if mppi_notes:
+        lines += ["", "### RSSM-MPPI notes"]
+        for n in mppi_notes:
+            lines.append(f"- {n}")
     lines += ["", "## Summary"]
     for k, v in summary.items():
-        if k in ("criteria", "failures", "recommendation"):
+        if k in ("criteria", "failures", "recommendation", "mppi_notes"):
             continue
         lines.append(f"- {k}: {v}")
     lines += ["", "## Success criteria"]

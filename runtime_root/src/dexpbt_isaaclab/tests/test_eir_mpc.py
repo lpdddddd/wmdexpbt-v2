@@ -338,6 +338,98 @@ class TestComputeEIRLoss(unittest.TestCase):
         self.assertEqual(bridge.last_rssm_candidate_added, 0.0)
 
 
+class TestComputeEIRLossWithMPPI(unittest.TestCase):
+    """Full H-step MPPI integration into compute_eir_loss."""
+
+    def _setup_with_mppi(self, *, planner_active=True, belief_valid=True):
+        from dexpbt_isaaclab.world_model.rssm_lite import RSSMState
+        from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
+            RSSMMPPIConfig, RSSMMPPIPlanner,
+        )
+        from dexpbt_isaaclab.world_model.rssm_belief_provider import RSSMBeliefCache, BELIEF_OK
+
+        base = TestComputeEIRLoss()
+        bridge, model, scorer, res_bridge = base._setup()
+        B = bridge.cache.actions_flat.shape[0]
+        belief_dim = 6
+
+        class _ToyModel:
+            def get_state_from_belief(self, belief):
+                return RSSMState(belief=belief, deter=belief[:, :3], stoch=belief[:, 3:])
+
+            def imagine_step(self, state, action):
+                if not isinstance(state, RSSMState):
+                    state = self.get_state_from_belief(state)
+                bel = state.belief
+                Bn = bel.shape[0]
+                # reward larger actions (so non-actor sequences win when active)
+                mag = action.norm(dim=-1)
+                succ = torch.sigmoid(3.0 * mag) if planner_active else torch.zeros(Bn)
+                preds = {
+                    "success": succ,
+                    "drop": torch.zeros(Bn),
+                    "recovery": succ,
+                    "value": mag,
+                    "task_error_delta": torch.zeros(Bn),
+                    "prior_std_mean": torch.zeros(Bn),
+                    "imagine_mode": "prior_rollout",
+                }
+                return RSSMState(belief=bel + 0.01 * mag[:, None], deter=bel[:, :3], stoch=bel[:, 3:]), preds
+
+        cfg = RSSMMPPIConfig(
+            enabled=True, mode="full", start_after_frames=0, horizon=3,
+            num_sequences=16, num_elite=4, cem_iters=1,
+            min_sequence_margin=(-1.0 if planner_active else 1e6),
+            uncertainty_threshold=1.0,
+        )
+        bridge.rssm_planner = RSSMMPPIPlanner(cfg)
+        bridge.rssm_model = _ToyModel()
+        if belief_valid:
+            bridge.rssm_belief_cache = RSSMBeliefCache(
+                belief_flat=torch.randn(B, belief_dim), state_flat=None,
+                frame=0, generation=0, rows=B, belief_dim=belief_dim,
+                valid=True, fallback_reason=BELIEF_OK, source="test",
+            )
+        else:
+            bridge.rssm_belief_cache = RSSMBeliefCache.invalid(3)
+        return bridge
+
+    def test_passes_belief_and_appends_rssm_candidate_when_active(self):
+        from dexpbt_isaaclab.world_model.eir_mpc import SRC_RSSM
+        import dexpbt_isaaclab.world_model.eir_mpc as _eir
+
+        bridge = self._setup_with_mppi(planner_active=True, belief_valid=True)
+        seen = {}
+        orig = _eir.rerank_candidates
+
+        def _spy(**kw):
+            seen["source_id"] = kw["source_id"]
+            return orig(**kw)
+
+        _eir.rerank_candidates = _spy
+        try:
+            compute_eir_loss(bridge, frames=1000)
+        finally:
+            _eir.rerank_candidates = orig
+        self.assertEqual(bridge.last_mppi_active, 1.0)
+        self.assertEqual(bridge.last_mppi_belief_valid, 1.0)
+        self.assertEqual(bridge.last_rssm_candidate_added, 1.0)
+        self.assertTrue(bool((seen["source_id"] == SRC_RSSM).any()))
+
+    def test_no_crash_and_no_candidate_when_mppi_inactive(self):
+        bridge = self._setup_with_mppi(planner_active=False, belief_valid=True)
+        out = compute_eir_loss(bridge, frames=1000)
+        # planner ran (belief valid) but low margin -> inactive, no candidate
+        self.assertEqual(bridge.last_rssm_candidate_added, 0.0)
+        self.assertEqual(bridge.last_mppi_active, 0.0)
+
+    def test_no_crash_when_belief_invalid(self):
+        bridge = self._setup_with_mppi(planner_active=True, belief_valid=False)
+        # belief cache invalid -> planner gets None belief -> inactive, no crash
+        out = compute_eir_loss(bridge, frames=1000)
+        self.assertEqual(bridge.last_rssm_candidate_added, 0.0)
+
+
 def _filled_bank(*, target):
     cfg = EliteRecoveryBankConfig(
         enabled=True, bank_size=64, feature_dim=4, action_dim=3,

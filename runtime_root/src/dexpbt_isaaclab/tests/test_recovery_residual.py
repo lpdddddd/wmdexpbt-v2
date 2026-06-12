@@ -16,6 +16,7 @@ from dexpbt_isaaclab.world_model.recovery_residual import (
     compute_rollout_residual_action,
     APPLY_OK,
     APPLY_AUX_MISSING,
+    APPLY_AUX_STALE,
     APPLY_BEFORE_WARMUP,
     APPLY_KILL_SWITCH_OFF,
 )
@@ -141,6 +142,46 @@ class TestRolloutApply(unittest.TestCase):
         self.assertEqual(res["fallback_reason"], APPLY_AUX_MISSING)
         self.assertTrue(torch.allclose(res["action"], mu))
         self.assertEqual(res["apply_fraction"], 0.0)
+
+    def test_apply_self_disables_when_aux_stale_by_frame_age(self):
+        bridge = self._bridge(apply_max_aux_age_frames=1000)
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        bridge.set_aux_snapshot(
+            d_hat=torch.full((3,), 0.01), tol=torch.full((3,), 0.015),
+            lifted=torch.ones(3), frame=100,
+        )
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=5000)
+        self.assertEqual(res["fallback_reason"], APPLY_AUX_STALE)
+        self.assertTrue(torch.allclose(res["action"], mu))
+
+    def test_apply_self_disables_when_aux_generation_mismatch(self):
+        bridge = self._bridge(apply_max_aux_age_frames=10**9)
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        bridge.set_aux_snapshot(
+            d_hat=torch.full((3,), 0.01), tol=torch.full((3,), 0.015),
+            lifted=torch.ones(3), frame=500, generation=7,
+        )
+        res = compute_rollout_residual_action(
+            bridge, feat=feat, mu=mu, frames=500, rollout_generation=8,
+        )
+        self.assertEqual(res["fallback_reason"], APPLY_AUX_STALE)
+        self.assertTrue(torch.allclose(res["action"], mu))
+
+    def test_apply_not_aux_missing_when_fresh_aux_after_warmup(self):
+        bridge = self._bridge()
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        bridge.set_aux_snapshot(
+            d_hat=torch.full((3,), 0.01), tol=torch.full((3,), 0.015),
+            lifted=torch.ones(3), frame=500, generation=3,
+        )
+        res = compute_rollout_residual_action(
+            bridge, feat=feat, mu=mu, frames=500, rollout_generation=3,
+        )
+        self.assertNotEqual(res["fallback_reason"], APPLY_AUX_MISSING)
+        self.assertNotEqual(res["fallback_reason"], APPLY_AUX_STALE)
 
     def test_apply_blocked_before_warmup(self):
         bridge = self._bridge(apply_after_frames=1_000_000)

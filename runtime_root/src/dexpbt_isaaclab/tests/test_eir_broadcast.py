@@ -110,6 +110,25 @@ class TestTrigger(unittest.TestCase):
         self.assertEqual(bc.decide_consume_mode(True), CONSUME_LIVE)
         self.assertEqual(bc.decide_consume_mode(False), CONSUME_RESTART)
 
+    def test_source_broadcast_cooldown(self):
+        cfg = EliteBroadcastConfig(
+            enabled=True, min_frames_between_broadcasts_per_source=100,
+        )
+        self.assertTrue(bc.source_broadcast_allowed(-1, 1000, cfg=cfg))
+        self.assertFalse(bc.source_broadcast_allowed(900, 950, cfg=cfg))
+        self.assertTrue(bc.source_broadcast_allowed(900, 1000, cfg=cfg))
+
+    def test_target_broadcast_cooldown(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = Path(d)
+            cfg = EliteBroadcastConfig(
+                enabled=True, min_frames_between_broadcasts_per_target=100,
+            )
+            self.assertTrue(bc.target_broadcast_allowed(ws, 2, 1000, cfg=cfg))
+            bc.record_target_broadcast_write(ws, 2, frame=900, source_policy=0)
+            self.assertFalse(bc.target_broadcast_allowed(ws, 2, 950, cfg=cfg))
+            self.assertTrue(bc.target_broadcast_allowed(ws, 2, 1000, cfg=cfg))
+
 
 class TestMailboxRoundtrip(unittest.TestCase):
     def test_write_read_merge_and_idempotent_consume(self):

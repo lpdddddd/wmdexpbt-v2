@@ -64,6 +64,8 @@ class RecoveryResidualConfig:
     hard_floor_tol: float = 0.012
     near_success_mult: float = 2.0
     gate_confidence_threshold: float = 0.5
+    # max env-frame age of the aux snapshot before rollout apply self-disables
+    apply_max_aux_age_frames: int = 100_000_000
 
     def distill_weight_for_tol(self, tol: float) -> float:
         t = float(tol)
@@ -120,6 +122,7 @@ class RecoveryResidualBridge:
     aux_tol: Optional[torch.Tensor] = None
     aux_lifted: Optional[torch.Tensor] = None
     aux_frame: int = -1
+    aux_generation: int = -1
 
     # logged metrics
     last_residual_loss: float = 0.0
@@ -141,11 +144,13 @@ class RecoveryResidualBridge:
         tol: Optional[torch.Tensor],
         lifted: Optional[torch.Tensor],
         frame: int,
+        generation: int = -1,
     ) -> None:
         self.aux_d_hat = d_hat
         self.aux_tol = tol
         self.aux_lifted = lifted
         self.aux_frame = int(frame)
+        self.aux_generation = int(generation)
 
 
 def attach_recovery_residual(
@@ -216,6 +221,7 @@ def compute_rollout_residual_action(
     feat: torch.Tensor,
     mu: torch.Tensor,
     frames: int,
+    rollout_generation: Optional[int] = None,
 ) -> dict[str, Any]:
     """Compute the (possibly modified) env action mean at rollout time.
 
@@ -253,6 +259,15 @@ def compute_rollout_residual_action(
     lifted = bridge.aux_lifted
     if d_hat is None or tol is None or (cfg.only_lifted and lifted is None):
         return _finish(APPLY_AUX_MISSING, dict(no_apply))
+    aux_age = int(frames) - int(bridge.aux_frame)
+    if int(bridge.aux_frame) < 0 or aux_age > int(cfg.apply_max_aux_age_frames):
+        return _finish(APPLY_AUX_STALE, dict(no_apply))
+    if (
+        rollout_generation is not None
+        and int(bridge.aux_generation) >= 0
+        and int(rollout_generation) != int(bridge.aux_generation)
+    ):
+        return _finish(APPLY_AUX_STALE, dict(no_apply))
     d_hat = d_hat.to(dev).reshape(-1)[:B]
     tol = tol.to(dev).reshape(-1)[:B]
     if torch.isnan(d_hat).any() or torch.isnan(tol).any():
