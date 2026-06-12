@@ -2763,6 +2763,20 @@ def _patch_actor_train_for_seq_wm(
                             tb_writer.add_scalar(tag, float(v), frames)
                         except Exception:
                             pass
+            if tb_writer is not None:
+                _restore_metrics = getattr(
+                    seq_wm_trainer, "_rssm_ensemble_restore_metrics", None
+                )
+                if isinstance(_restore_metrics, dict):
+                    for _rk, _rv in _restore_metrics.items():
+                        if isinstance(_rv, (int, float)):
+                            try:
+                                tb_writer.add_scalar(
+                                    f"seq_wm_ensemble/{_rk}", float(_rv), frames
+                                )
+                            except Exception:
+                                pass
+                    seq_wm_trainer._rssm_ensemble_restore_metrics = None
             if tb_writer is not None and len(_ens_trainers) > 1:
                 # per-member + aggregate ensemble seq-WM training metrics.
                 _loss_totals: list[float] = []
@@ -2786,19 +2800,6 @@ def _patch_actor_train_for_seq_wm(
                     tb_writer.add_scalar("seq_wm_ensemble/size", float(len(_ens_trainers)), frames)
                     tb_writer.add_scalar("seq_wm_ensemble/train_active", 1.0, frames)
                     tb_writer.add_scalar("seq_wm_ensemble/bootstrap_mask_active", 0.0, frames)
-                    _restore_metrics = getattr(
-                        seq_wm_trainer, "_rssm_ensemble_restore_metrics", None
-                    )
-                    if isinstance(_restore_metrics, dict):
-                        for _rk, _rv in _restore_metrics.items():
-                            if isinstance(_rv, (int, float)):
-                                try:
-                                    tb_writer.add_scalar(
-                                        f"seq_wm_ensemble/{_rk}", float(_rv), frames
-                                    )
-                                except Exception:
-                                    pass
-                        seq_wm_trainer._rssm_ensemble_restore_metrics = None
                     if _loss_totals:
                         tb_writer.add_scalar(
                             "seq_wm_ensemble/loss_total_mean",
@@ -5185,9 +5186,7 @@ def main():
         # Optional warm-start from prior wm_seq_latest.pt (within-family only;
         # cross-family load is a reset by --wm_load_mode contract).
         wm_seq_ckpt_path = args_cli.wm_checkpoint_path or ""
-        if (wm_seq_ckpt_path
-                and args_cli.wm_load_mode != "reset"
-                and Path(wm_seq_ckpt_path).is_file()):
+        if wm_seq_ckpt_path and Path(wm_seq_ckpt_path).is_file():
             try:
                 payload = torch.load(wm_seq_ckpt_path, map_location=rl_device,
                                       weights_only=False)
@@ -5195,28 +5194,31 @@ def main():
                 compatible, compat_reason = _is_wm_strategy_compatible(
                     src_strategy, args_cli.wm_strategy
                 )
-                if "model_state_dict" in payload and compatible:
-                    seq_wm_trainer.load_state_dict(payload, strict=False)
-                    print(
-                        f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path} "
-                        f"(src={src_strategy}, reason={compat_reason})"
-                    )
-                    _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
-                    if _ens_mgr is not None and _ens_mgr.size > 1:
-                        _ens_metrics = restore_rssm_ensemble_checkpoint(
-                            _ens_mgr,
-                            payload,
-                            wm_load_mode=str(args_cli.wm_load_mode),
-                            ensemble_load_mode=str(args_cli.seq_wm_ensemble_load_mode),
-                            primary_loaded=True,
+                primary_loaded = False
+                if args_cli.wm_load_mode != "reset":
+                    if "model_state_dict" in payload and compatible:
+                        seq_wm_trainer.load_state_dict(payload, strict=False)
+                        primary_loaded = True
+                        print(
+                            f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path} "
+                            f"(src={src_strategy}, reason={compat_reason})"
                         )
-                        seq_wm_trainer._rssm_ensemble_restore_metrics = _ens_metrics
-                elif "model_state_dict" in payload:
-                    print(
-                        f"[SeqWM] skip warm-start from {wm_seq_ckpt_path}: "
-                        f"src={src_strategy} incompatible with "
-                        f"{args_cli.wm_strategy} ({compat_reason})"
+                    elif "model_state_dict" in payload:
+                        print(
+                            f"[SeqWM] skip warm-start from {wm_seq_ckpt_path}: "
+                            f"src={src_strategy} incompatible with "
+                            f"{args_cli.wm_strategy} ({compat_reason})"
+                        )
+                _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
+                if _ens_mgr is not None and _ens_mgr.size > 1:
+                    _ens_metrics = restore_rssm_ensemble_checkpoint(
+                        _ens_mgr,
+                        payload,
+                        wm_load_mode=str(args_cli.wm_load_mode),
+                        ensemble_load_mode=str(args_cli.seq_wm_ensemble_load_mode),
+                        primary_loaded=primary_loaded,
                     )
+                    seq_wm_trainer._rssm_ensemble_restore_metrics = _ens_metrics
             except Exception as exc:
                 print(f"[SeqWM] failed to warm-start from {wm_seq_ckpt_path}: {exc}")
 

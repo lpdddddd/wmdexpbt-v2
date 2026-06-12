@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import types
 import unittest
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -372,6 +373,28 @@ class TestEIRSmokePreflight(unittest.TestCase):
         )
         self.assertTrue(planner.cfg.use_model_ensemble)
         self.assertEqual(planner.cfg.ensemble_min_valid_models, 2)
+
+    def test_ensemble_mppi_launcher_uses_restore_compatible_wm_load_mode(self):
+        roots = [
+            Path("/root/autodl-tmp/wmdexpbt/results"),
+            Path("/root/autodl-tmp/wmdexpbt/results/launchers"),
+        ]
+        launcher = None
+        for root in roots:
+            candidate = root / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+            if candidate.exists():
+                launcher = candidate
+                break
+        self.assertIsNotNone(launcher, "ensemble 3B launcher not found")
+        text = launcher.read_text()
+        self.assertIn("--seq_wm_ensemble_enable", text)
+        self.assertIn("--eir_mppi_use_model_ensemble", text)
+        self.assertIn("--seq_wm_ensemble_load_mode resume", text)
+        self.assertTrue(
+            "--wm_load_mode auto" in text or "--wm_load_mode force" in text,
+            "ensemble launcher must use restore-compatible wm_load_mode",
+        )
+        self.assertNotIn("--wm_load_mode reset", text)
 
 
 if __name__ == "__main__":

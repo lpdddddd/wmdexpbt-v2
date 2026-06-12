@@ -101,7 +101,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --wm_strategy "$WM_STRATEGY" \
   --wm_strategy_mode fixed \
   --fixed_wm_strategy "$WM_STRATEGY" \
-  --wm_load_mode reset \
+  --wm_load_mode auto \
   --seq_wm_seq_len 16 \
   --seq_wm_seq_batch_size 1024 \
   --seq_wm_lambda_total 0.05 \

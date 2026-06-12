@@ -205,6 +205,7 @@ class TestEnsembleCheckpointPersistence(unittest.TestCase):
             ensemble_load_mode="resume",
             primary_loaded=True,
         )
+        self.assertEqual(metrics.get("restore_attempted"), 1.0)
         self.assertEqual(metrics.get("ensemble_members_loaded"), 3.0)
         for i in range(3):
             p_a = next(mgr.models[i].parameters())
@@ -226,11 +227,12 @@ class TestEnsembleCheckpointPersistence(unittest.TestCase):
             mgr_restart,
             payload,
             wm_load_mode="auto",
-            ensemble_load_mode="reset",
+            ensemble_load_mode="resume",
             primary_loaded=True,
         )
+        self.assertEqual(metrics.get("restore_attempted"), 1.0)
         self.assertEqual(metrics.get("ensemble_members_loaded"), 3.0)
-        self.assertNotIn("init_from_primary", metrics)
+        self.assertEqual(metrics.get("init_from_primary"), 0.0)
         self.assertTrue(torch.allclose(
             next(restart_models[1].parameters()),
             next(models[1].parameters()),
@@ -259,13 +261,91 @@ class TestEnsembleCheckpointPersistence(unittest.TestCase):
             ensemble_load_mode="resume",
             primary_loaded=True,
         )
+        self.assertEqual(metrics.get("restore_attempted"), 1.0)
+        self.assertEqual(metrics.get("missing_ensemble_state"), 1.0)
         self.assertEqual(metrics.get("init_from_primary"), 1.0)
+        self.assertEqual(metrics.get("init_from_primary_members"), 2.0)
         for i, m in enumerate(members, start=1):
             self.assertTrue(
                 torch.allclose(next(m.parameters()), next(primary.parameters())),
                 msg=f"member {i} should match primary",
             )
             self.assertFalse(torch.allclose(before[i - 1], next(m.parameters())))
+
+
+class TestRestoreRssmEnsembleCheckpoint(unittest.TestCase):
+    def _make_manager(self, size=3):
+        models = [_real_rssm() for _ in range(size)]
+        mgr = RSSMEnsembleManager(
+            models, RSSMEnsembleConfig(enabled=True, size=size, load_mode="resume")
+        )
+        return mgr, models
+
+    def test_restore_skips_when_wm_load_mode_reset(self):
+        mgr, _ = self._make_manager(3)
+        with torch.no_grad():
+            next(mgr.models[1].parameters()).fill_(5.0)
+        payload = {"rssm_ensemble": mgr.state_dict()}
+        metrics = restore_rssm_ensemble_checkpoint(
+            mgr,
+            payload,
+            wm_load_mode="reset",
+            ensemble_load_mode="resume",
+            primary_loaded=True,
+        )
+        self.assertEqual(metrics["restore_skipped_wm_reset"], 1.0)
+        self.assertEqual(metrics["ensemble_members_loaded"], 0.0)
+        self.assertEqual(metrics["init_from_primary"], 0.0)
+        self.assertEqual(metrics["restore_attempted"], 0.0)
+
+    def test_restore_loads_rssm_ensemble_when_present(self):
+        mgr, models = self._make_manager(3)
+        with torch.no_grad():
+            next(models[1].parameters()).fill_(7.0)
+            next(models[2].parameters()).fill_(9.0)
+        payload = {"rssm_ensemble": mgr.state_dict()}
+        mgr2, models2 = self._make_manager(3)
+        metrics = restore_rssm_ensemble_checkpoint(
+            mgr2,
+            payload,
+            wm_load_mode="auto",
+            ensemble_load_mode="resume",
+            primary_loaded=True,
+        )
+        self.assertEqual(metrics["restore_attempted"], 1.0)
+        self.assertGreaterEqual(metrics["ensemble_members_loaded"], 2.0)
+        self.assertEqual(metrics["init_from_primary"], 0.0)
+        self.assertTrue(torch.allclose(
+            next(models2[1].parameters()),
+            next(models[1].parameters()),
+        ))
+
+    def test_restore_missing_ensemble_state_init_from_primary(self):
+        primary = _real_rssm()
+        with torch.no_grad():
+            next(primary.parameters()).fill_(3.5)
+        members = [_real_rssm() for _ in range(2)]
+        mgr = RSSMEnsembleManager(
+            [primary] + members,
+            RSSMEnsembleConfig(enabled=True, size=3, load_mode="resume"),
+        )
+        payload = {"model_state_dict": primary.state_dict()}
+        metrics = restore_rssm_ensemble_checkpoint(
+            mgr,
+            payload,
+            wm_load_mode="auto",
+            ensemble_load_mode="resume",
+            primary_loaded=True,
+        )
+        self.assertEqual(metrics["restore_attempted"], 1.0)
+        self.assertEqual(metrics["missing_ensemble_state"], 1.0)
+        self.assertEqual(metrics["init_from_primary"], 1.0)
+        self.assertEqual(metrics["init_from_primary_members"], 2.0)
+        for i, m in enumerate(members, start=1):
+            self.assertTrue(
+                torch.allclose(next(m.parameters()), next(primary.parameters())),
+                msg=f"member {i} should match primary",
+            )
 
 
 # ---------------------------------------------------------------------------

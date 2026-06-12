@@ -182,6 +182,18 @@ def make_bootstrap_generator(base_seed: int, member_index: int) -> torch.Generat
     return g
 
 
+def _default_restore_metrics() -> dict[str, float]:
+    return {
+        "bootstrap_mask_active": 0.0,
+        "restore_attempted": 0.0,
+        "restore_skipped_wm_reset": 0.0,
+        "ensemble_members_loaded": 0.0,
+        "init_from_primary": 0.0,
+        "init_from_primary_members": 0.0,
+        "missing_ensemble_state": 0.0,
+    }
+
+
 def restore_rssm_ensemble_checkpoint(
     manager: RSSMEnsembleManager,
     payload: dict,
@@ -192,44 +204,41 @@ def restore_rssm_ensemble_checkpoint(
 ) -> dict[str, float]:
     """Restore ensemble member weights from a SeqWM checkpoint payload.
 
-    Returns scalar metrics suitable for TB logging (e.g.
-    ``init_from_primary``, ``ensemble_members_loaded``).
-
-    Ensemble restore is attempted when ``ensemble_load_mode=='resume'`` or when
-    a PBT restart passes ``wm_load_mode in ('auto', 'force')`` and the payload
-    already contains ``rssm_ensemble`` (cross-copy / workspace checkpoint).
+    Returns scalar metrics suitable for TB logging under ``seq_wm_ensemble/*``.
     """
-    metrics: dict[str, float] = {
-        "bootstrap_mask_active": 0.0,
-    }
+    metrics = _default_restore_metrics()
     if manager.size <= 1:
         return metrics
 
     wm_mode = str(wm_load_mode or "auto")
     ens_mode = str(ensemble_load_mode or "reset")
+
     if wm_mode == "reset":
+        metrics["restore_skipped_wm_reset"] = 1.0
+        print("[RSSM-ensemble] restore skipped because wm_load_mode=reset")
+        return metrics
+
+    if ens_mode == "reset":
         return metrics
 
     ens_state = payload.get("rssm_ensemble") if isinstance(payload, dict) else None
-    should_restore = ens_mode == "resume" or (
-        wm_mode in ("auto", "force") and isinstance(ens_state, dict)
-    )
-    if not should_restore:
-        return metrics
-
     if isinstance(ens_state, dict):
+        metrics["restore_attempted"] = 1.0
         loaded = manager.load_state_dict(ens_state, strict=False)
         print(f"[RSSM-ensemble] loaded {loaded} member(s) from checkpoint")
         metrics["ensemble_members_loaded"] = float(loaded)
         return metrics
 
     if primary_loaded:
+        metrics["restore_attempted"] = 1.0
+        metrics["missing_ensemble_state"] = 1.0
         copied = manager.init_members_from_primary()
         print(
             "[RSSM-ensemble] no ensemble state in checkpoint; "
             f"init_from_primary for {copied} member(s)"
         )
         metrics["init_from_primary"] = 1.0
+        metrics["init_from_primary_members"] = float(copied)
     return metrics
 
 
