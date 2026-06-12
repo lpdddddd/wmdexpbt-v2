@@ -2459,7 +2459,7 @@ def _patch_actor_train_for_seq_wm(
                 # (19.2) full-rollout features -> elite bank update
                 if eir_bridge.bank is not None:
                     feat_flat, fsrc = _eir_extract_rollout_features(
-                        actor.model, td, eir_bridge.eir_cfg.feature_dim
+                        actor.model, td, eir_bridge.eir_cfg.feature_dim, actor=actor
                     )
                     if feat_flat is not None:
                         src_stats = {
@@ -3364,42 +3364,89 @@ def _patch_model_get_aux_loss_for_floorcritic(model, floorcritic_bridge):
     model.get_aux_loss = patched_get_aux_loss
 
 
-def _eir_extract_rollout_features(model, td, feature_dim):
+def _eir_extract_rollout_features(model, td, feature_dim, actor=None):
     """Full-rollout actor feature extraction for the elite bank (constraint 19.2).
 
     The ERD/EIR forward-capture hook only sees PPO *minibatch* features, so the
-    bank cannot reuse it. Here we recompute features over the whole rollout from
-    ``td['obses']`` with the SAME flatten convention as the target cache
-    (``flat[n*T+t]``), applying the model's obs normalization so the features
-    match what ``actor_mlp`` sees during the forward pass.
+    bank cannot reuse it. Here we replay the rollout through ``a2c_network`` with
+    the stored ``mb_rnn_states`` captured during ``play_steps_rnn`` so features
+    match the shared encoder path (RNN -> actor_mlp), using the same flatten
+    convention as the target cache (``flat[n*T+t]``).
 
     Returns ``(feature_flat[T*N, feature_dim], source_flag)`` where source_flag is
     0 for actor_mlp features and 1 for the fallback retrieval key.
     """
     import torch as _torch
 
+    def _resolve_a2c(m):
+        inner = m.model if hasattr(m, "model") else m
+        return getattr(inner, "a2c_network", None)
+
     try:
         obs = td.get("obses") if hasattr(td, "get") else td["obses"]
-        if obs is None:
-            raise KeyError("obses")
-        obs_flat = _erd_flatten_tn(obs.float())  # [T*N, obs_dim]
-        inner = model.model if hasattr(model, "model") else model
-        a2c = getattr(inner, "a2c_network", None)
+        actions = td.get("actions") if hasattr(td, "get") else td["actions"]
+        if obs is None or actions is None:
+            raise KeyError("obses/actions")
+        T, N = int(obs.shape[0]), int(obs.shape[1])
+        a2c = _resolve_a2c(model)
         if a2c is None or not hasattr(a2c, "actor_mlp"):
             raise RuntimeError("no a2c_network.actor_mlp")
-        with _torch.no_grad():
-            obs_n = obs_flat
-            norm_fn = getattr(model, "norm_obs", None)
-            if callable(norm_fn):
-                try:
-                    obs_n = norm_fn(obs_flat)
-                except Exception:
-                    obs_n = obs_flat
-            feat = a2c.actor_mlp(obs_n).to(_torch.float32)
-        if feat.dim() == 2 and int(feat.shape[-1]) == int(feature_dim):
-            return feat.detach().cpu(), 0
+        device = next(a2c.parameters()).device
+        act_dim = int(actions.shape[-1])
+        norm_fn = getattr(model, "norm_obs", None)
+        mb_rnn = getattr(actor, "mb_rnn_states", None) if actor is not None else None
+        seq_length = max(1, int(getattr(actor, "seq_length", 1)) if actor is not None else 1)
+
+        captured: list[_torch.Tensor] = []
+        feats: list[_torch.Tensor] = []
+
+        def hook_fn(_module, _inp, out):
+            captured.append(out.to(_torch.float32))
+
+        handle = a2c.actor_mlp.register_forward_hook(hook_fn)
+        a2c_was = a2c.training
+        a2c.eval()
+        try:
+            with _torch.no_grad():
+                for t in range(T):
+                    obs_t = obs[t].float().to(device)
+                    if callable(norm_fn):
+                        obs_t = norm_fn(obs_t)
+                    if t == 0:
+                        prev_a = _torch.zeros(N, act_dim, device=device, dtype=obs_t.dtype)
+                    else:
+                        prev_a = actions[t - 1].to(device).float()
+                        if prev_a.ndim == 3 and prev_a.shape[-1] == 1:
+                            prev_a = prev_a.squeeze(-1)
+                    rnn_states = None
+                    if mb_rnn is not None and bool(getattr(a2c, "has_rnn", False)):
+                        seq_idx = t // seq_length
+                        rnn_states = tuple(
+                            mb_s[seq_idx].contiguous().to(device) for mb_s in mb_rnn
+                        )
+                    batch_dict = {
+                        "is_train": False,
+                        "prev_actions": prev_a,
+                        "obs": obs_t,
+                        "seq_length": 1,
+                    }
+                    if rnn_states is not None:
+                        batch_dict["rnn_states"] = rnn_states
+                    a2c(batch_dict)
+                    if not captured:
+                        raise RuntimeError("actor_mlp hook did not fire")
+                    feats.append(captured.pop())
+        finally:
+            handle.remove()
+            if a2c_was:
+                a2c.train()
+
+        feat_tn = _torch.stack(feats, dim=0)
+        feat_flat = _erd_flatten_tn(feat_tn)
+        if feat_flat.dim() == 2 and int(feat_flat.shape[-1]) == int(feature_dim):
+            return feat_flat.detach().cpu(), 0
         raise RuntimeError(
-            f"feature width {tuple(feat.shape)} != feature_dim {feature_dim}"
+            f"feature width {tuple(feat_flat.shape)} != feature_dim {feature_dim}"
         )
     except Exception as exc:
         # Fallback retrieval key: pack normalized task context into a width-F key.
@@ -3407,17 +3454,19 @@ def _eir_extract_rollout_features(model, td, feature_dim):
             d_hat = td["aux_d_hat"]
             tol = td["aux_success_tolerance"]
             lifted = td.get("aux_lifted") if hasattr(td, "get") else None
-            dh = _erd_flatten_tn(d_hat.float()).reshape(-1, 1)
-            tl = _erd_flatten_tn(tol.float()).reshape(-1, 1)
+            dev = d_hat.device
+            dh = _erd_flatten_tn(d_hat.float()).reshape(-1, 1).to(dev)
+            tl = _erd_flatten_tn(tol.float()).reshape(-1, 1).to(dev)
             if lifted is not None:
-                lf = _erd_flatten_tn(lifted.float()).reshape(-1, 1)
+                lf = _erd_flatten_tn(lifted.float()).reshape(-1, 1).to(dev)
             else:
                 lf = _torch.ones_like(dh)
             key = _torch.cat([dh, tl, lf, dh / (tl + 1e-6)], dim=-1)
             n = key.shape[0]
             fd = int(feature_dim)
             if key.shape[-1] < fd:
-                key = _torch.cat([key, _torch.zeros(n, fd - key.shape[-1])], dim=-1)
+                pad = _torch.zeros(n, fd - key.shape[-1], device=dev, dtype=key.dtype)
+                key = _torch.cat([key, pad], dim=-1)
             else:
                 key = key[:, :fd]
             print(f"[EIR] feature extraction fell back to task-context key: {exc}")

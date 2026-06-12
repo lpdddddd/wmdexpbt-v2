@@ -129,6 +129,10 @@ def build_rssm_belief_cache(
         failure_full = read_aux_full(experience_buffer, "aux_failure")
         lifted_full = read_aux_full(experience_buffer, "aux_lifted")
         success_count_full = read_aux_full(experience_buffer, "aux_success_cnt")
+        succtol_full = read_aux_full(experience_buffer, "aux_success_tolerance")
+        picked_full = read_aux_full(experience_buffer, "aux_picked")
+        dropped_full = read_aux_full(experience_buffer, "aux_dropped")
+        closest_full = read_aux_full(experience_buffer, "aux_closest_d_hat")
 
         reward_2d = _squeeze_last1(reward_full)
         done_2d = _squeeze_last1(done_full)
@@ -137,6 +141,10 @@ def build_rssm_belief_cache(
         failure_2d = _squeeze_last1(failure_full)
         lifted_2d = _squeeze_last1(lifted_full)
         success_2d = _squeeze_last1(success_count_full)
+        succtol_2d = _squeeze_last1(succtol_full)
+        picked_2d = _squeeze_last1(picked_full)
+        dropped_2d = _squeeze_last1(dropped_full)
+        closest_2d = _squeeze_last1(closest_full)
         last_d_hat_1d = _squeeze_last1(last_d_hat) if last_d_hat is not None else None
         last_success_1d = _squeeze_last1(last_success_count) if last_success_count is not None else None
 
@@ -163,12 +171,45 @@ def build_rssm_belief_cache(
         if T >= 2:
             segment_id[1:] = torch.cumsum(done_2d[:-1], dim=0).long()
 
+        aux_scalars = None
+        success_tolerance_seq = None
+        aux_dim = int(getattr(model, "aux_dim", 0) or 0)
+        if aux_dim > 0:
+            from .seq_wm_sampler import build_rollout_aux_scalars
+
+            aux_scalars = build_rollout_aux_scalars(
+                T=T,
+                N=N,
+                d_hat=d_hat_2d,
+                next_d_hat=next_d_hat,
+                success_count=success_2d,
+                next_success_count=next_success,
+                success_tolerance=succtol_2d,
+                lifted=lifted_2d,
+                failure=failure_2d,
+                picked=picked_2d,
+                dropped=dropped_2d,
+                closest_d_hat=closest_2d,
+                device=obs_full.device,
+                dtype=obs_full.dtype,
+            )
+            if int(aux_scalars.shape[-1]) != aux_dim:
+                print(
+                    f"[EIR-belief] aux scalar dim {aux_scalars.shape[-1]} != model.aux_dim {aux_dim}"
+                )
+                return RSSMBeliefCache.invalid(
+                    BELIEF_SHAPE_MISMATCH, frame=frames, generation=generation
+                )
+            success_tolerance_seq = succtol_2d
+
         batch = SequenceBatch(
             obs=obs_full, action=action_full, reward=reward_2d, done=done_2d,
             next_obs=next_obs, returns=returns_2d, d_hat=d_hat_2d,
             next_d_hat=next_d_hat, failure=failure_2d, success_count=success_2d,
             next_success_count=next_success, lifted=lifted_2d,
             valid_mask=valid_mask, segment_id=segment_id,
+            aux_scalars=aux_scalars,
+            success_tolerance_seq=success_tolerance_seq,
             meta={"horizon_length": T, "num_actors": N, "seq_len": T, "seq_batch_size": N},
         ).to(device)
     except Exception as exc:  # pragma: no cover - defensive

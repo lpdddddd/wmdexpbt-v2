@@ -21,7 +21,7 @@ from dexpbt_isaaclab.world_model.rssm_belief_provider import (
 T, N, OBS, ACT = 6, 4, 12, 4
 
 
-def _exp_buffer():
+def _exp_buffer(*, with_task_aux=False):
     td = {
         "obses": torch.randn(T, N, OBS),
         "actions": torch.randn(T, N, ACT).clamp(-1, 1),
@@ -32,18 +32,27 @@ def _exp_buffer():
         "aux_lifted": torch.ones(T, N, 1),
         "aux_success_cnt": torch.zeros(T, N, 1),
     }
+    if with_task_aux:
+        td.update(
+            {
+                "aux_success_tolerance": torch.full((T, N, 1), 0.02),
+                "aux_picked": torch.zeros(T, N, 1),
+                "aux_dropped": torch.zeros(T, N, 1),
+                "aux_closest_d_hat": torch.rand(T, N, 1),
+            }
+        )
     return types.SimpleNamespace(tensor_dict=td)
+
+
+def _rssm(*, aux_dim=0):
+    return RSSMLiteWorldModel(
+        obs_dim=OBS, action_dim=ACT, obs_embed_dim=32, action_embed_dim=16,
+        h_dim=24, z_dim=8, head_hidden=32, aux_dim=aux_dim, aux_embed_dim=16,
+    )
 
 
 def _trainer(model):
     return types.SimpleNamespace(model=model, device=torch.device("cpu"))
-
-
-def _rssm():
-    return RSSMLiteWorldModel(
-        obs_dim=OBS, action_dim=ACT, obs_embed_dim=32, action_embed_dim=16,
-        h_dim=24, z_dim=8, head_hidden=32,
-    )
 
 
 class TestBeliefCache(unittest.TestCase):
@@ -60,6 +69,22 @@ class TestBeliefCache(unittest.TestCase):
         self.assertEqual(cache.rows, T * N)
         self.assertEqual(int(cache.belief_flat.shape[0]), T * N)
         self.assertEqual(cache.belief_dim, model.belief_dim)
+
+    def test_build_with_task_aux_scalars(self):
+        model = _rssm(aux_dim=12)
+        cache = build_rssm_belief_cache(
+            seq_wm_trainer=_trainer(model),
+            experience_buffer=_exp_buffer(with_task_aux=True),
+            returns_full=torch.randn(T, N),
+            last_obs=torch.randn(N, OBS),
+            last_d_hat=torch.rand(N, 1),
+            last_success_count=torch.zeros(N, 1),
+            frames=1000,
+            generation=2,
+            device=torch.device("cpu"),
+        )
+        self.assertTrue(cache.valid)
+        self.assertEqual(cache.fallback_reason, BELIEF_OK)
 
     def test_flatten_alignment(self):
         # Stub model whose encode_sequence writes belief_seq[t,n,0]=n*T+t so we

@@ -38,6 +38,63 @@ import torch
 from .seq_wm_base import SequenceBatch
 
 
+def build_rollout_aux_scalars(
+    *,
+    T: int,
+    N: int,
+    d_hat: Optional[torch.Tensor],
+    next_d_hat: Optional[torch.Tensor],
+    success_count: Optional[torch.Tensor],
+    next_success_count: Optional[torch.Tensor],
+    success_tolerance: Optional[torch.Tensor],
+    lifted: Optional[torch.Tensor],
+    failure: Optional[torch.Tensor],
+    picked: Optional[torch.Tensor] = None,
+    dropped: Optional[torch.Tensor] = None,
+    closest_d_hat: Optional[torch.Tensor] = None,
+    device: torch.device | str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build ``(T, N, aux_dim)`` task aux scalars for a full rollout batch.
+
+    Mirrors the field order assembled in ``SequenceSampler.sample`` so RSSM
+    posterior inputs match the seq-WM training path when
+    ``--seq_wm_use_task_aux_inputs`` is enabled.
+    """
+    aux_components: list[torch.Tensor] = []
+
+    def _push(x: Optional[torch.Tensor]) -> None:
+        if x is None:
+            aux_components.append(
+                torch.zeros(T, N, 1, device=device, dtype=dtype)
+            )
+        else:
+            if x.ndim == 2:
+                aux_components.append(x.unsqueeze(-1).to(dtype=dtype))
+            else:
+                aux_components.append(x.to(dtype=dtype))
+
+    _push(d_hat)
+    _push(next_d_hat)
+    if d_hat is not None and next_d_hat is not None:
+        _push(next_d_hat - d_hat)
+    else:
+        _push(None)
+    _push(success_count)
+    _push(next_success_count)
+    if success_count is not None and next_success_count is not None:
+        _push(next_success_count - success_count)
+    else:
+        _push(None)
+    _push(success_tolerance)
+    _push(lifted)
+    _push(failure)
+    _push(picked)
+    _push(dropped)
+    _push(closest_d_hat)
+    return torch.cat(aux_components, dim=-1)
+
+
 def _maybe_squeeze_last(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     """Squeeze trailing dim if it's 1; otherwise pass through."""
     if t is None:
@@ -474,4 +531,4 @@ class SequenceSampler:
         return t_idx[:, perm], e_idx[:, perm]
 
 
-__all__ = ["SequenceSampler"]
+__all__ = ["SequenceSampler", "build_rollout_aux_scalars"]

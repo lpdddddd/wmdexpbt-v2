@@ -409,6 +409,10 @@ class SeqWMTrainer:
         failure_full = read_aux_full(experience_buffer, "aux_failure")
         lifted_full = read_aux_full(experience_buffer, "aux_lifted")
         success_count_full = read_aux_full(experience_buffer, "aux_success_cnt")
+        succtol_full = read_aux_full(experience_buffer, "aux_success_tolerance")
+        picked_full = read_aux_full(experience_buffer, "aux_picked")
+        dropped_full = read_aux_full(experience_buffer, "aux_dropped")
+        closest_full = read_aux_full(experience_buffer, "aux_closest_d_hat")
 
         def _squeeze(t):
             if t is None:
@@ -424,6 +428,10 @@ class SeqWMTrainer:
         failure_2d = _squeeze(failure_full)
         lifted_2d = _squeeze(lifted_full)
         success_2d = _squeeze(success_count_full)
+        succtol_2d = _squeeze(succtol_full)
+        picked_2d = _squeeze(picked_full)
+        dropped_2d = _squeeze(dropped_full)
+        closest_2d = _squeeze(closest_full)
         last_d_hat_1d = _squeeze(last_d_hat) if last_d_hat is not None else None
         last_success_1d = (
             _squeeze(last_success_count) if last_success_count is not None else None
@@ -460,6 +468,30 @@ class SeqWMTrainer:
         if T >= 2:
             segment_id[1:] = torch.cumsum(done_2d[:-1], dim=0).long()
 
+        aux_scalars = None
+        success_tolerance_seq = None
+        aux_dim = int(getattr(self.model, "aux_dim", 0) or 0)
+        if aux_dim > 0:
+            from .seq_wm_sampler import build_rollout_aux_scalars
+
+            aux_scalars = build_rollout_aux_scalars(
+                T=T,
+                N=N,
+                d_hat=d_hat_2d,
+                next_d_hat=next_d_hat,
+                success_count=success_2d,
+                next_success_count=next_success,
+                success_tolerance=succtol_2d,
+                lifted=lifted_2d,
+                failure=failure_2d,
+                picked=picked_2d,
+                dropped=dropped_2d,
+                closest_d_hat=closest_2d,
+                device=obs_full.device,
+                dtype=obs_full.dtype,
+            )
+            success_tolerance_seq = succtol_2d
+
         batch = SequenceBatch(
             obs=obs_full,
             action=action_full,
@@ -475,6 +507,8 @@ class SeqWMTrainer:
             lifted=lifted_2d,
             valid_mask=valid_mask,
             segment_id=segment_id,
+            aux_scalars=aux_scalars,
+            success_tolerance_seq=success_tolerance_seq,
             meta={
                 "horizon_length": T,
                 "num_actors": N,
