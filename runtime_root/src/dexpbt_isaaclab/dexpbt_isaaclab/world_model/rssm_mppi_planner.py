@@ -234,6 +234,23 @@ _MPPI_FALLBACK_NAMES = {
     MPPI_LOW_MARGIN: "low_margin", MPPI_EXCEPTION: "exception",
 }
 
+# Ensemble MPPI fallback reasons (for eir_mppi/ensemble_fallback_reason).
+ENSEMBLE_FB_NOT_CONFIGURED = 0
+ENSEMBLE_FB_NO_CACHE = 1
+ENSEMBLE_FB_BELOW_MIN_VALID = 2
+ENSEMBLE_FB_SCORING_USED = 3
+ENSEMBLE_FB_PLANNER_INACTIVE = 4
+ENSEMBLE_FB_ACTIVE = 5
+
+_ENSEMBLE_FB_NAMES = {
+    ENSEMBLE_FB_NOT_CONFIGURED: "not_configured",
+    ENSEMBLE_FB_NO_CACHE: "no_cache",
+    ENSEMBLE_FB_BELOW_MIN_VALID: "below_min_valid",
+    ENSEMBLE_FB_SCORING_USED: "scoring_used",
+    ENSEMBLE_FB_PLANNER_INACTIVE: "planner_inactive",
+    ENSEMBLE_FB_ACTIVE: "active",
+}
+
 
 @dataclass
 class RSSMMPPIConfig:
@@ -269,8 +286,6 @@ class RSSMMPPIConfig:
     w_task_improve: float = 0.5
     w_uncertainty: float = 0.2
     w_action_smoothness: float = 0.05
-    w_action_delta: float = 0.02
-
     w_action_delta: float = 0.02
 
     fail_fast: bool = False
@@ -368,6 +383,10 @@ class RSSMMPPIPlanner:
         self.last_ensemble_risk_beta = 0.0
         self.last_ensemble_drop_weight = 0.0
         self.last_ensemble_uncertainty_weight = 0.0
+        self.last_ensemble_configured = 0.0
+        self.last_ensemble_available_size = 0.0
+        self.last_ensemble_used = 0.0
+        self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_NOT_CONFIGURED)
 
     # ---- helpers --------------------------------------------------------
     def _inactive(self, reason: int, B: int, A: int, actor_action: torch.Tensor, dev, dtype) -> dict:
@@ -387,6 +406,12 @@ class RSSMMPPIPlanner:
             "mode": self.cfg.mode,
             "imagine_mode": "none",
         }
+
+    def _mark_ensemble_planner_outcome(self, *, active: bool) -> None:
+        if self.last_ensemble_used >= 1.0:
+            self.last_ensemble_fallback_reason = float(
+                ENSEMBLE_FB_ACTIVE if active else ENSEMBLE_FB_PLANNER_INACTIVE
+            )
 
     def _build_sequences(
         self,
@@ -782,6 +807,12 @@ class RSSMMPPIPlanner:
         self.last_ensemble_risk_beta = float(cfg.ensemble_risk_beta)
         self.last_ensemble_drop_weight = float(cfg.ensemble_drop_weight)
         self.last_ensemble_uncertainty_weight = float(cfg.ensemble_uncertainty_weight)
+        self.last_ensemble_configured = 1.0 if cfg.use_model_ensemble else 0.0
+        self.last_ensemble_available_size = 0.0
+        self.last_ensemble_used = 0.0
+        self.last_ensemble_fallback_reason = float(
+            ENSEMBLE_FB_NOT_CONFIGURED if not cfg.use_model_ensemble else ENSEMBLE_FB_NO_CACHE
+        )
 
         if not cfg.enabled or cfg.mode == "off":
             return self._inactive(MPPI_DISABLED, B, A, actor_action, dev, dtype)
@@ -800,27 +831,37 @@ class RSSMMPPIPlanner:
         ens_models: list = []
         ens_beliefs: list = []
         use_ensemble = False
-        if (
-            cfg.use_model_ensemble
-            and rssm_models is not None
-            and belief_flat_ensemble is not None
-            and len(rssm_models) == len(belief_flat_ensemble)
-            and len(rssm_models) > 1
-        ):
-            for model_e, belief_e in zip(rssm_models, belief_flat_ensemble):
-                if (
-                    model_e is not None
-                    and belief_e is not None
-                    and hasattr(model_e, "get_state_from_belief")
-                    and hasattr(model_e, "imagine_step")
-                    and int(belief_e.shape[0]) == B
-                ):
-                    ens_models.append(model_e)
-                    ens_beliefs.append(belief_e.to(device=dev, dtype=dtype))
-            if cfg.ensemble_subsample_models and len(ens_models) > int(cfg.ensemble_max_models_per_plan):
-                ens_models = ens_models[: int(cfg.ensemble_max_models_per_plan)]
-                ens_beliefs = ens_beliefs[: int(cfg.ensemble_max_models_per_plan)]
-            use_ensemble = len(ens_models) >= int(cfg.ensemble_min_valid_models)
+        if cfg.use_model_ensemble:
+            if rssm_models is None or belief_flat_ensemble is None:
+                self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_NO_CACHE)
+            elif (
+                len(rssm_models) != len(belief_flat_ensemble)
+                or len(rssm_models) <= 1
+            ):
+                self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_NO_CACHE)
+            else:
+                for model_e, belief_e in zip(rssm_models, belief_flat_ensemble):
+                    if (
+                        model_e is not None
+                        and belief_e is not None
+                        and hasattr(model_e, "get_state_from_belief")
+                        and hasattr(model_e, "imagine_step")
+                        and int(belief_e.shape[0]) == B
+                    ):
+                        ens_models.append(model_e)
+                        ens_beliefs.append(belief_e.to(device=dev, dtype=dtype))
+                self.last_ensemble_available_size = float(len(ens_models))
+                if cfg.ensemble_subsample_models and len(ens_models) > int(cfg.ensemble_max_models_per_plan):
+                    ens_models = ens_models[: int(cfg.ensemble_max_models_per_plan)]
+                    ens_beliefs = ens_beliefs[: int(cfg.ensemble_max_models_per_plan)]
+                use_ensemble = len(ens_models) >= int(cfg.ensemble_min_valid_models)
+                if use_ensemble:
+                    self.last_ensemble_used = 1.0
+                    self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_SCORING_USED)
+                elif len(ens_models) > 0:
+                    self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_BELOW_MIN_VALID)
+                else:
+                    self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_NO_CACHE)
 
         def _score_seq(seq_in: torch.Tensor) -> dict:
             if use_ensemble:
@@ -935,6 +976,7 @@ class RSSMMPPIPlanner:
                     "best_score": best_score, "actor_score": actor_score,
                     "imagine_mode": self.last_imagine_mode,
                 })
+                self._mark_ensemble_planner_outcome(active=False)
                 return out
             if mean_margin < float(cfg.min_sequence_margin):
                 self.last_active = 0.0
@@ -950,10 +992,12 @@ class RSSMMPPIPlanner:
                     "best_first_action_delta": first_delta,
                     "imagine_mode": self.last_imagine_mode,
                 })
+                self._mark_ensemble_planner_outcome(active=False)
                 return out
 
             self.last_active = 1.0
             self.last_fallback_reason = MPPI_OK
+            self._mark_ensemble_planner_outcome(active=True)
             return {
                 "active": True,
                 "fallback_reason": MPPI_OK,

@@ -379,6 +379,10 @@ class EIRBridge:
     last_mppi_use_model_ensemble: float = 0.0
     last_mppi_ensemble_valid_size: float = 0.0
     last_mppi_ensemble_score_std: float = 0.0
+    last_mppi_ensemble_configured: float = 0.0
+    last_mppi_ensemble_available_size: float = 0.0
+    last_mppi_ensemble_used: float = 0.0
+    last_mppi_ensemble_fallback_reason: float = 0.0
     last_mppi_score_std: float = 0.0
     last_mppi_drop_cvar: float = 0.0
     last_mppi_uncertainty_cvar: float = 0.0
@@ -527,6 +531,18 @@ def _maybe_rssm_candidate_action(
             )
             bridge.last_mppi_ensemble_score_std = float(
                 getattr(planner, "last_ensemble_score_std", 0.0)
+            )
+            bridge.last_mppi_ensemble_configured = float(
+                getattr(planner, "last_ensemble_configured", 0.0)
+            )
+            bridge.last_mppi_ensemble_available_size = float(
+                getattr(planner, "last_ensemble_available_size", 0.0)
+            )
+            bridge.last_mppi_ensemble_used = float(
+                getattr(planner, "last_ensemble_used", 0.0)
+            )
+            bridge.last_mppi_ensemble_fallback_reason = float(
+                getattr(planner, "last_ensemble_fallback_reason", 0.0)
             )
             bridge.last_mppi_stochastic_rollouts = float(
                 getattr(planner, "last_stochastic_rollouts", 0.0)

@@ -31,6 +31,8 @@ class RSSMEnsembleConfig:
     enabled: bool = False
     size: int = 3
     train_all: bool = True
+    # Reserved CLI hook; per-sample bootstrap masks are NOT implemented.
+    # Diversity comes from independent init + independent sequence minibatches.
     use_bootstrap_masks: bool = True
     bootstrap_keep_prob: float = 0.8
     share_architecture: bool = True
@@ -125,6 +127,25 @@ class RSSMEnsembleManager:
                 print(f"[RSSM-ensemble] member {e} load failed: {exc}")
         return loaded
 
+    def init_members_from_primary(self, *, member_start: int = 1) -> int:
+        """Copy member-0 weights into members ``member_start..E-1``.
+
+        Used when resuming a SeqWM checkpoint that lacks ``rssm_ensemble`` state
+        so PBT restarts do not leave members 1..E-1 randomly initialized while
+        member 0 matches the restored primary RSSM.
+        """
+        if self.size <= 1:
+            return 0
+        primary_sd = self._models[0].state_dict()
+        copied = 0
+        for e in range(max(1, int(member_start)), self.size):
+            try:
+                self._models[e].load_state_dict(primary_sd, strict=False)
+                copied += 1
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[RSSM-ensemble] member {e} init_from_primary failed: {exc}")
+        return copied
+
     # ----- inference -------------------------------------------------------
     @torch.no_grad()
     def encode_sequence_ensemble(
@@ -161,8 +182,60 @@ def make_bootstrap_generator(base_seed: int, member_index: int) -> torch.Generat
     return g
 
 
+def restore_rssm_ensemble_checkpoint(
+    manager: RSSMEnsembleManager,
+    payload: dict,
+    *,
+    wm_load_mode: str = "auto",
+    ensemble_load_mode: str = "resume",
+    primary_loaded: bool = True,
+) -> dict[str, float]:
+    """Restore ensemble member weights from a SeqWM checkpoint payload.
+
+    Returns scalar metrics suitable for TB logging (e.g.
+    ``init_from_primary``, ``ensemble_members_loaded``).
+
+    Ensemble restore is attempted when ``ensemble_load_mode=='resume'`` or when
+    a PBT restart passes ``wm_load_mode in ('auto', 'force')`` and the payload
+    already contains ``rssm_ensemble`` (cross-copy / workspace checkpoint).
+    """
+    metrics: dict[str, float] = {
+        "bootstrap_mask_active": 0.0,
+    }
+    if manager.size <= 1:
+        return metrics
+
+    wm_mode = str(wm_load_mode or "auto")
+    ens_mode = str(ensemble_load_mode or "reset")
+    if wm_mode == "reset":
+        return metrics
+
+    ens_state = payload.get("rssm_ensemble") if isinstance(payload, dict) else None
+    should_restore = ens_mode == "resume" or (
+        wm_mode in ("auto", "force") and isinstance(ens_state, dict)
+    )
+    if not should_restore:
+        return metrics
+
+    if isinstance(ens_state, dict):
+        loaded = manager.load_state_dict(ens_state, strict=False)
+        print(f"[RSSM-ensemble] loaded {loaded} member(s) from checkpoint")
+        metrics["ensemble_members_loaded"] = float(loaded)
+        return metrics
+
+    if primary_loaded:
+        copied = manager.init_members_from_primary()
+        print(
+            "[RSSM-ensemble] no ensemble state in checkpoint; "
+            f"init_from_primary for {copied} member(s)"
+        )
+        metrics["init_from_primary"] = 1.0
+    return metrics
+
+
 __all__ = [
     "RSSMEnsembleConfig",
     "RSSMEnsembleManager",
     "make_bootstrap_generator",
+    "restore_rssm_ensemble_checkpoint",
 ]

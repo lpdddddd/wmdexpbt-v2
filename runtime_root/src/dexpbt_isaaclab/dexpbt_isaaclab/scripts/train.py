@@ -1724,6 +1724,7 @@ from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_c
 from dexpbt_isaaclab.world_model.rssm_ensemble import (
     RSSMEnsembleConfig,
     RSSMEnsembleManager,
+    restore_rssm_ensemble_checkpoint,
 )
 
 
@@ -2784,6 +2785,20 @@ def _patch_actor_train_for_seq_wm(
                     import statistics as _stats
                     tb_writer.add_scalar("seq_wm_ensemble/size", float(len(_ens_trainers)), frames)
                     tb_writer.add_scalar("seq_wm_ensemble/train_active", 1.0, frames)
+                    tb_writer.add_scalar("seq_wm_ensemble/bootstrap_mask_active", 0.0, frames)
+                    _restore_metrics = getattr(
+                        seq_wm_trainer, "_rssm_ensemble_restore_metrics", None
+                    )
+                    if isinstance(_restore_metrics, dict):
+                        for _rk, _rv in _restore_metrics.items():
+                            if isinstance(_rv, (int, float)):
+                                try:
+                                    tb_writer.add_scalar(
+                                        f"seq_wm_ensemble/{_rk}", float(_rv), frames
+                                    )
+                                except Exception:
+                                    pass
+                        seq_wm_trainer._rssm_ensemble_restore_metrics = None
                     if _loss_totals:
                         tb_writer.add_scalar(
                             "seq_wm_ensemble/loss_total_mean",
@@ -3034,6 +3049,10 @@ def _patch_actor_train_for_seq_wm(
                             "ensemble_risk_beta": float(getattr(planner, "last_ensemble_risk_beta", 0.0)),
                             "ensemble_drop_weight": float(getattr(planner, "last_ensemble_drop_weight", 0.0)),
                             "ensemble_uncertainty_weight": float(getattr(planner, "last_ensemble_uncertainty_weight", 0.0)),
+                            "ensemble_configured": float(getattr(planner, "last_ensemble_configured", 0.0)),
+                            "ensemble_available_size": float(getattr(planner, "last_ensemble_available_size", 0.0)),
+                            "ensemble_used": float(getattr(planner, "last_ensemble_used", 0.0)),
+                            "ensemble_fallback_reason": float(getattr(planner, "last_ensemble_fallback_reason", 0.0)),
                         }
                         for k, v in mppi_scalars.items():
                             try:
@@ -3271,7 +3290,11 @@ def _patch_actor_train_for_seq_wm(
                     # (optimizers reset on resume). Member 0 == primary model,
                     # already covered by payload["model_state_dict"].
                     _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
-                    if _ens_mgr is not None and _ens_mgr.size > 1 and _ens_mgr.cfg.save_ensemble:
+                    if (
+                        _ens_mgr is not None
+                        and _ens_mgr.cfg.enabled
+                        and _ens_mgr.size > 1
+                    ):
                         try:
                             payload["rssm_ensemble"] = _ens_mgr.state_dict()
                         except Exception as _ens_exc:
@@ -4783,10 +4806,9 @@ def main():
         # ------------------------------------------------------------------
         # Full RSSM ensemble (MPPI scoring only). Member 0 is the primary
         # trainer above; members 1..E-1 are independent RSSM models with their
-        # own trainers/optimizers and per-member sampler RNG (bootstrap
-        # diversity). Disabled by default and for non-RSSM backbones, in which
-        # case the ensemble collapses to the single primary trainer and nothing
-        # downstream changes.
+        # own trainers/optimizers. Diversity comes from independent init and
+        # independently sampled sequence minibatches (per-sample bootstrap masks
+        # are NOT active; see seq_wm_ensemble/bootstrap_mask_active).
         # ------------------------------------------------------------------
         _ens_enable = bool(args_cli.seq_wm_ensemble_enable)
         _ens_size = max(1, int(args_cli.seq_wm_ensemble_size))
@@ -4805,10 +4827,8 @@ def main():
             ensemble_trainers = [seq_wm_trainer]
             for _e in range(1, _ens_size):
                 # Each member is an independently-initialised RSSM with its own
-                # trainer/optimizer/sampler. Diversity comes from (a) independent
-                # random init and (b) independent sequence minibatches: members
-                # are stepped sequentially so each .sample() consumes fresh draws
-                # from the global RNG (no shared minibatch).
+                # trainer/optimizer. Members are stepped sequentially so each
+                # .sample() draws an independent sequence minibatch.
                 _member_model = RSSMLiteWorldModel(**_rssm_model_kwargs)
                 _member_trainer = SeqWMTrainer(
                     model=_member_model,
@@ -4823,8 +4843,8 @@ def main():
             seq_wm_trainer._rssm_ensemble_trainers = ensemble_trainers
             print(
                 f"[RSSM-ensemble] enabled: size={_ens_size} "
-                f"bootstrap={bool(args_cli.seq_wm_ensemble_bootstrap)} "
-                f"keep_prob={float(args_cli.seq_wm_ensemble_bootstrap_keep_prob)}"
+                f"independent_minibatch_ensemble=True "
+                f"bootstrap_mask_active=False"
             )
         elif _ens_enable and _ens_size > 1 and args_cli.wm_strategy not in RSSM_FAMILY:
             print(
@@ -5181,21 +5201,16 @@ def main():
                         f"[SeqWM] Loaded checkpoint from {wm_seq_ckpt_path} "
                         f"(src={src_strategy}, reason={compat_reason})"
                     )
-                    # ensemble members (model state_dicts only; optimizers reset).
                     _ens_mgr = getattr(seq_wm_trainer, "_rssm_ensemble_manager", None)
                     if _ens_mgr is not None and _ens_mgr.size > 1:
-                        if _ens_mgr.cfg.load_mode != "reset" and isinstance(
-                            payload.get("rssm_ensemble"), dict
-                        ):
-                            loaded = _ens_mgr.load_state_dict(
-                                payload["rssm_ensemble"], strict=False
-                            )
-                            print(f"[RSSM-ensemble] loaded {loaded} member(s) from checkpoint")
-                        else:
-                            print(
-                                "[RSSM-ensemble] no ensemble state loaded "
-                                f"(load_mode={_ens_mgr.cfg.load_mode}); fresh members"
-                            )
+                        _ens_metrics = restore_rssm_ensemble_checkpoint(
+                            _ens_mgr,
+                            payload,
+                            wm_load_mode=str(args_cli.wm_load_mode),
+                            ensemble_load_mode=str(args_cli.seq_wm_ensemble_load_mode),
+                            primary_loaded=True,
+                        )
+                        seq_wm_trainer._rssm_ensemble_restore_metrics = _ens_metrics
                 elif "model_state_dict" in payload:
                     print(
                         f"[SeqWM] skip warm-start from {wm_seq_ckpt_path}: "

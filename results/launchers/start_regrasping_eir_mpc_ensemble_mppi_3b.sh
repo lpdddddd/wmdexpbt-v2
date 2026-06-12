@@ -195,6 +195,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --seq_wm_replay_prioritize_floor_recovery \
   --seq_wm_ensemble_enable \
   --seq_wm_ensemble_size "$ENSEMBLE_SIZE" \
+  --seq_wm_ensemble_load_mode resume \
   --seq_wm_ensemble_bootstrap \
   --seq_wm_ensemble_bootstrap_keep_prob 0.8 \
   --seq_wm_ensemble_save \
