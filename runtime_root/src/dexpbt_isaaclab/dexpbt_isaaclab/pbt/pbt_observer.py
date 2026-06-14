@@ -403,6 +403,32 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # observer and prints the expansion. The observer just records that
         # the preset was active for audit.
         experimental_rssm_floor_recovery_stack: bool = False,
+        # PBT-WM Strategy Zoo v1.0
+        wm_strategy_profile_name: str = "legacy",
+        wm_strategy_profile_id: int = 0,
+        wm_strategy_profile_generation: int | None = None,
+        wm_strategy_profile_parent: int | None = None,
+        wm_strategy_profile_copied_from_source: int | None = None,
+        wm_curriculum_controller_enable: bool = False,
+        wm_curriculum_controller_start_after_frames: int = 500_000_000,
+        wm_curriculum_controller_min_nsucc_mean: float = 10.0,
+        wm_curriculum_controller_drop_risk_threshold: float = 0.45,
+        wm_curriculum_controller_uncertainty_threshold: float = 0.55,
+        wm_curriculum_controller_min_success_prob: float = 0.20,
+        wm_curriculum_controller_freeze_frames: int = 100_000_000,
+        wm_curriculum_controller_hard_block_shrink: bool = True,
+        wm_curriculum_controller_use_recovery_prob: bool = False,
+        pbt_wm_profile_copy_enable: bool = False,
+        pbt_wm_profile_copy_after_frames: int = 1_000_000_000,
+        pbt_wm_profile_copy_prob: float = 0.3,
+        pbt_wm_profile_keep_diversity_min_profiles: int = 3,
+        profile_actor_distill_enabled: bool = False,
+        profile_residual_apply_enabled: bool = False,
+        profile_rssm_mppi_enabled: bool = False,
+        profile_wm_pbt_score_enabled: bool = False,
+        profile_wm_curriculum_controller_enabled: bool = False,
+        profile_elite_bank_enabled: bool = False,
+        profile_conservative_planner_enabled: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
         restart_count_resume: int | None = None,
@@ -571,6 +597,68 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.experimental_rssm_floor_recovery_stack = bool(
             experimental_rssm_floor_recovery_stack
         )
+        # PBT-WM Strategy Zoo v1.0
+        self.wm_strategy_profile_name = str(wm_strategy_profile_name or "legacy")
+        self.wm_strategy_profile_id = int(wm_strategy_profile_id)
+        self._wm_strategy_profile_generation = int(
+            wm_strategy_profile_generation
+            if wm_strategy_profile_generation is not None
+            else 0
+        )
+        self._wm_strategy_profile_parent = int(
+            wm_strategy_profile_parent
+            if wm_strategy_profile_parent is not None
+            else policy_idx
+        )
+        self._wm_strategy_profile_copied_from_source = bool(
+            int(wm_strategy_profile_copied_from_source or 0)
+        )
+        self.wm_curriculum_controller_enable = bool(wm_curriculum_controller_enable)
+        self.wm_curriculum_controller_start_after_frames = int(
+            wm_curriculum_controller_start_after_frames
+        )
+        self.wm_curriculum_controller_min_nsucc_mean = float(
+            wm_curriculum_controller_min_nsucc_mean
+        )
+        self.wm_curriculum_controller_drop_risk_threshold = float(
+            wm_curriculum_controller_drop_risk_threshold
+        )
+        self.wm_curriculum_controller_uncertainty_threshold = float(
+            wm_curriculum_controller_uncertainty_threshold
+        )
+        self.wm_curriculum_controller_min_success_prob = float(
+            wm_curriculum_controller_min_success_prob
+        )
+        self.wm_curriculum_controller_freeze_frames = int(
+            wm_curriculum_controller_freeze_frames
+        )
+        self.wm_curriculum_controller_hard_block_shrink = bool(
+            wm_curriculum_controller_hard_block_shrink
+        )
+        self.wm_curriculum_controller_use_recovery_prob = bool(
+            wm_curriculum_controller_use_recovery_prob
+        )
+        self.pbt_wm_profile_copy_enable = bool(pbt_wm_profile_copy_enable)
+        self.pbt_wm_profile_copy_after_frames = int(pbt_wm_profile_copy_after_frames)
+        self.pbt_wm_profile_copy_prob = float(pbt_wm_profile_copy_prob)
+        self.pbt_wm_profile_keep_diversity_min_profiles = int(
+            pbt_wm_profile_keep_diversity_min_profiles
+        )
+        self.profile_actor_distill_enabled = bool(profile_actor_distill_enabled)
+        self.profile_residual_apply_enabled = bool(profile_residual_apply_enabled)
+        self.profile_rssm_mppi_enabled = bool(profile_rssm_mppi_enabled)
+        self.profile_wm_pbt_score_enabled = bool(profile_wm_pbt_score_enabled)
+        self.profile_wm_curriculum_controller_enabled = bool(
+            profile_wm_curriculum_controller_enabled
+        )
+        self.profile_elite_bank_enabled = bool(profile_elite_bank_enabled)
+        self.profile_conservative_planner_enabled = bool(
+            profile_conservative_planner_enabled
+        )
+        self._wm_curriculum_freeze_until: dict[int, int] = {}
+        self._last_wm_curriculum_audit: dict[str, Any] = {}
+        self._last_pbt_wm_profile_copy_decision: str = "disabled"
+        self._last_pbt_wm_profile_diversity_count: int = 0
         # Per-policy floor-recovery state (Part A).
         self._first_floor_frame: dict[int, int] = {}
         self._first_hard_floor_frame: dict[int, int] = {}
@@ -1067,6 +1155,128 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return int(fsr)
         return 0
 
+    def _load_policy_wm_imagined_eval(self, policy_idx: int) -> dict[str, Any] | None:
+        """Load fresh imagined-eval JSON written by train.py for one policy."""
+        path = self.workspace / "wm_imagined" / f"{int(policy_idx):03d}.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return None
+
+    def _evaluate_wm_curriculum_controller(
+        self,
+        policy_idx: int,
+        window: RollingNsuccWindow,
+        env_frames: int,
+    ) -> dict[str, Any]:
+        """Return WM curriculum controller audit dict for this tick."""
+        out: dict[str, Any] = {
+            "active": False,
+            "eval_valid": False,
+            "drop_risk": 0.0,
+            "success_prob": 0.0,
+            "recovery_prob": 0.0,
+            "uncertainty": 1.0,
+            "blocked_shrink": False,
+            "freeze_until": int(
+                self._wm_curriculum_freeze_until.get(policy_idx, 0)
+            ),
+            "fallback_reason_id": 0,
+        }
+        if not self.wm_curriculum_controller_enable:
+            out["fallback_reason_id"] = 1
+            return out
+        if int(env_frames) < int(self.wm_curriculum_controller_start_after_frames):
+            out["fallback_reason_id"] = 2
+            return out
+        out["active"] = True
+        wm_freeze_until = int(self._wm_curriculum_freeze_until.get(policy_idx, 0))
+        if int(env_frames) < wm_freeze_until:
+            out["blocked_shrink"] = True
+            out["freeze_until"] = wm_freeze_until
+            out["fallback_reason_id"] = 6
+            return out
+        payload = self._load_policy_wm_imagined_eval(policy_idx)
+        if not payload:
+            out["fallback_reason_id"] = 3
+            return out
+        out["drop_risk"] = float(payload.get("wm_drop_risk", 0.0))
+        out["success_prob"] = float(payload.get("wm_success_prob", 0.0))
+        out["recovery_prob"] = float(payload.get("wm_recovery_prob", 0.0))
+        out["uncertainty"] = float(payload.get("uncertainty", 1.0))
+        out["eval_valid"] = bool(payload.get("imagined_valid", False))
+        if not out["eval_valid"]:
+            out["fallback_reason_id"] = 3
+            return out
+        nsucc_mean = 0.0
+        if window.samples:
+            nsucc_mean = float(window.samples[-1].nsucc_mean)
+        risk_high = (
+            out["drop_risk"] >= self.wm_curriculum_controller_drop_risk_threshold
+            or out["uncertainty"]
+            >= self.wm_curriculum_controller_uncertainty_threshold
+            or out["success_prob"] < self.wm_curriculum_controller_min_success_prob
+        )
+        if self.wm_curriculum_controller_use_recovery_prob:
+            risk_high = risk_high or (
+                out["recovery_prob"]
+                < self.wm_curriculum_controller_min_success_prob
+            )
+        if (
+            risk_high
+            and nsucc_mean >= self.wm_curriculum_controller_min_nsucc_mean
+            and self.wm_curriculum_controller_hard_block_shrink
+        ):
+            out["blocked_shrink"] = True
+            out["freeze_until"] = int(env_frames) + int(
+                self.wm_curriculum_controller_freeze_frames
+            )
+            self._wm_curriculum_freeze_until[policy_idx] = out["freeze_until"]
+            out["fallback_reason_id"] = 5
+        else:
+            out["fallback_reason_id"] = 4
+        return out
+
+    @staticmethod
+    def _rewrite_train_arg_profile(train_args: list[str], profile_name: str) -> list[str]:
+        flag = "--wm_strategy_profile"
+        out: list[str] = []
+        replaced = False
+        for arg in train_args:
+            if arg.startswith(f"{flag}="):
+                out.append(f"{flag}={profile_name}")
+                replaced = True
+            elif arg == flag and not replaced:
+                continue
+            else:
+                out.append(arg)
+        if not replaced:
+            out.append(f"{flag}={profile_name}")
+        return out
+
+    def _count_profile_diversity(
+        self, population: dict[int, dict[str, Any] | None] | None
+    ) -> tuple[int, set[str]]:
+        profiles: set[str] = set()
+        if population:
+            for st in population.values():
+                if not st:
+                    continue
+                name = str(st.get("wm_strategy_profile_name", "legacy") or "legacy")
+                profiles.add(name)
+        profiles.add(str(self.wm_strategy_profile_name or "legacy"))
+        return len(profiles), profiles
+
+    def _profile_from_population_state(
+        self, population: dict[int, dict[str, Any] | None] | None, policy_idx: int
+    ) -> tuple[str, int, int]:
+        st = (population or {}).get(policy_idx) or {}
+        name = str(st.get("wm_strategy_profile_name", "legacy") or "legacy")
+        gen = int(st.get("wm_strategy_profile_generation", 0))
+        return name, gen, int(st.get("wm_strategy_profile_id", 0))
+
     def _build_curriculum_control_state(
         self,
         policy_idx: int,
@@ -1394,6 +1604,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             floor_recovery_slope_val = float(components.get("slope_raw", 0.0))
             floor_recovery_score_val = float(score_50)
 
+        wm_cc = self._evaluate_wm_curriculum_controller(
+            policy_idx, window, env_frames
+        )
+        self._last_wm_curriculum_audit = dict(wm_cc)
+        if wm_cc.get("blocked_shrink") and shrink_token:
+            shrink_token = False
+            allow_shrink = False
+            shrink_blocked_reason = "wm_curriculum_high_risk"
+            if (
+                self.pbt_single_shrink_per_window
+                and self._shrink_issued_this_window.get(policy_idx, False)
+            ):
+                self._shrink_issued_this_window[policy_idx] = False
+                cur = int(self._shrinks_since_rollback.get(policy_idx, 0))
+                if cur > 0:
+                    self._shrinks_since_rollback[policy_idx] = cur - 1
+            shrinks_in_window = 0
+            shrink_reason = "wm_curriculum_blocked"
+
         return CurriculumControlState(
             curriculum_mode=self.curriculum_mode,
             allow_shrink=allow_shrink,
@@ -1446,6 +1675,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             if floor_recovery_score_val
             else 0.0,
             floor_recovery_protect_until=floor_recovery_protect_until_val,
+            wm_curriculum_controller_active=bool(wm_cc.get("active", False)),
+            wm_curriculum_eval_valid=bool(wm_cc.get("eval_valid", False)),
+            wm_curriculum_drop_risk=float(wm_cc.get("drop_risk", 0.0)),
+            wm_curriculum_success_prob=float(wm_cc.get("success_prob", 0.0)),
+            wm_curriculum_recovery_prob=float(wm_cc.get("recovery_prob", 0.0)),
+            wm_curriculum_uncertainty=float(wm_cc.get("uncertainty", 1.0)),
+            wm_curriculum_blocked_shrink=bool(wm_cc.get("blocked_shrink", False)),
+            wm_curriculum_freeze_until=int(wm_cc.get("freeze_until", 0)),
+            wm_curriculum_fallback_reason_id=int(
+                wm_cc.get("fallback_reason_id", 0)
+            ),
         )
 
     def _log_curriculum_control_scalars(
@@ -1623,6 +1863,51 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.writer.add_scalar(
             "curriculum/blocked_by_adaptive_fast_low_nsucc",
             1.0 if control.blocked_by_adaptive_fast_low_nsucc else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/controller_active",
+            1.0 if control.wm_curriculum_controller_active else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/eval_valid",
+            1.0 if control.wm_curriculum_eval_valid else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/drop_risk",
+            float(control.wm_curriculum_drop_risk),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/success_prob",
+            float(control.wm_curriculum_success_prob),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/recovery_prob",
+            float(control.wm_curriculum_recovery_prob),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/uncertainty",
+            float(control.wm_curriculum_uncertainty),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/blocked_shrink",
+            1.0 if control.wm_curriculum_blocked_shrink else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/freeze_until",
+            float(control.wm_curriculum_freeze_until),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "wm_curriculum/fallback_reason_id",
+            float(control.wm_curriculum_fallback_reason_id),
             env_frames,
         )
         self.writer.add_scalar(
@@ -3422,6 +3707,68 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 ),
                 "experimental_rssm_floor_recovery_stack": bool(
                     self.experimental_rssm_floor_recovery_stack
+                ),
+                # PBT-WM Strategy Zoo v1.0
+                "wm_strategy_profile_name": str(self.wm_strategy_profile_name),
+                "wm_strategy_profile_id": int(self.wm_strategy_profile_id),
+                "wm_strategy_profile_generation": int(
+                    self._wm_strategy_profile_generation
+                ),
+                "wm_strategy_profile_parent": int(self._wm_strategy_profile_parent),
+                "wm_strategy_profile_copied_from_source": bool(
+                    self._wm_strategy_profile_copied_from_source
+                ),
+                "profile_actor_distill_enabled": bool(
+                    self.profile_actor_distill_enabled
+                ),
+                "profile_residual_apply_enabled": bool(
+                    self.profile_residual_apply_enabled
+                ),
+                "profile_rssm_mppi_enabled": bool(self.profile_rssm_mppi_enabled),
+                "profile_wm_pbt_score_enabled": bool(
+                    self.profile_wm_pbt_score_enabled
+                ),
+                "profile_wm_curriculum_controller_enabled": bool(
+                    self.profile_wm_curriculum_controller_enabled
+                ),
+                "profile_elite_bank_enabled": bool(self.profile_elite_bank_enabled),
+                "profile_conservative_planner_enabled": bool(
+                    self.profile_conservative_planner_enabled
+                ),
+                "pbt_wm_profile_copy_enable": bool(self.pbt_wm_profile_copy_enable),
+                "pbt_wm_profile_copy_decision": str(
+                    getattr(self, "_last_pbt_wm_profile_copy_decision", "disabled")
+                ),
+                "pbt_wm_profile_copy_prob": float(self.pbt_wm_profile_copy_prob),
+                "pbt_wm_profile_diversity_count": int(
+                    getattr(self, "_last_pbt_wm_profile_diversity_count", 0)
+                ),
+                "wm_curriculum_controller_active": bool(
+                    own_ctrl.wm_curriculum_controller_active if own_ctrl else False
+                ),
+                "wm_curriculum_eval_valid": bool(
+                    own_ctrl.wm_curriculum_eval_valid if own_ctrl else False
+                ),
+                "wm_curriculum_drop_risk": float(
+                    own_ctrl.wm_curriculum_drop_risk if own_ctrl else 0.0
+                ),
+                "wm_curriculum_success_prob": float(
+                    own_ctrl.wm_curriculum_success_prob if own_ctrl else 0.0
+                ),
+                "wm_curriculum_recovery_prob": float(
+                    own_ctrl.wm_curriculum_recovery_prob if own_ctrl else 0.0
+                ),
+                "wm_curriculum_uncertainty": float(
+                    own_ctrl.wm_curriculum_uncertainty if own_ctrl else 0.0
+                ),
+                "wm_curriculum_blocked_shrink": bool(
+                    own_ctrl.wm_curriculum_blocked_shrink if own_ctrl else False
+                ),
+                "wm_curriculum_freeze_until": int(
+                    own_ctrl.wm_curriculum_freeze_until if own_ctrl else 0
+                ),
+                "wm_curriculum_fallback_reason_id": int(
+                    own_ctrl.wm_curriculum_fallback_reason_id if own_ctrl else 0
                 ),
                 "tier": str(tier),
                 "checkpoint": own_state.get("checkpoint", ""),
@@ -5250,6 +5597,30 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "restart_count": int(self._restart_count),
             "frames_at_restart": int(self._frames_at_restart),
             "last_mutation_frame": int(self.last_mutation_frame),
+            # PBT-WM Strategy Zoo v1.0
+            "wm_strategy_profile_name": str(self.wm_strategy_profile_name),
+            "wm_strategy_profile_id": int(self.wm_strategy_profile_id),
+            "wm_strategy_profile_family": str(
+                getattr(self, "wm_strategy_profile_family", self.wm_strategy_profile_name)
+            ),
+            "wm_strategy_profile_generation": int(self._wm_strategy_profile_generation),
+            "wm_strategy_profile_parent": int(self._wm_strategy_profile_parent),
+            "wm_strategy_profile_copied_from_source": bool(
+                self._wm_strategy_profile_copied_from_source
+            ),
+            "profile_actor_distill_enabled": bool(self.profile_actor_distill_enabled),
+            "profile_residual_apply_enabled": bool(
+                self.profile_residual_apply_enabled
+            ),
+            "profile_rssm_mppi_enabled": bool(self.profile_rssm_mppi_enabled),
+            "profile_wm_pbt_score_enabled": bool(self.profile_wm_pbt_score_enabled),
+            "profile_wm_curriculum_controller_enabled": bool(
+                self.profile_wm_curriculum_controller_enabled
+            ),
+            "profile_elite_bank_enabled": bool(self.profile_elite_bank_enabled),
+            "profile_conservative_planner_enabled": bool(
+                self.profile_conservative_planner_enabled
+            ),
         }
         meta_tmp.write_text(json.dumps(state))
         meta_tmp.replace(meta_path)
@@ -5943,6 +6314,55 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             f"--last_recovery_frame_resume={int(self._last_recovery_frame)}"
         )
 
+        # PBT-WM Strategy Zoo v1.0: optional profile inheritance on cross-copy.
+        from dexpbt_isaaclab.world_model.wm_strategy_profiles import PROFILE_IDS
+
+        population_meta = self._load_population_checkpoints()
+        diversity_count, _profiles = self._count_profile_diversity(population_meta)
+        self._last_pbt_wm_profile_diversity_count = int(diversity_count)
+        profile_copy_decision = "weights_only"
+        new_profile_name = str(self.wm_strategy_profile_name or "legacy")
+        if self.pbt_wm_profile_copy_enable:
+            if int(env_frames) < int(self.pbt_wm_profile_copy_after_frames):
+                profile_copy_decision = "before_after_frames"
+            elif diversity_count <= int(
+                self.pbt_wm_profile_keep_diversity_min_profiles
+            ):
+                profile_copy_decision = "diversity_guard"
+            else:
+                source_name, source_gen, _ = self._profile_from_population_state(
+                    population_meta, int(source_policy)
+                )
+                rng = random.Random(
+                    int(env_frames) + int(self.policy_idx) + int(source_policy)
+                )
+                if rng.random() < float(self.pbt_wm_profile_copy_prob):
+                    new_profile_name = source_name
+                    self._wm_strategy_profile_generation = int(source_gen) + 1
+                    self._wm_strategy_profile_parent = int(source_policy)
+                    self._wm_strategy_profile_copied_from_source = True
+                    profile_copy_decision = "copied"
+                else:
+                    profile_copy_decision = "rng_skip"
+        else:
+            profile_copy_decision = "disabled"
+        self.wm_strategy_profile_name = new_profile_name
+        self.wm_strategy_profile_id = int(PROFILE_IDS.get(new_profile_name, 0))
+        train_args = self._rewrite_train_arg_profile(train_args, new_profile_name)
+        train_args.append(
+            f"--wm_strategy_profile_generation_resume="
+            f"{int(self._wm_strategy_profile_generation)}"
+        )
+        train_args.append(
+            f"--wm_strategy_profile_parent_resume="
+            f"{int(self._wm_strategy_profile_parent)}"
+        )
+        train_args.append(
+            f"--wm_strategy_profile_copied_from_source_resume="
+            f"{1 if self._wm_strategy_profile_copied_from_source else 0}"
+        )
+        self._last_pbt_wm_profile_copy_decision = str(profile_copy_decision)
+
         # Write restart manifest so the supervisor can pick up new params.
         # The supervisor script ($RUN_DIR) is the parent of train_dir ($RUN_DIR/rl_games).
         supervisor_run_dir = self.train_dir.parent
@@ -5988,6 +6408,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "recovery_restart_count": int(self._recovery_restart_count),
             "last_recovery_frame": int(self._last_recovery_frame),
             "enable_best_nsucc_recovery": bool(self.enable_best_nsucc_recovery),
+            "pbt_wm_profile_copy_enable": bool(self.pbt_wm_profile_copy_enable),
+            "pbt_wm_profile_copy_decision": str(profile_copy_decision),
+            "pbt_wm_profile_copy_prob": float(self.pbt_wm_profile_copy_prob),
+            "pbt_wm_profile_diversity_count": int(diversity_count),
+            "wm_strategy_profile_name": str(new_profile_name),
+            "wm_strategy_profile_id": int(PROFILE_IDS.get(new_profile_name, 0)),
+            "wm_strategy_profile_generation": int(self._wm_strategy_profile_generation),
+            "wm_strategy_profile_parent": int(self._wm_strategy_profile_parent),
+            "wm_strategy_profile_copied_from_source": bool(
+                self._wm_strategy_profile_copied_from_source
+            ),
         }
 
         # Atomic manifest write

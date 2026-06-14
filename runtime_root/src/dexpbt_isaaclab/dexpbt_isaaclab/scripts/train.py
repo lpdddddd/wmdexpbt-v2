@@ -609,6 +609,61 @@ parser.add_argument(
     "--pbt_wm_max_uncertainty", type=float, default=0.5,
     help="WM eval ignored when uncertainty > this; falls back to real.",
 )
+# PBT-WM Strategy Zoo v1.0: optional profile copy on cross-copy restart.
+parser.add_argument(
+    "--pbt_wm_profile_copy_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="When enabled, target may inherit source wm_strategy_profile after "
+    "copy_after_frames (subject to diversity guard + copy_prob).",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_after_frames", type=int, default=1_000_000_000,
+    help="Earliest env frame at which profile copy may occur.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_prob", type=float, default=0.3,
+    help="Probability of inheriting source profile on eligible cross-copy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_keep_diversity_min_profiles", type=int, default=3,
+    help="Profile copy blocked when active distinct profiles <= this count.",
+)
+# WM curriculum controller (Strategy Zoo profile: wm_curriculum_controller).
+parser.add_argument(
+    "--wm_curriculum_controller_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Use RSSM imagined risk to block/delay curriculum shrink.",
+)
+parser.add_argument(
+    "--wm_curriculum_controller_start_after_frames", type=int, default=500_000_000,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_min_nsucc_mean", type=float, default=10.0,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_drop_risk_threshold", type=float, default=0.45,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_uncertainty_threshold", type=float, default=0.55,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_min_success_prob", type=float, default=0.20,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_freeze_frames", type=int, default=100_000_000,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_hard_block_shrink",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument(
+    "--wm_curriculum_controller_use_recovery_prob",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
 # Part B: task-aware RSSM extensions.
 parser.add_argument(
     "--seq_wm_use_task_aux_inputs",
@@ -937,6 +992,10 @@ parser.add_argument("--cross_restart_count_resume", type=int, default=None)
 # Patch G (2026-05-31): archive-recovery accounting resume hooks.
 parser.add_argument("--recovery_restart_count_resume", type=int, default=None)
 parser.add_argument("--last_recovery_frame_resume", type=int, default=None)
+# PBT-WM Strategy Zoo v1.0: profile lineage resume hooks (forwarded by observer).
+parser.add_argument("--wm_strategy_profile_generation_resume", type=int, default=None)
+parser.add_argument("--wm_strategy_profile_parent_resume", type=int, default=None)
+parser.add_argument("--wm_strategy_profile_copied_from_source_resume", type=int, default=None)
 parser.add_argument("--gamma", type=float, default=None)
 parser.add_argument("--kl_threshold", type=float, default=None)
 parser.add_argument("--grad_norm", type=float, default=None)
@@ -982,6 +1041,22 @@ parser.add_argument("--allegro_actions_penalty_scale", type=float, default=None)
 parser.add_argument("--sigma", type=str, default=None)
 parser.add_argument("--test", action="store_true", default=False, help="Run in play / evaluation mode.")
 # ---- World Model (WM) args ----
+parser.add_argument(
+    "--wm_strategy_profile",
+    type=str,
+    default="legacy",
+    choices=[
+        "legacy",
+        "ppo_only",
+        "rssm_mppi_actor_distill",
+        "wm_curriculum_controller",
+        "wm_pbt_source_selector",
+        "elite_bank_actor_distill",
+        "conservative_rssm_planner_distill",
+    ],
+    help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
+    "legacy = no expansion (existing launcher behaviour).",
+)
 parser.add_argument("--enable_wm", action="store_true", default=False,
                     help="Enable world model training.")
 parser.add_argument("--wm_strategy", type=str, default="none",
@@ -1626,6 +1701,16 @@ if bool(getattr(args_cli, "experimental_rssm_floor_recovery_stack", False)):
         "[experimental_rssm_floor_recovery_stack] expansion:\n  "
         + "\n  ".join(_audit_lines)
     )
+
+# PBT-WM Strategy Zoo v1.0: expand --wm_strategy_profile into concrete flags.
+from dexpbt_isaaclab.world_model.wm_strategy_profiles import (  # noqa: E402
+    PROFILE_IDS,
+    apply_wm_strategy_profile,
+    profile_capability_flags,
+)
+
+_wm_profile_audit = apply_wm_strategy_profile(args_cli)
+_wm_profile_caps = profile_capability_flags(args_cli)
 
 # Save original sys.argv before modification so PBT observer can reconstruct
 # the restart command with all parsed arguments (e.g. --task, --observer_mode).
@@ -5754,6 +5839,74 @@ def main():
                 args_cli.recovery_restart_count_resume
             ),
             last_recovery_frame_resume=args_cli.last_recovery_frame_resume,
+            # PBT-WM Strategy Zoo v1.0
+            wm_strategy_profile_name=str(args_cli.wm_strategy_profile),
+            wm_strategy_profile_id=int(
+                PROFILE_IDS.get(str(args_cli.wm_strategy_profile), 0)
+            ),
+            wm_strategy_profile_generation=(
+                args_cli.wm_strategy_profile_generation_resume
+            ),
+            wm_strategy_profile_parent=args_cli.wm_strategy_profile_parent_resume,
+            wm_strategy_profile_copied_from_source=(
+                args_cli.wm_strategy_profile_copied_from_source_resume
+            ),
+            wm_curriculum_controller_enable=(
+                args_cli.wm_curriculum_controller_enable
+            ),
+            wm_curriculum_controller_start_after_frames=(
+                args_cli.wm_curriculum_controller_start_after_frames
+            ),
+            wm_curriculum_controller_min_nsucc_mean=(
+                args_cli.wm_curriculum_controller_min_nsucc_mean
+            ),
+            wm_curriculum_controller_drop_risk_threshold=(
+                args_cli.wm_curriculum_controller_drop_risk_threshold
+            ),
+            wm_curriculum_controller_uncertainty_threshold=(
+                args_cli.wm_curriculum_controller_uncertainty_threshold
+            ),
+            wm_curriculum_controller_min_success_prob=(
+                args_cli.wm_curriculum_controller_min_success_prob
+            ),
+            wm_curriculum_controller_freeze_frames=(
+                args_cli.wm_curriculum_controller_freeze_frames
+            ),
+            wm_curriculum_controller_hard_block_shrink=(
+                args_cli.wm_curriculum_controller_hard_block_shrink
+            ),
+            wm_curriculum_controller_use_recovery_prob=(
+                args_cli.wm_curriculum_controller_use_recovery_prob
+            ),
+            pbt_wm_profile_copy_enable=args_cli.pbt_wm_profile_copy_enable,
+            pbt_wm_profile_copy_after_frames=(
+                args_cli.pbt_wm_profile_copy_after_frames
+            ),
+            pbt_wm_profile_copy_prob=args_cli.pbt_wm_profile_copy_prob,
+            pbt_wm_profile_keep_diversity_min_profiles=(
+                args_cli.pbt_wm_profile_keep_diversity_min_profiles
+            ),
+            profile_actor_distill_enabled=_wm_profile_caps.get(
+                "profile_actor_distill_enabled", False
+            ),
+            profile_residual_apply_enabled=_wm_profile_caps.get(
+                "profile_residual_apply_enabled", False
+            ),
+            profile_rssm_mppi_enabled=_wm_profile_caps.get(
+                "profile_rssm_mppi_enabled", False
+            ),
+            profile_wm_pbt_score_enabled=_wm_profile_caps.get(
+                "profile_wm_pbt_score_enabled", False
+            ),
+            profile_wm_curriculum_controller_enabled=_wm_profile_caps.get(
+                "profile_wm_curriculum_controller_enabled", False
+            ),
+            profile_elite_bank_enabled=_wm_profile_caps.get(
+                "profile_elite_bank_enabled", False
+            ),
+            profile_conservative_planner_enabled=_wm_profile_caps.get(
+                "profile_conservative_planner_enabled", False
+            ),
         )
     else:
         observer = IsaacAlgoObserver()

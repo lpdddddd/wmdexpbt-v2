@@ -506,6 +506,13 @@ def main() -> None:
     parser.add_argument("--change-max", type=float, default=1.5)
     parser.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra CLI overrides passed through to train.py")
     parser.add_argument(
+        "--profile-per-policy",
+        type=str,
+        default="",
+        help="Comma-separated wm_strategy_profile names, one per policy "
+        "(length must equal --num-policies). Empty = legacy shared --extra only.",
+    )
+    parser.add_argument(
         "--recover-checkpoint",
         type=str,
         default=None,
@@ -525,6 +532,19 @@ def main() -> None:
     if not gpu_ids:
         raise ValueError("At least one GPU id must be provided via --gpus")
     max_active = args.max_active if args.max_active is not None else len(gpu_ids)
+
+    profile_per_policy: list[str] = []
+    if str(args.profile_per_policy or "").strip():
+        profile_per_policy = [
+            p.strip()
+            for p in str(args.profile_per_policy).split(",")
+            if p.strip()
+        ]
+        if len(profile_per_policy) != args.num_policies:
+            raise ValueError(
+                f"--profile-per-policy length {len(profile_per_policy)} "
+                f"!= --num-policies {args.num_policies}"
+            )
 
     markers = tuple(args.first_epoch_marker) if args.first_epoch_marker else DEFAULT_FIRST_EPOCH_MARKERS
 
@@ -777,6 +797,11 @@ def main() -> None:
             normalized.append(tok)
             i += 1
         cmd.extend(normalized)
+        if profile_per_policy:
+            prof = profile_per_policy[policy_idx]
+            profile_args_path = train_root / f"profile_policy_{policy_idx:02d}.args"
+            profile_args_path.write_text(f"--wm_strategy_profile {prof}\n")
+            cmd.append(f"--wm_strategy_profile={prof}")
         if (
             args.recover_checkpoint
             and policy_idx == args.recover_policy_idx

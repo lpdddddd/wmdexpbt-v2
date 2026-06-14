@@ -142,6 +142,16 @@ class CurriculumControlState:
     floor_recovery_score_norm: float = 0.0
     floor_recovery_protect_until: int = 0
     best_floor_recovery_archive_used: bool = False
+    # PBT-WM Strategy Zoo v1.0: WM curriculum controller audit fields.
+    wm_curriculum_controller_active: bool = False
+    wm_curriculum_eval_valid: bool = False
+    wm_curriculum_drop_risk: float = 0.0
+    wm_curriculum_success_prob: float = 0.0
+    wm_curriculum_recovery_prob: float = 0.0
+    wm_curriculum_uncertainty: float = 0.0
+    wm_curriculum_blocked_shrink: bool = False
+    wm_curriculum_freeze_until: int = 0
+    wm_curriculum_fallback_reason_id: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
