@@ -33,6 +33,13 @@ from .recovery_residual import (
     RecoveryResidualBridge,
     compute_recovery_residual_loss,
 )
+from .wm_activation_gate import (
+    TOL_BINS,
+    WMActivationConfig,
+    clamp01,
+    soft_tol_weight,
+    tol_bin,
+)
 
 # EIR distill block reasons (parallel to ERD's).
 EIR_OK = 0
@@ -133,8 +140,44 @@ class EIRConfig:
         SRC_ELITE_ARCHIVE,
     )
 
+    # PBT-WM Soft Activation Gate v1: continuous activation weight that replaces
+    # the legacy ``tol <= actor_distill_tol`` hard gate.  ``hard_tol`` reproduces
+    # the legacy behaviour; ``soft_tol`` ramps the weight between tol_start and
+    # tol_full.  These never relax the residual-rollout-apply hard gate.
+    actor_distill_activation_enable: bool = True
+    actor_distill_gate_mode: str = "hard_tol"  # off|hard_tol|soft_tol|confidence_only
+    actor_distill_tol_start: float = 0.060
+    actor_distill_tol_full: float = 0.040
+    actor_distill_ramp_frames: int = 300_000_000
+    actor_distill_nsucc_ref: float = 20.0
+
     def __post_init__(self) -> None:
         self.horizons = tuple(int(h) for h in self.horizons if int(h) > 0) or (4, 8)
+
+    def actor_distill_activation_config(self) -> WMActivationConfig:
+        """Build the soft-activation config for the actor-distill path.
+
+        Teacher sources (rssm/elite/archive) get full weight; gaussian/actor
+        sources are blocked so they can never become a distill teacher.
+        """
+        return WMActivationConfig(
+            enable=bool(self.actor_distill_activation_enable),
+            gate_mode=str(self.actor_distill_gate_mode),
+            tol_start=float(self.actor_distill_tol_start),
+            tol_full=float(self.actor_distill_tol_full),
+            hard_tol=float(self.actor_distill_tol),
+            start_after_frames=int(self.actor_distill_start_after_frames),
+            ramp_frames=int(self.actor_distill_ramp_frames),
+            nsucc_ref=float(self.actor_distill_nsucc_ref),
+            min_margin=float(self.actor_distill_min_margin),
+            margin_norm=float(self.actor_distill_margin_norm),
+            uncertainty_threshold=float(self.actor_distill_uncertainty_threshold),
+            rssm_source_weight=1.0,
+            elite_source_weight=1.0,
+            archive_source_weight=1.0,
+            gaussian_source_weight=0.0,
+            actor_source_weight=0.0,
+        )
 
     def distill_lambda_for_tol(self, tol: float) -> float:
         # staging gate identical in spirit to ERD: residual distill only once tol
@@ -204,8 +247,17 @@ def build_actor_distill_mask(
     frames: int,
     rssm_unc_bk: Optional[torch.Tensor],
     uncertainty_threshold: float,
+    soft_tol_gate: bool = False,
 ) -> tuple[torch.Tensor, dict[str, int]]:
-    """Build per-row actor-distill mask and per-reason reject counts."""
+    """Build per-row actor-distill mask and per-reason reject counts.
+
+    Hard safety filters retained regardless of gating mode: allowed source,
+    min_margin, max_delta, and (for rssm rows) high-uncertainty rejection.
+
+    When ``soft_tol_gate`` is True the legacy ``tol <= tol_threshold`` /
+    ``frames >= start_after_frames`` hard return is skipped — the caller's soft
+    activation weight governs tol + time instead.  ``reject_tol`` stays 0.
+    """
     base = eligible.bool()
     rejects: dict[str, int] = {
         "reject_bad_source": 0,
@@ -234,13 +286,14 @@ def build_actor_distill_mask(
     rejects["reject_large_delta"] = int((m & large_delta).sum().item())
     m = m & ~large_delta
 
-    tol_ok = (
-        float(tol_mean) <= float(tol_threshold)
-        and int(frames) >= int(start_after_frames)
-    )
-    if not tol_ok:
-        rejects["reject_tol"] = int(m.sum().item())
-        return torch.zeros_like(base), rejects
+    if not soft_tol_gate:
+        tol_ok = (
+            float(tol_mean) <= float(tol_threshold)
+            and int(frames) >= int(start_after_frames)
+        )
+        if not tol_ok:
+            rejects["reject_tol"] = int(m.sum().item())
+            return torch.zeros_like(base), rejects
 
     rssm_rows = best_source == int(SRC_RSSM)
     if rssm_unc_bk is not None:
@@ -252,6 +305,132 @@ def build_actor_distill_mask(
         rejects["reject_uncertainty_missing"] = int((m & rssm_rows).sum().item())
 
     return m, rejects
+
+
+def compute_actor_distill_activation(
+    *,
+    cfg: WMActivationConfig,
+    frames: int,
+    tol_mean: float,
+    margin: torch.Tensor,
+    best_source: torch.Tensor,
+    best_unc: Optional[torch.Tensor],
+    nsucc_mean: float = -1.0,
+    eval_valid: bool = True,
+) -> dict[str, Any]:
+    """Vectorized soft-activation weight for the actor-distill minibatch.
+
+    ``tol_mean`` is a scalar (per-minibatch), so the time/tol/perf components are
+    scalars while confidence/uncertainty/source components vary per row.
+
+    A negative ``nsucc_mean`` means "unknown" and makes the perf gate neutral
+    (w_perf = 1.0) so the path is not silently killed when nsucc is unavailable.
+    Returns a dict with the per-row ``weight`` tensor and component telemetry.
+    """
+    device = margin.device
+    n = margin.shape[0]
+    zero_w = torch.zeros(n, device=device, dtype=margin.dtype)
+    tb = tol_bin(float(tol_mean))
+    out: dict[str, Any] = {
+        "weight": zero_w,
+        "tol_bin": tb,
+        "time_weight": 0.0,
+        "tol_weight": 0.0,
+        "perf_weight": 0.0,
+        "conf_weight_mean": 0.0,
+        "unc_weight_mean": 0.0,
+        "source_weight_mean": 0.0,
+        "weight_mean": 0.0,
+        "nonzero_frac": 0.0,
+    }
+    mode = str(cfg.gate_mode)
+    if not cfg.enable or mode == "off" or not eval_valid:
+        return out
+
+    # scalar components
+    if frames < cfg.start_after_frames:
+        w_time = 0.0
+    elif mode == "hard_tol":
+        # Legacy step-on at start_after_frames (no ramp).
+        w_time = 1.0
+    else:
+        w_time = clamp01((frames - cfg.start_after_frames) / max(1, int(cfg.ramp_frames)))
+
+    if mode == "hard_tol":
+        w_tol = 1.0 if float(tol_mean) <= float(cfg.hard_tol) else 0.0
+    elif mode == "soft_tol":
+        w_tol = soft_tol_weight(
+            float(tol_mean),
+            tol_start=cfg.tol_start,
+            tol_full=cfg.tol_full,
+            min_w=cfg.min_weight,
+            max_w=cfg.max_weight,
+        )
+    elif mode == "confidence_only":
+        w_tol = 1.0
+    else:
+        return out
+
+    if mode == "confidence_only":
+        w_perf = 1.0
+    elif float(nsucc_mean) < 0.0:
+        w_perf = 1.0  # unknown nsucc -> neutral perf gate
+    else:
+        w_perf = clamp01(float(nsucc_mean) / max(1e-6, cfg.nsucc_ref))
+        if float(nsucc_mean) < cfg.min_nsucc_mean:
+            w_perf = 0.0
+
+    scalar = float(cfg.max_weight) * w_time * w_tol * w_perf
+
+    # per-row confidence
+    w_conf = (margin / max(1e-6, cfg.margin_norm)).clamp(0.0, 1.0)
+    w_conf = torch.where(
+        margin < float(cfg.min_margin), torch.zeros_like(w_conf), w_conf
+    )
+
+    # per-row uncertainty (rssm rows only; others neutral)
+    rssm_rows = best_source == int(SRC_RSSM)
+    w_unc = torch.ones(n, device=device, dtype=margin.dtype)
+    if best_unc is not None:
+        unc_term = (1.0 - best_unc / max(1e-6, cfg.uncertainty_threshold)).clamp(0.0, 1.0)
+        unc_term = torch.where(
+            torch.isfinite(best_unc), unc_term, torch.zeros_like(unc_term)
+        )
+        w_unc = torch.where(rssm_rows, unc_term, w_unc)
+    else:
+        # uncertainty missing for rssm rows -> block them (hard safety)
+        w_unc = torch.where(rssm_rows, torch.zeros_like(w_unc), w_unc)
+
+    # per-row source weight
+    w_source = torch.zeros(n, device=device, dtype=margin.dtype)
+    src_map = {
+        SRC_RSSM: cfg.rssm_source_weight,
+        SRC_ELITE_LOCAL: cfg.elite_source_weight,
+        SRC_ELITE_ARCHIVE: cfg.archive_source_weight,
+        SRC_GAUSSIAN: cfg.gaussian_source_weight,
+        SRC_ACTOR: cfg.actor_source_weight,
+    }
+    for sid, sw in src_map.items():
+        if sw != 0.0:
+            w_source = torch.where(
+                best_source == int(sid),
+                torch.full_like(w_source, float(sw)),
+                w_source,
+            )
+
+    weight = (scalar * w_conf * w_unc * w_source).clamp(0.0, float(cfg.max_weight))
+    nonzero = weight > 0.0
+    out["weight"] = weight
+    out["time_weight"] = float(w_time)
+    out["tol_weight"] = float(w_tol)
+    out["perf_weight"] = float(w_perf)
+    if bool(nonzero.any()):
+        out["conf_weight_mean"] = float(w_conf[nonzero].mean().item())
+        out["unc_weight_mean"] = float(w_unc[nonzero].mean().item())
+        out["source_weight_mean"] = float(w_source[nonzero].mean().item())
+        out["weight_mean"] = float(weight[nonzero].mean().item())
+    out["nonzero_frac"] = float(nonzero.float().mean().item())
+    return out
 
 
 def _noise_std_for_tol(std: float, cap_by_tol: bool, floor_tol: float, hard_tol: float, tol_mean: float) -> float:
@@ -636,6 +815,22 @@ class EIRBridge:
     last_actor_distill_reject_tol: float = 0.0
     last_actor_distill_reject_uncertainty_missing: float = 0.0
 
+    # Soft Activation Gate v1 telemetry.
+    last_actor_distill_activation_weight_mean: float = 0.0
+    last_actor_distill_activation_nonzero_frac: float = 0.0
+    last_actor_distill_tol_weight_mean: float = 0.0
+    last_actor_distill_time_weight_mean: float = 0.0
+    last_actor_distill_perf_weight_mean: float = 0.0
+    last_actor_distill_conf_weight_mean: float = 0.0
+    last_actor_distill_unc_weight_mean: float = 0.0
+    last_actor_distill_source_weight_mean: float = 0.0
+    last_actor_distill_active_frac_tol_gt_006: float = 0.0
+    last_actor_distill_active_frac_tol_005_006: float = 0.0
+    last_actor_distill_active_frac_tol_004_005: float = 0.0
+    last_actor_distill_active_frac_tol_le_004: float = 0.0
+    # Runtime context fed by train.py; -1.0 means "unknown" (perf gate neutral).
+    last_nsucc_mean: float = -1.0
+
     def record_bank_feature_source(self, source_flag: int) -> None:
         """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
         self.bank_feature_update_count += 1
@@ -690,6 +885,19 @@ class EIRBridge:
         self.last_actor_distill_reject_high_uncertainty = 0.0
         self.last_actor_distill_reject_tol = 0.0
         self.last_actor_distill_reject_uncertainty_missing = 0.0
+        self.last_actor_distill_activation_weight_mean = 0.0
+        self.last_actor_distill_activation_nonzero_frac = 0.0
+        self.last_actor_distill_tol_weight_mean = 0.0
+        self.last_actor_distill_time_weight_mean = 0.0
+        self.last_actor_distill_perf_weight_mean = 0.0
+        self.last_actor_distill_conf_weight_mean = 0.0
+        self.last_actor_distill_unc_weight_mean = 0.0
+        self.last_actor_distill_source_weight_mean = 0.0
+        self.last_actor_distill_active_frac_tol_gt_006 = 0.0
+        self.last_actor_distill_active_frac_tol_005_006 = 0.0
+        self.last_actor_distill_active_frac_tol_004_005 = 0.0
+        self.last_actor_distill_active_frac_tol_le_004 = 0.0
+        # last_nsucc_mean is runtime context; do NOT reset per call.
 
 
 def _stage_for_tol(eir_cfg: EIRConfig, tol_mean: float) -> Optional[int]:
@@ -1026,6 +1234,18 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             best_idx = rer["best_idx"]
             best_source = gather_best_source(cand_out["source_id"], best_idx)
             teacher_all = rer["best_action"].detach()
+            # Soft Activation Gate: soft tol/time only for soft_tol /
+            # confidence_only modes; hard_tol keeps the legacy hard tol return.
+            _act_cfg = eir_cfg.actor_distill_activation_config()
+            _soft_gate = bool(_act_cfg.enable) and str(_act_cfg.gate_mode) in (
+                "soft_tol",
+                "confidence_only",
+            )
+            best_unc = None
+            if rssm_unc_bk is not None:
+                best_unc = rssm_unc_bk.gather(
+                    1, best_idx.unsqueeze(1).long()
+                ).squeeze(1)
             distill_mask, reject_counts = build_actor_distill_mask(
                 eligible=rer["eligible"],
                 best_source=best_source,
@@ -1042,7 +1262,37 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 frames=int(frames),
                 rssm_unc_bk=rssm_unc_bk,
                 uncertainty_threshold=float(eir_cfg.actor_distill_uncertainty_threshold),
+                soft_tol_gate=_soft_gate,
             )
+            # Per-row soft activation weight (also drives telemetry).
+            _act = compute_actor_distill_activation(
+                cfg=_act_cfg,
+                frames=int(frames),
+                tol_mean=float(cache.tol_mean),
+                margin=rer["margin"],
+                best_source=best_source,
+                best_unc=best_unc,
+                nsucc_mean=float(getattr(bridge, "last_nsucc_mean", -1.0)),
+                eval_valid=True,
+            )
+            row_weight = _act["weight"] * distill_mask.float()
+            bridge.last_actor_distill_activation_weight_mean = float(_act["weight_mean"])
+            bridge.last_actor_distill_activation_nonzero_frac = float(_act["nonzero_frac"])
+            bridge.last_actor_distill_tol_weight_mean = float(_act["tol_weight"])
+            bridge.last_actor_distill_time_weight_mean = float(_act["time_weight"])
+            bridge.last_actor_distill_perf_weight_mean = float(_act["perf_weight"])
+            bridge.last_actor_distill_conf_weight_mean = float(_act["conf_weight_mean"])
+            bridge.last_actor_distill_unc_weight_mean = float(_act["unc_weight_mean"])
+            bridge.last_actor_distill_source_weight_mean = float(_act["source_weight_mean"])
+            _tb = str(_act["tol_bin"])
+            _active_rows = row_weight > 0.0
+            _active_frac_bin = float(_active_rows.float().mean().item())
+            for _b in TOL_BINS:
+                setattr(
+                    bridge,
+                    f"last_actor_distill_active_frac_tol_{_b}",
+                    _active_frac_bin if _b == _tb else 0.0,
+                )
             bridge.last_actor_distill_reject_bad_source = float(
                 reject_counts["reject_bad_source"]
             )
@@ -1059,11 +1309,13 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             bridge.last_actor_distill_reject_uncertainty_missing = float(
                 reject_counts["reject_uncertainty_missing"]
             )
-            bridge.last_actor_distill_active_fraction = float(distill_mask.float().mean().item())
-            if bool(distill_mask.any()):
+            bridge.last_actor_distill_active_fraction = float(
+                _active_rows.float().mean().item()
+            )
+            if bool(_active_rows.any()):
                 bridge.last_actor_distill_active = 1.0
-                bs = best_source[distill_mask]
-                n_act = int(distill_mask.sum().item())
+                bs = best_source[_active_rows]
+                n_act = int(_active_rows.sum().item())
                 bridge.last_actor_distill_source_frac_rssm = float((bs == SRC_RSSM).sum().item()) / float(n_act)
                 bridge.last_actor_distill_source_frac_elite = float((bs == SRC_ELITE_LOCAL).sum().item()) / float(n_act)
                 bridge.last_actor_distill_source_frac_archive = float(
@@ -1071,19 +1323,19 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 ) / float(n_act)
                 delta_all = (teacher_all - mu_r).detach()
                 bridge.last_actor_distill_delta_linf_mean = float(
-                    delta_all[distill_mask].abs().max(dim=-1).values.mean().item()
+                    delta_all[_active_rows].abs().max(dim=-1).values.mean().item()
                 )
                 bridge.last_actor_distill_delta_l2_mean = float(
-                    delta_all[distill_mask].norm(dim=-1).mean().item()
+                    delta_all[_active_rows].norm(dim=-1).mean().item()
                 )
                 confidence = (
                     rer["margin"] / float(eir_cfg.actor_distill_margin_norm)
                 ).clamp(0.0, 1.0)
                 bridge.last_actor_distill_margin_mean = float(
-                    rer["margin"][distill_mask].mean().item()
+                    rer["margin"][_active_rows].mean().item()
                 )
                 bridge.last_actor_distill_confidence_mean = float(
-                    confidence[distill_mask].mean().item()
+                    confidence[_active_rows].mean().item()
                 )
                 mu_distill = a2c.mu(feat_r)
                 mu_act = getattr(a2c, "mu_act", None)
@@ -1092,7 +1344,9 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 per_row = F.smooth_l1_loss(
                     mu_distill, teacher_all, reduction="none"
                 ).mean(dim=-1)
-                actor_distill_loss = (confidence[distill_mask] * per_row[distill_mask]).mean()
+                # weighted mean over per-row activation weight (teacher detached).
+                denom = row_weight.sum().clamp(min=1.0)
+                actor_distill_loss = (per_row * row_weight).sum() / denom
                 actor_distill_weighted = float(eir_cfg.actor_distill_weight) * actor_distill_loss
                 bridge.last_actor_distill_loss = float(actor_distill_loss.detach().item())
                 bridge.last_actor_distill_weighted_loss = float(
@@ -1110,6 +1364,11 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             else:
                 bridge.last_actor_distill_active_fraction = 0.0
 
+        # NOTE (Soft Activation Gate v1): the residual-rollout-apply path below
+        # is intentionally NOT softened.  It keeps its own hard gate (``lam``
+        # from ``distill_lambda_for_tol`` + RecoveryResidualConfig.apply_tol_*
+        # / confidence / max_aux_age).  The soft activation weight only governs
+        # actor_distill above; residual never intervenes at tol > start_tol.
         eligible = rer["eligible"]
         if not bool(eligible.any()):
             block = EIR_NOT_ELIGIBLE

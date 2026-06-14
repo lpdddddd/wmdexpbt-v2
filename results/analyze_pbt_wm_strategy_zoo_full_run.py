@@ -52,6 +52,71 @@ def _stats(vals: list[float]) -> dict[str, Any]:
     }
 
 
+TOL_BINS = ("gt_006", "005_006", "004_005", "le_004")
+
+
+def _tol_bin(tol: float | None) -> str:
+    if tol is None:
+        return "le_004"
+    if tol > 0.06:
+        return "gt_006"
+    if tol > 0.05:
+        return "005_006"
+    if tol > 0.04:
+        return "004_005"
+    return "le_004"
+
+
+def _by_tol_bin_stats(rows: list[dict]) -> dict[str, dict[str, Any]]:
+    """Aggregate per-tol-bin WM activation / curriculum stats for one policy."""
+    out: dict[str, dict[str, Any]] = {}
+    for b in TOL_BINS:
+        out[b] = {
+            "n": 0,
+            "actor_distill_active_fraction": None,
+            "actor_distill_activation_weight_mean": None,
+            "wm_score_used_fraction": None,
+            "wm_curriculum_blocked_shrink_count": 0,
+            "nsucc_mean_latest": None,
+            "collapse_count": 0,
+        }
+    acc: dict[str, dict[str, list]] = {b: defaultdict(list) for b in TOL_BINS}
+    for r in rows:
+        b = _tol_bin(_safe_float(r.get("success_tolerance")))
+        out[b]["n"] += 1
+        adf = _safe_float(
+            r.get("actor_distill_activation_nonzero_frac",
+                  r.get("profile_actor_distill_enabled"))
+        )
+        if adf is not None:
+            acc[b]["adf"].append(adf)
+        awm = _safe_float(r.get("actor_distill_activation_weight_mean"))
+        if awm is not None:
+            acc[b]["awm"].append(awm)
+        acc[b]["wm_used"].append(1.0 if r.get("wm_score_used") else 0.0)
+        if r.get("wm_curriculum_blocked_shrink"):
+            out[b]["wm_curriculum_blocked_shrink_count"] += 1
+        ns = _safe_float(r.get("nsucc_mean"))
+        if ns is not None:
+            acc[b]["nsucc"].append(ns)
+        if (
+            r.get("collapse_freeze_active")
+            or r.get("early_collapse_triggered")
+            or r.get("hard_collapse_triggered")
+        ):
+            out[b]["collapse_count"] += 1
+    for b in TOL_BINS:
+        if acc[b]["adf"]:
+            out[b]["actor_distill_active_fraction"] = sum(acc[b]["adf"]) / len(acc[b]["adf"])
+        if acc[b]["awm"]:
+            out[b]["actor_distill_activation_weight_mean"] = sum(acc[b]["awm"]) / len(acc[b]["awm"])
+        if acc[b]["wm_used"]:
+            out[b]["wm_score_used_fraction"] = sum(acc[b]["wm_used"]) / len(acc[b]["wm_used"])
+        if acc[b]["nsucc"]:
+            out[b]["nsucc_mean_latest"] = acc[b]["nsucc"][-1]
+    return out
+
+
 def _parse_run_config(run_dir: Path) -> dict[str, str]:
     cfg: dict[str, str] = {}
     p = run_dir / "RUN_CONFIG.txt"
@@ -163,6 +228,7 @@ def analyze_run(run_dir: Path, *, ws_name: str | None = None, num_policies: int 
             "residual_apply_enabled_last": bool(
                 rows[-1].get("profile_residual_apply_enabled", False)
             ),
+            "by_tol_bin": _by_tol_bin_stats(rows),
         }
 
     profiles_sorted_stability = sorted(
@@ -224,6 +290,57 @@ def analyze_run(run_dir: Path, *, ws_name: str | None = None, num_policies: int 
         ),
     }
 
+    # --- Soft Activation Gate v1 questions (by-tol-bin) ---
+    def _bin(prof: str, b: str) -> dict:
+        return by_profile.get(prof, {}).get("by_tol_bin", {}).get(b, {})
+
+    def _nonzero_above_004(prof: str) -> bool:
+        # WM has nonzero-but-small activation while tol > 0.04?
+        for b in ("gt_006", "005_006", "004_005"):
+            w = _bin(prof, b).get("actor_distill_activation_weight_mean")
+            if w is not None and w > 0.0:
+                return True
+        return False
+
+    def _activation_increases_as_tol_shrinks(prof: str) -> bool:
+        seq = []
+        for b in ("gt_006", "005_006", "004_005", "le_004"):
+            w = _bin(prof, b).get("actor_distill_activation_weight_mean")
+            if w is not None:
+                seq.append(w)
+        return len(seq) >= 2 and seq[-1] >= seq[0]
+
+    soft_gate_questions = {
+        "soft_gate_nonzero_above_tol_004": {
+            prof: _nonzero_above_004(prof)
+            for prof in (
+                "rssm_mppi_actor_distill",
+                "elite_bank_actor_distill",
+                "conservative_rssm_planner_distill",
+            )
+        },
+        "activation_increases_as_tol_shrinks": {
+            prof: _activation_increases_as_tol_shrinks(prof)
+            for prof in (
+                "rssm_mppi_actor_distill",
+                "elite_bank_actor_distill",
+                "conservative_rssm_planner_distill",
+            )
+        },
+        "wm_curriculum_blocks_before_floor": {
+            prof: any(
+                _bin(prof, b).get("wm_curriculum_blocked_shrink_count", 0) > 0
+                for b in ("gt_006", "005_006", "004_005")
+            )
+            for prof in ("wm_curriculum_controller",)
+        },
+        "wm_source_used_by_tol_bin": {
+            b: _bin("wm_pbt_source_selector", b).get("wm_score_used_fraction")
+            for b in TOL_BINS
+        },
+    }
+    questions["soft_activation_gate"] = soft_gate_questions
+
     return {
         "run_dir": str(run_dir),
         "workspace": str(ws),
@@ -244,6 +361,12 @@ def write_reports(report: dict[str, Any], out_dir: Path) -> None:
         "# PBT-WM Strategy Zoo Full Report",
         "",
         f"Run: `{report.get('run_dir')}`",
+        "",
+        "## Profile semantics",
+        "",
+        "`ppo_only` is the PPO/PBT anchor under the shared strategy-zoo "
+        "PBT/curriculum scaffold. It disables WM/EIR/action-level intervention, "
+        "but it is **not** an exact original DexPBT reproduction.",
         "",
         "## Per-profile summary",
         "",
@@ -267,9 +390,23 @@ def write_reports(report: dict[str, Any], out_dir: Path) -> None:
         lines.append(
             f"- residual apply (last): {data.get('residual_apply_enabled_last')}"
         )
+        btb = data.get("by_tol_bin", {})
+        if btb:
+            lines.append("- by tol bin (active_frac / activation_w / wm_score_used / blocked / collapse):")
+            for b in TOL_BINS:
+                s = btb.get(b, {})
+                lines.append(
+                    f"    - `{b}` (n={s.get('n', 0)}): "
+                    f"adf={s.get('actor_distill_active_fraction')} "
+                    f"aw={s.get('actor_distill_activation_weight_mean')} "
+                    f"wm_used={s.get('wm_score_used_fraction')} "
+                    f"blocked={s.get('wm_curriculum_blocked_shrink_count', 0)} "
+                    f"collapse={s.get('collapse_count', 0)}"
+                )
         lines.append("")
 
     q = report.get("questions", {})
+    sag = q.get("soft_activation_gate", {})
     lines.extend(
         [
             "## Questions",
@@ -282,6 +419,15 @@ def write_reports(report: dict[str, Any], out_dir: Path) -> None:
             f"6. Elite vs planner retention: **{q.get('elite_bank_vs_planner_stability')}**",
             f"7. No rollout residual apply: **{q.get('conservative_planner_no_rollout_apply')}**",
             f"8. Profile diversity collapse (<3): **{q.get('profile_diversity_collapse')}**",
+            "",
+            "## Soft Activation Gate v1",
+            "",
+            f"- WM has nonzero activation while tol > 0.04: **{sag.get('soft_gate_nonzero_above_tol_004')}**",
+            f"- Activation increases as tol shrinks: **{sag.get('activation_increases_as_tol_shrinks')}**",
+            f"- WM curriculum blocks before floor stage: **{sag.get('wm_curriculum_blocks_before_floor')}**",
+            f"- WM source score used by tol bin: **{sag.get('wm_source_used_by_tol_bin')}**",
+            "",
+            "Residual rollout apply remains HARD-gated (not relaxed by the soft gate).",
             "",
         ]
     )

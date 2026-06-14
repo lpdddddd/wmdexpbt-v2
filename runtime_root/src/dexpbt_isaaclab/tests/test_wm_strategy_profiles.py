@@ -5,16 +5,27 @@ from __future__ import annotations
 import argparse
 import unittest
 
+from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
 from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+    PROFILE_DESCRIPTIONS,
     PROFILE_IDS,
+    PROFILE_TABLES,
     apply_wm_strategy_profile,
     collect_explicit_dests,
     profile_capability_flags,
+    profile_controlled_restart_skip_flags,
 )
 
 
 def _ns(**kwargs):
     return argparse.Namespace(**kwargs)
+
+
+def _all_profile_dests() -> set[str]:
+    dests: set[str] = set()
+    for table in PROFILE_TABLES.values():
+        dests.update(table.keys())
+    return dests
 
 
 class TestWMStrategyProfiles(unittest.TestCase):
@@ -26,6 +37,11 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertEqual(PROFILE_IDS["wm_pbt_source_selector"], 4)
         self.assertEqual(PROFILE_IDS["elite_bank_actor_distill"], 5)
         self.assertEqual(PROFILE_IDS["conservative_rssm_planner_distill"], 6)
+
+    def test_ppo_only_description_is_not_original_dexpbt(self):
+        desc = PROFILE_DESCRIPTIONS["ppo_only"]
+        self.assertIn("anchor", desc)
+        self.assertIn("not an exact original DexPBT", desc)
 
     def test_legacy_no_op(self):
         args = _ns(wm_strategy_profile="legacy", eir_enable=False)
@@ -114,7 +130,29 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertTrue(args.eir_use_rssm_mppi)
         self.assertFalse(args.eir_residual_apply_to_rollout)
 
-    def test_explicit_override_respected(self):
+    def test_nonlegacy_profile_overrides_restart_wm_args(self):
+        argv = [
+            "train.py",
+            "--wm_strategy_profile=ppo_only",
+            "--enable_wm",
+            "--wm_strategy=rssm_belief_value",
+            "--eir_enable",
+        ]
+        args = _ns(
+            wm_strategy_profile="ppo_only",
+            enable_wm=True,
+            wm_strategy="rssm_belief_value",
+            eir_enable=True,
+        )
+        audit = apply_wm_strategy_profile(args, argv=argv, authoritative=True)
+        self.assertFalse(args.enable_wm)
+        self.assertEqual(args.wm_strategy, "none")
+        self.assertFalse(args.eir_enable)
+        overridden = [a for a in audit if a.get("overridden")]
+        self.assertTrue(any(a.get("flag") == "enable_wm" for a in overridden))
+        self.assertTrue(all(a.get("profile_authoritative") for a in overridden))
+
+    def test_legacy_profile_keeps_user_explicit_args(self):
         argv = [
             "train.py",
             "--wm_strategy_profile",
@@ -127,10 +165,33 @@ class TestWMStrategyProfiles(unittest.TestCase):
             wm_strategy_profile="ppo_only",
             enable_wm=True,
         )
-        audit = apply_wm_strategy_profile(args, argv=argv)
+        audit = apply_wm_strategy_profile(args, argv=argv, authoritative=False)
         kept = [a for a in audit if not a.get("overridden", True)]
         self.assertTrue(args.enable_wm)
         self.assertTrue(any(a.get("flag") == "enable_wm" for a in kept))
+
+    def test_rssm_profile_not_polluted_by_no_eir_or_wrong_wm_strategy_when_authoritative(
+        self,
+    ):
+        argv = [
+            "train.py",
+            "--wm_strategy_profile=rssm_mppi_actor_distill",
+            "--no-eir_enable",
+            "--wm_strategy=none",
+        ]
+        args = _ns(
+            wm_strategy_profile="rssm_mppi_actor_distill",
+            eir_enable=False,
+            wm_strategy="none",
+        )
+        apply_wm_strategy_profile(args, argv=argv, authoritative=True)
+        self.assertTrue(args.eir_enable)
+        self.assertEqual(args.wm_strategy, "rssm_belief_value")
+
+    def test_profile_controlled_restart_skip_flags_cover_table(self):
+        skip = profile_controlled_restart_skip_flags()
+        for dest in _all_profile_dests():
+            self.assertIn(f"--{dest}", skip)
 
     def test_profile_capability_flags(self):
         args = _ns(
@@ -148,6 +209,100 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertTrue(caps["profile_actor_distill_enabled"])
         self.assertFalse(caps["profile_residual_apply_enabled"])
         self.assertTrue(caps["profile_rssm_mppi_enabled"])
+
+
+class TestSoftActivationGateProfiles(unittest.TestCase):
+    def _expand(self, profile: str):
+        args = _ns(wm_strategy_profile=profile)
+        for dest in _all_profile_dests():
+            if not hasattr(args, dest):
+                setattr(args, dest, None)
+        apply_wm_strategy_profile(
+            args, argv=["train.py", f"--wm_strategy_profile={profile}"],
+            authoritative=True,
+        )
+        return args
+
+    def test_rssm_mppi_profile_uses_soft_actor_distill_gate(self):
+        a = self._expand("rssm_mppi_actor_distill")
+        self.assertEqual(a.eir_actor_distill_gate_mode, "soft_tol")
+        self.assertEqual(a.eir_actor_distill_tol_start, 0.060)
+        self.assertEqual(a.eir_actor_distill_tol_full, 0.040)
+        self.assertTrue(a.wm_activation_enable)
+
+    def test_elite_profile_uses_earlier_soft_gate_than_rssm(self):
+        elite = self._expand("elite_bank_actor_distill")
+        rssm = self._expand("rssm_mppi_actor_distill")
+        self.assertEqual(elite.eir_actor_distill_gate_mode, "soft_tol")
+        # elite softens earlier: higher tol_start and shorter ramp.
+        self.assertGreater(
+            elite.eir_actor_distill_tol_start, rssm.eir_actor_distill_tol_start
+        )
+        self.assertLess(
+            elite.eir_actor_distill_ramp_frames, rssm.eir_actor_distill_ramp_frames
+        )
+        self.assertEqual(elite.elite_distill_gate_mode, "soft_tol")
+        self.assertEqual(elite.eir_actor_distill_allowed_sources, "elite,archive")
+
+    def test_conservative_profile_uses_stricter_uncertainty_and_later_gate(self):
+        cons = self._expand("conservative_rssm_planner_distill")
+        elite = self._expand("elite_bank_actor_distill")
+        self.assertEqual(cons.eir_actor_distill_gate_mode, "soft_tol")
+        # later + stricter: lower tol_full, stricter uncertainty than elite.
+        self.assertLess(
+            cons.eir_actor_distill_tol_full, elite.eir_actor_distill_tol_full
+        )
+        self.assertEqual(cons.eir_actor_distill_uncertainty_threshold, 1.5)
+        self.assertEqual(cons.eir_actor_distill_allowed_sources, "rssm")
+        self.assertEqual(cons.conservative_planner_gate_mode, "soft_tol")
+
+    def test_wm_pbt_source_selector_uses_confidence_only_gate(self):
+        a = self._expand("wm_pbt_source_selector")
+        self.assertEqual(a.wm_pbt_source_gate_mode, "confidence_only")
+        self.assertEqual(a.wm_pbt_source_start_after_frames, 300_000_000)
+        self.assertEqual(a.pbt_wm_score_mode, "active")
+
+    def test_wm_curriculum_controller_uses_shrink_candidate_gate(self):
+        a = self._expand("wm_curriculum_controller")
+        self.assertEqual(a.wm_curriculum_gate_mode, "shrink_candidate")
+
+    def test_ppo_only_disables_activation(self):
+        a = self._expand("ppo_only")
+        self.assertFalse(a.wm_activation_enable)
+
+    def test_residual_apply_still_disabled_in_all_strategy_zoo_profiles(self):
+        for profile in (
+            "ppo_only",
+            "rssm_mppi_actor_distill",
+            "wm_curriculum_controller",
+            "wm_pbt_source_selector",
+            "elite_bank_actor_distill",
+            "conservative_rssm_planner_distill",
+        ):
+            a = self._expand(profile)
+            self.assertFalse(
+                a.eir_residual_apply_to_rollout,
+                msg=f"{profile} must keep residual rollout apply OFF",
+            )
+
+
+class TestRewriteTrainArgProfile(unittest.TestCase):
+    def test_rewrite_train_arg_profile_handles_equals_and_space_forms(self):
+        args = [
+            "--wm_strategy_profile",
+            "ppo_only",
+            "--foo=bar",
+            "--wm_strategy_profile=wm_pbt_source_selector",
+        ]
+        out = DexPBTPbtAlgoObserver._rewrite_train_arg_profile(
+            args, "elite_bank_actor_distill"
+        )
+        self.assertIn("--wm_strategy_profile=elite_bank_actor_distill", out)
+        self.assertNotIn("ppo_only", out)
+        self.assertFalse(any(a.startswith("--wm_strategy_profile=wm_pbt") for a in out))
+        self.assertEqual(
+            sum(1 for a in out if a.startswith("--wm_strategy_profile=")), 1
+        )
 
 
 class TestProfileCopyDefaults(unittest.TestCase):

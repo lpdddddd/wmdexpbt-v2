@@ -152,6 +152,12 @@ class CurriculumControlState:
     wm_curriculum_blocked_shrink: bool = False
     wm_curriculum_freeze_until: int = 0
     wm_curriculum_fallback_reason_id: int = 0
+    # PBT-WM Soft Activation Gate v1: tol-bin diagnostics (backward compatible).
+    wm_curriculum_tol_bin: str = "le_004"
+    wm_curriculum_blocked_shrink_tol_gt_006: float = 0.0
+    wm_curriculum_blocked_shrink_tol_005_006: float = 0.0
+    wm_curriculum_blocked_shrink_tol_004_005: float = 0.0
+    wm_curriculum_blocked_shrink_tol_le_004: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

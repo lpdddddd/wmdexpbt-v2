@@ -67,6 +67,9 @@ curriculum_fast_consolidation_frames=100000000
 post_shrink_consolidation_env_frames=150000000
 curriculum_fast_target_tolerance_800m=0.045
 note=PBT-WM Strategy Zoo v1.0 full population: six distinct wm_strategy_profile workers; profile propagation after 1B; no global residual rollout apply.
+ppo_only_note=ppo_only is the PPO/PBT anchor under the shared strategy-zoo PBT/curriculum scaffold. It disables WM/EIR/action-level intervention, but it is not an exact original DexPBT reproduction.
+soft_activation_gate=PBT-WM Soft Activation Gate v1: actor_distill / WM source score / WM curriculum diagnostics use a continuous activation weight (w_time*w_tol*w_perf*w_conf*w_unc*w_source) instead of a tol<=0.04 hard gate.
+residual_apply_note=eir_residual_apply_to_rollout stays OFF and HARD-gated (hard tol / confidence / max_aux_age). The soft activation gate does NOT relax residual rollout apply; residual never intervenes at tol > 0.04.
 EOF
 
 source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"

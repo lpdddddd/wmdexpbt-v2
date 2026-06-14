@@ -418,6 +418,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         wm_curriculum_controller_freeze_frames: int = 100_000_000,
         wm_curriculum_controller_hard_block_shrink: bool = True,
         wm_curriculum_controller_use_recovery_prob: bool = False,
+        # PBT-WM Soft Activation Gate v1: WM PBT source-score soft gate
+        # (confidence_only: eval_valid + time ramp + uncertainty, no tol gate).
+        wm_pbt_source_gate_mode: str = "confidence_only",
+        wm_pbt_source_start_after_frames: int = 300_000_000,
+        wm_pbt_source_ramp_frames: int = 300_000_000,
+        wm_curriculum_gate_mode: str = "shrink_candidate",
+        wm_activation_enable: bool = True,
         pbt_wm_profile_copy_enable: bool = False,
         pbt_wm_profile_copy_after_frames: int = 1_000_000_000,
         pbt_wm_profile_copy_prob: float = 0.3,
@@ -638,6 +645,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.wm_curriculum_controller_use_recovery_prob = bool(
             wm_curriculum_controller_use_recovery_prob
         )
+        # PBT-WM Soft Activation Gate v1.
+        self.wm_activation_enable = bool(wm_activation_enable)
+        self.wm_pbt_source_gate_mode = str(wm_pbt_source_gate_mode)
+        self.wm_pbt_source_start_after_frames = int(wm_pbt_source_start_after_frames)
+        self.wm_pbt_source_ramp_frames = int(wm_pbt_source_ramp_frames)
+        self.wm_curriculum_gate_mode = str(wm_curriculum_gate_mode)
+        self._last_wm_source_activation_weight = 0.0
+        self._last_wm_source_activation_nonzero = 0.0
+        self._last_wm_source_unc_weight = 0.0
+        self._last_wm_source_time_weight = 0.0
         self.pbt_wm_profile_copy_enable = bool(pbt_wm_profile_copy_enable)
         self.pbt_wm_profile_copy_after_frames = int(pbt_wm_profile_copy_after_frames)
         self.pbt_wm_profile_copy_prob = float(pbt_wm_profile_copy_prob)
@@ -1171,7 +1188,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         window: RollingNsuccWindow,
         env_frames: int,
     ) -> dict[str, Any]:
-        """Return WM curriculum controller audit dict for this tick."""
+        """Return WM curriculum controller audit dict for this tick.
+
+        Soft Activation Gate v1: this is a ``shrink_candidate`` gate.  There is
+        NO ``tol <= 0.04`` hard gate; eval missing / stale / invalid fails OPEN
+        (does not block).  ``tol_bin`` and per-bin blocked-shrink counters are
+        recorded for diagnostics.
+        """
+        from dexpbt_isaaclab.world_model.wm_activation_gate import TOL_BINS, tol_bin
+
+        cur_tol = float("nan")
+        if window.samples:
+            cur_tol = float(window.samples[-1].success_tolerance)
+        tb = tol_bin(cur_tol) if cur_tol == cur_tol else "le_004"
         out: dict[str, Any] = {
             "active": False,
             "eval_valid": False,
@@ -1180,12 +1209,30 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "recovery_prob": 0.0,
             "uncertainty": 1.0,
             "blocked_shrink": False,
+            "tol_bin": tb,
             "freeze_until": int(
                 self._wm_curriculum_freeze_until.get(policy_idx, 0)
             ),
             "fallback_reason_id": 0,
         }
-        if not self.wm_curriculum_controller_enable:
+        for _b in TOL_BINS:
+            out[f"blocked_shrink_tol_{_b}"] = 0.0
+
+        gate_off = (
+            not getattr(self, "wm_activation_enable", True)
+            or str(getattr(self, "wm_curriculum_gate_mode", "shrink_candidate")) == "off"
+        )
+
+        def _mark_blocked() -> None:
+            out["blocked_shrink"] = True
+            out[f"blocked_shrink_tol_{tb}"] = 1.0
+            counts = getattr(self, "_wm_curriculum_blocked_by_tol_bin", None)
+            if counts is None:
+                counts = {b: 0 for b in TOL_BINS}
+                self._wm_curriculum_blocked_by_tol_bin = counts
+            counts[tb] = int(counts.get(tb, 0)) + 1
+
+        if gate_off or not self.wm_curriculum_controller_enable:
             out["fallback_reason_id"] = 1
             return out
         if int(env_frames) < int(self.wm_curriculum_controller_start_after_frames):
@@ -1194,7 +1241,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         out["active"] = True
         wm_freeze_until = int(self._wm_curriculum_freeze_until.get(policy_idx, 0))
         if int(env_frames) < wm_freeze_until:
-            out["blocked_shrink"] = True
+            _mark_blocked()
             out["freeze_until"] = wm_freeze_until
             out["fallback_reason_id"] = 6
             return out
@@ -1229,7 +1276,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             and nsucc_mean >= self.wm_curriculum_controller_min_nsucc_mean
             and self.wm_curriculum_controller_hard_block_shrink
         ):
-            out["blocked_shrink"] = True
+            _mark_blocked()
             out["freeze_until"] = int(env_frames) + int(
                 self.wm_curriculum_controller_freeze_frames
             )
@@ -1243,17 +1290,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     def _rewrite_train_arg_profile(train_args: list[str], profile_name: str) -> list[str]:
         flag = "--wm_strategy_profile"
         out: list[str] = []
-        replaced = False
-        for arg in train_args:
-            if arg.startswith(f"{flag}="):
-                out.append(f"{flag}={profile_name}")
-                replaced = True
-            elif arg == flag and not replaced:
+        i = 0
+        while i < len(train_args):
+            arg = train_args[i]
+            if arg == flag:
+                i += 2
                 continue
-            else:
-                out.append(arg)
-        if not replaced:
-            out.append(f"{flag}={profile_name}")
+            if arg.startswith(f"{flag}="):
+                i += 1
+                continue
+            out.append(arg)
+            i += 1
+        out.append(f"{flag}={profile_name}")
         return out
 
     def _count_profile_diversity(
@@ -1685,6 +1733,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             wm_curriculum_freeze_until=int(wm_cc.get("freeze_until", 0)),
             wm_curriculum_fallback_reason_id=int(
                 wm_cc.get("fallback_reason_id", 0)
+            ),
+            wm_curriculum_tol_bin=str(wm_cc.get("tol_bin", "le_004")),
+            wm_curriculum_blocked_shrink_tol_gt_006=float(
+                wm_cc.get("blocked_shrink_tol_gt_006", 0.0)
+            ),
+            wm_curriculum_blocked_shrink_tol_005_006=float(
+                wm_cc.get("blocked_shrink_tol_005_006", 0.0)
+            ),
+            wm_curriculum_blocked_shrink_tol_004_005=float(
+                wm_cc.get("blocked_shrink_tol_004_005", 0.0)
+            ),
+            wm_curriculum_blocked_shrink_tol_le_004=float(
+                wm_cc.get("blocked_shrink_tol_le_004", 0.0)
             ),
         )
 
@@ -3770,6 +3831,22 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_curriculum_fallback_reason_id": int(
                     own_ctrl.wm_curriculum_fallback_reason_id if own_ctrl else 0
                 ),
+                # PBT-WM Soft Activation Gate v1 diagnostics.
+                "wm_curriculum_tol_bin": str(
+                    own_ctrl.wm_curriculum_tol_bin if own_ctrl else "le_004"
+                ),
+                "wm_source_activation_weight": float(
+                    getattr(self, "_last_wm_source_activation_weight", 0.0)
+                ),
+                "wm_source_activation_nonzero": float(
+                    getattr(self, "_last_wm_source_activation_nonzero", 0.0)
+                ),
+                "wm_source_unc_weight": float(
+                    getattr(self, "_last_wm_source_unc_weight", 0.0)
+                ),
+                "wm_source_time_weight": float(
+                    getattr(self, "_last_wm_source_time_weight", 0.0)
+                ),
                 "tier": str(tier),
                 "checkpoint": own_state.get("checkpoint", ""),
                 "params": {k: own_state["params"][k] for k in own_state.get("params", {})},
@@ -4220,6 +4297,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         wm_changed_selection = False
         wm_score_used_now = False
         wm_fallback_reason = "feature_off"
+        local_wm_unc = 1.0
+        local_wm_valid = False
         floor_recovery_score_real_local = 0.0
         floor_recovery_score_wm_local = 0.0
         # Phase A4 P4 wired (2026-06-10): pull the latest WMImaginedEvaluator
@@ -4340,6 +4419,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         if used_wm_for_pidx:
                             wm_score_used_now = True
                         wm_fallback_reason = fallback_reason_pidx
+                        if wm_mode in ("shadow", "active"):
+                            _le = self._wm_imagined_eval_per_policy.get(pidx) or {}
+                            local_wm_valid = bool(_le.get("imagined_valid", False))
+                            local_wm_unc = float(_le.get("uncertainty", 1.0))
                 if alt_objectives:
                     sorted_policies_alt = sorted(
                         alt_objectives.keys(),
@@ -4433,6 +4516,47 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         "pbt/hard_collapse_population",
                         1.0 if any_hard_collapse else 0.0,
                         env_frames,
+                    )
+                    # PBT-WM Soft Activation Gate v1 diagnostics for the WM
+                    # source-score path (no tol hard gate; time ramp + unc).
+                    from dexpbt_isaaclab.world_model.wm_activation_gate import clamp01
+                    if (
+                        not self.wm_activation_enable
+                        or str(self.wm_pbt_source_gate_mode) == "off"
+                        or not local_wm_valid
+                    ):
+                        _w_time = 0.0
+                        _w_unc = 0.0
+                        _src_w = 0.0
+                    else:
+                        if int(env_frames) < int(self.wm_pbt_source_start_after_frames):
+                            _w_time = 0.0
+                        else:
+                            _w_time = clamp01(
+                                (int(env_frames) - int(self.wm_pbt_source_start_after_frames))
+                                / max(1, int(self.wm_pbt_source_ramp_frames))
+                            )
+                        _w_unc = clamp01(
+                            1.0 - local_wm_unc / max(1e-6, float(self.pbt_wm_max_uncertainty))
+                        )
+                        _src_w = _w_time * _w_unc
+                    self._last_wm_source_activation_weight = float(_src_w)
+                    self._last_wm_source_activation_nonzero = 1.0 if _src_w > 0.0 else 0.0
+                    self._last_wm_source_unc_weight = float(_w_unc)
+                    self._last_wm_source_time_weight = float(_w_time)
+                    self.writer.add_scalar(
+                        "pbt/wm_source_activation_weight", float(_src_w), env_frames
+                    )
+                    self.writer.add_scalar(
+                        "pbt/wm_source_activation_nonzero",
+                        1.0 if _src_w > 0.0 else 0.0,
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/wm_source_unc_weight", float(_w_unc), env_frames
+                    )
+                    self.writer.add_scalar(
+                        "pbt/wm_source_time_weight", float(_w_time), env_frames
                     )
         except Exception as exc:  # pragma: no cover - guard against mis-init
             print(f"[floor-recovery-ranking] guarded fallback: {exc}")
@@ -6118,6 +6242,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "--wm_checkpoint_path",
             "--wm_checkpoint_strategy",
             "--wm_load_mode",
+            "--wm_strategy_mode",
+            "--fixed_wm_strategy",
             "--require_counterfactual_runner",
             # M2: also strip previous resume flags so a chain of restarts always
             # carries the freshest curriculum snapshot, not a stale one.
@@ -6136,6 +6262,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             # keep --kit_args from _original_sys_argv it would be duplicated.
             "--kit_args",
         }
+        from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+            profile_controlled_restart_skip_flags,
+        )
+
+        skip_flags = set(skip_flags) | set(profile_controlled_restart_skip_flags())
         # Use original sys.argv (before train.py strips parsed args).
         # train.py is loaded as __main__ via `python -m`, so it lives in
         # sys.modules['__main__'] — importing the dotted name would re-execute
@@ -6194,18 +6325,33 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             f"--r_success={new_params['r_success']}",
             f"--kuka_actions_penalty_scale={new_params['kuka_actions_penalty_scale']}",
             f"--allegro_actions_penalty_scale={new_params['allegro_actions_penalty_scale']}",
-            # M6: enable_wm/wm_strategy/wm_ensemble_size are NOT mutated; pass
-            # through fresh values (wm_strategy comes from posterior, others are
-            # constants from the source state).
-            f"--wm_strategy={selected_strategy}",
-            f"--wm_ensemble_size={int(new_params.get('wm_ensemble_size', 3))}",
-            "--wm_load_mode=auto",
-            f"--wm_checkpoint_strategy={wm_ckpt_strategy}",
+            f"--learning_rate={new_params.get('learning_rate', 3e-4)}",
         ]
-        if bool(new_params.get("enable_wm", False)):
-            train_args.append("--enable_wm")
+        profile_is_authoritative = str(
+            self.wm_strategy_profile_name or "legacy"
+        ) != "legacy"
+        if not profile_is_authoritative:
+            # Legacy path: forward source WM flags unchanged.
+            train_args.extend(
+                [
+                    f"--wm_strategy={selected_strategy}",
+                    f"--wm_ensemble_size={int(new_params.get('wm_ensemble_size', 3))}",
+                    "--wm_load_mode=auto",
+                    f"--wm_checkpoint_strategy={wm_ckpt_strategy}",
+                ]
+            )
+            if bool(new_params.get("enable_wm", False)):
+                train_args.append("--enable_wm")
+                if wm_ckpt_path:
+                    train_args.append(f"--wm_checkpoint_path={wm_ckpt_path}")
+            train_args.append(f"--wm_strategy_mode={self.wm_strategy_mode}")
+            train_args.append(f"--fixed_wm_strategy={self.fixed_wm_strategy}")
+        else:
+            # Strategy-zoo path: profile expansion is authoritative; only
+            # checkpoint warm-start hints may pass through.
             if wm_ckpt_path:
                 train_args.append(f"--wm_checkpoint_path={wm_ckpt_path}")
+            train_args.append(f"--wm_checkpoint_strategy={wm_ckpt_strategy}")
         if bool(new_params.get("enable_counterfactual", False)):
             train_args.append("--enable_counterfactual")
             train_args.append(f"--cf_interval_gens={int(new_params.get('cf_interval_gens', 5))}")
@@ -6283,10 +6429,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         # Patch J (2026-05-31): forward fixed-strategy ablation mode so
         # the spawned process stays on the same wm_strategy across
-        # restarts. We pass these unconditionally; `bayesian` is the
-        # default and a no-op.
-        train_args.append(f"--wm_strategy_mode={self.wm_strategy_mode}")
-        train_args.append(f"--fixed_wm_strategy={self.fixed_wm_strategy}")
+        # restarts. Strategy-zoo profiles derive these from the table.
+        if not profile_is_authoritative:
+            train_args.append(f"--wm_strategy_mode={self.wm_strategy_mode}")
+            train_args.append(f"--fixed_wm_strategy={self.fixed_wm_strategy}")
 
         # Patch 2 (rev 2, 2026-05-30): forward in-process anti-churn state so
         # the spawned worker can rebuild it via train.py argparse without

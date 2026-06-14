@@ -1057,6 +1057,13 @@ parser.add_argument(
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
 )
+parser.add_argument(
+    "--wm_strategy_profile_allow_cli_override",
+    action="store_true",
+    default=False,
+    help="Debug only: allow explicit CLI flags to override non-legacy profile "
+    "table values (default: profile is authoritative).",
+)
 parser.add_argument("--enable_wm", action="store_true", default=False,
                     help="Enable world model training.")
 parser.add_argument("--wm_strategy", type=str, default="none",
@@ -1583,6 +1590,40 @@ parser.add_argument("--eir_actor_distill_uncertainty_threshold", type=float, def
 parser.add_argument("--eir_actor_distill_loss_cap", type=float, default=0.05)
 parser.add_argument("--eir_actor_distill_feature_detach", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--eir_actor_distill_mu_head_only", action=argparse.BooleanOptionalAction, default=True)
+# PBT-WM Soft Activation Gate v1 (shared toggles + per-module soft tol schedule).
+parser.add_argument("--wm_activation_enable", action=argparse.BooleanOptionalAction, default=True,
+                    help="Master switch for the soft activation gate (per-module).")
+parser.add_argument("--wm_activation_log_by_tol_bin", action=argparse.BooleanOptionalAction, default=True,
+                    help="Emit per-tol-bin activation telemetry.")
+# actor-distill soft gate (default hard_tol preserves legacy behaviour).
+parser.add_argument("--eir_actor_distill_gate_mode", type=str, default="hard_tol",
+                    choices=["off", "hard_tol", "soft_tol", "confidence_only"])
+parser.add_argument("--eir_actor_distill_tol_start", type=float, default=0.060)
+parser.add_argument("--eir_actor_distill_tol_full", type=float, default=0.040)
+parser.add_argument("--eir_actor_distill_ramp_frames", type=int, default=300000000)
+parser.add_argument("--eir_actor_distill_nsucc_ref", type=float, default=20.0)
+# elite-distill soft gate (profile elite_bank_actor_distill diagnostics).
+parser.add_argument("--elite_distill_gate_mode", type=str, default="hard_tol",
+                    choices=["off", "hard_tol", "soft_tol", "confidence_only"])
+parser.add_argument("--elite_distill_tol_start", type=float, default=0.070)
+parser.add_argument("--elite_distill_tol_full", type=float, default=0.045)
+parser.add_argument("--elite_distill_ramp_frames", type=int, default=200000000)
+parser.add_argument("--elite_distill_nsucc_ref", type=float, default=15.0)
+# conservative planner soft gate (profile conservative_rssm_planner_distill).
+parser.add_argument("--conservative_planner_gate_mode", type=str, default="hard_tol",
+                    choices=["off", "hard_tol", "soft_tol", "confidence_only"])
+parser.add_argument("--conservative_planner_tol_start", type=float, default=0.055)
+parser.add_argument("--conservative_planner_tol_full", type=float, default=0.035)
+parser.add_argument("--conservative_planner_ramp_frames", type=int, default=300000000)
+parser.add_argument("--conservative_planner_nsucc_ref", type=float, default=25.0)
+# WM PBT source selector soft gate (no tol hard gate).
+parser.add_argument("--wm_pbt_source_gate_mode", type=str, default="confidence_only",
+                    choices=["off", "confidence_only"])
+parser.add_argument("--wm_pbt_source_start_after_frames", type=int, default=300000000)
+parser.add_argument("--wm_pbt_source_ramp_frames", type=int, default=300000000)
+# WM curriculum controller gate mode (shrink-candidate only; fail-open).
+parser.add_argument("--wm_curriculum_gate_mode", type=str, default="shrink_candidate",
+                    choices=["off", "shrink_candidate"])
 # RSSM reranking / full H-step MPPI
 parser.add_argument("--eir_mppi_mode", type=str, default="full", choices=["off", "light", "full"])
 parser.add_argument("--eir_mppi_start_after_frames", type=int, default=800000000)
@@ -1709,7 +1750,14 @@ from dexpbt_isaaclab.world_model.wm_strategy_profiles import (  # noqa: E402
     profile_capability_flags,
 )
 
-_wm_profile_audit = apply_wm_strategy_profile(args_cli)
+_wm_profile_audit = apply_wm_strategy_profile(
+    args_cli,
+    argv=sys.argv,
+    authoritative=(
+        str(args_cli.wm_strategy_profile) != "legacy"
+        and not bool(args_cli.wm_strategy_profile_allow_cli_override)
+    ),
+)
 _wm_profile_caps = profile_capability_flags(args_cli)
 
 # Save original sys.argv before modification so PBT observer can reconstruct
@@ -3121,6 +3169,19 @@ def _patch_actor_train_for_seq_wm(
                         "actor_distill_reject_high_uncertainty": xb.last_actor_distill_reject_high_uncertainty,
                         "actor_distill_reject_tol": xb.last_actor_distill_reject_tol,
                         "actor_distill_reject_uncertainty_missing": xb.last_actor_distill_reject_uncertainty_missing,
+                        # Soft Activation Gate v1 telemetry.
+                        "actor_distill_activation_weight_mean": xb.last_actor_distill_activation_weight_mean,
+                        "actor_distill_activation_nonzero_frac": xb.last_actor_distill_activation_nonzero_frac,
+                        "actor_distill_tol_weight_mean": xb.last_actor_distill_tol_weight_mean,
+                        "actor_distill_time_weight_mean": xb.last_actor_distill_time_weight_mean,
+                        "actor_distill_perf_weight_mean": xb.last_actor_distill_perf_weight_mean,
+                        "actor_distill_conf_weight_mean": xb.last_actor_distill_conf_weight_mean,
+                        "actor_distill_unc_weight_mean": xb.last_actor_distill_unc_weight_mean,
+                        "actor_distill_source_weight_mean": xb.last_actor_distill_source_weight_mean,
+                        "actor_distill_active_frac_tol_gt_006": xb.last_actor_distill_active_frac_tol_gt_006,
+                        "actor_distill_active_frac_tol_005_006": xb.last_actor_distill_active_frac_tol_005_006,
+                        "actor_distill_active_frac_tol_004_005": xb.last_actor_distill_active_frac_tol_004_005,
+                        "actor_distill_active_frac_tol_le_004": xb.last_actor_distill_active_frac_tol_le_004,
                     })
                     for k, v in eir_scalars.items():
                         try:
@@ -5129,6 +5190,12 @@ def main():
             actor_distill_feature_detach=bool(args_cli.eir_actor_distill_feature_detach),
             actor_distill_mu_head_only=bool(args_cli.eir_actor_distill_mu_head_only),
             allowed_source_ids=_actor_distill_allowed,
+            actor_distill_activation_enable=bool(args_cli.wm_activation_enable),
+            actor_distill_gate_mode=str(args_cli.eir_actor_distill_gate_mode),
+            actor_distill_tol_start=float(args_cli.eir_actor_distill_tol_start),
+            actor_distill_tol_full=float(args_cli.eir_actor_distill_tol_full),
+            actor_distill_ramp_frames=int(args_cli.eir_actor_distill_ramp_frames),
+            actor_distill_nsucc_ref=float(args_cli.eir_actor_distill_nsucc_ref),
         )
         eir_bank_cfg = EliteRecoveryBankConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),
@@ -5878,6 +5945,13 @@ def main():
             wm_curriculum_controller_use_recovery_prob=(
                 args_cli.wm_curriculum_controller_use_recovery_prob
             ),
+            wm_activation_enable=bool(args_cli.wm_activation_enable),
+            wm_pbt_source_gate_mode=str(args_cli.wm_pbt_source_gate_mode),
+            wm_pbt_source_start_after_frames=int(
+                args_cli.wm_pbt_source_start_after_frames
+            ),
+            wm_pbt_source_ramp_frames=int(args_cli.wm_pbt_source_ramp_frames),
+            wm_curriculum_gate_mode=str(args_cli.wm_curriculum_gate_mode),
             pbt_wm_profile_copy_enable=args_cli.pbt_wm_profile_copy_enable,
             pbt_wm_profile_copy_after_frames=(
                 args_cli.pbt_wm_profile_copy_after_frames

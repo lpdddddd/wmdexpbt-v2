@@ -50,6 +50,187 @@ DEFAULT_FIRST_EPOCH_MARKERS = (
     "PPO total step",
 )
 
+# BooleanOptionalAction / store_true flags that must not be merged with the
+# next token as ``--flag=--next_flag`` during extra-arg normalization.
+LAUNCH_PBT_BOOLEAN_FLAGS: frozenset[str] = frozenset(
+    {
+        "--enable_wm",
+        "--enable_counterfactual",
+        "--require_counterfactual_runner",
+        "--cf_reset_epoch_counter",
+        "--cf_require_nsucc_gt_zero",
+        "--no-cf_require_nsucc_gt_zero",
+        "--pbt_allow_low_nsucc_source_fallback",
+        "--no-pbt_allow_low_nsucc_source_fallback",
+        "--pbt_disable_self_restart",
+        "--no-pbt_disable_self_restart",
+        "--pbt_allow_mid_self_mutation",
+        "--no-pbt_allow_mid_self_mutation",
+        "--pbt_enable_best_nsucc_recovery",
+        "--no-pbt_enable_best_nsucc_recovery",
+        "--pbt_source_require_stable_mean",
+        "--no-pbt_source_require_stable_mean",
+        "--curriculum_collapse_detect",
+        "--no-curriculum_collapse_detect",
+        "--pbt_allow_best_nsucc_archive_recovery",
+        "--no-pbt_allow_best_nsucc_archive_recovery",
+        "--pbt_single_shrink_per_window",
+        "--no-pbt_single_shrink_per_window",
+        "--pbt_early_collapse_detect",
+        "--no-pbt_early_collapse_detect",
+        "--pbt_recovery_bypass_elimination_burnin",
+        "--no-pbt_recovery_bypass_elimination_burnin",
+        "--seq_wm_value_detach_belief",
+        "--no-seq_wm_value_detach_belief",
+        "--pbt_protect_promising_workers",
+        "--no-pbt_protect_promising_workers",
+        "--pbt_promising_allow_hard_collapse_override",
+        "--no-pbt_promising_allow_hard_collapse_override",
+        "--pbt_floor_recovery_aware",
+        "--no-pbt_floor_recovery_aware",
+        "--pbt_enable_best_floor_recovery_archive",
+        "--no-pbt_enable_best_floor_recovery_archive",
+        "--pbt_use_wm_recovery_score",
+        "--no-pbt_use_wm_recovery_score",
+        "--seq_wm_use_task_aux_inputs",
+        "--no-seq_wm_use_task_aux_inputs",
+        "--seq_wm_floor_aware_weighting",
+        "--no-seq_wm_floor_aware_weighting",
+        "--seq_wm_use_horizon_heads",
+        "--no-seq_wm_use_horizon_heads",
+        "--seq_wm_use_recovery_head",
+        "--no-seq_wm_use_recovery_head",
+        "--seq_wm_enable_iterative_teacher",
+        "--no-seq_wm_enable_iterative_teacher",
+        "--seq_wm_enable_imagined_evaluator",
+        "--no-seq_wm_enable_imagined_evaluator",
+        "--seq_wm_imagine_use_teacher",
+        "--no-seq_wm_imagine_use_teacher",
+        "--seq_wm_replay_prioritize_floor_recovery",
+        "--no-seq_wm_replay_prioritize_floor_recovery",
+        "--experimental_rssm_floor_recovery_stack",
+        "--no-experimental_rssm_floor_recovery_stack",
+        "--seq_wm_horizon_skip_too_long",
+        "--no-seq_wm_horizon_skip_too_long",
+        "--seq_wm_teacher_allow_first_promotion",
+        "--no-seq_wm_teacher_allow_first_promotion",
+        "--wm_floorcritic_enable",
+        "--no-wm_floorcritic_enable",
+        "--wm_floorcritic_auto_scale_by_grad_ratio",
+        "--no-wm_floorcritic_auto_scale_by_grad_ratio",
+        "--wm_floorcritic_actor_detach",
+        "--no-wm_floorcritic_actor_detach",
+        "--wm_floorcritic_update_actor",
+        "--no-wm_floorcritic_update_actor",
+        "--wm_floorcritic_use_success",
+        "--no-wm_floorcritic_use_success",
+        "--wm_floorcritic_use_near_success",
+        "--no-wm_floorcritic_use_near_success",
+        "--wm_floorcritic_use_dhat_improve",
+        "--no-wm_floorcritic_use_dhat_improve",
+        "--wm_floorcritic_use_drop_risk",
+        "--no-wm_floorcritic_use_drop_risk",
+        "--erd_enable",
+        "--no-erd_enable",
+        "--erd_auto_scale_by_grad_ratio",
+        "--no-erd_auto_scale_by_grad_ratio",
+        "--erd_only_lifted",
+        "--no-erd_only_lifted",
+        "--erd_noise_cap_by_tol",
+        "--no-erd_noise_cap_by_tol",
+        "--eir_enable",
+        "--no-eir_enable",
+        "--eir_use_elite_bank",
+        "--no-eir_use_elite_bank",
+        "--eir_use_recovery_residual",
+        "--no-eir_use_recovery_residual",
+        "--eir_use_rssm_mppi",
+        "--no-eir_use_rssm_mppi",
+        "--eir_noise_cap_by_tol",
+        "--no-eir_noise_cap_by_tol",
+        "--eir_only_lifted",
+        "--no-eir_only_lifted",
+        "--eir_mu_base_detach",
+        "--no-eir_mu_base_detach",
+        "--eir_residual_apply_to_rollout",
+        "--no-eir_residual_apply_to_rollout",
+        "--eir_mppi_smooth_noise",
+        "--no-eir_mppi_smooth_noise",
+        "--eir_mppi_fail_fast",
+        "--no-eir_mppi_fail_fast",
+        "--eir_mppi_stochastic_rollouts",
+        "--no-eir_mppi_stochastic_rollouts",
+        "--seq_wm_ensemble_enable",
+        "--no-seq_wm_ensemble_enable",
+        "--seq_wm_ensemble_bootstrap",
+        "--no-seq_wm_ensemble_bootstrap",
+        "--seq_wm_ensemble_save",
+        "--no-seq_wm_ensemble_save",
+        "--eir_mppi_use_model_ensemble",
+        "--no-eir_mppi_use_model_ensemble",
+        "--eir_pbt_broadcast_elite_bank",
+        "--no-eir_pbt_broadcast_elite_bank",
+        "--eir_guidance_enable",
+        "--no-eir_guidance_enable",
+        "--eir_actor_distill_enable",
+        "--no-eir_actor_distill_enable",
+        "--eir_actor_distill_feature_detach",
+        "--no-eir_actor_distill_feature_detach",
+        "--eir_actor_distill_mu_head_only",
+        "--no-eir_actor_distill_mu_head_only",
+        # PBT-WM Soft Activation Gate v1 toggles.
+        "--wm_activation_enable",
+        "--no-wm_activation_enable",
+        "--wm_activation_log_by_tol_bin",
+        "--no-wm_activation_log_by_tol_bin",
+        # PBT-WM Strategy Zoo v1.0 toggles.
+        "--pbt_wm_profile_copy_enable",
+        "--no-pbt_wm_profile_copy_enable",
+        "--wm_curriculum_controller_enable",
+        "--no-wm_curriculum_controller_enable",
+        "--wm_curriculum_controller_hard_block_shrink",
+        "--no-wm_curriculum_controller_hard_block_shrink",
+        "--wm_curriculum_controller_use_recovery_prob",
+        "--no-wm_curriculum_controller_use_recovery_prob",
+    }
+)
+
+
+def normalize_extra_args(
+    extra: list[str],
+    *,
+    boolean_flags: frozenset[str] | set[str] | None = None,
+) -> list[str]:
+    """Normalize ``--key value`` extra tokens to ``--key=value`` for PBT restart.
+
+    Boolean flags are kept standalone.  The next token is only merged when it
+    does **not** start with ``--`` (avoids ``--bool=--next_flag`` corruption).
+    """
+    flags = boolean_flags if boolean_flags is not None else LAUNCH_PBT_BOOLEAN_FLAGS
+    normalized: list[str] = []
+    i = 0
+    while i < len(extra):
+        tok = extra[i]
+        if tok == "--extra":
+            i += 1
+            continue
+        if tok in flags:
+            normalized.append(tok)
+            i += 1
+            continue
+        if (
+            tok.startswith("--")
+            and "=" not in tok
+            and i + 1 < len(extra)
+            and not str(extra[i + 1]).startswith("--")
+        ):
+            normalized.append(f"{tok}={extra[i + 1]}")
+            i += 2
+            continue
+        normalized.append(tok)
+        i += 1
+    return normalized
+
 
 def _read_status(run_dir: Path) -> dict[str, str]:
     status_path = run_dir / "status.txt"
@@ -620,183 +801,8 @@ def main() -> None:
             f"--num_envs={args.num_envs}",
             f"--max_iterations={args.max_iterations}",
         ]
-        # Normalize WM flags to --key=value so PBT restart argv reconstruction
-        # does not leave orphan tokens (value_imag_h1, 3, 5, ...).
-        boolean_flags = {
-            "--enable_wm",
-            "--enable_counterfactual",
-            "--cf_reset_epoch_counter",
-            "--cf_require_nsucc_gt_zero",
-            "--no-cf_require_nsucc_gt_zero",
-            "--require_counterfactual_runner",
-            # Patch A (rev 3, 2026-05-30): legacy source fallback toggle.
-            "--pbt_allow_low_nsucc_source_fallback",
-            "--no-pbt_allow_low_nsucc_source_fallback",
-            # Patch F (2026-05-31): self-restart governor toggles.
-            "--pbt_disable_self_restart",
-            "--no-pbt_disable_self_restart",
-            "--pbt_allow_mid_self_mutation",
-            "--no-pbt_allow_mid_self_mutation",
-            # Patch G (2026-05-31): best_nsucc recovery toggle.
-            "--pbt_enable_best_nsucc_recovery",
-            "--no-pbt_enable_best_nsucc_recovery",
-            # Patch P1 (2026-06-01): mastery curriculum + stable-source toggles.
-            "--pbt_source_require_stable_mean",
-            "--no-pbt_source_require_stable_mean",
-            "--curriculum_collapse_detect",
-            "--no-curriculum_collapse_detect",
-            "--pbt_allow_best_nsucc_archive_recovery",
-            "--no-pbt_allow_best_nsucc_archive_recovery",
-            # Patch P2-A (2026-06-01): single-shot shrink token.
-            "--pbt_single_shrink_per_window",
-            "--no-pbt_single_shrink_per_window",
-            "--pbt_early_collapse_detect",
-            "--no-pbt_early_collapse_detect",
-            "--pbt_recovery_bypass_elimination_burnin",
-            "--no-pbt_recovery_bypass_elimination_burnin",
-            # Phase A4 sequence WM toggles.
-            "--seq_wm_value_detach_belief",
-            "--no-seq_wm_value_detach_belief",
-            # Phase A4 P0/v2: all PPO-facing distillation flags are value
-            # flags (--seq_wm_policy_coupling=..., --seq_wm_distill_feature
-            # _source=..., --seq_wm_teacher_value_norm=..., --seq_wm_policy
-            # _coupling_gate=..., etc.). No boolean entries here; the
-            # generic `--key value` -> `--key=value` normalisation below
-            # handles them automatically.
-            # Phase A4 P2 (2026-06-08): adaptive-fast curriculum flags
-            # (--curriculum_speed_mode=..., --curriculum_fast_*=...) are
-            # all value flags handled by the generic normalisation below.
-            # No boolean entries needed.
-            # Phase A4 P3 (2026-06-09): source-safe curriculum inheritance
-            # value flags (--pbt_curriculum_inherit_mode=...,
-            # --pbt_source_safe_*=..., --pbt_source_unsafe_*=...,
-            # --pbt_promising_nsucc_mean=..., --pbt_promising_peak_mean=...,
-            # --pbt_promising_min_retention=...,
-            # --pbt_promising_protect_frames=...) are handled below.
-            # The two BooleanOptionalAction toggles need explicit entries:
-            "--pbt_protect_promising_workers",
-            "--no-pbt_protect_promising_workers",
-            "--pbt_promising_allow_hard_collapse_override",
-            "--no-pbt_promising_allow_hard_collapse_override",
-            # Phase A4 P4 (2026-06-09): floor-recovery + RSSM iterative
-            # stack BooleanOptionalAction toggles (Items 2, 3, 10).
-            "--pbt_floor_recovery_aware",
-            "--no-pbt_floor_recovery_aware",
-            "--pbt_enable_best_floor_recovery_archive",
-            "--no-pbt_enable_best_floor_recovery_archive",
-            "--pbt_use_wm_recovery_score",
-            "--no-pbt_use_wm_recovery_score",
-            "--seq_wm_use_task_aux_inputs",
-            "--no-seq_wm_use_task_aux_inputs",
-            "--seq_wm_floor_aware_weighting",
-            "--no-seq_wm_floor_aware_weighting",
-            "--seq_wm_use_horizon_heads",
-            "--no-seq_wm_use_horizon_heads",
-            "--seq_wm_use_recovery_head",
-            "--no-seq_wm_use_recovery_head",
-            "--seq_wm_enable_iterative_teacher",
-            "--no-seq_wm_enable_iterative_teacher",
-            "--seq_wm_enable_imagined_evaluator",
-            "--no-seq_wm_enable_imagined_evaluator",
-            "--seq_wm_imagine_use_teacher",
-            "--no-seq_wm_imagine_use_teacher",
-            "--seq_wm_replay_prioritize_floor_recovery",
-            "--no-seq_wm_replay_prioritize_floor_recovery",
-            "--experimental_rssm_floor_recovery_stack",
-            "--no-experimental_rssm_floor_recovery_stack",
-            # Phase A4 P4 wired (2026-06-10): horizon skip toggle.
-            "--seq_wm_horizon_skip_too_long",
-            "--no-seq_wm_horizon_skip_too_long",
-            # Phase A4 P5 (2026-06-10): teacher-gate fix toggles.
-            "--seq_wm_teacher_allow_first_promotion",
-            "--no-seq_wm_teacher_allow_first_promotion",
-            # FloorCritic (Real-target) boolean toggles.
-            "--wm_floorcritic_enable",
-            "--no-wm_floorcritic_enable",
-            "--wm_floorcritic_auto_scale_by_grad_ratio",
-            "--no-wm_floorcritic_auto_scale_by_grad_ratio",
-            "--wm_floorcritic_actor_detach",
-            "--no-wm_floorcritic_actor_detach",
-            "--wm_floorcritic_update_actor",
-            "--no-wm_floorcritic_update_actor",
-            "--wm_floorcritic_use_success",
-            "--no-wm_floorcritic_use_success",
-            "--wm_floorcritic_use_near_success",
-            "--no-wm_floorcritic_use_near_success",
-            "--wm_floorcritic_use_dhat_improve",
-            "--no-wm_floorcritic_use_dhat_improve",
-            "--wm_floorcritic_use_drop_risk",
-            "--no-wm_floorcritic_use_drop_risk",
-            # ERD-MPC boolean toggles.
-            "--erd_enable",
-            "--no-erd_enable",
-            "--erd_auto_scale_by_grad_ratio",
-            "--no-erd_auto_scale_by_grad_ratio",
-            "--erd_only_lifted",
-            "--no-erd_only_lifted",
-            "--erd_noise_cap_by_tol",
-            "--no-erd_noise_cap_by_tol",
-            # EIR-MPC boolean toggles.
-            "--eir_enable",
-            "--no-eir_enable",
-            "--eir_use_elite_bank",
-            "--no-eir_use_elite_bank",
-            "--eir_use_recovery_residual",
-            "--no-eir_use_recovery_residual",
-            "--eir_use_rssm_mppi",
-            "--no-eir_use_rssm_mppi",
-            "--eir_noise_cap_by_tol",
-            "--no-eir_noise_cap_by_tol",
-            "--eir_only_lifted",
-            "--no-eir_only_lifted",
-            "--eir_mu_base_detach",
-            "--no-eir_mu_base_detach",
-            "--eir_residual_apply_to_rollout",
-            "--no-eir_residual_apply_to_rollout",
-            "--eir_mppi_smooth_noise",
-            "--no-eir_mppi_smooth_noise",
-            "--eir_mppi_fail_fast",
-            "--no-eir_mppi_fail_fast",
-            "--eir_mppi_stochastic_rollouts",
-            "--no-eir_mppi_stochastic_rollouts",
-            "--seq_wm_ensemble_enable",
-            "--no-seq_wm_ensemble_enable",
-            "--seq_wm_ensemble_bootstrap",
-            "--no-seq_wm_ensemble_bootstrap",
-            "--seq_wm_ensemble_save",
-            "--no-seq_wm_ensemble_save",
-            "--eir_mppi_use_model_ensemble",
-            "--no-eir_mppi_use_model_ensemble",
-            "--eir_pbt_broadcast_elite_bank",
-            "--no-eir_pbt_broadcast_elite_bank",
-            "--eir_guidance_enable",
-            "--no-eir_guidance_enable",
-            "--eir_actor_distill_enable",
-            "--no-eir_actor_distill_enable",
-            "--eir_actor_distill_feature_detach",
-            "--no-eir_actor_distill_feature_detach",
-            "--eir_actor_distill_mu_head_only",
-            "--no-eir_actor_distill_mu_head_only",
-        }
         extra = list(args.extra)
-        i = 0
-        normalized: list[str] = []
-        while i < len(extra):
-            tok = extra[i]
-            if tok == "--extra":
-                i += 1
-                continue
-            if tok in boolean_flags:
-                normalized.append(tok)
-                i += 1
-                continue
-            if tok.startswith("--") and "=" not in tok and i + 1 < len(extra):
-                normalized.append(f"{tok}={extra[i + 1]}")
-                i += 2
-                continue
-            normalized.append(tok)
-            i += 1
-        cmd.extend(normalized)
+        cmd.extend(normalize_extra_args(extra))
         if profile_per_policy:
             prof = profile_per_policy[policy_idx]
             profile_args_path = train_root / f"profile_policy_{policy_idx:02d}.args"

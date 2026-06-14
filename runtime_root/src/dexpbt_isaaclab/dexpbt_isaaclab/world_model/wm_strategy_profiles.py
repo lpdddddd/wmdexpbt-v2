@@ -2,6 +2,10 @@
 
 Each profile expands to a full set of train.py CLI flag values.  ``legacy``
 is a no-op so existing launchers remain unchanged.
+
+``ppo_only`` is the PPO/PBT anchor under the shared strategy-zoo
+PBT/curriculum scaffold.  It disables WM/EIR/action-level intervention, but
+it is **not** an exact original DexPBT reproduction.
 """
 from __future__ import annotations
 
@@ -16,6 +20,20 @@ PROFILE_IDS: dict[str, int] = {
     "wm_pbt_source_selector": 4,
     "elite_bank_actor_distill": 5,
     "conservative_rssm_planner_distill": 6,
+}
+
+PROFILE_DESCRIPTIONS: dict[str, str] = {
+    "legacy": "No profile expansion; legacy launcher behaviour.",
+    "ppo_only": (
+        "PPO/PBT anchor under the shared strategy-zoo PBT/curriculum scaffold. "
+        "Disables WM/EIR/action-level intervention; not an exact original DexPBT "
+        "reproduction."
+    ),
+    "rssm_mppi_actor_distill": "RSSM ensemble + MPPI candidates + actor distillation.",
+    "wm_curriculum_controller": "Imagined-risk WM curriculum controller only.",
+    "wm_pbt_source_selector": "Active WM score in PBT floor-recovery ranking.",
+    "elite_bank_actor_distill": "Elite/archive guidance + actor distillation (no MPPI).",
+    "conservative_rssm_planner_distill": "Conservative RSSM-MPPI + RSSM-only actor distill.",
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -50,6 +68,8 @@ _PPO_ONLY: dict[str, Any] = {
     "pbt_use_wm_recovery_score": False,
     "eir_actor_distill_enable": False,
     "wm_curriculum_controller_enable": False,
+    # Soft Activation Gate v1: anchor never activates any WM soft gate.
+    "wm_activation_enable": False,
 }
 
 _RSSM_MPPI_ACTOR_DISTILL: dict[str, Any] = {
@@ -113,6 +133,13 @@ _RSSM_MPPI_ACTOR_DISTILL: dict[str, Any] = {
     "eir_actor_distill_uncertainty_threshold": 2.0,
     "eir_actor_distill_feature_detach": True,
     "eir_actor_distill_mu_head_only": True,
+    # Soft Activation Gate v1: ramp actor-distill in from tol 0.060 -> 0.040.
+    "wm_activation_enable": True,
+    "eir_actor_distill_gate_mode": "soft_tol",
+    "eir_actor_distill_tol_start": 0.060,
+    "eir_actor_distill_tol_full": 0.040,
+    "eir_actor_distill_ramp_frames": 300_000_000,
+    "eir_actor_distill_nsucc_ref": 20.0,
     "pbt_wm_score_mode": "off",
     "pbt_use_wm_recovery_score": False,
     "wm_curriculum_controller_enable": False,
@@ -144,6 +171,9 @@ _WM_CURRICULUM_CONTROLLER: dict[str, Any] = {
     "wm_curriculum_controller_min_nsucc_mean": 10.0,
     "wm_curriculum_controller_hard_block_shrink": True,
     "wm_curriculum_controller_use_recovery_prob": False,
+    # Soft Activation Gate v1: controller is a shrink-candidate gate (fail-open).
+    "wm_activation_enable": True,
+    "wm_curriculum_gate_mode": "shrink_candidate",
     "eir_enable": False,
     "eir_actor_distill_enable": False,
     "pbt_wm_score_mode": "off",
@@ -184,6 +214,12 @@ _WM_PBT_SOURCE_SELECTOR: dict[str, Any] = {
     "pbt_wm_max_uncertainty": 0.5,
     "pbt_floor_recovery_aware": True,
     "pbt_enable_best_floor_recovery_archive": True,
+    # Soft Activation Gate v1: WM PBT source score uses a confidence-only gate
+    # (eval_valid + time ramp + uncertainty), NOT a tol hard gate.
+    "wm_activation_enable": True,
+    "wm_pbt_source_gate_mode": "confidence_only",
+    "wm_pbt_source_start_after_frames": 300_000_000,
+    "wm_pbt_source_ramp_frames": 300_000_000,
     "eir_enable": False,
     "eir_actor_distill_enable": False,
     "wm_curriculum_controller_enable": False,
@@ -224,6 +260,19 @@ _ELITE_BANK_ACTOR_DISTILL: dict[str, Any] = {
     "eir_actor_distill_allowed_sources": "elite,archive",
     "eir_actor_distill_feature_detach": True,
     "eir_actor_distill_mu_head_only": True,
+    # Soft Activation Gate v1: elite distill softens EARLIER than RSSM-MPPI
+    # (tol 0.070 -> 0.045, shorter 200M ramp, lower nsucc_ref).
+    "wm_activation_enable": True,
+    "elite_distill_gate_mode": "soft_tol",
+    "elite_distill_tol_start": 0.070,
+    "elite_distill_tol_full": 0.045,
+    "elite_distill_ramp_frames": 200_000_000,
+    "elite_distill_nsucc_ref": 15.0,
+    "eir_actor_distill_gate_mode": "soft_tol",
+    "eir_actor_distill_tol_start": 0.070,
+    "eir_actor_distill_tol_full": 0.045,
+    "eir_actor_distill_ramp_frames": 200_000_000,
+    "eir_actor_distill_nsucc_ref": 15.0,
     "eir_pbt_broadcast_elite_bank": True,
     "eir_pbt_broadcast_threshold_nsucc_mean": 25,
     "eir_pbt_broadcast_to_bottom_k": 3,
@@ -291,6 +340,19 @@ _CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "eir_actor_distill_uncertainty_threshold": 1.5,
     "eir_actor_distill_feature_detach": True,
     "eir_actor_distill_mu_head_only": True,
+    # Soft Activation Gate v1: conservative planner softens LATER and stricter
+    # (tol 0.055 -> 0.035, 300M ramp, higher nsucc_ref, stricter uncertainty).
+    "wm_activation_enable": True,
+    "conservative_planner_gate_mode": "soft_tol",
+    "conservative_planner_tol_start": 0.055,
+    "conservative_planner_tol_full": 0.035,
+    "conservative_planner_ramp_frames": 300_000_000,
+    "conservative_planner_nsucc_ref": 25.0,
+    "eir_actor_distill_gate_mode": "soft_tol",
+    "eir_actor_distill_tol_start": 0.055,
+    "eir_actor_distill_tol_full": 0.035,
+    "eir_actor_distill_ramp_frames": 300_000_000,
+    "eir_actor_distill_nsucc_ref": 25.0,
     "pbt_wm_score_mode": "off",
     "pbt_use_wm_recovery_score": False,
     "wm_curriculum_controller_enable": False,
@@ -387,10 +449,59 @@ def collect_explicit_dests(argv: list[str] | None = None) -> set[str]:
     return explicit
 
 
-def apply_wm_strategy_profile(args_cli, *, argv: list[str] | None = None) -> list[dict[str, Any]]:
+def profile_controlled_restart_skip_flags() -> frozenset[str]:
+    """CLI flags stripped from PBT restart argv before profile re-expansion."""
+    skip: set[str] = {
+        "--wm_strategy_profile",
+        "--wm_strategy_profile_generation_resume",
+        "--wm_strategy_profile_parent_resume",
+        "--wm_strategy_profile_copied_from_source_resume",
+        "--wm_curriculum_controller_enable",
+        "--no-wm_curriculum_controller_enable",
+        "--wm_curriculum_controller_start_after_frames",
+        "--wm_curriculum_controller_min_nsucc_mean",
+        "--wm_curriculum_controller_drop_risk_threshold",
+        "--wm_curriculum_controller_uncertainty_threshold",
+        "--wm_curriculum_controller_min_success_prob",
+        "--wm_curriculum_controller_freeze_frames",
+        "--wm_curriculum_controller_hard_block_shrink",
+        "--no-wm_curriculum_controller_hard_block_shrink",
+        "--wm_curriculum_controller_use_recovery_prob",
+        "--no-wm_curriculum_controller_use_recovery_prob",
+        "--pbt_wm_profile_copy_enable",
+        "--no-pbt_wm_profile_copy_enable",
+        "--pbt_wm_profile_copy_after_frames",
+        "--pbt_wm_profile_copy_prob",
+        "--pbt_wm_profile_keep_diversity_min_profiles",
+    }
+    for dest in _all_profile_controlled_dests():
+        skip.add(f"--{dest}")
+        skip.add(f"--{dest.replace('_', '-')}")
+        skip.add(f"--no-{dest}")
+        skip.add(f"--no-{dest.replace('_', '-')}")
+    return frozenset(skip)
+
+
+def _all_profile_controlled_dests() -> set[str]:
+    dests: set[str] = set()
+    for table in PROFILE_TABLES.values():
+        dests.update(table.keys())
+    return dests
+
+
+def apply_wm_strategy_profile(
+    args_cli,
+    *,
+    argv: list[str] | None = None,
+    authoritative: bool | None = None,
+) -> list[dict[str, Any]]:
     """Expand ``args_cli.wm_strategy_profile`` into concrete flag values.
 
     Mutates ``args_cli`` in-place.  Returns an audit list of changes.
+
+    When ``authoritative`` is True (default for non-``legacy`` profiles),
+    profile-table values override explicit CLI / PBT-restart args so restart
+    machinery cannot pollute the selected profile.
     """
     profile = str(getattr(args_cli, "wm_strategy_profile", "legacy") or "legacy")
     if profile not in PROFILE_IDS:
@@ -399,6 +510,9 @@ def apply_wm_strategy_profile(args_cli, *, argv: list[str] | None = None) -> lis
     if not table:
         return []
 
+    if authoritative is None:
+        authoritative = profile != "legacy"
+
     explicit = collect_explicit_dests(argv)
     # Profile selector itself is never overridden by the table.
     explicit.discard("wm_strategy_profile")
@@ -406,13 +520,14 @@ def apply_wm_strategy_profile(args_cli, *, argv: list[str] | None = None) -> lis
     audit: list[dict[str, Any]] = []
     for dest, target in table.items():
         cur = getattr(args_cli, dest, None)
-        if dest in explicit:
+        if (not authoritative) and dest in explicit:
             audit.append(
                 {
                     "flag": dest,
                     "profile_default": target,
                     "kept_user_value": cur,
                     "overridden": False,
+                    "profile_authoritative": False,
                 }
             )
             continue
@@ -423,8 +538,10 @@ def apply_wm_strategy_profile(args_cli, *, argv: list[str] | None = None) -> lis
                     "flag": dest,
                     "old": cur,
                     "new": target,
-                    "source": "profile",
+                    "source": "profile_authoritative" if authoritative else "profile",
                     "overridden": True,
+                    "profile_authoritative": bool(authoritative),
+                    "was_explicit": dest in explicit,
                 }
             )
     lines = [
@@ -432,17 +549,31 @@ def apply_wm_strategy_profile(args_cli, *, argv: list[str] | None = None) -> lis
         + (
             f"kept {row['kept_user_value']!r} (user override)"
             if not row.get("overridden", True)
-            else f"{row.get('old')!r} -> {row['new']!r} (profile)"
+            else (
+                f"{row.get('old')!r} -> {row['new']!r} "
+                f"({row.get('source', 'profile')}"
+                + (
+                    ", was explicit"
+                    if row.get("was_explicit")
+                    else ""
+                )
+                + ")"
+            )
         )
         for row in audit
         if row.get("overridden", True) or "kept_user_value" in row
     ]
+    header = f"[wm_strategy_profile={profile}] expansion"
+    if authoritative:
+        header += " (profile_authoritative=true)"
     if lines:
         print(
-            f"[wm_strategy_profile={profile}] expansion:\n  "
+            f"{header}:\n  "
             + "\n  ".join(lines[:80])
             + (f"\n  ... ({len(lines) - 80} more)" if len(lines) > 80 else "")
         )
+    elif authoritative:
+        print(f"{header}: no changes (already matches profile table)")
     return audit
 
 
