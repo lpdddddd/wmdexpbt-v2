@@ -510,6 +510,84 @@ class TestEIRSmokePreflight(unittest.TestCase):
             text,
         )
 
+    def test_actor_distill_launcher_exists(self):
+        repo_root = _find_repo_root(Path(__file__))
+        path = repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        self.assertTrue(path.is_file(), str(path))
+
+    def test_actor_distill_launcher_contains_flags(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        ).read_text()
+        required = [
+            "--eir_actor_distill_enable",
+            "--eir_actor_distill_weight 0.001",
+            "--eir_actor_distill_loss_cap 0.05",
+            "--eir_actor_distill_start_after_frames 500000000",
+            "--eir_actor_distill_tol 0.04",
+            "--eir_actor_distill_allowed_sources rssm,elite,archive",
+            "--eir_actor_distill_feature_detach",
+            "--eir_actor_distill_mu_head_only",
+        ]
+        for needle in required:
+            self.assertIn(needle, text, f"missing actor-distill flag: {needle}")
+
+    def test_actor_distill_launcher_disables_residual_rollout_apply(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        ).read_text()
+        self.assertIn("--no-eir_residual_apply_to_rollout", text)
+        self.assertNotIn("--eir_residual_apply_to_rollout \\", text)
+        self.assertIn("eir_residual_apply_to_rollout=false", text)
+
+    def test_actor_distill_launcher_keeps_pacing_patch(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        ).read_text()
+        required = [
+            "--eir_guidance_mid_gate_confidence_threshold 0.30",
+            "--eir_guidance_mid_residual_alpha 0.15",
+            "--eir_residual_apply_alpha_mid 0.25",
+            "--eir_pbt_broadcast_threshold_nsucc_mean 25",
+            "--curriculum_fast_shrink_strong 0.925",
+            "--curriculum_fast_shrink_mid 0.95",
+            "--curriculum_fast_shrink_low 0.975",
+            "--curriculum_fast_target_tolerance_800m 0.045",
+        ]
+        for needle in required:
+            self.assertIn(needle, text, f"missing pacing-patch config: {needle}")
+
+    def test_actor_distill_launcher_not_from_main(self):
+        import re
+
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        ).read_text()
+        forbidden_patterns = [
+            r"--eir_gate_sparsity_weight\s+0\.0003\b",
+            r"--eir_guidance_mid_gate_confidence_threshold\s+0\.20\b",
+            r"--eir_residual_apply_alpha_mid\s+0\.30\b",
+            r"--eir_guidance_mid_residual_alpha\s+0\.20\b",
+        ]
+        for pattern in forbidden_patterns:
+            self.assertIsNone(
+                re.search(pattern, text),
+                f"gate-opening config present in actor-distill launcher: {pattern}",
+            )
+
+    def test_actor_distill_launcher_keeps_mppi_budget_32_4(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_actor_distill_3b.sh"
+        ).read_text()
+        self.assertIn("--eir_mppi_num_sequences 32", text)
+        self.assertIn("--eir_mppi_num_elite 4", text)
+        self.assertIn("--eir_mppi_horizon 4", text)
+
 
 if __name__ == "__main__":
     unittest.main()

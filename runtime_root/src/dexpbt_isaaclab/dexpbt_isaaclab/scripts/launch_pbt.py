@@ -751,6 +751,12 @@ def main() -> None:
             "--no-eir_pbt_broadcast_elite_bank",
             "--eir_guidance_enable",
             "--no-eir_guidance_enable",
+            "--eir_actor_distill_enable",
+            "--no-eir_actor_distill_enable",
+            "--eir_actor_distill_feature_detach",
+            "--no-eir_actor_distill_feature_detach",
+            "--eir_actor_distill_mu_head_only",
+            "--no-eir_actor_distill_mu_head_only",
         }
         extra = list(args.extra)
         i = 0

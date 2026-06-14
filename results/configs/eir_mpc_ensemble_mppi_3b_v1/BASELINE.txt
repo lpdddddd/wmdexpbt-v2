@@ -1,0 +1,84 @@
+EIR-MPC Ensemble MPPI 3B — Config v1 (best baseline to date)
+============================================================
+
+Status: CANONICAL BASELINE (v1)
+Reference run: regrasping_eir_mpc_ensemble_mppi_3b_20260613_203229
+Launched: 2026-06-13 20:32
+Stopped:  ~54% (~1620M avg) when gate-opening run 150640 started
+Launcher: results/launchers/start_regrasping_eir_mpc_ensemble_mppi_3b_v1.sh
+
+Label: "pacing-patch" — stage-aware guidance enabled, curriculum/PBT slowed,
+residual cold-start gate relaxed to 0.30. NO gate-opening patch (sparsity/alpha
+left at defaults).
+
+Why v1: Best training metrics so far. Residual guidance did NOT materially apply
+(apply_fraction ~0); gains attributed to PBT + base RL + stable curriculum +
+modest MPPI/RSSM rerank (~2%).
+
+----------------------------------------------------------------------
+RESULTS @ stop (~1620M avg, 54% of 3B)
+----------------------------------------------------------------------
+Policy   Frame    nsucc_mean  tol      r_meta   restart
+p00      1360M    32.1        0.0353   1.110    1
+p01      1800M    38.6        0.0363   1.096    2
+p02      1460M    34.3        0.0363   1.095    2
+p03      1700M    38.9        0.0362   1.097    2
+p04      1420M    33.9        0.0363   1.096    1
+p05      1980M    35.3        0.0383   0.655    1
+AVG               35.5        0.0364   1.025
+
+Main method telemetry: residual_apply_fraction ~0 (fallback 5 GATE_CLOSED or 7
+NOT_GUIDANCE_STAGE). Brief p05 peak apply 12.7% @ 1620M only. MPPI ensemble
+active 500M+; RSSM rerank bonus ~2%.
+
+----------------------------------------------------------------------
+CONFIG v1 — EIR / GUIDANCE (stage-aware)
+----------------------------------------------------------------------
+eir_guidance_enable=true
+eir_guidance_start_tol=0.04
+eir_guidance_bank_tol=0.04
+eir_guidance_apply_tol=0.04
+eir_guidance_mid_residual_alpha=0.15
+eir_guidance_mid_priority_scale=0.5
+eir_guidance_mid_gate_confidence_threshold=0.30
+eir_guidance_rssm_source_bonus=0.03
+eir_residual_distill_weight=0.08
+eir_residual_apply_alpha_mid=0.25
+eir_residual_apply_alpha_floor=0.5
+eir_residual_apply_alpha_hard_floor=0.75
+eir_gate_sparsity_weight=0.001          # default, not overridden
+eir_residual_gate_confidence_threshold=0.5   # default, not overridden
+eir_start_after_frames=200000000
+eir_residual_apply_after_frames=300000000
+eir_mppi_start_after_frames=500000000
+eir_mppi_num_sequences=32
+eir_mppi_num_elite=4
+seq_wm_ensemble_size=3
+eir_mppi_num_latent_samples=2
+
+----------------------------------------------------------------------
+CONFIG v1 — PBT PACING (vs pre-144258 defaults)
+----------------------------------------------------------------------
+eir_pbt_broadcast_threshold_nsucc_mean=25      # was 38
+pbt_min_frames_between_restarts=100000000      # was 50M
+pbt_promising_protect_frames=250000000         # was 150M
+pbt_floor_recovery_protect_frames=300000000    # was 200M
+
+----------------------------------------------------------------------
+CONFIG v1 — CURRICULUM PACING (slowed)
+----------------------------------------------------------------------
+curriculum_fast_shrink_strong=0.925             # was 0.90
+curriculum_fast_shrink_mid=0.95                # was 0.925
+curriculum_fast_shrink_low=0.975              # was 0.95
+curriculum_fast_consolidation_frames=100000000 # was 50M
+post_shrink_consolidation_env_frames=150000000 # was 100M
+curriculum_fast_target_tolerance_800m=0.045    # was 0.04
+
+----------------------------------------------------------------------
+NOT v1 (gate-opening patch — worse nsucc in run 150640)
+----------------------------------------------------------------------
+eir_gate_sparsity_weight=0.0003
+eir_guidance_mid_gate_confidence_threshold=0.20
+eir_residual_gate_confidence_threshold=0.35
+eir_guidance_mid_residual_alpha=0.20
+eir_residual_apply_alpha_mid=0.30

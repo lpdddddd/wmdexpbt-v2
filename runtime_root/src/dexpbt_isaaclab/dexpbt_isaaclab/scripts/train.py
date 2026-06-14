@@ -1495,6 +1495,19 @@ parser.add_argument("--eir_residual_apply_tol_threshold", type=float, default=0.
 parser.add_argument("--eir_residual_near_success_mult", type=float, default=2.0)
 parser.add_argument("--eir_residual_gate_confidence_threshold", type=float, default=0.5)
 parser.add_argument("--eir_residual_apply_max_aux_age_frames", type=int, default=100000000)
+# WM-MPC actor distillation (v1): auxiliary Huber loss on actor mu head.
+parser.add_argument("--eir_actor_distill_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_actor_distill_weight", type=float, default=0.001)
+parser.add_argument("--eir_actor_distill_start_after_frames", type=int, default=500000000)
+parser.add_argument("--eir_actor_distill_tol", type=float, default=0.04)
+parser.add_argument("--eir_actor_distill_min_margin", type=float, default=0.02)
+parser.add_argument("--eir_actor_distill_margin_norm", type=float, default=0.05)
+parser.add_argument("--eir_actor_distill_max_delta", type=float, default=0.35)
+parser.add_argument("--eir_actor_distill_allowed_sources", type=str, default="rssm,elite,archive")
+parser.add_argument("--eir_actor_distill_uncertainty_threshold", type=float, default=2.0)
+parser.add_argument("--eir_actor_distill_loss_cap", type=float, default=0.05)
+parser.add_argument("--eir_actor_distill_feature_detach", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--eir_actor_distill_mu_head_only", action=argparse.BooleanOptionalAction, default=True)
 # RSSM reranking / full H-step MPPI
 parser.add_argument("--eir_mppi_mode", type=str, default="full", choices=["off", "light", "full"])
 parser.add_argument("--eir_mppi_start_after_frames", type=int, default=800000000)
@@ -1713,6 +1726,8 @@ from dexpbt_isaaclab.world_model.eir_mpc import (
     EIRBridge,
     EIRConfig,
     compute_eir_loss,
+    parse_actor_distill_allowed_sources,
+    validate_actor_distill_v1_flags,
 )
 from dexpbt_isaaclab.world_model.eir_broadcast import (
     EliteBroadcastConfig,
@@ -3000,6 +3015,28 @@ def _patch_actor_train_for_seq_wm(
                         _res_diag = getattr(rb, "last_apply_diagnostics", None) or {}
                         for k, v in _res_diag.items():
                             eir_scalars[k] = float(v)
+                    eir_scalars.update({
+                        "actor_distill_active": xb.last_actor_distill_active,
+                        "actor_distill_active_fraction": xb.last_actor_distill_active_fraction,
+                        "actor_distill_loss": xb.last_actor_distill_loss,
+                        "actor_distill_weighted_loss": xb.last_actor_distill_weighted_loss,
+                        "actor_distill_total": xb.last_actor_distill_total,
+                        "actor_distill_loss_cap": xb.last_actor_distill_loss_cap,
+                        "actor_distill_loss_cap_hit": xb.last_actor_distill_loss_cap_hit,
+                        "actor_distill_confidence_mean": xb.last_actor_distill_confidence_mean,
+                        "actor_distill_margin_mean": xb.last_actor_distill_margin_mean,
+                        "actor_distill_delta_linf_mean": xb.last_actor_distill_delta_linf_mean,
+                        "actor_distill_delta_l2_mean": xb.last_actor_distill_delta_l2_mean,
+                        "actor_distill_source_frac_rssm": xb.last_actor_distill_source_frac_rssm,
+                        "actor_distill_source_frac_elite": xb.last_actor_distill_source_frac_elite,
+                        "actor_distill_source_frac_archive": xb.last_actor_distill_source_frac_archive,
+                        "actor_distill_reject_low_margin": xb.last_actor_distill_reject_low_margin,
+                        "actor_distill_reject_bad_source": xb.last_actor_distill_reject_bad_source,
+                        "actor_distill_reject_large_delta": xb.last_actor_distill_reject_large_delta,
+                        "actor_distill_reject_high_uncertainty": xb.last_actor_distill_reject_high_uncertainty,
+                        "actor_distill_reject_tol": xb.last_actor_distill_reject_tol,
+                        "actor_distill_reject_uncertainty_missing": xb.last_actor_distill_reject_uncertainty_missing,
+                    })
                     for k, v in eir_scalars.items():
                         try:
                             tb_writer.add_scalar(f"eir/{k}", float(v), frames)
@@ -4931,6 +4968,13 @@ def main():
         ) or (4, 8)
         _eir_feature_dim = int(getattr(erd_cfg, "feature_dim", 256))
         eir_enabled = bool(args_cli.eir_enable)
+        validate_actor_distill_v1_flags(
+            feature_detach=bool(args_cli.eir_actor_distill_feature_detach),
+            mu_head_only=bool(args_cli.eir_actor_distill_mu_head_only),
+        )
+        _actor_distill_allowed = parse_actor_distill_allowed_sources(
+            str(args_cli.eir_actor_distill_allowed_sources)
+        )
         # EIR borrows an ERD scorer config (same scorer architecture / targets).
         eir_scorer_cfg = ERDConfig(
             enabled=eir_enabled,
@@ -4986,6 +5030,20 @@ def main():
             guidance_rssm_bonus_uncertainty_penalty=float(
                 args_cli.eir_guidance_rssm_bonus_uncertainty_penalty
             ),
+            actor_distill_enable=bool(args_cli.eir_actor_distill_enable),
+            actor_distill_weight=float(args_cli.eir_actor_distill_weight),
+            actor_distill_start_after_frames=int(args_cli.eir_actor_distill_start_after_frames),
+            actor_distill_tol=float(args_cli.eir_actor_distill_tol),
+            actor_distill_min_margin=float(args_cli.eir_actor_distill_min_margin),
+            actor_distill_margin_norm=float(args_cli.eir_actor_distill_margin_norm),
+            actor_distill_max_delta=float(args_cli.eir_actor_distill_max_delta),
+            actor_distill_uncertainty_threshold=float(
+                args_cli.eir_actor_distill_uncertainty_threshold
+            ),
+            actor_distill_loss_cap=float(args_cli.eir_actor_distill_loss_cap),
+            actor_distill_feature_detach=bool(args_cli.eir_actor_distill_feature_detach),
+            actor_distill_mu_head_only=bool(args_cli.eir_actor_distill_mu_head_only),
+            allowed_source_ids=_actor_distill_allowed,
         )
         eir_bank_cfg = EliteRecoveryBankConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),

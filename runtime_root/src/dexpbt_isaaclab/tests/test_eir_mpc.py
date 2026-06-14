@@ -17,9 +17,14 @@ from dexpbt_isaaclab.world_model.eir_mpc import (
     EIRConfig,
     generate_eir_candidates,
     rerank_candidates,
+    gather_best_source,
+    build_actor_distill_mask,
+    parse_actor_distill_allowed_sources,
+    validate_actor_distill_v1_flags,
     SRC_ACTOR,
     SRC_GAUSSIAN,
     SRC_ELITE_LOCAL,
+    SRC_ELITE_ARCHIVE,
     SRC_RSSM,
 )
 
@@ -631,6 +636,224 @@ class TestRSSMSourceBonus(unittest.TestCase):
             rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
         )
         self.assertAlmostEqual(base["actor_score_mean"], boosted["actor_score_mean"], places=5)
+
+
+class TestActorDistillHelpers(unittest.TestCase):
+    def test_parse_allowed_sources(self):
+        ids = parse_actor_distill_allowed_sources("rssm,elite,archive")
+        self.assertEqual(ids, (SRC_RSSM, SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE))
+
+    def test_parse_rejects_actor_and_gaussian(self):
+        with self.assertRaises(ValueError):
+            parse_actor_distill_allowed_sources("actor,rssm")
+        with self.assertRaises(ValueError):
+            parse_actor_distill_allowed_sources("gaussian")
+
+    def test_validate_v1_flags_raises(self):
+        with self.assertRaises(ValueError):
+            validate_actor_distill_v1_flags(feature_detach=False, mu_head_only=True)
+        with self.assertRaises(ValueError):
+            validate_actor_distill_v1_flags(feature_detach=True, mu_head_only=False)
+
+    def test_gather_best_source(self):
+        source_id = torch.tensor([[SRC_ACTOR, SRC_RSSM], [SRC_GAUSSIAN, SRC_ELITE_LOCAL]])
+        best_idx = torch.tensor([1, 1])
+        bs = gather_best_source(source_id, best_idx)
+        self.assertEqual(int(bs[0].item()), SRC_RSSM)
+        self.assertEqual(int(bs[1].item()), SRC_ELITE_LOCAL)
+
+    def test_rssm_unc_missing_skips_gate(self):
+        eligible = torch.ones(2, dtype=torch.bool)
+        best_source = torch.tensor([SRC_RSSM, SRC_ELITE_LOCAL])
+        margin = torch.tensor([0.5, 0.5])
+        teacher = torch.zeros(2, 4)
+        mu_r = torch.zeros(2, 4)
+        best_idx = torch.zeros(2, dtype=torch.long)
+        mask, rej = build_actor_distill_mask(
+            eligible=eligible,
+            best_source=best_source,
+            margin=margin,
+            teacher=teacher,
+            mu_r=mu_r,
+            best_idx=best_idx,
+            allowed_source_ids=(SRC_RSSM, SRC_ELITE_LOCAL),
+            min_margin=0.0,
+            max_delta=10.0,
+            tol_mean=0.01,
+            tol_threshold=0.04,
+            start_after_frames=0,
+            frames=100,
+            rssm_unc_bk=None,
+            uncertainty_threshold=2.0,
+        )
+        self.assertTrue(bool(mask.all()))
+        self.assertEqual(rej["reject_high_uncertainty"], 0)
+        self.assertEqual(rej["reject_uncertainty_missing"], 1)
+
+    def test_rejects_bad_source_actor(self):
+        eligible = torch.ones(1, dtype=torch.bool)
+        mask, rej = build_actor_distill_mask(
+            eligible=eligible,
+            best_source=torch.tensor([SRC_ACTOR]),
+            margin=torch.tensor([0.5]),
+            teacher=torch.zeros(1, 4),
+            mu_r=torch.zeros(1, 4),
+            best_idx=torch.zeros(1, dtype=torch.long),
+            allowed_source_ids=(SRC_RSSM, SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE),
+            min_margin=0.0,
+            max_delta=10.0,
+            tol_mean=0.01,
+            tol_threshold=0.04,
+            start_after_frames=0,
+            frames=100,
+            rssm_unc_bk=None,
+            uncertainty_threshold=2.0,
+        )
+        self.assertFalse(bool(mask.any()))
+        self.assertEqual(rej["reject_bad_source"], 1)
+
+
+class TestActorDistillLoss(unittest.TestCase):
+    def _fill_bridge_bank(self, bridge, *, target=None):
+        n = 32
+        act_dim = int(bridge.eir_cfg.action_dim)
+        feat_dim = int(bridge.eir_cfg.feature_dim)
+        target = target if target is not None else torch.full((act_dim,), 0.5)
+        actions = target.expand(n, act_dim) + 0.01 * torch.randn(n, act_dim)
+        actions = actions.clamp(-1.0, 1.0)
+        d_hat = torch.full((n,), 0.015)
+        tol = torch.full((n,), 0.01)
+        lifted = torch.ones(n)
+        targets = {
+            "success_h2": torch.ones(n),
+            "improve_h2": torch.zeros(n),
+            "drop_h2": torch.zeros(n),
+        }
+        if bridge.capture.tensor is not None and int(bridge.capture.tensor.shape[0]) >= n:
+            feats = bridge.capture.tensor[:n].detach().clone()
+        else:
+            feats = torch.randn(n, feat_dim)
+        cache = _make_cache(actions, d_hat, tol, lifted, targets)
+        bridge.bank.update_from_cache(
+            cache, feats, source_stats={"source_nsucc_mean": 10.0}
+        )
+
+    def _setup_distill(self, **cfg_kw):
+        bridge, model, scorer, res_bridge = TestComputeEIRLoss()._setup()
+        bridge.scorer = _ProximityScorer(torch.full((4,), 0.5), horizons=(2,))
+        self._fill_bridge_bank(bridge)
+        bridge.eir_cfg.actor_distill_enable = True
+        bridge.eir_cfg.actor_distill_start_after_frames = 0
+        bridge.eir_cfg.actor_distill_tol = 1.0
+        bridge.eir_cfg.actor_distill_min_margin = -1.0
+        bridge.eir_cfg.actor_distill_max_delta = 10.0
+        bridge.eir_cfg.min_score_margin = -1.0
+        bridge.eir_cfg.min_elite_margin = -1.0
+        bridge.eir_cfg.allowed_source_ids = (
+            SRC_RSSM,
+            SRC_ELITE_LOCAL,
+            SRC_ELITE_ARCHIVE,
+        )
+        for key, val in cfg_kw.items():
+            setattr(bridge.eir_cfg, key, val)
+        return bridge, model, scorer, res_bridge
+
+    def test_actor_distill_disabled_legacy_no_actor_loss(self):
+        bridge, model, scorer, res_bridge = self._setup_distill(actor_distill_enable=False)
+        out = compute_eir_loss(bridge, frames=0)
+        out["eir_total"].backward()
+        mu_grad = sum(
+            float(p.grad.abs().sum()) for p in model.a2c_network.mu.parameters() if p.grad is not None
+        )
+        mlp_grad = sum(
+            float(p.grad.abs().sum()) for p in model.a2c_network.actor_mlp.parameters() if p.grad is not None
+        )
+        self.assertEqual(mu_grad, 0.0)
+        self.assertEqual(mlp_grad, 0.0)
+
+    def test_actor_distill_adds_loss_when_high_conf_teacher(self):
+        bridge, *_ = self._setup_distill()
+        out = compute_eir_loss(bridge, frames=0)
+        self.assertIn("eir_total", out)
+        self.assertEqual(bridge.last_actor_distill_active, 1.0)
+        self.assertGreater(bridge.last_actor_distill_loss, 0.0)
+
+    def test_actor_distill_no_mu_forward_when_mask_empty(self):
+        bridge, model, *_ = self._setup_distill(allowed_source_ids=(SRC_RSSM,))
+        out = compute_eir_loss(bridge, frames=0)
+        self.assertEqual(bridge.last_actor_distill_active, 0.0)
+        if "eir_total" in out:
+            out["eir_total"].backward()
+        mu_grad = sum(
+            float(p.grad.abs().sum()) for p in model.a2c_network.mu.parameters() if p.grad is not None
+        )
+        self.assertEqual(mu_grad, 0.0)
+
+    def test_actor_distill_mu_receives_grad(self):
+        bridge, model, *_ = self._setup_distill()
+        out = compute_eir_loss(bridge, frames=0)
+        out["eir_total"].backward()
+        mu_grad = sum(
+            float(p.grad.abs().sum()) for p in model.a2c_network.mu.parameters() if p.grad is not None
+        )
+        mlp_grad = sum(
+            float(p.grad.abs().sum()) for p in model.a2c_network.actor_mlp.parameters() if p.grad is not None
+        )
+        self.assertGreater(mu_grad, 0.0)
+        self.assertEqual(mlp_grad, 0.0)
+
+    def test_actor_distill_loss_cap_clamps_weighted_loss(self):
+        bridge, *_ = self._setup_distill(
+            actor_distill_weight=100.0,
+            actor_distill_loss_cap=0.01,
+        )
+        compute_eir_loss(bridge, frames=0)
+        self.assertAlmostEqual(bridge.last_actor_distill_total, 0.01, places=5)
+        self.assertEqual(bridge.last_actor_distill_loss_cap_hit, 1.0)
+
+    def test_actor_distill_rejects_low_margin(self):
+        eligible = torch.ones(1, dtype=torch.bool)
+        mask, rej = build_actor_distill_mask(
+            eligible=eligible,
+            best_source=torch.tensor([SRC_RSSM]),
+            margin=torch.tensor([0.01]),
+            teacher=torch.zeros(1, 4),
+            mu_r=torch.zeros(1, 4),
+            best_idx=torch.zeros(1, dtype=torch.long),
+            allowed_source_ids=(SRC_RSSM,),
+            min_margin=0.05,
+            max_delta=10.0,
+            tol_mean=0.01,
+            tol_threshold=0.04,
+            start_after_frames=0,
+            frames=100,
+            rssm_unc_bk=None,
+            uncertainty_threshold=2.0,
+        )
+        self.assertFalse(bool(mask.any()))
+        self.assertEqual(rej["reject_low_margin"], 1)
+
+    def test_actor_distill_rejects_large_delta(self):
+        eligible = torch.ones(1, dtype=torch.bool)
+        mask, rej = build_actor_distill_mask(
+            eligible=eligible,
+            best_source=torch.tensor([SRC_ELITE_LOCAL]),
+            margin=torch.tensor([0.5]),
+            teacher=torch.full((1, 4), 0.9),
+            mu_r=torch.zeros(1, 4),
+            best_idx=torch.zeros(1, dtype=torch.long),
+            allowed_source_ids=(SRC_ELITE_LOCAL,),
+            min_margin=0.0,
+            max_delta=0.1,
+            tol_mean=0.01,
+            tol_threshold=0.04,
+            start_after_frames=0,
+            frames=100,
+            rssm_unc_bk=None,
+            uncertainty_threshold=2.0,
+        )
+        self.assertFalse(bool(mask.any()))
+        self.assertEqual(rej["reject_large_delta"], 1)
 
 
 if __name__ == "__main__":

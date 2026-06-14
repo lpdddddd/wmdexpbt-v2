@@ -115,6 +115,24 @@ class EIRConfig:
     min_target_valid_fraction: float = 0.2
     min_risky_fraction: float = 0.02
 
+    # WM-MPC actor distillation (v1): auxiliary Huber loss on actor mu head only.
+    actor_distill_enable: bool = False
+    actor_distill_weight: float = 0.001
+    actor_distill_start_after_frames: int = 500_000_000
+    actor_distill_tol: float = 0.04
+    actor_distill_min_margin: float = 0.02
+    actor_distill_margin_norm: float = 0.05
+    actor_distill_max_delta: float = 0.35
+    actor_distill_uncertainty_threshold: float = 2.0
+    actor_distill_loss_cap: float = 0.05
+    actor_distill_feature_detach: bool = True
+    actor_distill_mu_head_only: bool = True
+    allowed_source_ids: tuple[int, ...] = (
+        SRC_RSSM,
+        SRC_ELITE_LOCAL,
+        SRC_ELITE_ARCHIVE,
+    )
+
     def __post_init__(self) -> None:
         self.horizons = tuple(int(h) for h in self.horizons if int(h) > 0) or (4, 8)
 
@@ -124,6 +142,116 @@ class EIRConfig:
         if not self.enabled:
             return 0.0
         return 1.0 if float(tol) <= float(self.start_tol) else 0.0
+
+
+_ACTOR_DISTILL_SOURCE_ALIASES = {
+    "rssm": SRC_RSSM,
+    "elite": SRC_ELITE_LOCAL,
+    "archive": SRC_ELITE_ARCHIVE,
+}
+
+
+def validate_actor_distill_v1_flags(*, feature_detach: bool, mu_head_only: bool) -> None:
+    """v1 requires detached features and mu-head-only gradients."""
+    if not feature_detach:
+        raise ValueError(
+            "--no-eir_actor_distill_feature_detach is not supported in WM-MPC actor distillation v1"
+        )
+    if not mu_head_only:
+        raise ValueError(
+            "--no-eir_actor_distill_mu_head_only is not supported in WM-MPC actor distillation v1"
+        )
+
+
+def parse_actor_distill_allowed_sources(s: str) -> tuple[int, ...]:
+    """Parse ``rssm,elite,archive`` into source id tuple (actor/gaussian excluded)."""
+    parts = [p.strip().lower() for p in str(s or "").split(",") if p.strip()]
+    if not parts:
+        raise ValueError("eir_actor_distill_allowed_sources must not be empty")
+    out: list[int] = []
+    for part in parts:
+        if part in ("actor", "gaussian"):
+            raise ValueError(
+                f"eir_actor_distill_allowed_sources excludes {part!r} (teacher must not be on-policy noise)"
+            )
+        if part not in _ACTOR_DISTILL_SOURCE_ALIASES:
+            raise ValueError(f"unknown eir_actor_distill_allowed_sources entry {part!r}")
+        sid = int(_ACTOR_DISTILL_SOURCE_ALIASES[part])
+        if sid not in out:
+            out.append(sid)
+    return tuple(out)
+
+
+def gather_best_source(source_id: torch.Tensor, best_idx: torch.Tensor) -> torch.Tensor:
+    """Per-row best candidate source from ``source_id[B,K]`` and ``best_idx[B]``."""
+    return source_id.gather(1, best_idx.unsqueeze(1).long()).squeeze(1)
+
+
+def build_actor_distill_mask(
+    *,
+    eligible: torch.Tensor,
+    best_source: torch.Tensor,
+    margin: torch.Tensor,
+    teacher: torch.Tensor,
+    mu_r: torch.Tensor,
+    best_idx: torch.Tensor,
+    allowed_source_ids: tuple[int, ...],
+    min_margin: float,
+    max_delta: float,
+    tol_mean: float,
+    tol_threshold: float,
+    start_after_frames: int,
+    frames: int,
+    rssm_unc_bk: Optional[torch.Tensor],
+    uncertainty_threshold: float,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    """Build per-row actor-distill mask and per-reason reject counts."""
+    base = eligible.bool()
+    rejects: dict[str, int] = {
+        "reject_bad_source": 0,
+        "reject_low_margin": 0,
+        "reject_large_delta": 0,
+        "reject_high_uncertainty": 0,
+        "reject_tol": 0,
+        "reject_uncertainty_missing": 0,
+    }
+    if not bool(base.any()):
+        return torch.zeros_like(base), rejects
+
+    allowed_t = torch.tensor(
+        list(allowed_source_ids), device=best_source.device, dtype=best_source.dtype
+    )
+    source_ok = torch.isin(best_source, allowed_t)
+    rejects["reject_bad_source"] = int((base & ~source_ok).sum().item())
+    m = base & source_ok
+
+    low_margin = margin < float(min_margin)
+    rejects["reject_low_margin"] = int((m & low_margin).sum().item())
+    m = m & ~low_margin
+
+    delta_linf = (teacher - mu_r).abs().max(dim=-1).values
+    large_delta = delta_linf > float(max_delta)
+    rejects["reject_large_delta"] = int((m & large_delta).sum().item())
+    m = m & ~large_delta
+
+    tol_ok = (
+        float(tol_mean) <= float(tol_threshold)
+        and int(frames) >= int(start_after_frames)
+    )
+    if not tol_ok:
+        rejects["reject_tol"] = int(m.sum().item())
+        return torch.zeros_like(base), rejects
+
+    rssm_rows = best_source == int(SRC_RSSM)
+    if rssm_unc_bk is not None:
+        best_unc = rssm_unc_bk.gather(1, best_idx.unsqueeze(1).long()).squeeze(1)
+        high_unc = (best_unc > float(uncertainty_threshold)) & rssm_rows
+        rejects["reject_high_uncertainty"] = int((m & high_unc).sum().item())
+        m = m & ~high_unc
+    else:
+        rejects["reject_uncertainty_missing"] = int((m & rssm_rows).sum().item())
+
+    return m, rejects
 
 
 def _noise_std_for_tol(std: float, cap_by_tol: bool, floor_tol: float, hard_tol: float, tol_mean: float) -> float:
@@ -486,6 +614,28 @@ class EIRBridge:
     bank_feature_source_actor_count: int = 0
     bank_feature_source_fallback_count: int = 0
 
+    # actor-distill telemetry (WM-MPC v1)
+    last_actor_distill_active: float = 0.0
+    last_actor_distill_active_fraction: float = 0.0
+    last_actor_distill_loss: float = 0.0
+    last_actor_distill_weighted_loss: float = 0.0
+    last_actor_distill_total: float = 0.0
+    last_actor_distill_loss_cap: float = 0.0
+    last_actor_distill_loss_cap_hit: float = 0.0
+    last_actor_distill_confidence_mean: float = 0.0
+    last_actor_distill_margin_mean: float = 0.0
+    last_actor_distill_delta_linf_mean: float = 0.0
+    last_actor_distill_delta_l2_mean: float = 0.0
+    last_actor_distill_source_frac_rssm: float = 0.0
+    last_actor_distill_source_frac_elite: float = 0.0
+    last_actor_distill_source_frac_archive: float = 0.0
+    last_actor_distill_reject_low_margin: float = 0.0
+    last_actor_distill_reject_bad_source: float = 0.0
+    last_actor_distill_reject_large_delta: float = 0.0
+    last_actor_distill_reject_high_uncertainty: float = 0.0
+    last_actor_distill_reject_tol: float = 0.0
+    last_actor_distill_reject_uncertainty_missing: float = 0.0
+
     def record_bank_feature_source(self, source_flag: int) -> None:
         """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
         self.bank_feature_update_count += 1
@@ -520,6 +670,26 @@ class EIRBridge:
         self.last_best_source_frac = {}
         self.last_elite_similarity_mean = 0.0
         self.last_elite_action_delta_norm = 0.0
+        self.last_actor_distill_active = 0.0
+        self.last_actor_distill_active_fraction = 0.0
+        self.last_actor_distill_loss = 0.0
+        self.last_actor_distill_weighted_loss = 0.0
+        self.last_actor_distill_total = 0.0
+        self.last_actor_distill_loss_cap = 0.0
+        self.last_actor_distill_loss_cap_hit = 0.0
+        self.last_actor_distill_confidence_mean = 0.0
+        self.last_actor_distill_margin_mean = 0.0
+        self.last_actor_distill_delta_linf_mean = 0.0
+        self.last_actor_distill_delta_l2_mean = 0.0
+        self.last_actor_distill_source_frac_rssm = 0.0
+        self.last_actor_distill_source_frac_elite = 0.0
+        self.last_actor_distill_source_frac_archive = 0.0
+        self.last_actor_distill_reject_low_margin = 0.0
+        self.last_actor_distill_reject_bad_source = 0.0
+        self.last_actor_distill_reject_large_delta = 0.0
+        self.last_actor_distill_reject_high_uncertainty = 0.0
+        self.last_actor_distill_reject_tol = 0.0
+        self.last_actor_distill_reject_uncertainty_missing = 0.0
 
 
 def _stage_for_tol(eir_cfg: EIRConfig, tol_mean: float) -> Optional[int]:
@@ -740,6 +910,7 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         block = EIR_LOW_VALID_FRACTION
 
     residual_total = feat.new_zeros(())
+    actor_distill_total = feat.new_zeros(())
     if block == EIR_OK:
         d_hat = cache.d_hat_flat[start:end].to(device=device, dtype=dtype)
         tol = cache.success_tol_flat[start:end].to(device=device, dtype=dtype)
@@ -799,12 +970,14 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             bridge.last_rssm_candidate_added = 1.0
 
         # Build [B,K]-aligned planner-signal tensors for the SRC_RSSM rerank
-        # bonus. Only the RSSM columns are filled (from the per-risky-row plan
-        # signals stashed above, same row order); all other positions are 0.
+        # bonus and/or actor-distill RSSM uncertainty gate.
         rssm_margin_bk: Optional[torch.Tensor] = None
         rssm_unc_bk: Optional[torch.Tensor] = None
         _bonus = float(eir_cfg.guidance_rssm_source_bonus) if bool(eir_cfg.guidance_enable) else 0.0
-        if _bonus != 0.0:
+        _need_rssm_plan_signals = (
+            _bonus != 0.0 or bool(getattr(eir_cfg, "actor_distill_enable", False))
+        )
+        if _need_rssm_plan_signals:
             sid = cand_out["source_id"]
             mask_bk = sid == SRC_RSSM
             if bool(mask_bk.any()):
@@ -813,7 +986,7 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 zeros_bk = torch.zeros_like(sid, dtype=dt2)
                 mr = bridge.last_rssm_plan_margin_rows
                 ur = bridge.last_rssm_plan_uncertainty_rows
-                if isinstance(mr, torch.Tensor) and int(mr.shape[0]) == Bk:
+                if _bonus != 0.0 and isinstance(mr, torch.Tensor) and int(mr.shape[0]) == Bk:
                     rssm_margin_bk = torch.where(
                         mask_bk, mr.to(device=dev2, dtype=dt2)[:, None].expand_as(sid), zeros_bk
                     )
@@ -847,6 +1020,96 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             rer.get("rssm_candidate_uncertainty_mean", 0.0)
         )
 
+        actor_distill_total = feat.new_zeros(())
+        if bool(getattr(eir_cfg, "actor_distill_enable", False)):
+            bridge.last_actor_distill_loss_cap = float(eir_cfg.actor_distill_loss_cap)
+            best_idx = rer["best_idx"]
+            best_source = gather_best_source(cand_out["source_id"], best_idx)
+            teacher_all = rer["best_action"].detach()
+            distill_mask, reject_counts = build_actor_distill_mask(
+                eligible=rer["eligible"],
+                best_source=best_source,
+                margin=rer["margin"],
+                teacher=teacher_all,
+                mu_r=mu_r,
+                best_idx=best_idx,
+                allowed_source_ids=tuple(eir_cfg.allowed_source_ids),
+                min_margin=float(eir_cfg.actor_distill_min_margin),
+                max_delta=float(eir_cfg.actor_distill_max_delta),
+                tol_mean=float(cache.tol_mean),
+                tol_threshold=float(eir_cfg.actor_distill_tol),
+                start_after_frames=int(eir_cfg.actor_distill_start_after_frames),
+                frames=int(frames),
+                rssm_unc_bk=rssm_unc_bk,
+                uncertainty_threshold=float(eir_cfg.actor_distill_uncertainty_threshold),
+            )
+            bridge.last_actor_distill_reject_bad_source = float(
+                reject_counts["reject_bad_source"]
+            )
+            bridge.last_actor_distill_reject_low_margin = float(
+                reject_counts["reject_low_margin"]
+            )
+            bridge.last_actor_distill_reject_large_delta = float(
+                reject_counts["reject_large_delta"]
+            )
+            bridge.last_actor_distill_reject_high_uncertainty = float(
+                reject_counts["reject_high_uncertainty"]
+            )
+            bridge.last_actor_distill_reject_tol = float(reject_counts["reject_tol"])
+            bridge.last_actor_distill_reject_uncertainty_missing = float(
+                reject_counts["reject_uncertainty_missing"]
+            )
+            bridge.last_actor_distill_active_fraction = float(distill_mask.float().mean().item())
+            if bool(distill_mask.any()):
+                bridge.last_actor_distill_active = 1.0
+                bs = best_source[distill_mask]
+                n_act = int(distill_mask.sum().item())
+                bridge.last_actor_distill_source_frac_rssm = float((bs == SRC_RSSM).sum().item()) / float(n_act)
+                bridge.last_actor_distill_source_frac_elite = float((bs == SRC_ELITE_LOCAL).sum().item()) / float(n_act)
+                bridge.last_actor_distill_source_frac_archive = float(
+                    (bs == SRC_ELITE_ARCHIVE).sum().item()
+                ) / float(n_act)
+                delta_all = (teacher_all - mu_r).detach()
+                bridge.last_actor_distill_delta_linf_mean = float(
+                    delta_all[distill_mask].abs().max(dim=-1).values.mean().item()
+                )
+                bridge.last_actor_distill_delta_l2_mean = float(
+                    delta_all[distill_mask].norm(dim=-1).mean().item()
+                )
+                confidence = (
+                    rer["margin"] / float(eir_cfg.actor_distill_margin_norm)
+                ).clamp(0.0, 1.0)
+                bridge.last_actor_distill_margin_mean = float(
+                    rer["margin"][distill_mask].mean().item()
+                )
+                bridge.last_actor_distill_confidence_mean = float(
+                    confidence[distill_mask].mean().item()
+                )
+                mu_distill = a2c.mu(feat_r)
+                mu_act = getattr(a2c, "mu_act", None)
+                if mu_act is not None:
+                    mu_distill = mu_act(mu_distill)
+                per_row = F.smooth_l1_loss(
+                    mu_distill, teacher_all, reduction="none"
+                ).mean(dim=-1)
+                actor_distill_loss = (confidence[distill_mask] * per_row[distill_mask]).mean()
+                actor_distill_weighted = float(eir_cfg.actor_distill_weight) * actor_distill_loss
+                bridge.last_actor_distill_loss = float(actor_distill_loss.detach().item())
+                bridge.last_actor_distill_weighted_loss = float(
+                    actor_distill_weighted.detach().item()
+                )
+                cap = float(eir_cfg.actor_distill_loss_cap)
+                if cap > 0.0:
+                    actor_distill_total = actor_distill_weighted.clamp(max=cap)
+                    bridge.last_actor_distill_loss_cap_hit = float(
+                        actor_distill_weighted.detach().item() > cap
+                    )
+                else:
+                    actor_distill_total = actor_distill_weighted
+                bridge.last_actor_distill_total = float(actor_distill_total.detach().item())
+            else:
+                bridge.last_actor_distill_active_fraction = 0.0
+
         eligible = rer["eligible"]
         if not bool(eligible.any()):
             block = EIR_NOT_ELIGIBLE
@@ -874,9 +1137,13 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         _bank_diag = getattr(bridge.bank, "update_diagnostics", None)
         if callable(_bank_diag):
             bridge.last_bank_update_diagnostics = _bank_diag()
-    total = float(eir_cfg.scorer_loss_weight) * scorer_total + residual_total
+    total = float(eir_cfg.scorer_loss_weight) * scorer_total + residual_total + actor_distill_total
     bridge.last_total_loss = float(total.detach().item())
-    bridge.last_active = 1.0 if (bridge.last_scorer_active > 0 or bridge.last_residual_active > 0) else 0.0
+    bridge.last_active = 1.0 if (
+        bridge.last_scorer_active > 0
+        or bridge.last_residual_active > 0
+        or bridge.last_actor_distill_active > 0
+    ) else 0.0
     if total.detach().abs().item() <= 0.0:
         return {}
     return {"eir_total": total}
