@@ -76,7 +76,31 @@ eir_mppi_use_model_ensemble=true
 eir_mppi_ensemble_risk_beta=0.5
 eir_mppi_ensemble_drop_weight=0.5
 eir_mppi_ensemble_uncertainty_weight=0.2
-note=Ensemble risk-sensitive RSSM-MPPI main run; MPPI scoring only; production warmups (constraint 19.5).
+eir_guidance_enable=true
+eir_guidance_start_tol=0.04
+eir_guidance_bank_tol=0.04
+eir_guidance_apply_tol=0.04
+eir_guidance_mid_residual_alpha=0.20
+eir_guidance_mid_priority_scale=0.5
+eir_guidance_mid_gate_confidence_threshold=0.20
+eir_guidance_rssm_source_bonus=0.03
+eir_residual_distill_weight=0.08
+eir_gate_sparsity_weight=0.0003
+eir_residual_gate_confidence_threshold=0.35
+eir_residual_apply_alpha_mid=0.30
+eir_pbt_broadcast_threshold_nsucc_mean=25
+pbt_min_frames_between_restarts=100000000
+pbt_promising_protect_frames=250000000
+pbt_floor_recovery_protect_frames=300000000
+curriculum_fast_shrink_strong=0.925
+curriculum_fast_shrink_mid=0.95
+curriculum_fast_shrink_low=0.975
+curriculum_fast_consolidation_frames=100000000
+post_shrink_consolidation_env_frames=150000000
+curriculum_fast_target_tolerance_800m=0.045
+eir_mppi_num_sequences=32
+eir_mppi_num_elite=4
+note=Stage-aware guidance pacing patch + gate-opening patch: gate sparsity drag loosened (0.0003), mid/floor gate confidence thresholds lowered (0.20/0.35), mid residual+apply alpha raised (0.20/0.30); curriculum slowed, PBT restarts slowed, bank broadcast threshold lowered.
 EOF
 
 source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"
@@ -110,7 +134,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --seq_wm_policy_coupling none \
   --pbt_ranking_metric success_aware_r_meta \
   --pbt_min_frames_as_source_after_restart 50000000 \
-  --pbt_min_frames_between_restarts 50000000 \
+  --pbt_min_frames_between_restarts 100000000 \
   --pbt_disable_self_restart \
   --pbt_source_selection_mode tiered \
   --no-pbt_enable_best_nsucc_recovery \
@@ -125,19 +149,19 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --mastery_consecutive_windows 2 \
   --curriculum_shrink_factor 0.95 \
   --pbt_single_shrink_per_window \
-  --post_shrink_consolidation_env_frames 100000000 \
+  --post_shrink_consolidation_env_frames 150000000 \
   --curriculum_speed_mode adaptive_fast \
   --curriculum_fast_strong_mean 30.0 \
   --curriculum_fast_mid_mean 20.0 \
   --curriculum_fast_low_mean 10.0 \
   --curriculum_fast_retention_threshold 0.8 \
   --curriculum_fast_retention_window 4 \
-  --curriculum_fast_shrink_strong 0.90 \
-  --curriculum_fast_shrink_mid 0.925 \
-  --curriculum_fast_shrink_low 0.95 \
-  --curriculum_fast_consolidation_frames 50000000 \
+  --curriculum_fast_shrink_strong 0.925 \
+  --curriculum_fast_shrink_mid 0.95 \
+  --curriculum_fast_shrink_low 0.975 \
+  --curriculum_fast_consolidation_frames 100000000 \
   --curriculum_fast_recovery_consolidation_frames 100000000 \
-  --curriculum_fast_target_tolerance_800m 0.04 \
+  --curriculum_fast_target_tolerance_800m 0.045 \
   --pbt_curriculum_inherit_mode source_safe \
   --pbt_source_safe_recovery_consolidation_frames 100000000 \
   --pbt_source_safe_min_mean 20.0 \
@@ -146,13 +170,13 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_promising_nsucc_mean 20.0 \
   --pbt_promising_peak_mean 25.0 \
   --pbt_promising_min_retention 0.5 \
-  --pbt_promising_protect_frames 150000000 \
+  --pbt_promising_protect_frames 250000000 \
   --pbt_promising_allow_hard_collapse_override \
   --pbt_floor_recovery_aware \
   --pbt_floor_tol_threshold 0.02 \
   --pbt_hard_floor_tol_threshold 0.012 \
   --pbt_floor_recovery_window 4 \
-  --pbt_floor_recovery_protect_frames 200000000 \
+  --pbt_floor_recovery_protect_frames 300000000 \
   --pbt_floor_recovery_min_nsucc_protect 15.0 \
   --pbt_enable_best_floor_recovery_archive \
   --pbt_wm_score_mode active \
@@ -215,23 +239,36 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --eir_start_tol 0.04 \
   --eir_floor_tol 0.02 \
   --eir_hard_floor_tol 0.012 \
+  --eir_guidance_enable \
+  --eir_guidance_start_tol 0.04 \
+  --eir_guidance_bank_tol 0.04 \
+  --eir_guidance_apply_tol 0.04 \
+  --eir_guidance_mid_near_success_mult 1.5 \
+  --eir_guidance_mid_priority_scale 0.5 \
+  --eir_guidance_mid_residual_alpha 0.20 \
+  --eir_guidance_mid_gate_confidence_threshold 0.20 \
+  --eir_gate_sparsity_weight 0.0003 \
+  --eir_residual_gate_confidence_threshold 0.35 \
+  --eir_guidance_rssm_source_bonus 0.03 \
+  --eir_guidance_rssm_bonus_margin_scale 1.0 \
+  --eir_guidance_rssm_bonus_uncertainty_penalty 0.01 \
   --eir_scorer_loss_weight 0.01 \
   --eir_start_after_frames "$EIR_START_AFTER_FRAMES" \
   --eir_scorer_warmup_iters "$EIR_SCORER_WARMUP_ITERS" \
   --eir_residual_scale 0.5 \
-  --eir_residual_distill_weight 0.05 \
+  --eir_residual_distill_weight 0.08 \
   --eir_residual_floor_distill_weight 0.08 \
   --eir_residual_hard_floor_distill_weight 0.12 \
   --eir_mu_base_detach \
   --eir_residual_apply_to_rollout \
   --eir_residual_apply_after_frames "$EIR_RESIDUAL_APPLY_AFTER" \
-  --eir_residual_apply_alpha_mid 0.25 \
+  --eir_residual_apply_alpha_mid 0.30 \
   --eir_residual_apply_alpha_floor 0.5 \
   --eir_residual_apply_alpha_hard_floor 0.75 \
   --eir_mppi_mode full \
   --eir_mppi_horizon 4 \
-  --eir_mppi_num_sequences 64 \
-  --eir_mppi_num_elite 8 \
+  --eir_mppi_num_sequences 32 \
+  --eir_mppi_num_elite 4 \
   --eir_mppi_cem_iters 1 \
   --eir_mppi_action_noise_std 0.10 \
   --eir_mppi_max_action_delta 0.5 \
@@ -253,8 +290,10 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --eir_mppi_ensemble_uncertainty_weight 0.2 \
   --eir_mppi_ensemble_min_valid_models 2 \
   --eir_mppi_ensemble_max_models_per_plan 3 \
+  --eir_mppi_ensemble_uncertainty_threshold 2.0 \
+  --eir_mppi_ensemble_uncertainty_allow_margin 0.10 \
   --eir_pbt_broadcast_elite_bank \
-  --eir_pbt_broadcast_threshold_nsucc_mean 38 \
+  --eir_pbt_broadcast_threshold_nsucc_mean 25 \
   --eir_pbt_broadcast_to_bottom_k 3 \
   --pbt_early_collapse_detect \
   --early_collapse_drop_ratio 0.3 \

@@ -20,6 +20,7 @@ from dexpbt_isaaclab.world_model.eir_mpc import (
     SRC_ACTOR,
     SRC_GAUSSIAN,
     SRC_ELITE_LOCAL,
+    SRC_RSSM,
 )
 
 
@@ -500,6 +501,136 @@ def _filled_bank(*, target):
     cache = _make_cache(actions, d_hat, tol, lifted, targets)
     bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
     return bank
+
+
+class TestStageForTol(unittest.TestCase):
+    def test_stage_for_tol_returns_mid_when_guidance_enabled(self):
+        cfg = EIRConfig(
+            enabled=True, guidance_enable=True, guidance_start_tol=0.04,
+            floor_tol=0.02, hard_floor_tol=0.012,
+        )
+        self.assertEqual(eir_mpc._stage_for_tol(cfg, 0.03), 3)   # mid
+        self.assertEqual(eir_mpc._stage_for_tol(cfg, 0.015), 1)  # floor
+        self.assertEqual(eir_mpc._stage_for_tol(cfg, 0.01), 2)   # hard
+        self.assertIsNone(eir_mpc._stage_for_tol(cfg, 0.05))     # above guidance band
+
+    def test_stage_for_tol_no_mid_when_guidance_disabled(self):
+        cfg = EIRConfig(enabled=True, guidance_enable=False, floor_tol=0.02, hard_floor_tol=0.012)
+        self.assertIsNone(eir_mpc._stage_for_tol(cfg, 0.03))
+        self.assertEqual(eir_mpc._stage_for_tol(cfg, 0.015), 1)
+
+
+class TestRSSMSourceBonus(unittest.TestCase):
+    """[B,K]-aligned, source-gated RSSM rerank bonus."""
+
+    def _setup(self, B=2):
+        target = torch.tensor([0.5, 0.5, 0.5])
+        # actor col closer to target than rssm col -> actor wins without bonus
+        actor = torch.full((B, 1, 3), 0.45)
+        rssm = torch.full((B, 1, 3), 0.40)
+        cand = torch.cat([actor, rssm], dim=1)  # [B,2,3]
+        source_id = torch.tensor([[SRC_ACTOR, SRC_RSSM]] * B, dtype=torch.long)
+        priority = torch.zeros(B, 2)
+        similarity = torch.zeros(B, 2)
+        feat_r = torch.randn(B, 4)
+        cfg = EIRConfig(
+            enabled=True, action_dim=3, feature_dim=4,
+            min_score_margin=0.0, min_elite_margin=0.0,
+        )
+        erd_cfg = ERDConfig(enabled=True, horizons=(4, 8), action_dim=3, feature_dim=4)
+        scorer = _ProximityScorer(target)
+        mask = source_id == SRC_RSSM
+        return dict(
+            cand=cand, source_id=source_id, priority=priority, similarity=similarity,
+            feat_r=feat_r, cfg=cfg, erd_cfg=erd_cfg, scorer=scorer, mask=mask, B=B,
+        )
+
+    def _margin_bk(self, mask, value):
+        return torch.where(mask, torch.full(mask.shape, float(value)), torch.zeros(mask.shape))
+
+    def test_rssm_source_bonus_applied_only_to_rssm_candidate(self):
+        s = self._setup()
+        base = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.0,
+        )
+        # without bonus, actor (closer) wins
+        self.assertEqual(base["best_source_frac"]["actor"], 1.0)
+        boosted = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=1.0,
+            rssm_bonus_margin_scale=1.0, rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
+        )
+        # large bonus flips the winner to the RSSM candidate
+        self.assertEqual(boosted["best_source_frac"]["rssm"], 1.0)
+        # actor column score is untouched by the bonus
+        self.assertAlmostEqual(base["actor_score_mean"], boosted["actor_score_mean"], places=5)
+
+    def test_rssm_source_bonus_uses_planner_margin(self):
+        s = self._setup()
+        zero_margin = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.5,
+            rssm_plan_margin_bk=self._margin_bk(s["mask"], 0.0),
+        )
+        hi_margin = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.5,
+            rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
+        )
+        self.assertAlmostEqual(zero_margin["rssm_source_bonus_mean"], 0.0, places=6)
+        self.assertGreater(hi_margin["rssm_source_bonus_mean"], 0.0)
+
+    def test_rssm_source_bonus_penalizes_uncertainty(self):
+        s = self._setup()
+        no_unc = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.5,
+            rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
+            rssm_bonus_uncertainty_penalty=0.1,
+            rssm_plan_uncertainty_bk=self._margin_bk(s["mask"], 0.0),
+        )
+        hi_unc = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.5,
+            rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
+            rssm_bonus_uncertainty_penalty=0.1,
+            rssm_plan_uncertainty_bk=self._margin_bk(s["mask"], 2.0),
+        )
+        self.assertGreater(no_unc["rssm_source_bonus_mean"], hi_unc["rssm_source_bonus_mean"])
+
+    def test_rssm_source_bonus_small_and_bounded(self):
+        s = self._setup()
+        bonus_val = 0.05
+        # margin clamped to [0,1], so the positive bonus never exceeds bonus_val
+        res = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=bonus_val,
+            rssm_bonus_margin_scale=1.0, rssm_plan_margin_bk=self._margin_bk(s["mask"], 5.0),
+        )
+        self.assertLessEqual(res["rssm_source_bonus_mean"], bonus_val + 1e-6)
+
+    def test_actor_candidate_score_unchanged(self):
+        s = self._setup()
+        base = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=0.0,
+        )
+        boosted = rerank_candidates(
+            cand=s["cand"], source_id=s["source_id"], priority=s["priority"],
+            similarity=s["similarity"], scorer=s["scorer"], feat_r=s["feat_r"],
+            cfg=s["cfg"], erd_cfg=s["erd_cfg"], rssm_source_bonus=1.0,
+            rssm_plan_margin_bk=self._margin_bk(s["mask"], 1.0),
+        )
+        self.assertAlmostEqual(base["actor_score_mean"], boosted["actor_score_mean"], places=5)
 
 
 if __name__ == "__main__":

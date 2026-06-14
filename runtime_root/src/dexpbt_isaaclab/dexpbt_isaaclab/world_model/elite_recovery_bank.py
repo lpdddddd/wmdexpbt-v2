@@ -28,10 +28,14 @@ import torch
 FEATURE_SOURCE_ACTOR_MLP = 0
 FEATURE_SOURCE_FALLBACK = 1
 
-# Floor-stage bucket ids: stage in {0:none, 1:floor, 2:hard} x success flag.
+# Floor-stage bucket ids: stage in {0:none, 1:floor, 2:hard, 3:mid} x success
+# flag. STAGE_MID is appended as id 3 (NOT a renumber) so the legacy floor/hard
+# bucket ids (2/3 and 4/5 via ``stage*2+is_success``) keep their exact meaning;
+# the new mid buckets are 6/7. This preserves old checkpoints' bucket semantics.
 STAGE_NONE = 0
 STAGE_FLOOR = 1
 STAGE_HARD = 2
+STAGE_MID = 3
 
 
 @dataclass
@@ -50,6 +54,16 @@ class EliteRecoveryBankConfig:
     hard_tol_threshold: float = 0.012
     near_success_mult: float = 3.0
     min_priority: float = 1.0
+
+    # Stage-aware guidance (opt-in). When ``guidance_enable`` is False the bank
+    # collects exactly as before (floor-only at ``tol_threshold``). When True it
+    # additionally collects a weaker "mid" band ``tol_threshold < tol <=
+    # guidance_bank_tol`` with a tighter near-success multiplier and a scaled
+    # priority so mid samples never outrank true floor/hard elites.
+    guidance_enable: bool = False
+    guidance_bank_tol: float = 0.04
+    guidance_mid_near_success_mult: float = 1.5
+    guidance_mid_priority_scale: float = 0.5
 
     recent_fraction: float = 0.2
     top_fraction: float = 0.6
@@ -120,8 +134,71 @@ class EliteRecoveryBank:
         self.scalars: dict[str, torch.Tensor] = {
             name: torch.zeros(cap, dtype=torch.float32) for name in _SCALAR_COLUMNS
         }
+        # Per-update insertion diagnostics (observation only; does not affect the
+        # insert rules). Populated by ``update_from_cache`` and surfaced via
+        # ``update_diagnostics()`` so we can see *why* the bank stays empty.
+        self.last_update_diagnostics: dict[str, float] = {}
+        self._reset_update_diagnostics()
+
+    # ----- diagnostics ----------------------------------------------------
+    _UPDATE_DIAG_KEYS = (
+        "update_seen_rows",
+        "update_risky_rows",
+        "update_near_success_rows",
+        "update_lifted_rows",
+        "update_priority_positive_rows",
+        "update_inserted_rows",
+        "reject_reason_tol",
+        "reject_reason_not_lifted",
+        "reject_reason_low_priority",
+        "reject_reason_no_feature",
+        "reject_reason_no_action",
+        # stage-aware (observation only)
+        "update_mid_stage_rows",
+        "update_floor_stage_rows",
+        "update_hard_stage_rows",
+        "update_inserted_mid_rows",
+        "update_inserted_floor_rows",
+        "update_inserted_hard_rows",
+        "reject_reason_not_guidance_stage",
+    )
+
+    def _reset_update_diagnostics(self) -> None:
+        self.last_update_diagnostics = {k: 0.0 for k in self._UPDATE_DIAG_KEYS}
+
+    def update_diagnostics(self) -> dict[str, float]:
+        return dict(self.last_update_diagnostics)
 
     # ----- elite selection ------------------------------------------------
+    def _row_stage_ids(self, tol: torch.Tensor) -> torch.Tensor:
+        """Per-row stage id with precedence hard > floor > mid > none.
+
+        STAGE_MID is only assigned when ``guidance_enable`` is True; otherwise
+        rows above ``tol_threshold`` stay STAGE_NONE (legacy behaviour, so the
+        floor-only collection gate is preserved bit-for-bit when guidance off).
+        """
+        cfg = self.cfg
+        stage = torch.full_like(tol, float(STAGE_NONE))
+        if bool(cfg.guidance_enable):
+            mid = tol <= float(cfg.guidance_bank_tol)
+            stage = torch.where(mid, torch.full_like(tol, float(STAGE_MID)), stage)
+        floor = tol <= float(cfg.tol_threshold)
+        stage = torch.where(floor, torch.full_like(tol, float(STAGE_FLOOR)), stage)
+        hard = tol <= float(cfg.hard_tol_threshold)
+        stage = torch.where(hard, torch.full_like(tol, float(STAGE_HARD)), stage)
+        return stage
+
+    def _near_success_mult_for_stage(self, stage: torch.Tensor) -> torch.Tensor:
+        cfg = self.cfg
+        mult = torch.full_like(stage, float(cfg.near_success_mult))
+        if bool(cfg.guidance_enable):
+            mult = torch.where(
+                stage == float(STAGE_MID),
+                torch.full_like(stage, float(cfg.guidance_mid_near_success_mult)),
+                mult,
+            )
+        return mult
+
     def _elite_mask(
         self,
         *,
@@ -133,10 +210,11 @@ class EliteRecoveryBank:
         i0: torch.Tensor,
         d0: torch.Tensor,
     ) -> torch.Tensor:
-        cfg = self.cfg
+        stage = self._row_stage_ids(tol)
+        mult = self._near_success_mult_for_stage(stage)
         cond = lifted > 0.5
-        cond = cond & (tol <= float(cfg.tol_threshold))
-        cond = cond & (d_hat <= (float(cfg.near_success_mult) * tol).clamp_min(1e-6))
+        cond = cond & (stage > float(STAGE_NONE))
+        cond = cond & (d_hat <= (mult * tol).clamp_min(1e-6))
         cond = cond & ((s0 > 0.5) | (s1 > 0.5) | (i0 > 0.5))
         cond = cond & (d0 <= 0.5)
         return cond
@@ -198,17 +276,20 @@ class EliteRecoveryBank:
         retrieval key produced by the caller). It is never assumed to come from
         the PPO minibatch capture hook.
         """
+        self._reset_update_diagnostics()
         if not self.cfg.enabled:
             return self.metrics()
         actions = getattr(cache, "actions_flat", None)
         d_hat = getattr(cache, "d_hat_flat", None)
         tol = getattr(cache, "success_tol_flat", None)
         if actions is None or d_hat is None or tol is None:
+            self.last_update_diagnostics["reject_reason_no_action"] = 1.0
             return self.metrics()
         n = int(actions.shape[0])
         if n == 0:
             return self.metrics()
         if feature_flat is None or int(feature_flat.shape[0]) != n:
+            self.last_update_diagnostics["reject_reason_no_feature"] = 1.0
             raise ValueError(
                 f"[EIR-bank] feature_flat shape {None if feature_flat is None else tuple(feature_flat.shape)} "
                 f"does not match cache rows {n}"
@@ -239,6 +320,27 @@ class EliteRecoveryBank:
         i1 = _get_target(cache, f"improve_h{h1}", n, dev, f32)
         d1 = _get_target(cache, f"drop_h{h1}", n, dev, f32)
 
+        # ---- per-row diagnostics (observation only; gate rules unchanged) ----
+        lifted_mask = lifted > 0.5
+        tol_mask = tol <= float(self.cfg.tol_threshold)
+        near_success_mask = d_hat <= (float(self.cfg.near_success_mult) * tol).clamp_min(1e-6)
+        diag = self.last_update_diagnostics
+        diag["update_seen_rows"] = float(n)
+        diag["update_lifted_rows"] = float(lifted_mask.sum().item())
+        diag["update_risky_rows"] = float(tol_mask.sum().item())
+        diag["update_near_success_rows"] = float(near_success_mask.sum().item())
+        diag["reject_reason_not_lifted"] = float((~lifted_mask).sum().item())
+        # rows that were lifted but fail the tolerance (risky) staging gate
+        diag["reject_reason_tol"] = float((lifted_mask & (~tol_mask)).sum().item())
+        # stage-aware row counts (observation only; precedence hard>floor>mid>none)
+        stage_all = self._row_stage_ids(tol)
+        diag["update_mid_stage_rows"] = float((stage_all == float(STAGE_MID)).sum().item())
+        diag["update_floor_stage_rows"] = float((stage_all == float(STAGE_FLOOR)).sum().item())
+        diag["update_hard_stage_rows"] = float((stage_all == float(STAGE_HARD)).sum().item())
+        diag["reject_reason_not_guidance_stage"] = float(
+            (lifted_mask & (stage_all == float(STAGE_NONE))).sum().item()
+        )
+
         elite = self._elite_mask(
             lifted=lifted, tol=tol, d_hat=d_hat, s0=s0, s1=s1, i0=i0, d0=d0
         )
@@ -261,26 +363,34 @@ class EliteRecoveryBank:
             source_nsucc_max=ones * src_max,
             super_elite=super_elite,
         )
+        # mid-stage samples are weaker guidance: scale their priority down so they
+        # never outrank true floor/hard elites (and may drop below min_priority).
+        if bool(self.cfg.guidance_enable):
+            stage_pi = self._row_stage_ids(tol)[idx]
+            mid_pi = stage_pi == float(STAGE_MID)
+            if bool(mid_pi.any()):
+                priority = torch.where(
+                    mid_pi,
+                    priority * float(self.cfg.guidance_mid_priority_scale),
+                    priority,
+                )
         keep = priority >= float(self.cfg.min_priority)
+        diag["update_priority_positive_rows"] = float(keep.sum().item())
+        diag["reject_reason_low_priority"] = float((~keep).sum().item())
         if not bool(keep.any()):
             return self.metrics()
         idx = idx[keep]
         priority = priority[keep]
         m = int(idx.shape[0])
 
-        # bucket id: stage * 2 + is_success
-        tol_k = tol[idx]
-        stage = torch.where(
-            tol_k <= float(self.cfg.hard_tol_threshold),
-            torch.full_like(tol_k, float(STAGE_HARD)),
-            torch.where(
-                tol_k <= float(self.cfg.tol_threshold),
-                torch.full_like(tol_k, float(STAGE_FLOOR)),
-                torch.full_like(tol_k, float(STAGE_NONE)),
-            ),
-        )
+        # bucket id: stage * 2 + is_success. ``_row_stage_ids`` returns STAGE_MID
+        # (=3 -> buckets 6/7) for the mid band, keeping floor/hard buckets intact.
+        stage = self._row_stage_ids(tol)[idx]
         is_success = ((s0[idx] > 0.5) | (s1[idx] > 0.5)).float()
         bucket_id = stage * 2.0 + is_success
+        diag["update_inserted_mid_rows"] = float((stage == float(STAGE_MID)).sum().item())
+        diag["update_inserted_floor_rows"] = float((stage == float(STAGE_FLOOR)).sum().item())
+        diag["update_inserted_hard_rows"] = float((stage == float(STAGE_HARD)).sum().item())
 
         new = {
             "feature": feature_flat[idx],
@@ -303,6 +413,7 @@ class EliteRecoveryBank:
         }
         self._insert(new)
         self.add_count += m
+        self.last_update_diagnostics["update_inserted_rows"] = float(m)
         return self.metrics()
 
     def _current_block(self) -> dict[str, torch.Tensor]:
@@ -506,7 +617,8 @@ class EliteRecoveryBank:
             out["elite_priority_mean"] = float(pr.mean().item())
             out["elite_priority_max"] = float(pr.max().item())
             bucket = self.scalars["bucket_id"][:s]
-            for b in range(6):
+            # buckets 0..7: stage(0=none,1=floor,2=hard,3=mid) * 2 + is_success
+            for b in range(8):
                 out[f"elite_bucket_{b}"] = float((bucket == float(b)).sum().item())
         return out
 

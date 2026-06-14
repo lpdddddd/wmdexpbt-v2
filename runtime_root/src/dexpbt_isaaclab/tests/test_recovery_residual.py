@@ -19,6 +19,9 @@ from dexpbt_isaaclab.world_model.recovery_residual import (
     APPLY_AUX_STALE,
     APPLY_BEFORE_WARMUP,
     APPLY_KILL_SWITCH_OFF,
+    APPLY_NOT_FLOOR_STAGE,
+    APPLY_NOT_GUIDANCE_STAGE,
+    RESID_STAGE_MID,
 )
 
 
@@ -133,6 +136,40 @@ class TestRolloutApply(unittest.TestCase):
         changed = (res["action"] != mu).any(dim=-1)
         self.assertTrue(torch.equal(changed, res["apply_mask"]))
 
+    def test_apply_diagnostics_smoke(self):
+        # Observation-only funnel diagnostics: rows 0,1 reach floor stage + apply;
+        # they must be consistent with apply_mask (does not change apply rules).
+        bridge = self._bridge()
+        B = 5
+        feat = torch.randn(B, 8)
+        mu = torch.zeros(B, 3)
+        d_hat = torch.tensor([0.01, 0.01, 0.5, 0.5, 0.5])
+        tol = torch.tensor([0.015, 0.015, 0.05, 0.05, 0.05])
+        lifted = torch.tensor([1.0, 1.0, 1.0, 0.0, 1.0])
+        bridge.set_aux_snapshot(d_hat=d_hat, tol=tol, lifted=lifted, frame=500)
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        diag = bridge.last_apply_diagnostics
+        self.assertEqual(diag["residual_apply_seen_rows"], 5.0)
+        self.assertEqual(diag["residual_apply_after_warmup_rows"], 5.0)
+        self.assertEqual(diag["residual_apply_floor_stage_rows"], 2.0)
+        self.assertEqual(diag["residual_apply_final_rows"], float(res["apply_mask"].sum().item()))
+        self.assertEqual(diag["residual_apply_reject_before_warmup"], 0.0)
+
+    def test_apply_diagnostics_before_warmup(self):
+        bridge = self._bridge(apply_after_frames=1_000_000)
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        bridge.set_aux_snapshot(
+            d_hat=torch.full((3,), 0.01), tol=torch.full((3,), 0.015),
+            lifted=torch.ones(3), frame=10,
+        )
+        compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=10)
+        diag = bridge.last_apply_diagnostics
+        self.assertEqual(diag["residual_apply_seen_rows"], 3.0)
+        self.assertEqual(diag["residual_apply_reject_before_warmup"], 3.0)
+        self.assertEqual(diag["residual_apply_after_warmup_rows"], 0.0)
+        self.assertEqual(diag["residual_apply_final_rows"], 0.0)
+
     def test_apply_self_disables_when_aux_missing(self):
         bridge = self._bridge()
         feat = torch.randn(4, 8)
@@ -203,6 +240,148 @@ class TestRolloutApply(unittest.TestCase):
         res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=10**9)
         self.assertEqual(res["fallback_reason"], APPLY_KILL_SWITCH_OFF)
         self.assertTrue(torch.allclose(res["action"], mu))
+
+
+class TestStageAwareResidualApply(unittest.TestCase):
+    """Per-row stage-aware alpha + mid-band guidance apply."""
+
+    def _bridge(self, **kw):
+        params = dict(
+            apply_to_rollout=True,
+            apply_after_frames=100,
+            gate_confidence_threshold=0.0,
+            apply_alpha_floor=0.5,
+            apply_alpha_hard_floor=0.75,
+            guidance_enable=True,
+            guidance_apply_tol=0.04,
+            guidance_mid_near_success_mult=1.5,
+            guidance_mid_alpha=0.15,
+            guidance_mid_gate_confidence_threshold=0.0,
+        )
+        params.update(kw)
+        cfg = _cfg(**params)
+        return RecoveryResidualBridge(cfg=cfg, head=RecoveryResidualHead(cfg))
+
+    def _aux(self, bridge, tol, frame=500, d_hat=0.005):
+        B = len(tol)
+        t = torch.tensor(tol, dtype=torch.float32)
+        bridge.set_aux_snapshot(
+            d_hat=torch.full((B,), float(d_hat)), tol=t, lifted=torch.ones(B), frame=frame
+        )
+
+    def test_residual_apply_head_per_row_alpha(self):
+        # head-level: a per-row alpha tensor must match per-row scalar calls.
+        cfg = _cfg(residual_scale=0.5)
+        head = RecoveryResidualHead(cfg)
+        feat = torch.randn(3, 8)
+        mu_base = torch.zeros(3, 3)
+        alpha_vec = torch.tensor([0.15, 0.5, 0.75])
+        out_vec = head.recovery_action(feat, mu_base, alpha_vec)
+        for i, a in enumerate([0.15, 0.5, 0.75]):
+            out_i = head.recovery_action(feat[i : i + 1], mu_base[i : i + 1], float(a))
+            self.assertTrue(torch.allclose(out_vec["a_rec"][i], out_i["a_rec"][0], atol=1e-6))
+
+    def test_residual_apply_mid_stage_when_guidance_enabled(self):
+        bridge = self._bridge()
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        self._aux(bridge, [0.015, 0.03, 0.05])  # floor, mid, none
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertEqual(res["fallback_reason"], APPLY_OK)
+        self.assertTrue(bool(res["apply_mask"][0]))  # floor
+        self.assertTrue(bool(res["apply_mask"][1]))  # mid
+        self.assertFalse(bool(res["apply_mask"][2]))  # none
+        diag = bridge.last_apply_diagnostics
+        self.assertEqual(diag["residual_apply_mid_final_rows"], 1.0)
+        self.assertEqual(diag["residual_apply_floor_final_rows"], 1.0)
+
+    def test_residual_apply_does_not_apply_mid_stage_when_guidance_disabled(self):
+        bridge = self._bridge(guidance_enable=False)
+        feat = torch.randn(3, 8)
+        mu = torch.zeros(3, 3)
+        self._aux(bridge, [0.015, 0.03, 0.05])
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertTrue(bool(res["apply_mask"][0]))  # floor still applies
+        self.assertFalse(bool(res["apply_mask"][1]))  # mid NOT applied
+        self.assertFalse(bool(res["apply_mask"][2]))
+
+    def test_residual_apply_mid_alpha_used(self):
+        bridge = self._bridge()
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.03, 0.03])  # both mid
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertEqual(res["fallback_reason"], APPLY_OK)
+        # mid rows must use guidance_mid_alpha (0.15)
+        expected = bridge.head.recovery_action(feat, mu.clamp(-1, 1), 0.15)["a_rec"]
+        self.assertTrue(torch.allclose(res["action"], expected, atol=1e-6))
+        self.assertEqual(bridge.last_apply_diagnostics["residual_apply_mid_alpha"], 0.15)
+        self.assertAlmostEqual(
+            bridge.last_apply_diagnostics["residual_apply_stage_id_mean"],
+            float(RESID_STAGE_MID),
+            places=5,
+        )
+
+    def test_residual_apply_floor_alpha_unchanged(self):
+        bridge = self._bridge()
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.015, 0.015])  # both floor
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        expected = bridge.head.recovery_action(feat, mu.clamp(-1, 1), 0.5)["a_rec"]
+        self.assertTrue(torch.allclose(res["action"], expected, atol=1e-6))
+
+    def test_residual_apply_hard_alpha_unchanged(self):
+        bridge = self._bridge()
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.01, 0.01], d_hat=0.005)  # both hard
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        expected = bridge.head.recovery_action(feat, mu.clamp(-1, 1), 0.75)["a_rec"]
+        self.assertTrue(torch.allclose(res["action"], expected, atol=1e-6))
+
+    def test_residual_apply_mid_gate_threshold_stricter(self):
+        # mid gate impossible to pass (>1) while floor gate passes (0.0):
+        # floor row applies, mid row blocked by its stricter gate threshold.
+        bridge = self._bridge(
+            gate_confidence_threshold=0.0, guidance_mid_gate_confidence_threshold=1.01
+        )
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.015, 0.03])  # floor, mid
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertTrue(bool(res["apply_mask"][0]))  # floor applied
+        self.assertFalse(bool(res["apply_mask"][1]))  # mid gate-blocked
+        self.assertGreaterEqual(bridge.last_apply_diagnostics["residual_apply_reject_low_gate"], 1.0)
+
+    def test_residual_apply_stage_diagnostics(self):
+        bridge = self._bridge()
+        feat = torch.randn(4, 8)
+        mu = torch.zeros(4, 3)
+        self._aux(bridge, [0.01, 0.015, 0.03, 0.05])  # hard, floor, mid, none
+        compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        diag = bridge.last_apply_diagnostics
+        self.assertEqual(diag["residual_apply_hard_stage_rows"], 1.0)
+        self.assertEqual(diag["residual_apply_floor_stage_rows"], 1.0)
+        self.assertEqual(diag["residual_apply_mid_stage_rows"], 1.0)
+        self.assertEqual(diag["residual_apply_reject_not_guidance_stage"], 1.0)
+
+    def test_residual_apply_not_guidance_stage_reason(self):
+        bridge = self._bridge()
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.05, 0.06])  # all above guidance_apply_tol
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertEqual(res["fallback_reason"], APPLY_NOT_GUIDANCE_STAGE)
+        self.assertTrue(torch.allclose(res["action"], mu))
+
+    def test_residual_apply_legacy_reason_when_guidance_off(self):
+        bridge = self._bridge(guidance_enable=False)
+        feat = torch.randn(2, 8)
+        mu = torch.zeros(2, 3)
+        self._aux(bridge, [0.05, 0.06])  # above floor
+        res = compute_rollout_residual_action(bridge, feat=feat, mu=mu, frames=500)
+        self.assertEqual(res["fallback_reason"], APPLY_NOT_FLOOR_STAGE)
 
 
 if __name__ == "__main__":

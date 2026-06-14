@@ -89,6 +89,14 @@ def _elite_rollout_cache(*, T=6, N=2, action_dim=4):
     return erd_cfg, cache
 
 
+def _find_repo_root(start: Path) -> Path:
+    cur = start.resolve()
+    for p in [cur, *cur.parents]:
+        if (p / "results" / "launchers").exists() and (p / "runtime_root").exists():
+            return p
+    raise RuntimeError(f"Could not locate repo root from {start}")
+
+
 class TestEIRSmokePreflight(unittest.TestCase):
     def test_rollout_apply_clamps_modified_mus_and_actions(self):
         mus = torch.tensor([[1.5, -1.2, 0.0]])
@@ -375,17 +383,11 @@ class TestEIRSmokePreflight(unittest.TestCase):
         self.assertEqual(planner.cfg.ensemble_min_valid_models, 2)
 
     def test_ensemble_mppi_launcher_uses_restore_compatible_wm_load_mode(self):
-        roots = [
-            Path("/root/autodl-tmp/wmdexpbt/results"),
-            Path("/root/autodl-tmp/wmdexpbt/results/launchers"),
-        ]
-        launcher = None
-        for root in roots:
-            candidate = root / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
-            if candidate.exists():
-                launcher = candidate
-                break
-        self.assertIsNotNone(launcher, "ensemble 3B launcher not found")
+        repo_root = _find_repo_root(Path(__file__))
+        launcher = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+        )
+        self.assertTrue(launcher.exists(), "ensemble 3B launcher not found")
         text = launcher.read_text()
         self.assertIn("--seq_wm_ensemble_enable", text)
         self.assertIn("--eir_mppi_use_model_ensemble", text)
@@ -395,6 +397,118 @@ class TestEIRSmokePreflight(unittest.TestCase):
             "ensemble launcher must use restore-compatible wm_load_mode",
         )
         self.assertNotIn("--wm_load_mode reset", text)
+        # ensemble-specific uncertainty gate (scale-mismatch fix): the ensemble
+        # path must use its own absolute threshold, not the single-model 0.4.
+        self.assertIn("--eir_mppi_ensemble_uncertainty_threshold 2.0", text)
+        self.assertIn("--eir_mppi_ensemble_uncertainty_allow_margin 0.10", text)
+
+    def test_ensemble_guidance_launcher_contains_stage_aware_flags(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+        ).read_text()
+        self.assertIn("--eir_guidance_enable", text)
+        self.assertIn("--eir_guidance_start_tol 0.04", text)
+        self.assertIn("--eir_guidance_bank_tol 0.04", text)
+        self.assertIn("--eir_guidance_apply_tol 0.04", text)
+        self.assertIn("--eir_guidance_mid_residual_alpha 0.20", text)
+        self.assertIn("--eir_guidance_mid_priority_scale 0.5", text)
+        self.assertIn("--eir_guidance_mid_gate_confidence_threshold 0.20", text)
+        self.assertIn("--eir_guidance_rssm_source_bonus 0.03", text)
+        # floor/hard semantics must be preserved (not repurposed)
+        self.assertIn("--eir_floor_tol 0.02", text)
+        self.assertIn("--eir_hard_floor_tol 0.012", text)
+
+    def test_ensemble_guidance_launcher_reduces_mppi_budget(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+        ).read_text()
+        self.assertIn("--eir_mppi_num_sequences 32", text)
+        self.assertIn("--eir_mppi_num_elite 4", text)
+        self.assertNotIn("--eir_mppi_num_sequences 64", text)
+        self.assertNotIn("--eir_mppi_num_elite 8", text)
+        # horizon / latent / ensemble size unchanged
+        self.assertIn("--eir_mppi_horizon 4", text)
+        self.assertIn("--eir_mppi_num_latent_samples 2", text)
+        # ensemble size is wired via the ENSEMBLE_SIZE shell var (default 3)
+        self.assertIn("--seq_wm_ensemble_size", text)
+        self.assertIn('ENSEMBLE_SIZE="${ENSEMBLE_SIZE:-3}"', text)
+
+    def test_ensemble_guidance_launcher_keeps_restore_and_uncertainty_flags(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+        ).read_text()
+        self.assertIn("--wm_load_mode auto", text)
+        self.assertIn("--seq_wm_ensemble_load_mode resume", text)
+        self.assertIn("--eir_mppi_ensemble_uncertainty_threshold 2.0", text)
+        self.assertIn("--eir_mppi_ensemble_uncertainty_allow_margin 0.10", text)
+
+    def test_ensemble_guidance_pacing_launcher_config(self):
+        repo_root = _find_repo_root(Path(__file__))
+        text = (
+            repo_root / "results" / "launchers" / "start_regrasping_eir_mpc_ensemble_mppi_3b.sh"
+        ).read_text()
+
+        required = [
+            "--eir_guidance_mid_gate_confidence_threshold 0.20",
+            "--eir_gate_sparsity_weight 0.0003",
+            "--eir_residual_gate_confidence_threshold 0.35",
+            "--eir_residual_apply_alpha_mid 0.30",
+            "--eir_guidance_mid_residual_alpha 0.20",
+            "--eir_residual_distill_weight 0.08",
+            "--eir_pbt_broadcast_threshold_nsucc_mean 25",
+            "--pbt_min_frames_between_restarts 100000000",
+            "--pbt_promising_protect_frames 250000000",
+            "--pbt_floor_recovery_protect_frames 300000000",
+            "--curriculum_fast_shrink_strong 0.925",
+            "--curriculum_fast_shrink_mid 0.95",
+            "--curriculum_fast_shrink_low 0.975",
+            "--curriculum_fast_consolidation_frames 100000000",
+            "--post_shrink_consolidation_env_frames 150000000",
+            "--curriculum_fast_target_tolerance_800m 0.045",
+            "--eir_mppi_num_sequences 32",
+            "--eir_mppi_num_elite 4",
+        ]
+        for needle in required:
+            self.assertIn(needle, text, f"missing pacing config: {needle}")
+
+        import re
+
+        forbidden_patterns = [
+            r"--eir_guidance_mid_gate_confidence_threshold\s+0\.6\b",
+            r"--eir_guidance_mid_gate_confidence_threshold\s+0\.30\b",
+            r"--eir_guidance_mid_residual_alpha\s+0\.15\b",
+            r"--eir_residual_apply_alpha_mid\s+0\.25\b",
+            r"--eir_pbt_broadcast_threshold_nsucc_mean\s+38\b",
+            r"--pbt_min_frames_between_restarts\s+50000000\b",
+            r"--curriculum_fast_shrink_strong\s+0\.90\b",
+            r"--curriculum_fast_target_tolerance_800m\s+0\.04\b",
+            r"--eir_mppi_num_sequences\s+64\b",
+            r"--eir_mppi_num_elite\s+8\b",
+        ]
+        for pattern in forbidden_patterns:
+            self.assertIsNone(
+                re.search(pattern, text),
+                f"legacy pacing config still present: {pattern}",
+            )
+
+        # RUN_CONFIG must record the pacing patch note and key values.
+        self.assertIn("eir_guidance_mid_gate_confidence_threshold=0.20", text)
+        self.assertIn("eir_gate_sparsity_weight=0.0003", text)
+        self.assertIn("eir_residual_gate_confidence_threshold=0.35", text)
+        self.assertIn("eir_residual_apply_alpha_mid=0.30", text)
+        self.assertIn("eir_pbt_broadcast_threshold_nsucc_mean=25", text)
+        self.assertIn("pbt_min_frames_between_restarts=100000000", text)
+        self.assertIn("curriculum_fast_target_tolerance_800m=0.045", text)
+        self.assertIn(
+            "note=Stage-aware guidance pacing patch + gate-opening patch: gate sparsity "
+            "drag loosened (0.0003), mid/floor gate confidence thresholds lowered "
+            "(0.20/0.35), mid residual+apply alpha raised (0.20/0.30); curriculum slowed, "
+            "PBT restarts slowed, bank broadcast threshold lowered.",
+            text,
+        )
 
 
 if __name__ == "__main__":

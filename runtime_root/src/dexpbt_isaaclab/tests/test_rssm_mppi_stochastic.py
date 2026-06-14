@@ -9,6 +9,7 @@ import torch
 
 from dexpbt_isaaclab.world_model.rssm_lite import RSSMState
 from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
+    MPPI_HIGH_UNCERTAINTY,
     RSSMMPPIConfig,
     RSSMMPPIPlanner,
     _tail_mean,
@@ -288,6 +289,179 @@ class TestStochasticMPPI(unittest.TestCase):
         self.assertEqual(seq.shape[1], 1 + (cand.shape[1] - 1) + 4)
         self.assertTrue(torch.allclose(seq[:, 0, 0, :], actor))
         self.assertTrue(torch.allclose(seq[:, 1, 0, :], cand[:, 1, :]))
+
+
+class TestEnsembleUncertaintyGate(unittest.TestCase):
+    """Ensemble-specific uncertainty gate: the ensemble worst-case / CVaR
+    uncertainty is on a different scale than the single-model prior_std, so the
+    ensemble path uses ``ensemble_uncertainty_threshold`` instead of the absolute
+    single-model ``uncertainty_threshold`` (with a high-margin override)."""
+
+    def _inputs(self, b=4):
+        belief = torch.randn(b, D)
+        actor = torch.zeros(b, A)
+        cand = torch.randn(b, 2, A).clamp(-1, 1)
+        return belief, actor, cand
+
+    # ---- Test A: single-model path keeps the original absolute threshold ----
+    def test_single_model_path_uses_original_threshold(self):
+        planner = RSSMMPPIPlanner(
+            _cfg(
+                use_model_ensemble=False,
+                uncertainty_threshold=0.4,
+                ensemble_uncertainty_threshold=2.0,
+            )
+        )
+        belief, actor, cand = self._inputs()
+        out = planner.plan(
+            belief_flat=belief,
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=_ToyRSSM(torch.tensor([0.8, 0.0, 0.0]), base_unc=0.05),
+            frames=1000,
+        )
+        self.assertTrue(out["active"])
+        self.assertEqual(planner.last_effective_uncertainty_threshold, 0.4)
+
+    def test_single_model_high_uncertainty_still_blocks_at_original(self):
+        # base_unc 0.5 > 0.4 -> single-model behaviour unchanged: blocked.
+        planner = RSSMMPPIPlanner(
+            _cfg(
+                use_model_ensemble=False,
+                uncertainty_threshold=0.4,
+                ensemble_uncertainty_threshold=2.0,
+                ensemble_uncertainty_allow_margin=0.10,
+            )
+        )
+        belief, actor, cand = self._inputs()
+        out = planner.plan(
+            belief_flat=belief,
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=_ToyRSSM(torch.zeros(A), base_unc=0.5),
+            frames=1000,
+        )
+        self.assertFalse(out["active"])
+        self.assertEqual(out["fallback_reason"], MPPI_HIGH_UNCERTAINTY)
+        self.assertEqual(planner.last_effective_uncertainty_threshold, 0.4)
+        self.assertEqual(planner.last_uncertainty_gate_blocked, 1.0)
+
+    # ---- Test B: ensemble path uses the ensemble threshold ------------------
+    def test_ensemble_path_uses_ensemble_threshold(self):
+        members = [
+            _ToyRSSM(torch.zeros(A), base_unc=0.05),
+            _ToyRSSM(torch.zeros(A), base_unc=0.05),
+        ]
+        planner = RSSMMPPIPlanner(
+            _cfg(
+                use_model_ensemble=True,
+                ensemble_size=2,
+                ensemble_min_valid_models=2,
+                uncertainty_threshold=0.4,
+                ensemble_uncertainty_threshold=2.0,
+                ensemble_uncertainty_allow_margin=0.10,
+            )
+        )
+        belief, actor, cand = self._inputs(b=3)
+        out = planner.plan(
+            belief_flat=belief,
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=members[0],
+            frames=1000,
+            belief_flat_ensemble=[belief, belief],
+            rssm_models=members,
+        )
+        self.assertEqual(planner.last_use_model_ensemble, 1.0)
+        self.assertEqual(planner.last_effective_uncertainty_threshold, 2.0)
+
+    # ---- Test C: ensemble high-margin sequence not rejected -----------------
+    def test_ensemble_high_margin_not_rejected_by_single_model_threshold(self):
+        cfg = _cfg(
+            use_model_ensemble=True,
+            uncertainty_threshold=0.4,
+            ensemble_uncertainty_threshold=2.0,
+            ensemble_uncertainty_allow_margin=0.10,
+        )
+        gate = RSSMMPPIPlanner._evaluate_uncertainty_gate(
+            use_ensemble=True, mean_unc=1.4, mean_margin=0.37, cfg=cfg
+        )
+        self.assertFalse(gate["blocked"])
+        self.assertTrue(gate["allow_by_margin"])
+        self.assertEqual(gate["effective_threshold"], 2.0)
+        # the single-model absolute 0.4 would have blocked unc=1.4; ensemble does not.
+        single = RSSMMPPIPlanner._evaluate_uncertainty_gate(
+            use_ensemble=False, mean_unc=1.4, mean_margin=0.37, cfg=cfg
+        )
+        self.assertTrue(single["blocked"])
+
+    # ---- Test D: ensemble too-high uncertainty rejected ---------------------
+    def test_ensemble_too_high_uncertainty_rejected_helper(self):
+        cfg = _cfg(
+            use_model_ensemble=True,
+            ensemble_uncertainty_threshold=2.0,
+            ensemble_uncertainty_allow_margin=0.10,
+        )
+        gate = RSSMMPPIPlanner._evaluate_uncertainty_gate(
+            use_ensemble=True, mean_unc=2.5, mean_margin=0.5, cfg=cfg
+        )
+        self.assertTrue(gate["blocked"])
+        self.assertFalse(gate["allow_by_margin"])
+
+    def test_ensemble_too_high_uncertainty_plan_blocks(self):
+        # base_unc 3.0 -> ensemble worst-case uncertainty 3.0 > threshold 2.0.
+        members = [
+            _ToyRSSM(torch.zeros(A), base_unc=3.0),
+            _ToyRSSM(torch.zeros(A), base_unc=3.0),
+        ]
+        planner = RSSMMPPIPlanner(
+            _cfg(
+                use_model_ensemble=True,
+                ensemble_size=2,
+                ensemble_min_valid_models=2,
+                uncertainty_threshold=0.4,
+                ensemble_uncertainty_threshold=2.0,
+            )
+        )
+        belief, actor, cand = self._inputs(b=3)
+        out = planner.plan(
+            belief_flat=belief,
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=members[0],
+            frames=1000,
+            belief_flat_ensemble=[belief, belief],
+            rssm_models=members,
+        )
+        self.assertFalse(out["active"])
+        self.assertEqual(out["fallback_reason"], MPPI_HIGH_UNCERTAINTY)
+        self.assertEqual(planner.last_effective_uncertainty_threshold, 2.0)
+        self.assertEqual(planner.last_uncertainty_gate_blocked, 1.0)
+
+
+class TestPlannerBonusContract(unittest.TestCase):
+    """The rerank RSSM bonus reads per-row planner signals; the active plan()
+    output must expose them as [B] tensors (read-only contract; no behaviour
+    change to the planner itself)."""
+
+    def test_planner_exposes_risk_adjusted_margin_for_bonus(self):
+        planner = RSSMMPPIPlanner(_cfg(stochastic_rollouts=True, num_latent_samples=4))
+        b = 4
+        belief = torch.randn(b, D)
+        actor = torch.zeros(b, A)
+        cand = torch.randn(b, 2, A).clamp(-1, 1)
+        out = planner.plan(
+            belief_flat=belief,
+            actor_action=actor,
+            candidate_actions=cand,
+            rssm_model=_ToyRSSM(torch.tensor([0.8, 0.0, 0.0])),
+            frames=1000,
+        )
+        self.assertTrue(out["active"])
+        for key in ("risk_adjusted_score_margin", "score_margin", "uncertainty"):
+            self.assertIn(key, out)
+            self.assertIsInstance(out[key], torch.Tensor)
+            self.assertEqual(int(out[key].reshape(-1).shape[0]), b)
 
 
 if __name__ == "__main__":

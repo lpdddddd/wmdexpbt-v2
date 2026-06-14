@@ -99,6 +99,16 @@ class EIRConfig:
     near_success_mult: float = 2.0
     only_lifted: bool = True
 
+    # Stage-aware guidance (opt-in). Adds a "mid" band above floor for elite
+    # retrieval staging, plus a small, bounded, source-gated rerank bonus for the
+    # SRC_RSSM candidate (scaled by the planner's risk-adjusted margin and
+    # penalized by ensemble uncertainty). All default to a no-op when disabled.
+    guidance_enable: bool = False
+    guidance_start_tol: float = 0.04
+    guidance_rssm_source_bonus: float = 0.0
+    guidance_rssm_bonus_margin_scale: float = 1.0
+    guidance_rssm_bonus_uncertainty_penalty: float = 0.0
+
     scorer_loss_weight: float = 0.01
     start_after_frames: int = 200_000_000
     scorer_warmup_iters: int = 2000
@@ -227,6 +237,11 @@ def rerank_candidates(
     cfg: EIRConfig,
     erd_cfg: ERDConfig,
     recovery_probs: Optional[torch.Tensor] = None,
+    rssm_source_bonus: float = 0.0,
+    rssm_bonus_margin_scale: float = 1.0,
+    rssm_bonus_uncertainty_penalty: float = 0.0,
+    rssm_plan_margin_bk: Optional[torch.Tensor] = None,
+    rssm_plan_uncertainty_bk: Optional[torch.Tensor] = None,
 ) -> dict[str, Any]:
     """Score candidates and select the best recovery action per row.
 
@@ -273,6 +288,36 @@ def rerank_candidates(
             - cfg.action_delta_weight * (action_delta ** 2)
             - cfg.clip_penalty_weight * clip_pen
         )
+
+        # ---- small, bounded, source-gated RSSM bonus (opt-in) ----------------
+        # Only positions where source_id == SRC_RSSM receive a nudge; everything
+        # else gets exactly 0 added. The bonus is built from [B,K] tensors that
+        # are aligned to ``source_id`` (constructed by the caller), so there is
+        # no full-batch / risky-row ordering ambiguity. Bonus stays small vs the
+        # main scorer weights, so the scorer still decides.
+        rssm_mask = (source_id == SRC_RSSM)
+        rssm_bonus = torch.zeros(B, K, device=dev, dtype=score.dtype)
+        rssm_bonus_applied_fraction = 0.0
+        if float(rssm_source_bonus) != 0.0 and bool(rssm_mask.any()):
+            margin_bk = (
+                rssm_plan_margin_bk.to(device=dev, dtype=score.dtype)
+                if isinstance(rssm_plan_margin_bk, torch.Tensor)
+                else torch.zeros(B, K, device=dev, dtype=score.dtype)
+            )
+            unc_bk = (
+                rssm_plan_uncertainty_bk.to(device=dev, dtype=score.dtype)
+                if isinstance(rssm_plan_uncertainty_bk, torch.Tensor)
+                else torch.zeros(B, K, device=dev, dtype=score.dtype)
+            )
+            margin_term = (margin_bk * float(rssm_bonus_margin_scale)).clamp(0.0, 1.0)
+            unc_term = unc_bk.clamp(0.0, 2.0)
+            bonus = (
+                float(rssm_source_bonus) * margin_term
+                - float(rssm_bonus_uncertainty_penalty) * unc_term
+            )
+            rssm_bonus = torch.where(rssm_mask, bonus, torch.zeros_like(bonus))
+            total = total + rssm_bonus
+            rssm_bonus_applied_fraction = float((rssm_bonus != 0.0).float().mean().item())
 
         best_idx = total.argmax(dim=1)
         rows = torch.arange(B, device=dev)
@@ -328,6 +373,20 @@ def rerank_candidates(
             "margin_mean": float(margin.mean().item()),
             "best_score_mean": float(best_score.mean().item()),
             "actor_score_mean": float(actor_score.mean().item()),
+            "rssm_source_bonus_mean": (
+                float(rssm_bonus[rssm_mask].mean().item()) if bool(rssm_mask.any()) else 0.0
+            ),
+            "rssm_source_bonus_applied_fraction": float(rssm_bonus_applied_fraction),
+            "rssm_candidate_margin_mean": (
+                float(rssm_plan_margin_bk[rssm_mask].mean().item())
+                if isinstance(rssm_plan_margin_bk, torch.Tensor) and bool(rssm_mask.any())
+                else 0.0
+            ),
+            "rssm_candidate_uncertainty_mean": (
+                float(rssm_plan_uncertainty_bk[rssm_mask].mean().item())
+                if isinstance(rssm_plan_uncertainty_bk, torch.Tensor) and bool(rssm_mask.any())
+                else 0.0
+            ),
         }
     return out
 
@@ -389,6 +448,17 @@ class EIRBridge:
     last_mppi_risk_adjusted_margin: float = 0.0
     last_mppi_stochastic_rollouts: float = 0.0
     last_mppi_num_latent_samples: float = 0.0
+    # per-risky-row planner signals for the SRC_RSSM rerank bonus. Set by
+    # ``_maybe_rssm_candidate_action`` in the SAME risky-row order used to build
+    # the candidate pool, so the [B,K] alignment in ``compute_eir_loss`` is exact
+    # (no ordering guess). None when no RSSM candidate was produced.
+    last_rssm_plan_margin_rows: Any = None
+    last_rssm_plan_uncertainty_rows: Any = None
+    # rerank RSSM-bonus telemetry (mirrored to eir/* TB tags)
+    last_rssm_source_bonus_mean: float = 0.0
+    last_rssm_source_bonus_applied_fraction: float = 0.0
+    last_rssm_candidate_margin_mean: float = 0.0
+    last_rssm_candidate_uncertainty_mean: float = 0.0
 
     scorer_warmup_iters_done: int = 0
 
@@ -410,6 +480,7 @@ class EIRBridge:
     last_elite_action_delta_norm: float = 0.0
     last_elite_bank_size: float = 0.0
     last_bank_metrics: dict = field(default_factory=dict)
+    last_bank_update_diagnostics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
     bank_feature_update_count: int = 0
     bank_feature_source_actor_count: int = 0
@@ -452,10 +523,16 @@ class EIRBridge:
 
 
 def _stage_for_tol(eir_cfg: EIRConfig, tol_mean: float) -> Optional[int]:
+    # Stage ids match EliteRecoveryBank STAGE_* and the bucket//2 convention used
+    # by ``retrieve_candidates``: floor=1, hard=2, mid=3 (mid appended, not a
+    # renumber). Mid is only returned when guidance is enabled; otherwise the
+    # above-floor band stays None (legacy: no stage filter -> whole pool).
     if tol_mean <= float(eir_cfg.hard_floor_tol):
         return 2
     if tol_mean <= float(eir_cfg.floor_tol):
         return 1
+    if bool(getattr(eir_cfg, "guidance_enable", False)) and tol_mean <= float(eir_cfg.guidance_start_tol):
+        return 3
     return None
 
 
@@ -480,6 +557,19 @@ def _maybe_rssm_candidate_action(
     dev = cand_out["cand"].device
     dtype = cand_out["cand"].dtype
     mu_clamped = mu_r.detach().clamp(-1.0, 1.0)
+    # reset per-row plan signals; set only when an active RSSM action is returned
+    bridge.last_rssm_plan_margin_rows = None
+    bridge.last_rssm_plan_uncertainty_rows = None
+
+    def _stash_plan_rows(out: dict) -> None:
+        m = out.get("risk_adjusted_score_margin")
+        if not isinstance(m, torch.Tensor):
+            m = out.get("score_margin")
+        u = out.get("uncertainty")
+        if isinstance(m, torch.Tensor):
+            bridge.last_rssm_plan_margin_rows = m.detach().reshape(-1)
+        if isinstance(u, torch.Tensor):
+            bridge.last_rssm_plan_uncertainty_rows = u.detach().reshape(-1)
 
     # ---- belief for risky rows from the per-rollout cache ----
     belief_r: Optional[torch.Tensor] = None
@@ -561,6 +651,7 @@ def _maybe_rssm_candidate_action(
                 else getattr(planner, "last_risk_adjusted_margin", 0.0)
             )
             if out.get("active") and out.get("best_action") is not None:
+                _stash_plan_rows(out)
                 return out["best_action"]
             # planner ran but inactive (low margin / uncertain / disabled): do
             # NOT fall through to light if planner is the configured path.
@@ -706,10 +797,39 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             cand_out["priority"] = torch.cat([cand_out["priority"], zk], dim=1)
             cand_out["similarity"] = torch.cat([cand_out["similarity"], zk.clone()], dim=1)
             bridge.last_rssm_candidate_added = 1.0
+
+        # Build [B,K]-aligned planner-signal tensors for the SRC_RSSM rerank
+        # bonus. Only the RSSM columns are filled (from the per-risky-row plan
+        # signals stashed above, same row order); all other positions are 0.
+        rssm_margin_bk: Optional[torch.Tensor] = None
+        rssm_unc_bk: Optional[torch.Tensor] = None
+        _bonus = float(eir_cfg.guidance_rssm_source_bonus) if bool(eir_cfg.guidance_enable) else 0.0
+        if _bonus != 0.0:
+            sid = cand_out["source_id"]
+            mask_bk = sid == SRC_RSSM
+            if bool(mask_bk.any()):
+                dev2, dt2 = cand_out["cand"].device, cand_out["cand"].dtype
+                Bk = int(sid.shape[0])
+                zeros_bk = torch.zeros_like(sid, dtype=dt2)
+                mr = bridge.last_rssm_plan_margin_rows
+                ur = bridge.last_rssm_plan_uncertainty_rows
+                if isinstance(mr, torch.Tensor) and int(mr.shape[0]) == Bk:
+                    rssm_margin_bk = torch.where(
+                        mask_bk, mr.to(device=dev2, dtype=dt2)[:, None].expand_as(sid), zeros_bk
+                    )
+                if isinstance(ur, torch.Tensor) and int(ur.shape[0]) == Bk:
+                    rssm_unc_bk = torch.where(
+                        mask_bk, ur.to(device=dev2, dtype=dt2)[:, None].expand_as(sid), zeros_bk
+                    )
         rer = rerank_candidates(
             cand=cand_out["cand"], source_id=cand_out["source_id"],
             priority=cand_out["priority"], similarity=cand_out["similarity"],
             scorer=bridge.scorer, feat_r=feat_r, cfg=eir_cfg, erd_cfg=erd_cfg,
+            rssm_source_bonus=_bonus,
+            rssm_bonus_margin_scale=float(eir_cfg.guidance_rssm_bonus_margin_scale),
+            rssm_bonus_uncertainty_penalty=float(eir_cfg.guidance_rssm_bonus_uncertainty_penalty),
+            rssm_plan_margin_bk=rssm_margin_bk,
+            rssm_plan_uncertainty_bk=rssm_unc_bk,
         )
         bridge.last_candidate_source_frac = rer["candidate_source_frac"]
         bridge.last_best_source_frac = rer["best_source_frac"]
@@ -718,6 +838,14 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         bridge.last_score_margin = rer["margin_mean"]
         bridge.last_best_score = rer["best_score_mean"]
         bridge.last_actor_score = rer["actor_score_mean"]
+        bridge.last_rssm_source_bonus_mean = float(rer.get("rssm_source_bonus_mean", 0.0))
+        bridge.last_rssm_source_bonus_applied_fraction = float(
+            rer.get("rssm_source_bonus_applied_fraction", 0.0)
+        )
+        bridge.last_rssm_candidate_margin_mean = float(rer.get("rssm_candidate_margin_mean", 0.0))
+        bridge.last_rssm_candidate_uncertainty_mean = float(
+            rer.get("rssm_candidate_uncertainty_mean", 0.0)
+        )
 
         eligible = rer["eligible"]
         if not bool(eligible.any()):
@@ -743,6 +871,9 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
     if bridge.bank is not None:
         bridge.last_elite_bank_size = float(getattr(bridge.bank, "size", 0))
         bridge.last_bank_metrics = bridge.bank.metrics()
+        _bank_diag = getattr(bridge.bank, "update_diagnostics", None)
+        if callable(_bank_diag):
+            bridge.last_bank_update_diagnostics = _bank_diag()
     total = float(eir_cfg.scorer_loss_weight) * scorer_total + residual_total
     bridge.last_total_loss = float(total.detach().item())
     bridge.last_active = 1.0 if (bridge.last_scorer_active > 0 or bridge.last_residual_active > 0) else 0.0

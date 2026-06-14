@@ -34,6 +34,14 @@ APPLY_BEFORE_WARMUP = 3
 APPLY_KILL_SWITCH_OFF = 4
 APPLY_GATE_CLOSED = 5
 APPLY_NOT_FLOOR_STAGE = 6
+APPLY_NOT_GUIDANCE_STAGE = 7
+
+# per-row apply stage ids (telemetry only; precedence hard>floor>mid>none).
+# Matches EliteRecoveryBank STAGE_* semantics (mid appended as 3, not a renumber).
+RESID_STAGE_NONE = 0
+RESID_STAGE_FLOOR = 1
+RESID_STAGE_HARD = 2
+RESID_STAGE_MID = 3
 
 
 @dataclass
@@ -66,6 +74,16 @@ class RecoveryResidualConfig:
     gate_confidence_threshold: float = 0.5
     # max env-frame age of the aux snapshot before rollout apply self-disables
     apply_max_aux_age_frames: int = 100_000_000
+
+    # Stage-aware guidance (opt-in). When False the rollout apply is floor-only
+    # exactly as before. When True a weak "mid" band (floor_tol < tol <=
+    # guidance_apply_tol) is also applied, with a small alpha and a stricter gate
+    # confidence threshold. Floor/hard alphas and gates are unchanged.
+    guidance_enable: bool = False
+    guidance_apply_tol: float = 0.04
+    guidance_mid_near_success_mult: float = 1.5
+    guidance_mid_alpha: float = 0.15
+    guidance_mid_gate_confidence_threshold: float = 0.6
 
     def distill_weight_for_tol(self, tol: float) -> float:
         t = float(tol)
@@ -104,12 +122,23 @@ class RecoveryResidualHead(nn.Module):
         return delta_raw, gate_logit
 
     def recovery_action(
-        self, feat: torch.Tensor, mu_base: torch.Tensor, alpha: float
+        self, feat: torch.Tensor, mu_base: torch.Tensor, alpha
     ) -> dict[str, torch.Tensor]:
+        """Compute the gated recovery action.
+
+        ``alpha`` may be a scalar (uniform blend, e.g. the distill path) or a
+        per-row tensor ``[B]`` (true per-row stage-aware blending at rollout
+        apply, so mid/floor/hard rows in the same batch each get their own
+        alpha instead of a single batch-mean alpha).
+        """
         delta_raw, gate_logit = self.forward(feat)
         gate = torch.sigmoid(gate_logit)
         delta = torch.tanh(delta_raw) * float(self.cfg.residual_scale)
-        a_rec = (mu_base + float(alpha) * gate * delta).clamp(-1.0, 1.0)
+        if isinstance(alpha, torch.Tensor):
+            alpha_b = alpha.to(device=delta.device, dtype=delta.dtype).reshape(-1, 1)
+        else:
+            alpha_b = float(alpha)
+        a_rec = (mu_base + alpha_b * gate * delta).clamp(-1.0, 1.0)
         return {"a_rec": a_rec, "gate": gate.squeeze(-1), "delta": delta}
 
 
@@ -136,6 +165,9 @@ class RecoveryResidualBridge:
     last_apply_alpha: float = 0.0
     last_gate_mean_on_rollout: float = 0.0
     last_apply_fallback_reason: int = APPLY_KILL_SWITCH_OFF
+    # per-call residual-apply diagnostics (observation only; does not change the
+    # apply rules). Populated by ``compute_rollout_residual_action``.
+    last_apply_diagnostics: dict = field(default_factory=dict)
 
     def set_aux_snapshot(
         self,
@@ -240,6 +272,30 @@ def compute_rollout_residual_action(
         "apply_alpha": 0.0,
         "gate_mean_on_rollout": 0.0,
     }
+    # observation-only diagnostics: how the batch funnels through each apply gate.
+    diag = {
+        "residual_apply_seen_rows": 0.0,
+        "residual_apply_after_warmup_rows": 0.0,
+        "residual_apply_floor_stage_rows": 0.0,
+        "residual_apply_lifted_rows": 0.0,
+        "residual_apply_gate_pass_rows": 0.0,
+        "residual_apply_final_rows": 0.0,
+        "residual_apply_reject_before_warmup": 0.0,
+        "residual_apply_reject_not_floor_stage": 0.0,
+        "residual_apply_reject_not_lifted": 0.0,
+        "residual_apply_reject_low_gate": 0.0,
+        "residual_apply_reject_stale_aux": 0.0,
+        # stage-aware (observation only)
+        "residual_apply_mid_stage_rows": 0.0,
+        "residual_apply_hard_stage_rows": 0.0,
+        "residual_apply_mid_final_rows": 0.0,
+        "residual_apply_floor_final_rows": 0.0,
+        "residual_apply_hard_final_rows": 0.0,
+        "residual_apply_stage_id_mean": 0.0,
+        "residual_apply_mid_alpha": 0.0,
+        "residual_apply_reject_not_guidance_stage": 0.0,
+    }
+    diag["residual_apply_seen_rows"] = float(B)
 
     def _finish(reason: int, payload: dict[str, Any]) -> dict[str, Any]:
         bridge.last_apply_fallback_reason = int(reason)
@@ -247,13 +303,16 @@ def compute_rollout_residual_action(
         bridge.last_apply_fraction = float(payload["apply_fraction"])
         bridge.last_apply_alpha = float(payload["apply_alpha"])
         bridge.last_gate_mean_on_rollout = float(payload["gate_mean_on_rollout"])
+        bridge.last_apply_diagnostics = dict(diag)
         payload["fallback_reason"] = int(reason)
         return payload
 
     if not cfg.enabled or head is None or not cfg.apply_to_rollout:
         return _finish(APPLY_KILL_SWITCH_OFF, dict(no_apply))
     if int(frames) < int(cfg.apply_after_frames):
+        diag["residual_apply_reject_before_warmup"] = float(B)
         return _finish(APPLY_BEFORE_WARMUP, dict(no_apply))
+    diag["residual_apply_after_warmup_rows"] = float(B)
     d_hat = bridge.aux_d_hat
     tol = bridge.aux_tol
     lifted = bridge.aux_lifted
@@ -261,12 +320,14 @@ def compute_rollout_residual_action(
         return _finish(APPLY_AUX_MISSING, dict(no_apply))
     aux_age = int(frames) - int(bridge.aux_frame)
     if int(bridge.aux_frame) < 0 or aux_age > int(cfg.apply_max_aux_age_frames):
+        diag["residual_apply_reject_stale_aux"] = float(B)
         return _finish(APPLY_AUX_STALE, dict(no_apply))
     if (
         rollout_generation is not None
         and int(bridge.aux_generation) >= 0
         and int(rollout_generation) != int(bridge.aux_generation)
     ):
+        diag["residual_apply_reject_stale_aux"] = float(B)
         return _finish(APPLY_AUX_STALE, dict(no_apply))
     d_hat = d_hat.to(dev).reshape(-1)[:B]
     tol = tol.to(dev).reshape(-1)[:B]
@@ -275,37 +336,89 @@ def compute_rollout_residual_action(
     lifted_b = (
         lifted.to(dev).reshape(-1)[:B] if lifted is not None else torch.ones(B, device=dev)
     )
+    diag["residual_apply_lifted_rows"] = float((lifted_b > 0.5).sum().item())
 
-    # floor near-success stage gate
-    stage_gate = (tol <= float(cfg.apply_tol_threshold)) & (
-        d_hat <= (float(cfg.near_success_mult) * tol).clamp_min(1e-6)
-    )
+    # ---- per-row stage assignment (precedence hard > floor > mid > none) ----
+    hard_m = tol <= float(cfg.hard_floor_tol)
+    floor_m = (~hard_m) & (tol <= float(cfg.floor_tol))
+    if bool(cfg.guidance_enable):
+        mid_m = (~hard_m) & (~floor_m) & (tol <= float(cfg.guidance_apply_tol))
+    else:
+        mid_m = torch.zeros_like(hard_m)
+
+    # per-row near-success multiplier: mid uses the tighter guidance mult,
+    # floor/hard keep the configured near_success_mult (legacy value).
+    ns_mult = torch.full_like(tol, float(cfg.near_success_mult))
+    if bool(cfg.guidance_enable):
+        ns_mult = torch.where(
+            mid_m, torch.full_like(tol, float(cfg.guidance_mid_near_success_mult)), ns_mult
+        )
+    near_ok = d_hat <= (ns_mult * tol).clamp_min(1e-6)
+
+    hard_s = hard_m & near_ok
+    floor_s = floor_m & near_ok
+    mid_s = mid_m & near_ok
+    in_stage = hard_s | floor_s | mid_s
+
     if cfg.only_lifted:
-        stage_gate = stage_gate & (lifted_b > 0.5)
-    if not bool(stage_gate.any()):
-        return _finish(APPLY_NOT_FLOOR_STAGE, dict(no_apply))
+        lifted_ok = lifted_b > 0.5
+        diag["residual_apply_reject_not_lifted"] = float((in_stage & (~lifted_ok)).sum().item())
+        hard_s = hard_s & lifted_ok
+        floor_s = floor_s & lifted_ok
+        mid_s = mid_s & lifted_ok
+        in_stage = hard_s | floor_s | mid_s
 
-    tol_mean = float(tol[stage_gate].mean().item())
-    alpha = cfg.alpha_for_tol(tol_mean)
+    diag["residual_apply_mid_stage_rows"] = float(mid_s.sum().item())
+    diag["residual_apply_floor_stage_rows"] = float(floor_s.sum().item())
+    diag["residual_apply_hard_stage_rows"] = float(hard_s.sum().item())
+    diag["residual_apply_reject_not_floor_stage"] = float((~in_stage).sum().item())
+    diag["residual_apply_reject_not_guidance_stage"] = float((~in_stage).sum().item())
+    if not bool(in_stage.any()):
+        reason = APPLY_NOT_GUIDANCE_STAGE if bool(cfg.guidance_enable) else APPLY_NOT_FLOOR_STAGE
+        return _finish(reason, dict(no_apply))
+
+    # ---- per-row alpha + gate threshold by stage (NOT a batch-mean scalar) ----
+    alpha_row = torch.zeros_like(tol)
+    alpha_row = torch.where(hard_s, torch.full_like(tol, float(cfg.apply_alpha_hard_floor)), alpha_row)
+    alpha_row = torch.where(floor_s, torch.full_like(tol, float(cfg.apply_alpha_floor)), alpha_row)
+    gate_thr_row = torch.full_like(tol, float(cfg.gate_confidence_threshold))
+    if bool(cfg.guidance_enable):
+        alpha_row = torch.where(mid_s, torch.full_like(tol, float(cfg.guidance_mid_alpha)), alpha_row)
+        gate_thr_row = torch.where(
+            mid_s, torch.full_like(tol, float(cfg.guidance_mid_gate_confidence_threshold)), gate_thr_row
+        )
+
     mu_base = mu.detach().clamp(-1.0, 1.0)
     with torch.no_grad():
-        out = head.recovery_action(feat, mu_base, alpha)
+        out = head.recovery_action(feat, mu_base, alpha_row)
     gate = out["gate"]
-    gate_gate = gate >= float(cfg.gate_confidence_threshold)
-    apply_mask = stage_gate & gate_gate
+    gate_gate = gate >= gate_thr_row
+    apply_mask = in_stage & gate_gate
+    diag["residual_apply_gate_pass_rows"] = float(apply_mask.sum().item())
+    diag["residual_apply_reject_low_gate"] = float((in_stage & (~gate_gate)).sum().item())
+    diag["residual_apply_mid_alpha"] = float(cfg.guidance_mid_alpha)
     if not bool(apply_mask.any()):
         payload = dict(no_apply)
-        payload["gate_mean_on_rollout"] = float(gate[stage_gate].mean().item())
-        payload["apply_alpha"] = float(alpha)
+        payload["gate_mean_on_rollout"] = float(gate[in_stage].mean().item())
+        payload["apply_alpha"] = float(alpha_row[in_stage].mean().item())
         return _finish(APPLY_GATE_CLOSED, payload)
 
     action = mu.clone()
     action[apply_mask] = out["a_rec"][apply_mask]
+    diag["residual_apply_final_rows"] = float(apply_mask.sum().item())
+    diag["residual_apply_mid_final_rows"] = float((apply_mask & mid_s).sum().item())
+    diag["residual_apply_floor_final_rows"] = float((apply_mask & floor_s).sum().item())
+    diag["residual_apply_hard_final_rows"] = float((apply_mask & hard_s).sum().item())
+    stage_id = torch.zeros_like(tol)
+    stage_id = torch.where(floor_s, torch.full_like(tol, float(RESID_STAGE_FLOOR)), stage_id)
+    stage_id = torch.where(hard_s, torch.full_like(tol, float(RESID_STAGE_HARD)), stage_id)
+    stage_id = torch.where(mid_s, torch.full_like(tol, float(RESID_STAGE_MID)), stage_id)
+    diag["residual_apply_stage_id_mean"] = float(stage_id[apply_mask].mean().item())
     payload = {
         "action": action,
         "apply_mask": apply_mask,
         "apply_fraction": float(apply_mask.float().mean().item()),
-        "apply_alpha": float(alpha),
+        "apply_alpha": float(alpha_row[apply_mask].mean().item()),
         "gate_mean_on_rollout": float(gate[apply_mask].mean().item()),
     }
     return _finish(APPLY_OK, payload)

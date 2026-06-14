@@ -1464,6 +1464,20 @@ parser.add_argument("--eir_start_after_frames", type=int, default=200000000)
 parser.add_argument("--eir_scorer_warmup_iters", type=int, default=2000)
 parser.add_argument("--eir_min_target_valid_fraction", type=float, default=0.2)
 parser.add_argument("--eir_min_risky_fraction", type=float, default=0.02)
+# stage-aware guidance (opt-in; default OFF keeps legacy floor-only behaviour).
+# Adds a weak "mid" band above floor for elite bank collection + residual apply,
+# plus a small source-gated RSSM rerank bonus. Floor/hard semantics unchanged.
+parser.add_argument("--eir_guidance_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--eir_guidance_start_tol", type=float, default=0.04)
+parser.add_argument("--eir_guidance_bank_tol", type=float, default=0.04)
+parser.add_argument("--eir_guidance_apply_tol", type=float, default=0.04)
+parser.add_argument("--eir_guidance_mid_near_success_mult", type=float, default=1.5)
+parser.add_argument("--eir_guidance_mid_priority_scale", type=float, default=0.5)
+parser.add_argument("--eir_guidance_mid_residual_alpha", type=float, default=0.15)
+parser.add_argument("--eir_guidance_mid_gate_confidence_threshold", type=float, default=0.6)
+parser.add_argument("--eir_guidance_rssm_source_bonus", type=float, default=0.03)
+parser.add_argument("--eir_guidance_rssm_bonus_margin_scale", type=float, default=1.0)
+parser.add_argument("--eir_guidance_rssm_bonus_uncertainty_penalty", type=float, default=0.01)
 # recovery residual head + rollout apply
 parser.add_argument("--eir_residual_scale", type=float, default=0.5)
 parser.add_argument("--eir_residual_distill_weight", type=float, default=0.05)
@@ -1530,6 +1544,10 @@ parser.add_argument("--eir_mppi_ensemble_drop_weight", type=float, default=0.0)
 parser.add_argument("--eir_mppi_ensemble_uncertainty_weight", type=float, default=0.0)
 parser.add_argument("--eir_mppi_ensemble_min_valid_models", type=int, default=2)
 parser.add_argument("--eir_mppi_ensemble_max_models_per_plan", type=int, default=3)
+# Ensemble worst-case / CVaR uncertainty is on a different scale than the
+# single-model prior_std, so the ensemble path uses its own absolute gate.
+parser.add_argument("--eir_mppi_ensemble_uncertainty_threshold", type=float, default=2.0)
+parser.add_argument("--eir_mppi_ensemble_uncertainty_allow_margin", type=float, default=0.10)
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
@@ -2954,6 +2972,15 @@ def _patch_actor_train_for_seq_wm(
                         eir_scalars[f"best_source_frac_{k}"] = float(v)
                     for k, v in (xb.last_bank_metrics or {}).items():
                         eir_scalars[f"bank_{k}"] = float(v)
+                    # elite bank insertion diagnostics (observation only): why is
+                    # the bank empty? logged under both eir_bank/* and eir/bank_*.
+                    _bank_diag = getattr(xb, "last_bank_update_diagnostics", None) or {}
+                    for k, v in _bank_diag.items():
+                        eir_scalars[f"bank_{k}"] = float(v)
+                        try:
+                            tb_writer.add_scalar(f"eir_bank/{k}", float(v), frames)
+                        except Exception:
+                            pass
                     if rb is not None:
                         eir_scalars.update({
                             "residual_loss": rb.last_residual_loss,
@@ -2968,6 +2995,11 @@ def _patch_actor_train_for_seq_wm(
                             "residual_gate_mean_on_rollout": rb.last_gate_mean_on_rollout,
                             "residual_apply_fallback_reason": float(rb.last_apply_fallback_reason),
                         })
+                        # residual-apply funnel diagnostics (observation only):
+                        # which gate drops the batch before apply.
+                        _res_diag = getattr(rb, "last_apply_diagnostics", None) or {}
+                        for k, v in _res_diag.items():
+                            eir_scalars[k] = float(v)
                     for k, v in eir_scalars.items():
                         try:
                             tb_writer.add_scalar(f"eir/{k}", float(v), frames)
@@ -2988,6 +3020,16 @@ def _patch_actor_train_for_seq_wm(
                         "mppi_belief_valid": float(xb.last_mppi_belief_valid),
                         "bank_feature_source_actor_fraction": xb.bank_feature_source_actor_fraction,
                         "bank_feature_source_fallback_fraction": xb.bank_feature_source_fallback_fraction,
+                        "rssm_source_bonus_mean": float(getattr(xb, "last_rssm_source_bonus_mean", 0.0)),
+                        "rssm_source_bonus_applied_fraction": float(
+                            getattr(xb, "last_rssm_source_bonus_applied_fraction", 0.0)
+                        ),
+                        "rssm_candidate_margin_mean": float(
+                            getattr(xb, "last_rssm_candidate_margin_mean", 0.0)
+                        ),
+                        "rssm_candidate_uncertainty_mean": float(
+                            getattr(xb, "last_rssm_candidate_uncertainty_mean", 0.0)
+                        ),
                     }
                     for k, v in extra_eir.items():
                         try:
@@ -3054,6 +3096,11 @@ def _patch_actor_train_for_seq_wm(
                             "ensemble_available_size": float(getattr(planner, "last_ensemble_available_size", 0.0)),
                             "ensemble_used": float(getattr(planner, "last_ensemble_used", 0.0)),
                             "ensemble_fallback_reason": float(getattr(planner, "last_ensemble_fallback_reason", 0.0)),
+                            "effective_uncertainty_threshold": float(getattr(planner, "last_effective_uncertainty_threshold", 0.0)),
+                            "ensemble_uncertainty_threshold": float(getattr(planner, "last_ensemble_uncertainty_threshold", 0.0)),
+                            "ensemble_uncertainty_allow_margin": float(getattr(planner, "last_ensemble_uncertainty_allow_margin", 0.0)),
+                            "uncertainty_gate_allow_by_margin": float(getattr(planner, "last_uncertainty_gate_allow_by_margin", 0.0)),
+                            "uncertainty_gate_blocked": float(getattr(planner, "last_uncertainty_gate_blocked", 0.0)),
                         }
                         for k, v in mppi_scalars.items():
                             try:
@@ -4932,6 +4979,13 @@ def main():
             scorer_warmup_iters=int(args_cli.eir_scorer_warmup_iters),
             min_target_valid_fraction=float(args_cli.eir_min_target_valid_fraction),
             min_risky_fraction=float(args_cli.eir_min_risky_fraction),
+            guidance_enable=bool(args_cli.eir_guidance_enable),
+            guidance_start_tol=float(args_cli.eir_guidance_start_tol),
+            guidance_rssm_source_bonus=float(args_cli.eir_guidance_rssm_source_bonus),
+            guidance_rssm_bonus_margin_scale=float(args_cli.eir_guidance_rssm_bonus_margin_scale),
+            guidance_rssm_bonus_uncertainty_penalty=float(
+                args_cli.eir_guidance_rssm_bonus_uncertainty_penalty
+            ),
         )
         eir_bank_cfg = EliteRecoveryBankConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),
@@ -4945,6 +4999,10 @@ def main():
             hard_tol_threshold=float(args_cli.eir_elite_hard_tol_threshold),
             near_success_mult=float(args_cli.eir_elite_near_success_mult),
             min_priority=float(args_cli.eir_elite_min_priority),
+            guidance_enable=bool(args_cli.eir_guidance_enable),
+            guidance_bank_tol=float(args_cli.eir_guidance_bank_tol),
+            guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
+            guidance_mid_priority_scale=float(args_cli.eir_guidance_mid_priority_scale),
         )
         eir_residual_cfg = RecoveryResidualConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_recovery_residual),
@@ -4969,6 +5027,13 @@ def main():
             near_success_mult=float(args_cli.eir_residual_near_success_mult),
             gate_confidence_threshold=float(args_cli.eir_residual_gate_confidence_threshold),
             apply_max_aux_age_frames=int(args_cli.eir_residual_apply_max_aux_age_frames),
+            guidance_enable=bool(args_cli.eir_guidance_enable),
+            guidance_apply_tol=float(args_cli.eir_guidance_apply_tol),
+            guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
+            guidance_mid_alpha=float(args_cli.eir_guidance_mid_residual_alpha),
+            guidance_mid_gate_confidence_threshold=float(
+                args_cli.eir_guidance_mid_gate_confidence_threshold
+            ),
         )
         _mppi_mode = str(args_cli.eir_mppi_mode)
         _mppi_on = eir_enabled and bool(args_cli.eir_use_rssm_mppi) and _mppi_mode != "off"
@@ -5020,6 +5085,8 @@ def main():
             ensemble_uncertainty_weight=float(args_cli.eir_mppi_ensemble_uncertainty_weight),
             ensemble_min_valid_models=int(args_cli.eir_mppi_ensemble_min_valid_models),
             ensemble_max_models_per_plan=int(args_cli.eir_mppi_ensemble_max_models_per_plan),
+            ensemble_uncertainty_threshold=float(args_cli.eir_mppi_ensemble_uncertainty_threshold),
+            ensemble_uncertainty_allow_margin=float(args_cli.eir_mppi_ensemble_uncertainty_allow_margin),
         )
         eir_broadcast_cfg = EliteBroadcastConfig(
             enabled=eir_enabled

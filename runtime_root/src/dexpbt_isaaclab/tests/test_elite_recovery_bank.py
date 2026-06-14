@@ -10,6 +10,9 @@ import torch
 from dexpbt_isaaclab.world_model.elite_recovery_bank import (
     EliteRecoveryBank,
     EliteRecoveryBankConfig,
+    STAGE_FLOOR,
+    STAGE_HARD,
+    STAGE_MID,
 )
 
 
@@ -76,6 +79,39 @@ class TestEliteBank(unittest.TestCase):
         cache, feats = self._elite_cache()
         bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
         self.assertEqual(bank.size, 0)
+
+    def test_update_diagnostics_smoke(self):
+        # Observation-only diagnostics must populate and stay consistent with the
+        # actual inserts (does not change insert behaviour).
+        bank = EliteRecoveryBank(self._cfg())
+        cache, feats = self._elite_cache()
+        bank.update_from_cache(
+            cache,
+            feats,
+            source_stats={"source_policy_idx": 3, "source_nsucc_mean": 10.0, "source_nsucc_max": 20.0},
+            frame=1234,
+        )
+        diag = bank.update_diagnostics()
+        self.assertEqual(diag["update_seen_rows"], 6.0)
+        self.assertEqual(diag["update_inserted_rows"], float(bank.size))
+        # lifted rows: 5 of 6 are lifted
+        self.assertEqual(diag["update_lifted_rows"], 5.0)
+        # diagnostics must reset between updates
+        empty = _make_cache(
+            actions=torch.zeros(2, 3),
+            d_hat=torch.full((2,), 0.30),
+            tol=torch.full((2,), 0.05),
+            lifted=torch.zeros(2),
+            targets={k: torch.zeros(2) for k in (
+                "success_h4", "improve_h4", "drop_h4",
+                "success_h8", "improve_h8", "drop_h8",
+            )},
+        )
+        bank.update_from_cache(empty, torch.zeros(2, 4))
+        diag2 = bank.update_diagnostics()
+        self.assertEqual(diag2["update_seen_rows"], 2.0)
+        self.assertEqual(diag2["update_inserted_rows"], 0.0)
+        self.assertEqual(diag2["reject_reason_not_lifted"], 2.0)
 
     def test_update_adds_only_elite(self):
         bank = EliteRecoveryBank(self._cfg())
@@ -224,6 +260,115 @@ class TestEliteBank(unittest.TestCase):
         bank.update_from_cache(cache, fallback_key, source_stats={"source_nsucc_mean": 10.0})
         self.assertEqual(bank.size, 2)
         self.assertTrue(torch.allclose(bank.feature[0], fallback_key[0]))
+
+
+class TestStageAwareGuidanceBank(unittest.TestCase):
+    """Stage-aware (mid-band) collection. STAGE_MID=3 -> buckets 6/7."""
+
+    def _cfg(self, **kw):
+        base = dict(
+            enabled=True,
+            bank_size=100,
+            feature_dim=4,
+            action_dim=3,
+            horizons=(4, 8),
+            tol_threshold=0.02,
+            hard_tol_threshold=0.012,
+            near_success_mult=3.0,
+            min_priority=0.5,
+            guidance_enable=True,
+            guidance_bank_tol=0.04,
+            guidance_mid_near_success_mult=1.5,
+            guidance_mid_priority_scale=0.5,
+        )
+        base.update(kw)
+        return EliteRecoveryBankConfig(**base)
+
+    def _rows(self, tols):
+        """One success row per tol value; near-success d_hat=0.01, lifted."""
+        n = len(tols)
+        actions = torch.zeros(n, 3)
+        d_hat = torch.full((n,), 0.01)
+        tol = torch.tensor(tols, dtype=torch.float32)
+        lifted = torch.ones(n)
+        targets = {
+            "success_h4": torch.ones(n),
+            "improve_h4": torch.zeros(n),
+            "drop_h4": torch.zeros(n),
+            "success_h8": torch.zeros(n),
+            "improve_h8": torch.zeros(n),
+            "drop_h8": torch.zeros(n),
+        }
+        feats = torch.arange(n * 4, dtype=torch.float32).reshape(n, 4)
+        cache = _make_cache(
+            actions=actions, d_hat=d_hat, tol=tol, lifted=lifted, targets=targets
+        )
+        return cache, feats
+
+    def test_elite_bank_collects_mid_stage_when_guidance_enabled(self):
+        bank = EliteRecoveryBank(self._cfg())
+        cache, feats = self._rows([0.03])  # mid band: 0.02 < 0.03 <= 0.04
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank.size, 1)
+        bucket = bank.scalars["bucket_id"][: bank.size]
+        # mid success -> STAGE_MID*2 + 1 = 7
+        self.assertEqual(int(bucket[0].item()), STAGE_MID * 2 + 1)
+
+    def test_elite_bank_does_not_collect_mid_stage_when_guidance_disabled(self):
+        bank = EliteRecoveryBank(self._cfg(guidance_enable=False))
+        cache, feats = self._rows([0.03])
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank.size, 0)
+        # but a floor row is still collected with guidance off
+        bank2 = EliteRecoveryBank(self._cfg(guidance_enable=False))
+        cache2, feats2 = self._rows([0.015])
+        bank2.update_from_cache(cache2, feats2, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank2.size, 1)
+
+    def test_elite_bank_mid_priority_scaled_below_floor(self):
+        bank = EliteRecoveryBank(self._cfg())
+        # row 0 floor (tol=0.015), row 1 mid (tol=0.03); identical labels/source
+        cache, feats = self._rows([0.015, 0.03])
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank.size, 2)
+        bucket = bank.scalars["bucket_id"][: bank.size]
+        pri = bank.scalars["priority_score"][: bank.size]
+        floor_pri = float(pri[bucket == float(STAGE_FLOOR * 2 + 1)][0].item())
+        mid_pri = float(pri[bucket == float(STAGE_MID * 2 + 1)][0].item())
+        self.assertAlmostEqual(mid_pri, 0.5 * floor_pri, places=5)
+
+    def test_elite_bank_stage_bucket_ids_are_distinct(self):
+        bank = EliteRecoveryBank(self._cfg())
+        # hard (0.01), floor (0.015), mid (0.03)
+        cache, feats = self._rows([0.01, 0.015, 0.03])
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank.size, 3)
+        buckets = set(int(b) for b in bank.scalars["bucket_id"][: bank.size].tolist())
+        self.assertEqual(
+            buckets,
+            {STAGE_HARD * 2 + 1, STAGE_FLOOR * 2 + 1, STAGE_MID * 2 + 1},
+        )
+
+    def test_elite_bank_diagnostics_stage_counts(self):
+        bank = EliteRecoveryBank(self._cfg())
+        cache, feats = self._rows([0.01, 0.015, 0.03])
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        diag = bank.update_diagnostics()
+        self.assertEqual(diag["update_hard_stage_rows"], 1.0)
+        self.assertEqual(diag["update_floor_stage_rows"], 1.0)
+        self.assertEqual(diag["update_mid_stage_rows"], 1.0)
+        self.assertEqual(diag["update_inserted_hard_rows"], 1.0)
+        self.assertEqual(diag["update_inserted_floor_rows"], 1.0)
+        self.assertEqual(diag["update_inserted_mid_rows"], 1.0)
+        self.assertEqual(diag["reject_reason_not_guidance_stage"], 0.0)
+
+    def test_elite_bank_above_guidance_tol_rejected(self):
+        bank = EliteRecoveryBank(self._cfg())
+        cache, feats = self._rows([0.05])  # above guidance_bank_tol=0.04
+        bank.update_from_cache(cache, feats, source_stats={"source_nsucc_mean": 10.0})
+        self.assertEqual(bank.size, 0)
+        diag = bank.update_diagnostics()
+        self.assertEqual(diag["reject_reason_not_guidance_stage"], 1.0)
 
 
 if __name__ == "__main__":

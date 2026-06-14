@@ -313,6 +313,15 @@ class RSSMMPPIConfig:
     ensemble_min_valid_models: int = 2
     ensemble_subsample_models: bool = False
     ensemble_max_models_per_plan: int = 3
+    # Ensemble worst-case / CVaR uncertainty lives on a different scale than the
+    # single-model ``prior_std_mean`` (it is a per-member max over latent CVaR),
+    # so it cannot share the single-model absolute gate ``uncertainty_threshold``.
+    # The ensemble path uses ``ensemble_uncertainty_threshold`` instead. When the
+    # uncertainty is below this threshold but the candidate beats the actor by at
+    # least ``ensemble_uncertainty_allow_margin``, the gate lets the SRC_RSSM
+    # candidate through even if uncertainty is elevated.
+    ensemble_uncertainty_threshold: float = 2.0
+    ensemble_uncertainty_allow_margin: float = 0.10
 
     def __post_init__(self) -> None:
         self.horizon = max(1, int(self.horizon))
@@ -387,6 +396,12 @@ class RSSMMPPIPlanner:
         self.last_ensemble_available_size = 0.0
         self.last_ensemble_used = 0.0
         self.last_ensemble_fallback_reason = float(ENSEMBLE_FB_NOT_CONFIGURED)
+        # ensemble-specific uncertainty gate telemetry
+        self.last_effective_uncertainty_threshold = 0.0
+        self.last_ensemble_uncertainty_threshold = 0.0
+        self.last_ensemble_uncertainty_allow_margin = 0.0
+        self.last_uncertainty_gate_allow_by_margin = 0.0
+        self.last_uncertainty_gate_blocked = 0.0
 
     # ---- helpers --------------------------------------------------------
     def _inactive(self, reason: int, B: int, A: int, actor_action: torch.Tensor, dev, dtype) -> dict:
@@ -412,6 +427,45 @@ class RSSMMPPIPlanner:
             self.last_ensemble_fallback_reason = float(
                 ENSEMBLE_FB_ACTIVE if active else ENSEMBLE_FB_PLANNER_INACTIVE
             )
+
+    @staticmethod
+    def _evaluate_uncertainty_gate(
+        *,
+        use_ensemble: bool,
+        mean_unc: float,
+        mean_margin: float,
+        cfg: "RSSMMPPIConfig",
+    ) -> dict:
+        """Pure uncertainty-gate decision shared by ``plan()`` and tests.
+
+        The single-model path keeps the original absolute ``uncertainty_threshold``
+        (default 0.4) so legacy behaviour is unchanged. The ensemble path uses
+        ``ensemble_uncertainty_threshold`` instead, because the ensemble
+        worst-case / CVaR uncertainty is on a different (larger) scale than the
+        single-model ``prior_std_mean``. As a margin override, when an ensemble
+        candidate beats the actor by at least ``ensemble_uncertainty_allow_margin``
+        and stays at/under the ensemble threshold, it is explicitly allowed.
+
+        Returns a dict with ``effective_threshold``, ``ensemble_threshold``,
+        ``ensemble_allow_margin``, ``allow_by_margin`` and ``blocked``.
+        """
+        if use_ensemble:
+            effective_threshold = float(cfg.ensemble_uncertainty_threshold)
+        else:
+            effective_threshold = float(cfg.uncertainty_threshold)
+        allow_by_margin = bool(
+            use_ensemble
+            and mean_margin >= float(cfg.ensemble_uncertainty_allow_margin)
+            and mean_unc <= float(cfg.ensemble_uncertainty_threshold)
+        )
+        blocked = bool(mean_unc > effective_threshold and not allow_by_margin)
+        return {
+            "effective_threshold": effective_threshold,
+            "ensemble_threshold": float(cfg.ensemble_uncertainty_threshold),
+            "ensemble_allow_margin": float(cfg.ensemble_uncertainty_allow_margin),
+            "allow_by_margin": allow_by_margin,
+            "blocked": blocked,
+        }
 
     def _build_sequences(
         self,
@@ -813,6 +867,11 @@ class RSSMMPPIPlanner:
         self.last_ensemble_fallback_reason = float(
             ENSEMBLE_FB_NOT_CONFIGURED if not cfg.use_model_ensemble else ENSEMBLE_FB_NO_CACHE
         )
+        self.last_effective_uncertainty_threshold = float(cfg.uncertainty_threshold)
+        self.last_ensemble_uncertainty_threshold = float(cfg.ensemble_uncertainty_threshold)
+        self.last_ensemble_uncertainty_allow_margin = float(cfg.ensemble_uncertainty_allow_margin)
+        self.last_uncertainty_gate_allow_by_margin = 0.0
+        self.last_uncertainty_gate_blocked = 0.0
 
         if not cfg.enabled or cfg.mode == "off":
             return self._inactive(MPPI_DISABLED, B, A, actor_action, dev, dtype)
@@ -963,8 +1022,21 @@ class RSSMMPPIPlanner:
             mean_unc = float(best_unc.mean().item())
             mean_margin = float(margin.mean().item())
             # uncertainty gate (only meaningful with a real prior rollout; in
-            # fixed-belief fallback prior_std is 0 so this never blocks).
-            if mean_unc > float(cfg.uncertainty_threshold):
+            # fixed-belief fallback prior_std is 0 so this never blocks). The
+            # single-model path keeps the absolute ``uncertainty_threshold``; the
+            # ensemble path uses ``ensemble_uncertainty_threshold`` (different
+            # scale) with an optional high-margin override. The decision is made
+            # by ``_evaluate_uncertainty_gate`` so plan() and tests stay in sync.
+            gate = self._evaluate_uncertainty_gate(
+                use_ensemble=use_ensemble,
+                mean_unc=mean_unc,
+                mean_margin=mean_margin,
+                cfg=cfg,
+            )
+            self.last_effective_uncertainty_threshold = float(gate["effective_threshold"])
+            self.last_uncertainty_gate_allow_by_margin = 1.0 if gate["allow_by_margin"] else 0.0
+            if gate["blocked"]:
+                self.last_uncertainty_gate_blocked = 1.0
                 self.last_active = 0.0
                 self.last_fallback_reason = MPPI_HIGH_UNCERTAINTY
                 out = self._inactive(MPPI_HIGH_UNCERTAINTY, B, A, actor_action, dev, dtype)

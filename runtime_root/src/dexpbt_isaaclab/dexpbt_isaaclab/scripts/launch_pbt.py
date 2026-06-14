@@ -749,6 +749,8 @@ def main() -> None:
             "--no-eir_mppi_use_model_ensemble",
             "--eir_pbt_broadcast_elite_bank",
             "--no-eir_pbt_broadcast_elite_bank",
+            "--eir_guidance_enable",
+            "--no-eir_guidance_enable",
         }
         extra = list(args.extra)
         i = 0
