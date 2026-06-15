@@ -399,6 +399,15 @@ def _build_flag_registry() -> None:
             "eir_actor_distill_enable",
             "wm_curriculum_controller_enable",
             "pbt_wm_profile_copy_enable",
+            "curriculum_safety_enable",
+            "curriculum_safety_use_real_fallback",
+            "curriculum_strong_shrink_global_retention_gate",
+            "curriculum_danger_zone_enable",
+            "curriculum_danger_disable_strong_shrink",
+            "curriculum_rollback_on_repeated_collapse",
+            "curriculum_rollback_to_last_mastered",
+            "wm_imagined_diagnostic_enable",
+            "wm_imagined_shadow_block_enable",
         }
     )
     for dest in all_dests:

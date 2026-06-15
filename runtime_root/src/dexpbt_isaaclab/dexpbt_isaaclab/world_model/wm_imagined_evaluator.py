@@ -120,6 +120,7 @@ class WMImaginedEvaluator:
                 "value": [],
             }
             uncertainty_terms: list[float] = []
+            logit_abs_terms: list[float] = []
             if "horizon_logits" in preds:
                 for h, head_out in preds["horizon_logits"].items():
                     p_succ = torch.sigmoid(head_out["success"]).mean().item()
@@ -128,16 +129,24 @@ class WMImaginedEvaluator:
                     out[f"drop_h{int(h)}"] = float(p_drop)
                     metric_components["success"].append(float(p_succ))
                     metric_components["drop"].append(float(p_drop))
+                    logit_abs_terms.append(
+                        float(head_out["success"].abs().mean().item())
+                    )
+                    logit_abs_terms.append(
+                        float(head_out["drop"].abs().mean().item())
+                    )
                     # Uncertainty proxy: distance from 0.5 (closer = less
                     # confident). 1.0 means perfectly uncertain.
                     p = float(p_succ)
                     uncertainty_terms.append(1.0 - abs(p - 0.5) * 2.0)
             recovery_prob = 0.0
             if "recovery_logits" in preds:
-                p_rec = torch.sigmoid(preds["recovery_logits"]).mean().item()
+                rec_logits = preds["recovery_logits"]
+                p_rec = torch.sigmoid(rec_logits).mean().item()
                 recovery_prob = float(p_rec)
                 out["recovery_h16"] = recovery_prob
                 metric_components["recovery"].append(recovery_prob)
+                logit_abs_terms.append(float(rec_logits.abs().mean().item()))
                 uncertainty_terms.append(1.0 - abs(recovery_prob - 0.5) * 2.0)
             v_mean = 0.0
             if heads.has_value_head:
@@ -162,6 +171,11 @@ class WMImaginedEvaluator:
             uncertainty = float(
                 sum(uncertainty_terms) / max(1, len(uncertainty_terms))
             )
+            logit_abs_mean = float(
+                sum(logit_abs_terms) / max(1, len(logit_abs_terms))
+                if logit_abs_terms
+                else 0.0
+            )
             imagined_valid = bool(uncertainty <= self.max_uncertainty)
             out.update(
                 {
@@ -170,6 +184,7 @@ class WMImaginedEvaluator:
                     "wm_success_prob": wm_success_prob,
                     "wm_drop_risk": wm_drop_risk,
                     "uncertainty": uncertainty,
+                    "logit_abs_mean": logit_abs_mean,
                 }
             )
             return out

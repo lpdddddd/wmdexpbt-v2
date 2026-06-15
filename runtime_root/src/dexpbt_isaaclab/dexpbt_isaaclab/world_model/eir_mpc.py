@@ -187,6 +187,15 @@ class EIRConfig:
         return 1.0 if float(tol) <= float(self.start_tol) else 0.0
 
 
+def _actor_distill_uses_soft_tol_gate(eir_cfg: EIRConfig) -> bool:
+    """True when actor-distill uses soft_tol/confidence_only (not legacy hard_tol)."""
+    return (
+        bool(getattr(eir_cfg, "actor_distill_enable", False))
+        and str(getattr(eir_cfg, "actor_distill_gate_mode", "hard_tol"))
+        in ("soft_tol", "confidence_only")
+    )
+
+
 _ACTOR_DISTILL_SOURCE_ALIASES = {
     "rssm": SRC_RSSM,
     "elite": SRC_ELITE_LOCAL,
@@ -828,6 +837,7 @@ class EIRBridge:
     last_actor_distill_active_frac_tol_005_006: float = 0.0
     last_actor_distill_active_frac_tol_004_005: float = 0.0
     last_actor_distill_active_frac_tol_le_004: float = 0.0
+    last_actor_distill_tol_bin: str = "le_004"
     # Runtime context fed by train.py; -1.0 means "unknown" (perf gate neutral).
     last_nsucc_mean: float = -1.0
 
@@ -897,6 +907,7 @@ class EIRBridge:
         self.last_actor_distill_active_frac_tol_005_006 = 0.0
         self.last_actor_distill_active_frac_tol_004_005 = 0.0
         self.last_actor_distill_active_frac_tol_le_004 = 0.0
+        self.last_actor_distill_tol_bin = "le_004"
         # last_nsucc_mean is runtime context; do NOT reset per call.
 
 
@@ -1108,8 +1119,11 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
     # ----- gating for residual distill -----
     lam = eir_cfg.distill_lambda_for_tol(cache.tol_mean)
     block = EIR_OK
-    if lam <= 0.0:
+    _soft_actor_gate = _actor_distill_uses_soft_tol_gate(eir_cfg)
+    if lam <= 0.0 and not _soft_actor_gate:
         block = EIR_TOL_ABOVE_START
+    # When soft actor-distill is enabled, allow the candidate + distill path above
+    # start_tol; residual rollout apply still scales by ``lam`` below.
     elif int(frames) < int(eir_cfg.start_after_frames):
         block = EIR_WARMUP_FRAMES
     elif bridge.scorer_warmup_iters_done < int(eir_cfg.scorer_warmup_iters):
@@ -1276,6 +1290,7 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 eval_valid=True,
             )
             row_weight = _act["weight"] * distill_mask.float()
+            bridge.last_actor_distill_tol_bin = str(_act["tol_bin"])
             bridge.last_actor_distill_activation_weight_mean = float(_act["weight_mean"])
             bridge.last_actor_distill_activation_nonzero_frac = float(_act["nonzero_frac"])
             bridge.last_actor_distill_tol_weight_mean = float(_act["tol_weight"])

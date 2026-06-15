@@ -921,6 +921,181 @@ parser.add_argument(
     default=200_000_000,
     help="Cooldown between hard-collapse tolerance rollbacks unless a new shrink happened.",
 )
+# Hybrid Curriculum Safety Patch (2026-06-15): real-signal fallback + gates.
+parser.add_argument(
+    "--curriculum_safety_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable hybrid curriculum safety controller (real-signal fallback).",
+)
+parser.add_argument(
+    "--curriculum_safety_start_after_frames",
+    type=int,
+    default=500_000_000,
+    help="Env frames before curriculum safety controller activates.",
+)
+parser.add_argument(
+    "--curriculum_safety_min_nsucc_mean",
+    type=float,
+    default=10.0,
+    help="Min nsucc_mean before real-signal safety may block shrink.",
+)
+parser.add_argument(
+    "--curriculum_safety_global_retention_threshold",
+    type=float,
+    default=0.80,
+    help="Real-signal risk when global_retention drops below this.",
+)
+parser.add_argument(
+    "--curriculum_safety_drop_ratio_threshold",
+    type=float,
+    default=0.30,
+    help="Real-signal risk when recent drop_ratio exceeds this.",
+)
+parser.add_argument(
+    "--curriculum_safety_slope_threshold",
+    type=float,
+    default=-2.0,
+    help="Real-signal risk when recent nsucc slope falls below this.",
+)
+parser.add_argument(
+    "--curriculum_safety_window",
+    type=int,
+    default=6,
+    help="Window length for slope / drop-ratio safety signals.",
+)
+parser.add_argument(
+    "--curriculum_safety_block_frames",
+    type=int,
+    default=100_000_000,
+    help="Post-block shrink freeze (env frames) after real-signal safety block.",
+)
+parser.add_argument(
+    "--curriculum_safety_use_real_fallback",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Use real PBT signals when WM imagined eval is invalid.",
+)
+parser.add_argument(
+    "--curriculum_strong_shrink_global_retention_gate",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Gate adaptive_fast strong shrink on global retention + stability.",
+)
+parser.add_argument(
+    "--curriculum_strong_shrink_min_global_retention",
+    type=float,
+    default=0.85,
+    help="Min global retention to allow adaptive_fast strong shrink.",
+)
+parser.add_argument(
+    "--curriculum_strong_shrink_min_stable_ticks",
+    type=int,
+    default=3,
+    help="Min stable tolerance ticks to allow adaptive_fast strong shrink.",
+)
+parser.add_argument(
+    "--curriculum_strong_shrink_long_window",
+    type=int,
+    default=12,
+    help="Long rolling window for global retention peak denominator.",
+)
+parser.add_argument(
+    "--curriculum_danger_zone_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable tol<=danger_tol conservative shrink rules.",
+)
+parser.add_argument(
+    "--curriculum_danger_tol",
+    type=float,
+    default=0.030,
+    help="Success tolerance threshold defining the danger zone.",
+)
+parser.add_argument(
+    "--curriculum_danger_disable_strong_shrink",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Disable adaptive_fast strong shrink inside danger zone.",
+)
+parser.add_argument(
+    "--curriculum_danger_min_stable_ticks",
+    type=int,
+    default=4,
+    help="Min stable ticks required before shrink in danger zone.",
+)
+parser.add_argument(
+    "--curriculum_danger_shrink_interval_mult",
+    type=float,
+    default=2.0,
+    help="Multiply consolidation frames in danger zone.",
+)
+parser.add_argument(
+    "--curriculum_danger_global_retention_threshold",
+    type=float,
+    default=0.85,
+    help="Block shrink in danger zone when global retention below this.",
+)
+parser.add_argument(
+    "--curriculum_rollback_on_repeated_collapse",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Rollback to last-mastered-safe tolerance on repeated collapse.",
+)
+parser.add_argument(
+    "--curriculum_rollback_collapse_patience",
+    type=int,
+    default=2,
+    help="Repeated collapse count before rollback-to-last-mastered.",
+)
+parser.add_argument(
+    "--curriculum_rollback_to_last_mastered",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Apply forced_success_tolerance rollback to last mastered safe tol.",
+)
+parser.add_argument(
+    "--curriculum_rollback_freeze_frames",
+    type=int,
+    default=200_000_000,
+    help="Shrink freeze after repeated-collapse rollback.",
+)
+parser.add_argument(
+    "--curriculum_last_mastered_min_nsucc_mean",
+    type=float,
+    default=30.0,
+    help="Min nsucc_mean to update last-mastered-safe tolerance.",
+)
+parser.add_argument(
+    "--curriculum_last_mastered_min_global_retention",
+    type=float,
+    default=0.85,
+    help="Min global retention to update last-mastered-safe tolerance.",
+)
+parser.add_argument(
+    "--curriculum_last_mastered_stable_ticks",
+    type=int,
+    default=3,
+    help="Min stable ticks to update last-mastered-safe tolerance.",
+)
+parser.add_argument(
+    "--wm_imagined_diagnostic_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Emit WM imagined head diagnostic fields in training_curve.",
+)
+parser.add_argument(
+    "--wm_imagined_shadow_block_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Record shadow WM block decisions (record-only unless real risk).",
+)
+parser.add_argument(
+    "--wm_imagined_shadow_uncertainty_threshold",
+    type=float,
+    default=0.95,
+    help="Uncertainty threshold for shadow block decision recording.",
+)
 parser.add_argument(
     "--pbt_usable_live_min_mean",
     type=float,
@@ -2402,13 +2577,30 @@ def _run_wm_runtime_wiring(
                 else 0
             )
             if wm_imagine_dir is not None:
+                shadow_block_decision = False
+                shadow_block_reason = ""
+                unc_val = float(imag_out.get("uncertainty", 1.0))
+                if getattr(args_cli, "wm_imagined_shadow_block_enable", False):
+                    thr = float(
+                        getattr(
+                            args_cli,
+                            "wm_imagined_shadow_uncertainty_threshold",
+                            0.95,
+                        )
+                    )
+                    if unc_val >= thr:
+                        shadow_block_decision = True
+                        shadow_block_reason = "shadow_high_uncertainty"
+                    elif not valid:
+                        shadow_block_decision = True
+                        shadow_block_reason = "shadow_imagined_invalid"
                 payload = {
                     "policy_idx": int(policy_idx_for_file),
                     "frames": int(frames),
                     "global_step": int(seq_wm_trainer.global_step),
                     "imagined_valid": bool(valid),
                     "invalid_reason": invalid_reason,
-                    "uncertainty": float(imag_out.get("uncertainty", 1.0)),
+                    "uncertainty": unc_val,
                     "wm_recovery_prob": float(
                         imag_out.get("wm_recovery_prob", 0.0)
                     ),
@@ -2416,6 +2608,11 @@ def _run_wm_runtime_wiring(
                         imag_out.get("wm_success_prob", 0.0)
                     ),
                     "wm_drop_risk": float(imag_out.get("wm_drop_risk", 0.0)),
+                    "logit_abs_mean": float(
+                        imag_out.get("logit_abs_mean", 0.0)
+                    ),
+                    "shadow_block_decision": bool(shadow_block_decision),
+                    "shadow_block_reason": str(shadow_block_reason),
                     "teacher_step": float(
                         teacher.current_teacher().frame
                         if (teacher is not None and teacher.current_teacher() is not None)
@@ -3171,6 +3368,7 @@ def _patch_actor_train_for_seq_wm(
                         "actor_distill_reject_uncertainty_missing": xb.last_actor_distill_reject_uncertainty_missing,
                         # Soft Activation Gate v1 telemetry.
                         "actor_distill_activation_weight_mean": xb.last_actor_distill_activation_weight_mean,
+                        "actor_distill_tol_bin": xb.last_actor_distill_tol_bin,
                         "actor_distill_activation_nonzero_frac": xb.last_actor_distill_activation_nonzero_frac,
                         "actor_distill_tol_weight_mean": xb.last_actor_distill_tol_weight_mean,
                         "actor_distill_time_weight_mean": xb.last_actor_distill_time_weight_mean,
@@ -3580,6 +3778,59 @@ def _checkpoint_optimizer_has_aux_group(checkpoint_path: str) -> bool:
     return any(isinstance(g, dict) and g.get("name") == "aux_value_head" for g in groups)
 
 
+def _align_optimizer_state_to_agent(
+    agent,
+    opt_sd: dict,
+) -> dict:
+    """Drop checkpoint optimizer groups absent on the live agent.
+
+    PBT cross-copy can load a donor checkpoint (EIR/elite/floorcritic param
+    groups) into a target worker with fewer optimizer groups (seq_wm-only or
+    ppo_only).  Aligning by group ``name`` lets us load the base PPO moments
+    when counts match; otherwise the caller falls back to fresh optimizer state.
+    """
+    import copy
+
+    agent_groups = list(getattr(agent.optimizer, "param_groups", []) or [])
+    ckpt_groups = opt_sd.get("param_groups")
+    if not isinstance(ckpt_groups, list) or not agent_groups:
+        return opt_sd
+
+    agent_names = [g.get("name") for g in agent_groups if isinstance(g, dict)]
+    agent_named = {n for n in agent_names if n}
+    agent_unnamed = sum(1 for n in agent_names if not n)
+
+    keep: list[dict] = []
+    drop_param_ids: set[int] = set()
+    unnamed_kept = 0
+    for group in ckpt_groups:
+        if not isinstance(group, dict):
+            continue
+        name = group.get("name")
+        if name is None:
+            if unnamed_kept < agent_unnamed:
+                keep.append(group)
+                unnamed_kept += 1
+            else:
+                drop_param_ids.update(int(p) for p in group.get("params", []))
+        elif name in agent_named:
+            keep.append(group)
+        else:
+            drop_param_ids.update(int(p) for p in group.get("params", []))
+
+    if len(keep) == len(ckpt_groups):
+        return opt_sd
+
+    aligned = copy.deepcopy(opt_sd)
+    aligned["param_groups"] = keep
+    opt_state = aligned.get("state")
+    if isinstance(opt_state, dict):
+        for pid in drop_param_ids:
+            opt_state.pop(pid, None)
+            opt_state.pop(str(pid), None)
+    return aligned
+
+
 def _wm_safe_restore(agent, checkpoint_path: str) -> None:
     """Restore rl_games agent tolerating aux_value_head / optimizer group mismatches."""
     import copy
@@ -3682,6 +3933,14 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
     if _try_load_opt(patched["optimizer"]):
         print("[WM] restore: loaded optimizer after stripping aux_value_head group from checkpoint")
         return
+    aligned = _align_optimizer_state_to_agent(agent, patched["optimizer"])
+    if len(aligned.get("param_groups", [])) == agent_groups:
+        if _try_load_opt(aligned):
+            print(
+                "[WM] restore: loaded optimizer after aligning param groups "
+                f"(agent_groups={agent_groups}, ckpt_groups={ckpt_groups})"
+            )
+            return
     print(
         f"[WM] restore: skipped optimizer state "
         f"(agent_groups={agent_groups}, ckpt_groups={ckpt_groups}) — using fresh moments"
@@ -4148,6 +4407,62 @@ def _load_wm_checkpoint_with_strategy(
     return result
 
 
+class _CheckpointSafeRunner(Runner):
+    """Runner that tolerates cross-profile PBT checkpoint restore.
+
+    ppo_only and other non-WM profiles use the stock ``Runner``, which calls
+    rl_games ``_restore`` and crashes when a donor checkpoint carries extra
+    optimizer param groups (EIR/elite/floorcritic).  This override mirrors the
+    restore path already used by ``_WmEnabledRunner``.
+    """
+
+    def run_train(self, args):
+        import torch
+        from rl_games import torch_runner
+
+        print("Started to train")
+
+        agent = self.algo_factory.create(self.algo_name, base_name="run", params=self.params)
+
+        ckpt_path = args.get("checkpoint")
+        if ckpt_path:
+            _wm_safe_restore(agent, ckpt_path)
+        else:
+            torch_runner._restore(agent, args)
+        torch_runner._override_sigma(agent, args)
+
+        compile_config = self.params.get("config", {}).get("torch_compile", True)
+        if compile_config is False:
+            print("torch.compile: Disabled")
+        else:
+            if isinstance(compile_config, bool):
+                actor_mode = "default"
+                critic_mode = "default"
+            elif isinstance(compile_config, str):
+                actor_mode = compile_config
+                critic_mode = compile_config
+            elif isinstance(compile_config, dict):
+                actor_mode = compile_config.get("mode", "default")
+                critic_mode = compile_config.get("critic_mode", actor_mode)
+            else:
+                print(f"Warning: Invalid torch_compile config {compile_config}, using default")
+                actor_mode = "default"
+                critic_mode = "default"
+
+            print(f"torch.compile: Enabled for actor with mode='{actor_mode}'")
+            agent.model = torch.compile(agent.model, mode=actor_mode)
+
+            if hasattr(agent, "central_value_net") and agent.central_value_net is not None:
+                print(f"torch.compile: Enabled for central value critic with mode='{critic_mode}'")
+                agent.central_value_net.model = torch.compile(
+                    agent.central_value_net.model,
+                    mode=critic_mode,
+                )
+
+        self.algo = agent
+        agent.train()
+
+
 class _WmEnabledRunner(Runner):
     """
     Custom Runner that injects WM trainer into A2CAgent after creation.
@@ -4527,11 +4842,11 @@ class _WmEnabledRunner(Runner):
 
         # Restore weights if checkpoint specified — AFTER aux_value_head is registered
         ckpt_path = args.get("checkpoint")
-        if ckpt_path and (
-            wm_trainer is not None
-            or getattr(agent, "_erd_bridge", None) is not None
-            or getattr(agent, "_eir_bridge", None) is not None
-        ):
+        if ckpt_path:
+            # Always use the tolerant restore path on PBT restart / warm-start.
+            # seq_wm-only profiles (wm_curriculum_controller, wm_pbt_source_selector)
+            # previously fell through to rl_games _restore and crashed when a donor
+            # checkpoint carried EIR/elite optimizer param groups.
             _wm_safe_restore(agent, ckpt_path)
         else:
             torch_runner._restore(agent, args)
@@ -5875,6 +6190,79 @@ def main():
             curriculum_rollback_cooldown_frames=(
                 args_cli.curriculum_rollback_cooldown_frames
             ),
+            curriculum_safety_enable=args_cli.curriculum_safety_enable,
+            curriculum_safety_start_after_frames=(
+                args_cli.curriculum_safety_start_after_frames
+            ),
+            curriculum_safety_min_nsucc_mean=args_cli.curriculum_safety_min_nsucc_mean,
+            curriculum_safety_global_retention_threshold=(
+                args_cli.curriculum_safety_global_retention_threshold
+            ),
+            curriculum_safety_drop_ratio_threshold=(
+                args_cli.curriculum_safety_drop_ratio_threshold
+            ),
+            curriculum_safety_slope_threshold=(
+                args_cli.curriculum_safety_slope_threshold
+            ),
+            curriculum_safety_window=args_cli.curriculum_safety_window,
+            curriculum_safety_block_frames=args_cli.curriculum_safety_block_frames,
+            curriculum_safety_use_real_fallback=(
+                args_cli.curriculum_safety_use_real_fallback
+            ),
+            curriculum_strong_shrink_global_retention_gate=(
+                args_cli.curriculum_strong_shrink_global_retention_gate
+            ),
+            curriculum_strong_shrink_min_global_retention=(
+                args_cli.curriculum_strong_shrink_min_global_retention
+            ),
+            curriculum_strong_shrink_min_stable_ticks=(
+                args_cli.curriculum_strong_shrink_min_stable_ticks
+            ),
+            curriculum_strong_shrink_long_window=(
+                args_cli.curriculum_strong_shrink_long_window
+            ),
+            curriculum_danger_zone_enable=args_cli.curriculum_danger_zone_enable,
+            curriculum_danger_tol=args_cli.curriculum_danger_tol,
+            curriculum_danger_disable_strong_shrink=(
+                args_cli.curriculum_danger_disable_strong_shrink
+            ),
+            curriculum_danger_min_stable_ticks=(
+                args_cli.curriculum_danger_min_stable_ticks
+            ),
+            curriculum_danger_shrink_interval_mult=(
+                args_cli.curriculum_danger_shrink_interval_mult
+            ),
+            curriculum_danger_global_retention_threshold=(
+                args_cli.curriculum_danger_global_retention_threshold
+            ),
+            curriculum_rollback_on_repeated_collapse=(
+                args_cli.curriculum_rollback_on_repeated_collapse
+            ),
+            curriculum_rollback_collapse_patience=(
+                args_cli.curriculum_rollback_collapse_patience
+            ),
+            curriculum_rollback_to_last_mastered=(
+                args_cli.curriculum_rollback_to_last_mastered
+            ),
+            curriculum_rollback_freeze_frames=(
+                args_cli.curriculum_rollback_freeze_frames
+            ),
+            curriculum_last_mastered_min_nsucc_mean=(
+                args_cli.curriculum_last_mastered_min_nsucc_mean
+            ),
+            curriculum_last_mastered_min_global_retention=(
+                args_cli.curriculum_last_mastered_min_global_retention
+            ),
+            curriculum_last_mastered_stable_ticks=(
+                args_cli.curriculum_last_mastered_stable_ticks
+            ),
+            wm_imagined_diagnostic_enable=args_cli.wm_imagined_diagnostic_enable,
+            wm_imagined_shadow_block_enable=(
+                args_cli.wm_imagined_shadow_block_enable
+            ),
+            wm_imagined_shadow_uncertainty_threshold=(
+                args_cli.wm_imagined_shadow_uncertainty_threshold
+            ),
             pbt_usable_live_min_mean=args_cli.pbt_usable_live_min_mean,
             pbt_usable_live_min_max=args_cli.pbt_usable_live_min_max,
             pbt_usable_live_max_drop_ratio=args_cli.pbt_usable_live_max_drop_ratio,
@@ -6022,6 +6410,11 @@ def main():
             seq_aux_env_wrap=seq_aux_env_wrap,
             seq_policy_coupling_cfg=seq_policy_coupling_cfg,
         )
+    elif args_cli.checkpoint is not None:
+        # ppo_only and other non-WM profiles still receive cross-copy checkpoints
+        # from EIR/elite donors; stock Runner::_restore crashes on optimizer
+        # param-group mismatches.
+        runner = _CheckpointSafeRunner(observer)
     else:
         runner = Runner(observer)
 

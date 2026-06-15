@@ -153,7 +153,9 @@ def compute_wm_activation(
     - ``confidence_only``: no tol/perf gate (w_tol=1, w_perf=1); mainly
       eval_valid + time + uncertainty/source.
     - ``shrink_candidate``: only active when ``shrink_candidate=True``.
-    - ``hard_tol``: legacy behaviour, ``tol <= hard_tol``.
+    - ``hard_tol``: legacy behaviour, ``tol <= hard_tol`` AND time ramp applies
+      (unlike ``eir_mpc.compute_actor_distill_activation`` hard_tol which uses a
+      step-on at ``start_after_frames`` without time ramp — see Risk A audit).
     - ``soft_tol``: continuous schedule between ``tol_start`` and ``tol_full``.
 
     Note: ``min_weight`` only feeds ``soft_tol_weight``'s tolerance component;
@@ -280,6 +282,44 @@ def compute_wm_activation(
     )
 
 
+def compute_wm_pbt_source_activation_weight(
+    *,
+    enable: bool,
+    gate_mode: str,
+    frames: int,
+    start_after_frames: int,
+    ramp_frames: int,
+    wm_valid: bool,
+    wm_uncertainty: float,
+    max_uncertainty: float,
+) -> tuple[float, float, float]:
+    """PBT WM source-selector activation weight (time ramp * uncertainty gate).
+
+    Returns ``(weight, time_weight, unc_weight)``.  Invalid eval or disabled gate
+    yields all zeros so ranking falls back to the real score.
+    """
+    if not enable or str(gate_mode) == "off" or not wm_valid:
+        return 0.0, 0.0, 0.0
+    if int(frames) < int(start_after_frames):
+        w_time = 0.0
+    else:
+        w_time = clamp01(
+            (int(frames) - int(start_after_frames)) / max(1, int(ramp_frames))
+        )
+    w_unc = clamp01(
+        1.0 - float(wm_uncertainty) / max(1e-6, float(max_uncertainty))
+    )
+    return float(w_time * w_unc), float(w_time), float(w_unc)
+
+
+def blend_wm_ranking_score(
+    score_real: float, score_with_wm: float, activation_weight: float
+) -> float:
+    """Blend WM ranking contribution: real + w * (wm - real)."""
+    w = clamp01(float(activation_weight))
+    return float(score_real) + w * (float(score_with_wm) - float(score_real))
+
+
 __all__ = [
     "WMActivationConfig",
     "WMActivationAudit",
@@ -289,4 +329,6 @@ __all__ = [
     "TOL_BINS",
     "source_weight",
     "compute_wm_activation",
+    "compute_wm_pbt_source_activation_weight",
+    "blend_wm_ranking_score",
 ]

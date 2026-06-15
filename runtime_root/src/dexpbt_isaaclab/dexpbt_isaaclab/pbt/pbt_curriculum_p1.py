@@ -158,6 +158,49 @@ class CurriculumControlState:
     wm_curriculum_blocked_shrink_tol_005_006: float = 0.0
     wm_curriculum_blocked_shrink_tol_004_005: float = 0.0
     wm_curriculum_blocked_shrink_tol_le_004: float = 0.0
+    # Hybrid Curriculum Safety Patch (2026-06-15): audit fields. Defaults
+    # inert; runtime gates only when matching observer flags are enabled.
+    curriculum_safety_active: bool = False
+    curriculum_safety_real_fallback_used: bool = False
+    curriculum_safety_blocked_shrink: bool = False
+    curriculum_safety_block_reason: str = ""
+    curriculum_safety_global_retention: float = 0.0
+    curriculum_safety_recent_drop_ratio: float = 0.0
+    curriculum_safety_recent_slope: float = 0.0
+    curriculum_safety_stable_ticks: int = 0
+    curriculum_safety_repeated_collapse_count: int = 0
+    curriculum_safety_danger_zone: bool = False
+    curriculum_safety_imagined_valid: bool = False
+    curriculum_safety_wm_risk: bool = False
+    curriculum_safety_real_risk: bool = False
+    curriculum_global_retention: float = 0.0
+    curriculum_recent_peak_nsucc_mean_long: float = 0.0
+    curriculum_strong_shrink_allowed: bool = True
+    curriculum_strong_shrink_block_reason: str = ""
+    curriculum_strong_shrink_global_gate_active: bool = False
+    curriculum_danger_zone: bool = False
+    curriculum_danger_tol: float = 0.03
+    curriculum_danger_blocked_shrink: bool = False
+    curriculum_danger_block_reason: str = ""
+    curriculum_danger_stable_ticks: int = 0
+    curriculum_danger_interval_mult: float = 1.0
+    curriculum_last_mastered_tolerance: float = 0.0
+    curriculum_last_mastered_frame: int = -1
+    curriculum_last_mastered_nsucc_mean: float = 0.0
+    curriculum_last_mastered_global_retention: float = 0.0
+    curriculum_rollback_triggered: bool = False
+    curriculum_rollback_from_tol: float = 0.0
+    curriculum_rollback_to_tol: float = 0.0
+    curriculum_rollback_freeze_until: int = 0
+    curriculum_repeated_collapse_count: int = 0
+    wm_imagined_valid: bool = False
+    wm_imagined_uncertainty: float = 1.0
+    wm_imagined_success_prob: float = 0.0
+    wm_imagined_drop_risk: float = 0.0
+    wm_imagined_recovery_prob: float = 0.0
+    wm_imagined_invalid_reason: str = ""
+    wm_imagined_shadow_block_decision: bool = False
+    wm_imagined_shadow_block_reason: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

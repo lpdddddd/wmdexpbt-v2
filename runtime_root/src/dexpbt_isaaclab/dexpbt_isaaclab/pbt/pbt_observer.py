@@ -418,6 +418,37 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         wm_curriculum_controller_freeze_frames: int = 100_000_000,
         wm_curriculum_controller_hard_block_shrink: bool = True,
         wm_curriculum_controller_use_recovery_prob: bool = False,
+        # Hybrid Curriculum Safety Patch (2026-06-15): real-signal fallback,
+        # strong-shrink gate, danger zone, rollback-to-last-mastered-safe.
+        curriculum_safety_enable: bool = False,
+        curriculum_safety_start_after_frames: int = 500_000_000,
+        curriculum_safety_min_nsucc_mean: float = 10.0,
+        curriculum_safety_global_retention_threshold: float = 0.80,
+        curriculum_safety_drop_ratio_threshold: float = 0.30,
+        curriculum_safety_slope_threshold: float = -2.0,
+        curriculum_safety_window: int = 6,
+        curriculum_safety_block_frames: int = 100_000_000,
+        curriculum_safety_use_real_fallback: bool = False,
+        curriculum_strong_shrink_global_retention_gate: bool = False,
+        curriculum_strong_shrink_min_global_retention: float = 0.85,
+        curriculum_strong_shrink_min_stable_ticks: int = 3,
+        curriculum_strong_shrink_long_window: int = 12,
+        curriculum_danger_zone_enable: bool = False,
+        curriculum_danger_tol: float = 0.030,
+        curriculum_danger_disable_strong_shrink: bool = True,
+        curriculum_danger_min_stable_ticks: int = 4,
+        curriculum_danger_shrink_interval_mult: float = 2.0,
+        curriculum_danger_global_retention_threshold: float = 0.85,
+        curriculum_rollback_on_repeated_collapse: bool = False,
+        curriculum_rollback_collapse_patience: int = 2,
+        curriculum_rollback_to_last_mastered: bool = False,
+        curriculum_rollback_freeze_frames: int = 200_000_000,
+        curriculum_last_mastered_min_nsucc_mean: float = 30.0,
+        curriculum_last_mastered_min_global_retention: float = 0.85,
+        curriculum_last_mastered_stable_ticks: int = 3,
+        wm_imagined_diagnostic_enable: bool = False,
+        wm_imagined_shadow_block_enable: bool = False,
+        wm_imagined_shadow_uncertainty_threshold: float = 0.95,
         # PBT-WM Soft Activation Gate v1: WM PBT source-score soft gate
         # (confidence_only: eval_valid + time ramp + uncertainty, no tol gate).
         wm_pbt_source_gate_mode: str = "confidence_only",
@@ -964,6 +995,90 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._rollback_count: dict[int, int] = {}
         self._shrinks_since_rollback: dict[int, int] = {}
         self._rollback_reason: dict[int, str] = {}
+        # Hybrid Curriculum Safety Patch (2026-06-15).
+        self.curriculum_safety_enable = bool(curriculum_safety_enable)
+        self.curriculum_safety_start_after_frames = int(
+            curriculum_safety_start_after_frames
+        )
+        self.curriculum_safety_min_nsucc_mean = float(
+            curriculum_safety_min_nsucc_mean
+        )
+        self.curriculum_safety_global_retention_threshold = float(
+            curriculum_safety_global_retention_threshold
+        )
+        self.curriculum_safety_drop_ratio_threshold = float(
+            curriculum_safety_drop_ratio_threshold
+        )
+        self.curriculum_safety_slope_threshold = float(
+            curriculum_safety_slope_threshold
+        )
+        self.curriculum_safety_window = max(2, int(curriculum_safety_window))
+        self.curriculum_safety_block_frames = int(curriculum_safety_block_frames)
+        self.curriculum_safety_use_real_fallback = bool(
+            curriculum_safety_use_real_fallback
+        )
+        self.curriculum_strong_shrink_global_retention_gate = bool(
+            curriculum_strong_shrink_global_retention_gate
+        )
+        self.curriculum_strong_shrink_min_global_retention = float(
+            curriculum_strong_shrink_min_global_retention
+        )
+        self.curriculum_strong_shrink_min_stable_ticks = max(
+            1, int(curriculum_strong_shrink_min_stable_ticks)
+        )
+        self.curriculum_strong_shrink_long_window = max(
+            2, int(curriculum_strong_shrink_long_window)
+        )
+        self.curriculum_danger_zone_enable = bool(curriculum_danger_zone_enable)
+        self.curriculum_danger_tol = float(curriculum_danger_tol)
+        self.curriculum_danger_disable_strong_shrink = bool(
+            curriculum_danger_disable_strong_shrink
+        )
+        self.curriculum_danger_min_stable_ticks = max(
+            1, int(curriculum_danger_min_stable_ticks)
+        )
+        self.curriculum_danger_shrink_interval_mult = float(
+            curriculum_danger_shrink_interval_mult
+        )
+        self.curriculum_danger_global_retention_threshold = float(
+            curriculum_danger_global_retention_threshold
+        )
+        self.curriculum_rollback_on_repeated_collapse = bool(
+            curriculum_rollback_on_repeated_collapse
+        )
+        self.curriculum_rollback_collapse_patience = max(
+            1, int(curriculum_rollback_collapse_patience)
+        )
+        self.curriculum_rollback_to_last_mastered = bool(
+            curriculum_rollback_to_last_mastered
+        )
+        self.curriculum_rollback_freeze_frames = int(
+            curriculum_rollback_freeze_frames
+        )
+        self.curriculum_last_mastered_min_nsucc_mean = float(
+            curriculum_last_mastered_min_nsucc_mean
+        )
+        self.curriculum_last_mastered_min_global_retention = float(
+            curriculum_last_mastered_min_global_retention
+        )
+        self.curriculum_last_mastered_stable_ticks = max(
+            1, int(curriculum_last_mastered_stable_ticks)
+        )
+        self.wm_imagined_diagnostic_enable = bool(wm_imagined_diagnostic_enable)
+        self.wm_imagined_shadow_block_enable = bool(wm_imagined_shadow_block_enable)
+        self.wm_imagined_shadow_uncertainty_threshold = float(
+            wm_imagined_shadow_uncertainty_threshold
+        )
+        self._last_mastered_safe_tolerance: dict[int, float] = {}
+        self._last_mastered_safe_frame: dict[int, int] = {}
+        self._last_mastered_safe_nsucc_mean: dict[int, float] = {}
+        self._last_mastered_safe_global_retention: dict[int, float] = {}
+        self._repeated_collapse_count: dict[int, int] = {}
+        self._curriculum_safety_freeze_until: dict[int, int] = {}
+        self._curriculum_safety_events_path = (
+            self.workspace / "metrics" / "curriculum_safety_events.jsonl"
+        )
+        self._last_curriculum_safety_audit: dict[str, Any] = {}
         self.pbt_usable_live_min_mean = float(pbt_usable_live_min_mean)
         self.pbt_usable_live_min_max = float(pbt_usable_live_min_max)
         self.pbt_usable_live_max_drop_ratio = float(
@@ -1350,6 +1465,26 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         rollback_count = int(self._rollback_count.get(policy_idx, 0))
         last_rollback_frame = int(self._last_rollback_frame.get(policy_idx, -10**18))
         rollback_and_freeze_same_tick = False
+        curriculum_rollback_triggered = False
+        curriculum_rollback_from_tol = 0.0
+        curriculum_rollback_to_tol = 0.0
+        curriculum_rollback_freeze_until = int(
+            self._curriculum_safety_freeze_until.get(policy_idx, 0)
+        )
+        global_retention, global_nsucc_mean, long_peak = self._compute_global_retention(
+            window
+        )
+        stable_ticks = self._count_tolerance_stable_ticks(window)
+        cur_tol = (
+            float(window.samples[-1].success_tolerance) if window.samples else 0.075
+        )
+        danger_zone = bool(
+            self.curriculum_danger_zone_enable
+            and cur_tol <= self.curriculum_danger_tol + 1e-9
+        )
+        repeated_collapse_count = int(
+            self._repeated_collapse_count.get(policy_idx, 0)
+        )
         if self.curriculum_collapse_detect:
             if self.pbt_early_collapse_detect:
                 early_detected, early_drop, _ = evaluate_collapse_freeze(
@@ -1376,6 +1511,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._collapse_freeze_until[policy_idx] = (
                     int(env_frames) + self.collapse_freeze_env_frames
                 )
+                repeated_collapse_count += 1
+                self._repeated_collapse_count[policy_idx] = repeated_collapse_count
             if hard_collapse_detected:
                 rollback_cooldown_active = (
                     int(env_frames) - last_rollback_frame
@@ -1401,6 +1538,64 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     rollback_and_freeze_same_tick = collapse_detected
                 else:
                     rollback_reason = "cooldown_blocked"
+            if (
+                self.curriculum_rollback_on_repeated_collapse
+                and self.curriculum_rollback_to_last_mastered
+                and danger_zone
+                and repeated_collapse_count
+                >= self.curriculum_rollback_collapse_patience
+            ):
+                safe_tol = float(
+                    self._last_mastered_safe_tolerance.get(policy_idx, 0.0)
+                )
+                if safe_tol > 1e-9 and cur_tol < safe_tol - 1e-9:
+                    forced_tolerance = safe_tol
+                    collapse_rollback_active = True
+                    curriculum_rollback_triggered = True
+                    curriculum_rollback_from_tol = float(cur_tol)
+                    curriculum_rollback_to_tol = float(safe_tol)
+                    rollback_reason = "repeated_collapse_to_last_mastered"
+                    self._last_rollback_frame[policy_idx] = int(env_frames)
+                    last_rollback_frame = int(env_frames)
+                    self._rollback_count[policy_idx] = rollback_count + 1
+                    rollback_count += 1
+                    self._shrinks_since_rollback[policy_idx] = 0
+                    self._repeated_collapse_count[policy_idx] = 0
+                    repeated_collapse_count = 0
+                    curriculum_rollback_freeze_until = int(env_frames) + int(
+                        self.curriculum_rollback_freeze_frames
+                    )
+                    self._curriculum_safety_freeze_until[policy_idx] = (
+                        curriculum_rollback_freeze_until
+                    )
+                    self._append_curriculum_safety_event(
+                        {
+                            "event": "repeated_collapse_rollback",
+                            "policy_idx": int(policy_idx),
+                            "env_frames": int(env_frames),
+                            "from_tol": float(cur_tol),
+                            "to_tol": float(safe_tol),
+                            "repeated_collapse_count": int(
+                                self.curriculum_rollback_collapse_patience
+                            ),
+                        }
+                    )
+                elif repeated_collapse_count >= self.curriculum_rollback_collapse_patience:
+                    curriculum_rollback_freeze_until = int(env_frames) + int(
+                        self.curriculum_rollback_freeze_frames
+                    )
+                    self._curriculum_safety_freeze_until[policy_idx] = (
+                        curriculum_rollback_freeze_until
+                    )
+                    rollback_reason = "repeated_collapse_freeze_only"
+                    self._append_curriculum_safety_event(
+                        {
+                            "event": "repeated_collapse_freeze_only",
+                            "policy_idx": int(policy_idx),
+                            "env_frames": int(env_frames),
+                            "current_tol": float(cur_tol),
+                        }
+                    )
 
         freeze_until = self._collapse_freeze_until.get(policy_idx, 0)
         collapse_freeze_active = int(env_frames) < freeze_until
@@ -1477,6 +1672,26 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             and not blocked_by_consolidation
         )
         blocked_by_adaptive_fast_low_nsucc = False
+        curriculum_strong_shrink_allowed = True
+        curriculum_strong_shrink_block_reason = ""
+        curriculum_strong_shrink_global_gate_active = bool(
+            self.curriculum_strong_shrink_global_retention_gate
+        )
+        curriculum_danger_blocked_shrink = False
+        curriculum_danger_block_reason = ""
+        curriculum_danger_interval_mult = 1.0
+        curriculum_last_mastered_tolerance = float(
+            self._last_mastered_safe_tolerance.get(policy_idx, 0.0)
+        )
+        curriculum_last_mastered_frame = int(
+            self._last_mastered_safe_frame.get(policy_idx, -1)
+        )
+        curriculum_last_mastered_nsucc_mean = float(
+            self._last_mastered_safe_nsucc_mean.get(policy_idx, 0.0)
+        )
+        curriculum_last_mastered_global_retention = float(
+            self._last_mastered_safe_global_retention.get(policy_idx, 0.0)
+        )
 
         if self.curriculum_speed_mode == "adaptive_fast":
             # In recovery stage we still allow shrink but force the legacy
@@ -1509,53 +1724,89 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         self.curriculum_fast_recovery_consolidation_frames
                     )
                     shrink_reason = "recovery_legacy"
-                elif (
-                    nsucc_mean_used >= self.curriculum_fast_strong_mean
-                    and retention_used >= self.curriculum_fast_retention_threshold
-                ):
-                    adaptive_shrink_factor = float(
-                        self.curriculum_fast_shrink_strong
-                    )
-                    adaptive_consolidation_frames = int(
-                        self.curriculum_fast_consolidation_frames
-                    )
-                    shrink_reason = "strong"
-                elif nsucc_mean_used >= self.curriculum_fast_mid_mean:
-                    adaptive_shrink_factor = float(
-                        self.curriculum_fast_shrink_mid
-                    )
-                    adaptive_consolidation_frames = int(
-                        self.curriculum_fast_consolidation_frames
-                    )
-                    shrink_reason = "mid"
-                elif nsucc_mean_used >= self.curriculum_fast_low_mean:
-                    adaptive_shrink_factor = float(
-                        self.curriculum_fast_shrink_low
-                    )
-                    adaptive_consolidation_frames = int(
-                        self.curriculum_fast_consolidation_frames
-                    )
-                    shrink_reason = "low"
                 else:
-                    # nsucc < low_mean -> block this shrink. Roll back the
-                    # single-shot bookkeeping so a future tick (with higher
-                    # nsucc_mean) can still shrink in this PBT iteration.
-                    shrink_token = False
-                    allow_shrink = False
-                    shrink_blocked_reason = "adaptive_fast_low_nsucc_mean"
-                    blocked_by_adaptive_fast_low_nsucc = True
-                    if (
-                        self.pbt_single_shrink_per_window
-                        and self._shrink_issued_this_window.get(policy_idx, False)
-                    ):
-                        self._shrink_issued_this_window[policy_idx] = False
-                        cur = int(
-                            self._shrinks_since_rollback.get(policy_idx, 0)
+                    allow_strong = True
+                    if self.curriculum_strong_shrink_global_retention_gate:
+                        allow_strong = (
+                            global_retention
+                            >= self.curriculum_strong_shrink_min_global_retention
+                            and stable_ticks
+                            >= self.curriculum_strong_shrink_min_stable_ticks
                         )
-                        if cur > 0:
-                            self._shrinks_since_rollback[policy_idx] = cur - 1
-                    shrinks_in_window = 0
-                    shrink_reason = "blocked_low_nsucc"
+                        if not allow_strong:
+                            curriculum_strong_shrink_allowed = False
+                            curriculum_strong_shrink_block_reason = (
+                                "low_global_retention_or_unstable"
+                            )
+                    if (
+                        danger_zone
+                        and self.curriculum_danger_disable_strong_shrink
+                    ):
+                        allow_strong = False
+                        curriculum_strong_shrink_allowed = False
+                        if not curriculum_strong_shrink_block_reason:
+                            curriculum_strong_shrink_block_reason = "danger_zone"
+                    if (
+                        nsucc_mean_used >= self.curriculum_fast_strong_mean
+                        and retention_used >= self.curriculum_fast_retention_threshold
+                        and allow_strong
+                    ):
+                        adaptive_shrink_factor = float(
+                            self.curriculum_fast_shrink_strong
+                        )
+                        adaptive_consolidation_frames = int(
+                            self.curriculum_fast_consolidation_frames
+                        )
+                        shrink_reason = "strong"
+                    elif nsucc_mean_used >= self.curriculum_fast_mid_mean:
+                        adaptive_shrink_factor = float(
+                            self.curriculum_fast_shrink_mid
+                        )
+                        adaptive_consolidation_frames = int(
+                            self.curriculum_fast_consolidation_frames
+                        )
+                        shrink_reason = "mid"
+                    elif nsucc_mean_used >= self.curriculum_fast_low_mean:
+                        adaptive_shrink_factor = float(
+                            self.curriculum_fast_shrink_low
+                        )
+                        adaptive_consolidation_frames = int(
+                            self.curriculum_fast_consolidation_frames
+                        )
+                        shrink_reason = "low"
+                    else:
+                        # nsucc < low_mean -> block this shrink. Roll back the
+                        # single-shot bookkeeping so a future tick (with higher
+                        # nsucc_mean) can still shrink in this PBT iteration.
+                        shrink_token = False
+                        allow_shrink = False
+                        shrink_blocked_reason = "adaptive_fast_low_nsucc_mean"
+                        blocked_by_adaptive_fast_low_nsucc = True
+                        if (
+                            self.pbt_single_shrink_per_window
+                            and self._shrink_issued_this_window.get(policy_idx, False)
+                        ):
+                            self._shrink_issued_this_window[policy_idx] = False
+                            cur = int(
+                                self._shrinks_since_rollback.get(policy_idx, 0)
+                            )
+                            if cur > 0:
+                                self._shrinks_since_rollback[policy_idx] = cur - 1
+                        shrinks_in_window = 0
+                        shrink_reason = "blocked_low_nsucc"
+                if (
+                    shrink_token
+                    and danger_zone
+                    and self.curriculum_danger_zone_enable
+                    and adaptive_consolidation_frames > 0
+                ):
+                    curriculum_danger_interval_mult = float(
+                        self.curriculum_danger_shrink_interval_mult
+                    )
+                    adaptive_consolidation_frames = int(
+                        adaptive_consolidation_frames
+                        * curriculum_danger_interval_mult
+                    )
             else:
                 # Token already cleared by an upstream gate; reflect why for
                 # logging consumers.
@@ -1581,6 +1832,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if gate_pass and window.samples:
             last_tol = window.samples[-1].success_tolerance
             self._last_mastered_tolerance[policy_idx] = last_tol
+        if (
+            global_nsucc_mean >= self.curriculum_last_mastered_min_nsucc_mean
+            and global_retention >= self.curriculum_last_mastered_min_global_retention
+            and stable_ticks >= self.curriculum_last_mastered_stable_ticks
+            and not collapse_freeze_active
+            and not hard_collapse_detected
+            and window.samples
+        ):
+            safe_tol = float(window.samples[-1].success_tolerance)
+            self._last_mastered_safe_tolerance[policy_idx] = safe_tol
+            self._last_mastered_safe_frame[policy_idx] = int(env_frames)
+            self._last_mastered_safe_nsucc_mean[policy_idx] = float(global_nsucc_mean)
+            self._last_mastered_safe_global_retention[policy_idx] = float(
+                global_retention
+            )
+            curriculum_last_mastered_tolerance = safe_tol
+            curriculum_last_mastered_frame = int(env_frames)
+            curriculum_last_mastered_nsucc_mean = float(global_nsucc_mean)
+            curriculum_last_mastered_global_retention = float(global_retention)
+            if not collapse_detected:
+                self._repeated_collapse_count[policy_idx] = 0
+                repeated_collapse_count = 0
 
         if self.pbt_freeze_mutation_after_stable_frames > 0:
             stable_ok, _ = is_stable_source_window(
@@ -1656,10 +1929,57 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             policy_idx, window, env_frames
         )
         self._last_wm_curriculum_audit = dict(wm_cc)
-        if wm_cc.get("blocked_shrink") and shrink_token:
+        safety = self._evaluate_curriculum_safety(
+            policy_idx,
+            window,
+            env_frames,
+            cur_tol,
+            shrink_token,
+            wm_cc=wm_cc,
+            global_retention=global_retention,
+            stable_ticks=stable_ticks,
+            danger_zone=danger_zone,
+            repeated_collapse_count=repeated_collapse_count,
+        )
+        self._last_curriculum_safety_audit = dict(safety)
+        if safety.get("danger_blocked"):
+            curriculum_danger_blocked_shrink = True
+            curriculum_danger_block_reason = str(
+                safety.get("danger_block_reason", "")
+            )
+        blocked_by_safety = bool(safety.get("blocked"))
+        blocked_by_wm = bool(wm_cc.get("blocked_shrink"))
+        if (blocked_by_safety or blocked_by_wm) and shrink_token:
             shrink_token = False
             allow_shrink = False
-            shrink_blocked_reason = "wm_curriculum_high_risk"
+            if blocked_by_safety:
+                shrink_blocked_reason = str(
+                    safety.get("block_reason", "curriculum_safety_blocked")
+                )
+                shrink_reason = "curriculum_safety_blocked"
+                if shrink_blocked_reason == "real_signal_risk":
+                    self._append_curriculum_safety_event(
+                        {
+                            "event": "real_signal_block",
+                            "policy_idx": int(policy_idx),
+                            "env_frames": int(env_frames),
+                            "global_retention": float(global_retention),
+                            "drop_ratio": float(safety.get("recent_drop_ratio", 0.0)),
+                        }
+                    )
+                elif shrink_blocked_reason.startswith("danger_zone"):
+                    self._append_curriculum_safety_event(
+                        {
+                            "event": "danger_zone_block",
+                            "policy_idx": int(policy_idx),
+                            "env_frames": int(env_frames),
+                            "reason": shrink_blocked_reason,
+                            "stable_ticks": int(stable_ticks),
+                        }
+                    )
+            else:
+                shrink_blocked_reason = "wm_curriculum_high_risk"
+                shrink_reason = "wm_curriculum_blocked"
             if (
                 self.pbt_single_shrink_per_window
                 and self._shrink_issued_this_window.get(policy_idx, False)
@@ -1669,7 +1989,43 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 if cur > 0:
                     self._shrinks_since_rollback[policy_idx] = cur - 1
             shrinks_in_window = 0
-            shrink_reason = "wm_curriculum_blocked"
+        elif (
+            not curriculum_strong_shrink_allowed
+            and shrink_reason == "strong"
+            and curriculum_strong_shrink_block_reason
+        ):
+            self._append_curriculum_safety_event(
+                {
+                    "event": "strong_shrink_blocked",
+                    "policy_idx": int(policy_idx),
+                    "env_frames": int(env_frames),
+                    "reason": curriculum_strong_shrink_block_reason,
+                    "global_retention": float(global_retention),
+                }
+            )
+
+        wm_payload = self._load_policy_wm_imagined_eval(policy_idx) or {}
+        wm_imagined_valid = bool(wm_payload.get("imagined_valid", False))
+        wm_imagined_uncertainty = float(wm_payload.get("uncertainty", 1.0))
+        wm_imagined_success_prob = float(wm_payload.get("wm_success_prob", 0.0))
+        wm_imagined_drop_risk = float(wm_payload.get("wm_drop_risk", 0.0))
+        wm_imagined_recovery_prob = float(wm_payload.get("wm_recovery_prob", 0.0))
+        wm_imagined_invalid_reason = str(
+            wm_payload.get("invalid_reason", "")
+        )
+        wm_imagined_shadow_block_decision = bool(
+            wm_payload.get("shadow_block_decision", False)
+        )
+        wm_imagined_shadow_block_reason = str(
+            wm_payload.get("shadow_block_reason", "")
+        )
+        if (
+            wm_imagined_shadow_block_decision
+            and not safety.get("real_risk")
+        ):
+            wm_imagined_shadow_block_reason = (
+                wm_imagined_shadow_block_reason or "shadow_only"
+            )
 
         return CurriculumControlState(
             curriculum_mode=self.curriculum_mode,
@@ -1747,6 +2103,63 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             wm_curriculum_blocked_shrink_tol_le_004=float(
                 wm_cc.get("blocked_shrink_tol_le_004", 0.0)
             ),
+            curriculum_safety_active=bool(safety.get("active", False)),
+            curriculum_safety_real_fallback_used=bool(
+                safety.get("real_fallback_used", False)
+            ),
+            curriculum_safety_blocked_shrink=bool(safety.get("blocked", False)),
+            curriculum_safety_block_reason=str(safety.get("block_reason", "")),
+            curriculum_safety_global_retention=float(
+                safety.get("global_retention", global_retention)
+            ),
+            curriculum_safety_recent_drop_ratio=float(
+                safety.get("recent_drop_ratio", 0.0)
+            ),
+            curriculum_safety_recent_slope=float(safety.get("recent_slope", 0.0)),
+            curriculum_safety_stable_ticks=int(safety.get("stable_ticks", stable_ticks)),
+            curriculum_safety_repeated_collapse_count=int(repeated_collapse_count),
+            curriculum_safety_danger_zone=bool(danger_zone),
+            curriculum_safety_imagined_valid=bool(safety.get("imagined_valid", False)),
+            curriculum_safety_wm_risk=bool(safety.get("wm_risk", False)),
+            curriculum_safety_real_risk=bool(safety.get("real_risk", False)),
+            curriculum_global_retention=float(global_retention),
+            curriculum_recent_peak_nsucc_mean_long=float(long_peak),
+            curriculum_strong_shrink_allowed=bool(curriculum_strong_shrink_allowed),
+            curriculum_strong_shrink_block_reason=str(
+                curriculum_strong_shrink_block_reason
+            ),
+            curriculum_strong_shrink_global_gate_active=bool(
+                curriculum_strong_shrink_global_gate_active
+            ),
+            curriculum_danger_zone=bool(danger_zone),
+            curriculum_danger_tol=float(self.curriculum_danger_tol),
+            curriculum_danger_blocked_shrink=bool(curriculum_danger_blocked_shrink),
+            curriculum_danger_block_reason=str(curriculum_danger_block_reason),
+            curriculum_danger_stable_ticks=int(stable_ticks),
+            curriculum_danger_interval_mult=float(curriculum_danger_interval_mult),
+            curriculum_last_mastered_tolerance=float(
+                curriculum_last_mastered_tolerance
+            ),
+            curriculum_last_mastered_frame=int(curriculum_last_mastered_frame),
+            curriculum_last_mastered_nsucc_mean=float(
+                curriculum_last_mastered_nsucc_mean
+            ),
+            curriculum_last_mastered_global_retention=float(
+                curriculum_last_mastered_global_retention
+            ),
+            curriculum_rollback_triggered=bool(curriculum_rollback_triggered),
+            curriculum_rollback_from_tol=float(curriculum_rollback_from_tol),
+            curriculum_rollback_to_tol=float(curriculum_rollback_to_tol),
+            curriculum_rollback_freeze_until=int(curriculum_rollback_freeze_until),
+            curriculum_repeated_collapse_count=int(repeated_collapse_count),
+            wm_imagined_valid=wm_imagined_valid,
+            wm_imagined_uncertainty=wm_imagined_uncertainty,
+            wm_imagined_success_prob=wm_imagined_success_prob,
+            wm_imagined_drop_risk=wm_imagined_drop_risk,
+            wm_imagined_recovery_prob=wm_imagined_recovery_prob,
+            wm_imagined_invalid_reason=wm_imagined_invalid_reason,
+            wm_imagined_shadow_block_decision=wm_imagined_shadow_block_decision,
+            wm_imagined_shadow_block_reason=wm_imagined_shadow_block_reason,
         )
 
     def _log_curriculum_control_scalars(
@@ -2334,6 +2747,169 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         record.setdefault("timestamp", time.time())
         with open(self._recovery_audit_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
+
+    def _append_curriculum_safety_event(self, record: dict[str, Any]) -> None:
+        self._curriculum_safety_events_path.parent.mkdir(parents=True, exist_ok=True)
+        record = dict(record)
+        record.setdefault("policy_idx", int(self.policy_idx))
+        record.setdefault("env_frames", int(record.get("env_frames", 0)))
+        record.setdefault("timestamp", time.time())
+        with open(self._curriculum_safety_events_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    @staticmethod
+    def _count_tolerance_stable_ticks(window: RollingNsuccWindow) -> int:
+        if not window.samples:
+            return 0
+        ref = float(window.samples[-1].success_tolerance)
+        count = 0
+        for sample in reversed(window.samples):
+            if abs(float(sample.success_tolerance) - ref) < 1e-9:
+                count += 1
+            else:
+                break
+        return count
+
+    def _compute_global_retention(
+        self, window: RollingNsuccWindow
+    ) -> tuple[float, float, float]:
+        """Return (global_retention, current_nsucc_mean, long_window_peak)."""
+        long_n = max(2, int(self.curriculum_strong_shrink_long_window))
+        xs = window.last_n(long_n)
+        if not xs:
+            return 1.0, 0.0, 0.0
+        cur = float(xs[-1].nsucc_mean)
+        peak = max(float(s.nsucc_mean) for s in xs)
+        if peak <= 1e-9:
+            return 1.0, cur, peak
+        return cur / peak, cur, peak
+
+    @staticmethod
+    def _recent_slope(window: RollingNsuccWindow, n: int) -> float:
+        xs = window.last_n(max(2, int(n)))
+        if len(xs) < 2:
+            return 0.0
+        return float(xs[-1].nsucc_mean) - float(xs[0].nsucc_mean)
+
+    def _evaluate_curriculum_safety(
+        self,
+        policy_idx: int,
+        window: RollingNsuccWindow,
+        env_frames: int,
+        success_tolerance: float,
+        shrink_token: bool,
+        *,
+        wm_cc: dict[str, Any],
+        global_retention: float,
+        stable_ticks: int,
+        danger_zone: bool,
+        repeated_collapse_count: int,
+    ) -> dict[str, Any]:
+        """Hybrid curriculum safety: real-signal fallback + WM + danger zone."""
+        out: dict[str, Any] = {
+            "active": False,
+            "blocked": False,
+            "block_reason": "",
+            "real_fallback_used": False,
+            "global_retention": float(global_retention),
+            "recent_drop_ratio": 0.0,
+            "recent_slope": 0.0,
+            "stable_ticks": int(stable_ticks),
+            "repeated_collapse_count": int(repeated_collapse_count),
+            "danger_zone": bool(danger_zone),
+            "imagined_valid": bool(wm_cc.get("eval_valid", False)),
+            "wm_risk": False,
+            "real_risk": False,
+            "danger_blocked": False,
+            "danger_block_reason": "",
+            "danger_interval_mult": 1.0,
+        }
+        if not self.curriculum_safety_enable:
+            return out
+        if int(env_frames) < int(self.curriculum_safety_start_after_frames):
+            return out
+        if int(env_frames) < int(
+            self._curriculum_safety_freeze_until.get(policy_idx, 0)
+        ):
+            out["active"] = True
+            out["blocked"] = True
+            out["block_reason"] = "curriculum_safety_freeze_active"
+            return out
+        out["active"] = True
+        out["recent_drop_ratio"] = float(
+            window.drop_ratio_vs_prior(max(2, self.curriculum_safety_window))
+        )
+        out["recent_slope"] = float(
+            self._recent_slope(window, self.curriculum_safety_window)
+        )
+        nsucc_mean = 0.0
+        if window.samples:
+            nsucc_mean = float(window.samples[-1].nsucc_mean)
+        risk_real = False
+        if self.curriculum_safety_use_real_fallback:
+            risk_real = (
+                global_retention
+                < self.curriculum_safety_global_retention_threshold
+                or out["recent_drop_ratio"]
+                > self.curriculum_safety_drop_ratio_threshold
+                or out["recent_slope"] < self.curriculum_safety_slope_threshold
+                or repeated_collapse_count
+                >= self.curriculum_rollback_collapse_patience
+            )
+            out["real_fallback_used"] = True
+        out["real_risk"] = bool(risk_real)
+        risk_wm = False
+        if out["imagined_valid"]:
+            risk_wm = (
+                float(wm_cc.get("drop_risk", 0.0))
+                >= self.wm_curriculum_controller_drop_risk_threshold
+                or float(wm_cc.get("uncertainty", 1.0))
+                >= self.wm_curriculum_controller_uncertainty_threshold
+                or float(wm_cc.get("success_prob", 0.0))
+                < self.wm_curriculum_controller_min_success_prob
+            )
+        out["wm_risk"] = bool(risk_wm)
+        if danger_zone and self.curriculum_danger_zone_enable:
+            out["danger_interval_mult"] = float(
+                self.curriculum_danger_shrink_interval_mult
+            )
+        if not shrink_token:
+            return out
+        apply_block = nsucc_mean >= self.curriculum_safety_min_nsucc_mean
+        if not apply_block:
+            return out
+        if risk_real:
+            out["blocked"] = True
+            out["block_reason"] = "real_signal_risk"
+            self._curriculum_safety_freeze_until[policy_idx] = int(env_frames) + int(
+                self.curriculum_safety_block_frames
+            )
+            return out
+        if risk_wm:
+            out["blocked"] = True
+            out["block_reason"] = "wm_risk_valid"
+            return out
+        if (
+            danger_zone
+            and self.curriculum_danger_zone_enable
+            and stable_ticks < self.curriculum_danger_min_stable_ticks
+        ):
+            out["blocked"] = True
+            out["block_reason"] = "danger_zone_not_stable"
+            out["danger_blocked"] = True
+            out["danger_block_reason"] = "danger_zone_insufficient_stability"
+            return out
+        if (
+            danger_zone
+            and self.curriculum_danger_zone_enable
+            and global_retention
+            < self.curriculum_danger_global_retention_threshold
+        ):
+            out["blocked"] = True
+            out["block_reason"] = "danger_zone_low_global_retention"
+            out["danger_blocked"] = True
+            out["danger_block_reason"] = "danger_zone_low_global_retention"
+        return out
 
     def _read_last_mastered_tolerance(self, policy_idx: int) -> float:
         path = self._curriculum_control_dir / f"{int(policy_idx):03d}.json"
@@ -3407,6 +3983,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             own_ctrl = read_curriculum_control(
                 self._curriculum_control_dir / f"{self.policy_idx:03d}.json"
             )
+            from dexpbt_isaaclab.world_model.wm_activation_gate import tol_bin as _wm_tol_bin
+
+            _succ_tol = float(curriculum.get("success_tolerance", float("nan")))
+            _curriculum_tol_bin = (
+                _wm_tol_bin(_succ_tol) if math.isfinite(_succ_tol) else "le_004"
+            )
+            _actor_distill_tol_bin = str(
+                curriculum.get("actor_distill_tol_bin") or _curriculum_tol_bin
+            )
             point = {
                 "env_frames": int(env_frames),
                 "policy_idx": int(self.policy_idx),
@@ -3831,6 +4416,141 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_curriculum_fallback_reason_id": int(
                     own_ctrl.wm_curriculum_fallback_reason_id if own_ctrl else 0
                 ),
+                # Hybrid Curriculum Safety Patch (2026-06-15).
+                "curriculum_safety_active": bool(
+                    own_ctrl.curriculum_safety_active if own_ctrl else False
+                ),
+                "curriculum_safety_real_fallback_used": bool(
+                    own_ctrl.curriculum_safety_real_fallback_used if own_ctrl else False
+                ),
+                "curriculum_safety_blocked_shrink": bool(
+                    own_ctrl.curriculum_safety_blocked_shrink if own_ctrl else False
+                ),
+                "curriculum_safety_block_reason": str(
+                    own_ctrl.curriculum_safety_block_reason if own_ctrl else ""
+                ),
+                "curriculum_safety_global_retention": float(
+                    own_ctrl.curriculum_safety_global_retention if own_ctrl else 0.0
+                ),
+                "curriculum_safety_recent_drop_ratio": float(
+                    own_ctrl.curriculum_safety_recent_drop_ratio if own_ctrl else 0.0
+                ),
+                "curriculum_safety_recent_slope": float(
+                    own_ctrl.curriculum_safety_recent_slope if own_ctrl else 0.0
+                ),
+                "curriculum_safety_stable_ticks": int(
+                    own_ctrl.curriculum_safety_stable_ticks if own_ctrl else 0
+                ),
+                "curriculum_safety_repeated_collapse_count": int(
+                    own_ctrl.curriculum_safety_repeated_collapse_count
+                    if own_ctrl
+                    else 0
+                ),
+                "curriculum_safety_danger_zone": bool(
+                    own_ctrl.curriculum_safety_danger_zone if own_ctrl else False
+                ),
+                "curriculum_safety_imagined_valid": bool(
+                    own_ctrl.curriculum_safety_imagined_valid if own_ctrl else False
+                ),
+                "curriculum_safety_wm_risk": bool(
+                    own_ctrl.curriculum_safety_wm_risk if own_ctrl else False
+                ),
+                "curriculum_safety_real_risk": bool(
+                    own_ctrl.curriculum_safety_real_risk if own_ctrl else False
+                ),
+                "curriculum_global_retention": float(
+                    own_ctrl.curriculum_global_retention if own_ctrl else 0.0
+                ),
+                "curriculum_recent_peak_nsucc_mean_long": float(
+                    own_ctrl.curriculum_recent_peak_nsucc_mean_long
+                    if own_ctrl
+                    else 0.0
+                ),
+                "curriculum_strong_shrink_allowed": bool(
+                    own_ctrl.curriculum_strong_shrink_allowed if own_ctrl else True
+                ),
+                "curriculum_strong_shrink_block_reason": str(
+                    own_ctrl.curriculum_strong_shrink_block_reason if own_ctrl else ""
+                ),
+                "curriculum_strong_shrink_global_gate_active": bool(
+                    own_ctrl.curriculum_strong_shrink_global_gate_active
+                    if own_ctrl
+                    else False
+                ),
+                "curriculum_danger_zone": bool(
+                    own_ctrl.curriculum_danger_zone if own_ctrl else False
+                ),
+                "curriculum_danger_tol": float(
+                    own_ctrl.curriculum_danger_tol if own_ctrl else 0.03
+                ),
+                "curriculum_danger_blocked_shrink": bool(
+                    own_ctrl.curriculum_danger_blocked_shrink if own_ctrl else False
+                ),
+                "curriculum_danger_block_reason": str(
+                    own_ctrl.curriculum_danger_block_reason if own_ctrl else ""
+                ),
+                "curriculum_danger_stable_ticks": int(
+                    own_ctrl.curriculum_danger_stable_ticks if own_ctrl else 0
+                ),
+                "curriculum_danger_interval_mult": float(
+                    own_ctrl.curriculum_danger_interval_mult if own_ctrl else 1.0
+                ),
+                "curriculum_last_mastered_tolerance": float(
+                    own_ctrl.curriculum_last_mastered_tolerance if own_ctrl else 0.0
+                ),
+                "curriculum_last_mastered_frame": int(
+                    own_ctrl.curriculum_last_mastered_frame if own_ctrl else -1
+                ),
+                "curriculum_last_mastered_nsucc_mean": float(
+                    own_ctrl.curriculum_last_mastered_nsucc_mean if own_ctrl else 0.0
+                ),
+                "curriculum_last_mastered_global_retention": float(
+                    own_ctrl.curriculum_last_mastered_global_retention
+                    if own_ctrl
+                    else 0.0
+                ),
+                "curriculum_rollback_triggered": bool(
+                    own_ctrl.curriculum_rollback_triggered if own_ctrl else False
+                ),
+                "curriculum_rollback_reason": str(
+                    own_ctrl.rollback_reason if own_ctrl else ""
+                ),
+                "curriculum_rollback_from_tol": float(
+                    own_ctrl.curriculum_rollback_from_tol if own_ctrl else 0.0
+                ),
+                "curriculum_rollback_to_tol": float(
+                    own_ctrl.curriculum_rollback_to_tol if own_ctrl else 0.0
+                ),
+                "curriculum_rollback_freeze_until": int(
+                    own_ctrl.curriculum_rollback_freeze_until if own_ctrl else 0
+                ),
+                "curriculum_repeated_collapse_count": int(
+                    own_ctrl.curriculum_repeated_collapse_count if own_ctrl else 0
+                ),
+                "wm_imagined_valid": bool(
+                    own_ctrl.wm_imagined_valid if own_ctrl else False
+                ),
+                "wm_imagined_uncertainty": float(
+                    own_ctrl.wm_imagined_uncertainty if own_ctrl else 1.0
+                ),
+                "wm_imagined_success_prob": float(
+                    own_ctrl.wm_imagined_success_prob if own_ctrl else 0.0
+                ),
+                "wm_imagined_drop_risk": float(
+                    own_ctrl.wm_imagined_drop_risk if own_ctrl else 0.0
+                ),
+                "wm_imagined_recovery_prob": float(
+                    own_ctrl.wm_imagined_recovery_prob if own_ctrl else 0.0
+                ),
+                "wm_imagined_invalid_reason": str(
+                    own_ctrl.wm_imagined_invalid_reason if own_ctrl else ""
+                ),
+                "wm_imagined_shadow_block_decision": bool(
+                    own_ctrl.wm_imagined_shadow_block_decision if own_ctrl else False
+                ),
+                "wm_imagined_shadow_block_reason": str(
+                    own_ctrl.wm_imagined_shadow_block_reason if own_ctrl else ""
+                ),
                 # PBT-WM Soft Activation Gate v1 diagnostics.
                 "wm_curriculum_tol_bin": str(
                     own_ctrl.wm_curriculum_tol_bin if own_ctrl else "le_004"
@@ -3847,6 +4567,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_source_time_weight": float(
                     getattr(self, "_last_wm_source_time_weight", 0.0)
                 ),
+                "curriculum_tol_bin": str(_curriculum_tol_bin),
+                "actor_distill_tol_bin": _actor_distill_tol_bin,
                 "tier": str(tier),
                 "checkpoint": own_state.get("checkpoint", ""),
                 "params": {k: own_state["params"][k] for k in own_state.get("params", {})},
@@ -4389,6 +5111,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                             from dexpbt_isaaclab.dexpbt_utils import (
                                 combine_wm_recovery_score,
                             )
+                            from dexpbt_isaaclab.world_model.wm_activation_gate import (
+                                blend_wm_ranking_score,
+                                compute_wm_pbt_source_activation_weight,
+                            )
                             score_with_wm, _ = combine_wm_recovery_score(
                                 score_real_for_pidx,
                                 wm_recovery_prob=float(
@@ -4406,8 +5132,34 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 drop_penalty=self.pbt_wm_drop_penalty,
                                 uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
                             )
-                            used_wm_for_pidx = True
-                            fallback_reason_pidx = "ok"
+                            _src_w, _w_time_p, _w_unc_p = (
+                                compute_wm_pbt_source_activation_weight(
+                                    enable=bool(self.wm_activation_enable),
+                                    gate_mode=str(self.wm_pbt_source_gate_mode),
+                                    frames=int(env_frames),
+                                    start_after_frames=int(
+                                        self.wm_pbt_source_start_after_frames
+                                    ),
+                                    ramp_frames=int(self.wm_pbt_source_ramp_frames),
+                                    wm_valid=True,
+                                    wm_uncertainty=float(wm_unc),
+                                    max_uncertainty=float(self.pbt_wm_max_uncertainty),
+                                )
+                            )
+                            score_with_wm = blend_wm_ranking_score(
+                                score_real_for_pidx, score_with_wm, _src_w
+                            )
+                            used_wm_for_pidx = _src_w > 0.0
+                            fallback_reason_pidx = (
+                                "ok" if used_wm_for_pidx else "wm_source_activation_zero"
+                            )
+                            if pidx == self.policy_idx:
+                                self._last_wm_source_activation_weight = float(_src_w)
+                                self._last_wm_source_activation_nonzero = (
+                                    1.0 if _src_w > 0.0 else 0.0
+                                )
+                                self._last_wm_source_unc_weight = float(_w_unc_p)
+                                self._last_wm_source_time_weight = float(_w_time_p)
                     # Both paths place the alt score on the 0..50 scale so
                     # mixing with non-floor base_obj is meaningful.
                     alt_objectives[pidx] = float(score_with_wm)
@@ -4517,29 +5269,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         1.0 if any_hard_collapse else 0.0,
                         env_frames,
                     )
-                    # PBT-WM Soft Activation Gate v1 diagnostics for the WM
-                    # source-score path (no tol hard gate; time ramp + unc).
-                    from dexpbt_isaaclab.world_model.wm_activation_gate import clamp01
-                    if (
-                        not self.wm_activation_enable
-                        or str(self.wm_pbt_source_gate_mode) == "off"
-                        or not local_wm_valid
-                    ):
-                        _w_time = 0.0
-                        _w_unc = 0.0
-                        _src_w = 0.0
-                    else:
-                        if int(env_frames) < int(self.wm_pbt_source_start_after_frames):
-                            _w_time = 0.0
-                        else:
-                            _w_time = clamp01(
-                                (int(env_frames) - int(self.wm_pbt_source_start_after_frames))
-                                / max(1, int(self.wm_pbt_source_ramp_frames))
-                            )
-                        _w_unc = clamp01(
-                            1.0 - local_wm_unc / max(1e-6, float(self.pbt_wm_max_uncertainty))
-                        )
-                        _src_w = _w_time * _w_unc
+                    # PBT-WM Soft Activation Gate v1 diagnostics (local policy).
+                    from dexpbt_isaaclab.world_model.wm_activation_gate import (
+                        compute_wm_pbt_source_activation_weight,
+                    )
+                    _src_w, _w_time, _w_unc = compute_wm_pbt_source_activation_weight(
+                        enable=bool(self.wm_activation_enable),
+                        gate_mode=str(self.wm_pbt_source_gate_mode),
+                        frames=int(env_frames),
+                        start_after_frames=int(self.wm_pbt_source_start_after_frames),
+                        ramp_frames=int(self.wm_pbt_source_ramp_frames),
+                        wm_valid=bool(local_wm_valid),
+                        wm_uncertainty=float(local_wm_unc),
+                        max_uncertainty=float(self.pbt_wm_max_uncertainty),
+                    )
                     self._last_wm_source_activation_weight = float(_src_w)
                     self._last_wm_source_activation_nonzero = 1.0 if _src_w > 0.0 else 0.0
                     self._last_wm_source_unc_weight = float(_w_unc)

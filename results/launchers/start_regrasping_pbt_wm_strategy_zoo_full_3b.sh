@@ -66,6 +66,12 @@ curriculum_fast_shrink_low=0.975
 curriculum_fast_consolidation_frames=100000000
 post_shrink_consolidation_env_frames=150000000
 curriculum_fast_target_tolerance_800m=0.045
+hybrid_curriculum_safety=true
+real_signal_fallback=true
+danger_tol=0.030
+strong_shrink_global_retention_gate=true
+rollback_to_last_mastered=true
+wm_imagined_shadow_only=true
 note=PBT-WM Strategy Zoo v1.0 full population: six distinct wm_strategy_profile workers; profile propagation after 1B; no global residual rollout apply.
 ppo_only_note=ppo_only is the PPO/PBT anchor under the shared strategy-zoo PBT/curriculum scaffold. It disables WM/EIR/action-level intervention, but it is not an exact original DexPBT reproduction.
 soft_activation_gate=PBT-WM Soft Activation Gate v1: actor_distill / WM source score / WM curriculum diagnostics use a continuous activation weight (w_time*w_tol*w_perf*w_conf*w_unc*w_source) instead of a tol<=0.04 hard gate.
@@ -156,6 +162,35 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_recovery_tolerance_mode last_mastered \
   --pbt_crosscopy_tolerance_mode last_mastered \
   --curriculum_rollback_cooldown_frames 50000000 \
+  --curriculum_safety_enable \
+  --curriculum_safety_start_after_frames 500000000 \
+  --curriculum_safety_min_nsucc_mean 10.0 \
+  --curriculum_safety_global_retention_threshold 0.80 \
+  --curriculum_safety_drop_ratio_threshold 0.30 \
+  --curriculum_safety_slope_threshold -2.0 \
+  --curriculum_safety_window 6 \
+  --curriculum_safety_block_frames 100000000 \
+  --curriculum_safety_use_real_fallback \
+  --curriculum_strong_shrink_global_retention_gate \
+  --curriculum_strong_shrink_min_global_retention 0.85 \
+  --curriculum_strong_shrink_min_stable_ticks 3 \
+  --curriculum_strong_shrink_long_window 12 \
+  --curriculum_danger_zone_enable \
+  --curriculum_danger_tol 0.030 \
+  --curriculum_danger_disable_strong_shrink \
+  --curriculum_danger_min_stable_ticks 4 \
+  --curriculum_danger_shrink_interval_mult 2.0 \
+  --curriculum_danger_global_retention_threshold 0.85 \
+  --curriculum_rollback_on_repeated_collapse \
+  --curriculum_rollback_collapse_patience 2 \
+  --curriculum_rollback_to_last_mastered \
+  --curriculum_rollback_freeze_frames 200000000 \
+  --curriculum_last_mastered_min_nsucc_mean 30.0 \
+  --curriculum_last_mastered_min_global_retention 0.85 \
+  --curriculum_last_mastered_stable_ticks 3 \
+  --wm_imagined_diagnostic_enable \
+  --wm_imagined_shadow_block_enable \
+  --wm_imagined_shadow_uncertainty_threshold 0.95 \
   >"$LOG" 2>&1 &
 
 echo $! > "$PIDFILE"
