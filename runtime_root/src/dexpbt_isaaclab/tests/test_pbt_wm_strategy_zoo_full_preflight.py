@@ -92,6 +92,26 @@ class TestStrategyZooLauncher(unittest.TestCase):
         self.assertIn("ppo_only_note=", text)
         self.assertIn("not an exact original DexPBT reproduction", text)
 
+    def test_launcher_has_head_rescue_and_candidate_gate_flags(self):
+        text = LAUNCHER.read_text()
+        for flag in (
+            "--seq_wm_head_balance_enable",
+            "--seq_wm_head_pos_weight_auto",
+            "--seq_wm_lambda_horizon_success",
+            "--wm_imagined_valid_mode",
+            "--eir_candidate_gate_mode",
+            "--eir_candidate_min_weight_for_retrieval",
+        ):
+            self.assertIn(flag, text, f"missing launcher flag {flag}")
+        self.assertIn("wm_imagined_head_rescue=true", text)
+        self.assertIn("soft_candidate_retrieval=true", text)
+
+    def test_ppo_only_profile_has_no_wm_or_candidate_activation(self):
+        args, caps = _simulate_profile_expansion("ppo_only")
+        self.assertFalse(args.enable_wm)
+        self.assertFalse(args.eir_enable)
+        self.assertNotEqual(getattr(args, "eir_candidate_gate_mode", "hard_tol"), "profile_soft")
+
 
 class TestLaunchPbtNormalize(unittest.TestCase):
     def test_bool_flag_not_merged_with_next_flag(self):

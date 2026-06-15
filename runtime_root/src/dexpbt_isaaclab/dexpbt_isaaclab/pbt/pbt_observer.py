@@ -449,6 +449,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         wm_imagined_diagnostic_enable: bool = False,
         wm_imagined_shadow_block_enable: bool = False,
         wm_imagined_shadow_uncertainty_threshold: float = 0.95,
+        wm_imagined_valid_mode: str = "strict_uncertainty",
+        wm_imagined_valid_uncertainty_threshold: float = 0.5,
+        wm_imagined_soft_uncertainty_threshold: float = 0.95,
+        wm_imagined_min_logit_abs_mean: float = 0.05,
+        wm_imagined_min_head_signal_std: float = 0.02,
+        wm_imagined_soft_validity_weight: float = 0.25,
         # PBT-WM Soft Activation Gate v1: WM PBT source-score soft gate
         # (confidence_only: eval_valid + time ramp + uncertainty, no tol gate).
         wm_pbt_source_gate_mode: str = "confidence_only",
@@ -686,6 +692,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._last_wm_source_activation_nonzero = 0.0
         self._last_wm_source_unc_weight = 0.0
         self._last_wm_source_time_weight = 0.0
+        self._last_wm_validity_weight = 0.0
+        self._last_wm_score_effective_weight = 0.0
+        self._last_wm_score_used_strict = 0.0
+        self._last_wm_score_used_soft = 0.0
         self.pbt_wm_profile_copy_enable = bool(pbt_wm_profile_copy_enable)
         self.pbt_wm_profile_copy_after_frames = int(pbt_wm_profile_copy_after_frames)
         self.pbt_wm_profile_copy_prob = float(pbt_wm_profile_copy_prob)
@@ -1069,6 +1079,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.wm_imagined_shadow_uncertainty_threshold = float(
             wm_imagined_shadow_uncertainty_threshold
         )
+        self.wm_imagined_valid_mode = str(wm_imagined_valid_mode)
+        self.wm_imagined_valid_uncertainty_threshold = float(
+            wm_imagined_valid_uncertainty_threshold
+        )
+        self.wm_imagined_soft_uncertainty_threshold = float(
+            wm_imagined_soft_uncertainty_threshold
+        )
+        self.wm_imagined_min_logit_abs_mean = float(wm_imagined_min_logit_abs_mean)
+        self.wm_imagined_min_head_signal_std = float(wm_imagined_min_head_signal_std)
+        self.wm_imagined_soft_validity_weight = float(wm_imagined_soft_validity_weight)
         self._last_mastered_safe_tolerance: dict[int, float] = {}
         self._last_mastered_safe_frame: dict[int, int] = {}
         self._last_mastered_safe_nsucc_mean: dict[int, float] = {}
@@ -1368,7 +1388,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         out["success_prob"] = float(payload.get("wm_success_prob", 0.0))
         out["recovery_prob"] = float(payload.get("wm_recovery_prob", 0.0))
         out["uncertainty"] = float(payload.get("uncertainty", 1.0))
-        out["eval_valid"] = bool(payload.get("imagined_valid", False))
+        out["imagined_valid_strict"] = bool(
+            payload.get(
+                "imagined_valid_strict",
+                payload.get("imagined_valid", False),
+            )
+        )
+        out["imagined_valid_soft"] = bool(payload.get("imagined_valid_soft", False))
+        out["eval_valid"] = bool(out["imagined_valid_strict"])
         if not out["eval_valid"]:
             out["fallback_reason_id"] = 3
             return out
@@ -2817,7 +2844,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "stable_ticks": int(stable_ticks),
             "repeated_collapse_count": int(repeated_collapse_count),
             "danger_zone": bool(danger_zone),
-            "imagined_valid": bool(wm_cc.get("eval_valid", False)),
+            "imagined_valid": bool(wm_cc.get("imagined_valid_strict", False)),
+            "imagined_valid_strict": bool(wm_cc.get("imagined_valid_strict", False)),
+            "imagined_valid_soft": bool(wm_cc.get("imagined_valid_soft", False)),
             "wm_risk": False,
             "real_risk": False,
             "danger_blocked": False,
@@ -2859,7 +2888,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             out["real_fallback_used"] = True
         out["real_risk"] = bool(risk_real)
         risk_wm = False
-        if out["imagined_valid"]:
+        strict_valid = bool(
+            wm_cc.get("imagined_valid_strict", wm_cc.get("eval_valid", False))
+        )
+        if strict_valid:
             risk_wm = (
                 float(wm_cc.get("drop_risk", 0.0))
                 >= self.wm_curriculum_controller_drop_risk_threshold
@@ -4567,6 +4599,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_source_time_weight": float(
                     getattr(self, "_last_wm_source_time_weight", 0.0)
                 ),
+                "wm_validity_weight": float(
+                    getattr(self, "_last_wm_validity_weight", 0.0)
+                ),
+                "wm_score_effective_weight": float(
+                    getattr(self, "_last_wm_score_effective_weight", 0.0)
+                ),
+                "wm_score_used_strict": float(
+                    getattr(self, "_last_wm_score_used_strict", 0.0)
+                ),
+                "wm_score_used_soft": float(
+                    getattr(self, "_last_wm_score_used_soft", 0.0)
+                ),
                 "curriculum_tol_bin": str(_curriculum_tol_bin),
                 "actor_distill_tol_bin": _actor_distill_tol_bin,
                 "tier": str(tier),
@@ -5079,14 +5123,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     fallback_reason_pidx = "wm_off"
                     if wm_mode in ("shadow", "active"):
                         wm_eval = self._wm_imagined_eval_per_policy.get(pidx) or {}
-                        wm_valid = bool(wm_eval.get("imagined_valid", False))
+                        wm_strict = bool(
+                            wm_eval.get(
+                                "imagined_valid_strict",
+                                wm_eval.get("imagined_valid", False),
+                            )
+                        )
+                        wm_soft = bool(wm_eval.get("imagined_valid_soft", False))
+                        wm_has_signal = bool(
+                            wm_eval.get(
+                                "imagined_head_has_signal",
+                                wm_strict or wm_soft,
+                            )
+                        )
+                        wm_v_weight = float(wm_eval.get("wm_validity_weight", 0.0))
+                        wm_any_valid = wm_strict or wm_soft or bool(
+                            wm_eval.get("imagined_valid", False)
+                        )
                         wm_unc = float(wm_eval.get("uncertainty", 1.0))
                         teacher_step = float(
                             wm_eval.get("teacher_step", -1.0)
                         )
-                        # Soft non-degenerate recovery target check —
-                        # if the writer included horizon_pos_rate we use
-                        # it; otherwise we accept ``imagined_valid``.
                         h_rates = wm_eval.get("horizon_pos_rate", {}) or {}
                         target_degenerate = False
                         for _k, _v in h_rates.items():
@@ -5097,9 +5154,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                     break
                             except (TypeError, ValueError):
                                 continue
-                        if not wm_valid:
+                        if not wm_any_valid or not wm_has_signal or wm_v_weight <= 0.0:
                             fallback_reason_pidx = wm_eval.get(
-                                "invalid_reason", "no_imagined_valid"
+                                "valid_reason",
+                                wm_eval.get("invalid_reason", "no_imagined_valid"),
                             )
                         elif wm_unc > float(self.pbt_wm_max_uncertainty):
                             fallback_reason_pidx = "high_uncertainty"
@@ -5132,19 +5190,30 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 drop_penalty=self.pbt_wm_drop_penalty,
                                 uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
                             )
-                            _src_w, _w_time_p, _w_unc_p = (
-                                compute_wm_pbt_source_activation_weight(
-                                    enable=bool(self.wm_activation_enable),
-                                    gate_mode=str(self.wm_pbt_source_gate_mode),
-                                    frames=int(env_frames),
-                                    start_after_frames=int(
-                                        self.wm_pbt_source_start_after_frames
-                                    ),
-                                    ramp_frames=int(self.wm_pbt_source_ramp_frames),
-                                    wm_valid=True,
-                                    wm_uncertainty=float(wm_unc),
-                                    max_uncertainty=float(self.pbt_wm_max_uncertainty),
-                                )
+                            (
+                                _src_w,
+                                _w_time_p,
+                                _w_unc_p,
+                                _v_w_p,
+                                _used_strict_p,
+                                _used_soft_p,
+                            ) = compute_wm_pbt_source_activation_weight(
+                                enable=bool(self.wm_activation_enable),
+                                gate_mode=str(self.wm_pbt_source_gate_mode),
+                                frames=int(env_frames),
+                                start_after_frames=int(
+                                    self.wm_pbt_source_start_after_frames
+                                ),
+                                ramp_frames=int(self.wm_pbt_source_ramp_frames),
+                                wm_uncertainty=float(wm_unc),
+                                max_uncertainty=float(self.pbt_wm_max_uncertainty),
+                                imagined_valid_strict=wm_strict,
+                                imagined_valid_soft=wm_soft,
+                                imagined_head_has_signal=wm_has_signal,
+                                wm_validity_weight=wm_v_weight,
+                                soft_validity_weight=float(
+                                    self.wm_imagined_soft_validity_weight
+                                ),
                             )
                             score_with_wm = blend_wm_ranking_score(
                                 score_real_for_pidx, score_with_wm, _src_w
@@ -5160,6 +5229,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 )
                                 self._last_wm_source_unc_weight = float(_w_unc_p)
                                 self._last_wm_source_time_weight = float(_w_time_p)
+                                self._last_wm_validity_weight = float(_v_w_p)
+                                self._last_wm_score_effective_weight = float(_src_w)
+                                self._last_wm_score_used_strict = (
+                                    1.0 if _used_strict_p else 0.0
+                                )
+                                self._last_wm_score_used_soft = (
+                                    1.0 if _used_soft_p else 0.0
+                                )
                     # Both paths place the alt score on the 0..50 scale so
                     # mixing with non-floor base_obj is meaningful.
                     alt_objectives[pidx] = float(score_with_wm)
@@ -5173,7 +5250,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         wm_fallback_reason = fallback_reason_pidx
                         if wm_mode in ("shadow", "active"):
                             _le = self._wm_imagined_eval_per_policy.get(pidx) or {}
-                            local_wm_valid = bool(_le.get("imagined_valid", False))
+                            local_wm_valid = bool(
+                                _le.get("imagined_valid_strict")
+                                or _le.get("imagined_valid_soft")
+                                or _le.get("imagined_valid", False)
+                            )
                             local_wm_unc = float(_le.get("uncertainty", 1.0))
                 if alt_objectives:
                     sorted_policies_alt = sorted(
@@ -5273,20 +5354,49 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     from dexpbt_isaaclab.world_model.wm_activation_gate import (
                         compute_wm_pbt_source_activation_weight,
                     )
-                    _src_w, _w_time, _w_unc = compute_wm_pbt_source_activation_weight(
+                    _le_diag = self._wm_imagined_eval_per_policy.get(self.policy_idx) or {}
+                    (
+                        _src_w,
+                        _w_time,
+                        _w_unc,
+                        _v_w,
+                        _used_strict,
+                        _used_soft,
+                    ) = compute_wm_pbt_source_activation_weight(
                         enable=bool(self.wm_activation_enable),
                         gate_mode=str(self.wm_pbt_source_gate_mode),
                         frames=int(env_frames),
                         start_after_frames=int(self.wm_pbt_source_start_after_frames),
                         ramp_frames=int(self.wm_pbt_source_ramp_frames),
-                        wm_valid=bool(local_wm_valid),
                         wm_uncertainty=float(local_wm_unc),
                         max_uncertainty=float(self.pbt_wm_max_uncertainty),
+                        imagined_valid_strict=bool(
+                            _le_diag.get(
+                                "imagined_valid_strict",
+                                _le_diag.get("imagined_valid", False),
+                            )
+                        ),
+                        imagined_valid_soft=bool(
+                            _le_diag.get("imagined_valid_soft", False)
+                        ),
+                        imagined_head_has_signal=bool(
+                            _le_diag.get(
+                                "imagined_head_has_signal",
+                                local_wm_valid,
+                            )
+                        ),
+                        wm_validity_weight=float(
+                            _le_diag.get("wm_validity_weight", 0.0)
+                        ),
                     )
                     self._last_wm_source_activation_weight = float(_src_w)
                     self._last_wm_source_activation_nonzero = 1.0 if _src_w > 0.0 else 0.0
                     self._last_wm_source_unc_weight = float(_w_unc)
                     self._last_wm_source_time_weight = float(_w_time)
+                    self._last_wm_validity_weight = float(_v_w)
+                    self._last_wm_score_effective_weight = float(_src_w)
+                    self._last_wm_score_used_strict = 1.0 if _used_strict else 0.0
+                    self._last_wm_score_used_soft = 1.0 if _used_soft else 0.0
                     self.writer.add_scalar(
                         "pbt/wm_source_activation_weight", float(_src_w), env_frames
                     )

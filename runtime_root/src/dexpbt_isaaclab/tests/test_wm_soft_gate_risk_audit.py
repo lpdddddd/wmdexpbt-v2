@@ -140,7 +140,7 @@ class TestCandidatePoolTolGate(unittest.TestCase):
 
 class TestWMPBTSourceActivation(unittest.TestCase):
     def test_before_start_after_frames_zero_weight(self):
-        w, t, u = compute_wm_pbt_source_activation_weight(
+        w, t, u, *_ = compute_wm_pbt_source_activation_weight(
             enable=True,
             gate_mode="confidence_only",
             frames=100,
@@ -162,7 +162,7 @@ class TestWMPBTSourceActivation(unittest.TestCase):
         self.assertAlmostEqual(blend_wm_ranking_score(real, wm, 0.5), 45.0)
 
     def test_invalid_eval_yields_zero_activation(self):
-        w, _, _ = compute_wm_pbt_source_activation_weight(
+        w, *_ = compute_wm_pbt_source_activation_weight(
             enable=True,
             gate_mode="confidence_only",
             frames=400_000_000,

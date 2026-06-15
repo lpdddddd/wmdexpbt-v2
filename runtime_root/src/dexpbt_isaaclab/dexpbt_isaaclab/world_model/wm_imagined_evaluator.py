@@ -38,6 +38,7 @@ from typing import Any, Optional
 import torch
 
 from .seq_wm_base import SequenceBatch, SequenceWorldModelBase
+from .wm_imagined_validity import compute_imagined_validity
 
 
 class ImaginedEvaluatorError(RuntimeError):
@@ -56,6 +57,12 @@ class WMImaginedEvaluator:
         num_starts: int = 256,
         use_teacher: bool = True,
         max_uncertainty: float = 0.5,
+        valid_mode: str = "strict_uncertainty",
+        strict_uncertainty_threshold: float = 0.5,
+        soft_uncertainty_threshold: float = 0.95,
+        min_logit_abs_mean: float = 0.05,
+        min_head_signal_std: float = 0.02,
+        soft_validity_weight: float = 0.25,
     ) -> None:
         if action_mode not in ("recorded", "policy"):
             raise ValueError(
@@ -68,6 +75,12 @@ class WMImaginedEvaluator:
         self.num_starts = max(1, int(num_starts))
         self.use_teacher = bool(use_teacher)
         self.max_uncertainty = float(max_uncertainty)
+        self.valid_mode = str(valid_mode or "strict_uncertainty")
+        self.strict_uncertainty_threshold = float(strict_uncertainty_threshold)
+        self.soft_uncertainty_threshold = float(soft_uncertainty_threshold)
+        self.min_logit_abs_mean = float(min_logit_abs_mean)
+        self.min_head_signal_std = float(min_head_signal_std)
+        self.soft_validity_weight = float(soft_validity_weight)
 
     @torch.no_grad()
     def evaluate_batch(
@@ -90,7 +103,6 @@ class WMImaginedEvaluator:
         if not self.enabled:
             return {"imagined_valid": False}
         if self.action_mode == "policy":
-            # Per user constraint #4, policy-action mode must fail fast.
             raise NotImplementedError(
                 "imagine_action_mode='policy' is not implemented in this "
                 "revision; use 'recorded' or disable the imagined evaluator."
@@ -100,11 +112,7 @@ class WMImaginedEvaluator:
         model.eval()
         try:
             b = batch.to(device)
-            losses = model.compute_aux_loss(b)
-            # Pull head outputs by recomputing predictions; cheaper than
-            # re-running the full loss path. Heads.predict_transition takes
-            # belief_flat + action_flat.
-            belief = model.encode_sequence(b)  # (T, B, D)
+            belief = model.encode_sequence(b)
             T = belief.shape[0]
             heads = getattr(model, "heads", None)
             if heads is None or T == 0:
@@ -121,32 +129,33 @@ class WMImaginedEvaluator:
             }
             uncertainty_terms: list[float] = []
             logit_abs_terms: list[float] = []
+            success_prob_stds: list[float] = []
+            drop_prob_stds: list[float] = []
+            recovery_prob_stds: list[float] = []
             if "horizon_logits" in preds:
                 for h, head_out in preds["horizon_logits"].items():
-                    p_succ = torch.sigmoid(head_out["success"]).mean().item()
-                    p_drop = torch.sigmoid(head_out["drop"]).mean().item()
-                    out[f"success_h{int(h)}"] = float(p_succ)
-                    out[f"drop_h{int(h)}"] = float(p_drop)
-                    metric_components["success"].append(float(p_succ))
-                    metric_components["drop"].append(float(p_drop))
-                    logit_abs_terms.append(
-                        float(head_out["success"].abs().mean().item())
-                    )
-                    logit_abs_terms.append(
-                        float(head_out["drop"].abs().mean().item())
-                    )
-                    # Uncertainty proxy: distance from 0.5 (closer = less
-                    # confident). 1.0 means perfectly uncertain.
-                    p = float(p_succ)
-                    uncertainty_terms.append(1.0 - abs(p - 0.5) * 2.0)
+                    p_succ = torch.sigmoid(head_out["success"])
+                    p_drop = torch.sigmoid(head_out["drop"])
+                    p_succ_mean = float(p_succ.mean().item())
+                    p_drop_mean = float(p_drop.mean().item())
+                    out[f"success_h{int(h)}"] = p_succ_mean
+                    out[f"drop_h{int(h)}"] = p_drop_mean
+                    metric_components["success"].append(p_succ_mean)
+                    metric_components["drop"].append(p_drop_mean)
+                    logit_abs_terms.append(float(head_out["success"].abs().mean().item()))
+                    logit_abs_terms.append(float(head_out["drop"].abs().mean().item()))
+                    success_prob_stds.append(float(p_succ.std().item()))
+                    drop_prob_stds.append(float(p_drop.std().item()))
+                    uncertainty_terms.append(1.0 - abs(p_succ_mean - 0.5) * 2.0)
             recovery_prob = 0.0
             if "recovery_logits" in preds:
                 rec_logits = preds["recovery_logits"]
-                p_rec = torch.sigmoid(rec_logits).mean().item()
-                recovery_prob = float(p_rec)
+                p_rec = torch.sigmoid(rec_logits)
+                recovery_prob = float(p_rec.mean().item())
                 out["recovery_h16"] = recovery_prob
                 metric_components["recovery"].append(recovery_prob)
                 logit_abs_terms.append(float(rec_logits.abs().mean().item()))
+                recovery_prob_stds.append(float(p_rec.std().item()))
                 uncertainty_terms.append(1.0 - abs(recovery_prob - 0.5) * 2.0)
             v_mean = 0.0
             if heads.has_value_head:
@@ -176,15 +185,51 @@ class WMImaginedEvaluator:
                 if logit_abs_terms
                 else 0.0
             )
-            imagined_valid = bool(uncertainty <= self.max_uncertainty)
+            success_prob_std = float(
+                sum(success_prob_stds) / max(1, len(success_prob_stds))
+            )
+            drop_risk_std = float(
+                sum(drop_prob_stds) / max(1, len(drop_prob_stds))
+            )
+            recovery_prob_std = float(
+                sum(recovery_prob_stds) / max(1, len(recovery_prob_stds))
+            )
+            head_signal_std = float(
+                max(success_prob_std, drop_risk_std, recovery_prob_std)
+            )
+            validity = compute_imagined_validity(
+                uncertainty=uncertainty,
+                logit_abs_mean=logit_abs_mean,
+                success_prob_std=success_prob_std,
+                drop_risk_std=drop_risk_std,
+                recovery_prob_std=recovery_prob_std,
+                valid_mode=self.valid_mode,
+                strict_uncertainty_threshold=self.strict_uncertainty_threshold,
+                soft_uncertainty_threshold=self.soft_uncertainty_threshold,
+                min_logit_abs_mean=self.min_logit_abs_mean,
+                min_head_signal_std=self.min_head_signal_std,
+                soft_validity_weight=self.soft_validity_weight,
+            )
             out.update(
                 {
-                    "imagined_valid": imagined_valid,
+                    "imagined_valid": bool(validity.imagined_valid),
+                    "imagined_valid_strict": bool(validity.imagined_valid_strict),
+                    "imagined_valid_soft": bool(validity.imagined_valid_soft),
+                    "imagined_head_has_signal": bool(validity.imagined_head_has_signal),
+                    "imagined_valid_mode": str(validity.imagined_valid_mode),
+                    "imagined_valid_reason": str(validity.imagined_valid_reason),
+                    "wm_validity_weight": float(validity.wm_validity_weight),
                     "wm_recovery_prob": wm_recovery_prob,
                     "wm_success_prob": wm_success_prob,
                     "wm_drop_risk": wm_drop_risk,
                     "uncertainty": uncertainty,
                     "logit_abs_mean": logit_abs_mean,
+                    "head_signal_std": head_signal_std,
+                    "success_prob_std": success_prob_std,
+                    "drop_risk_std": drop_risk_std,
+                    "recovery_prob_std": recovery_prob_std,
+                    "checkpoint_age_frames": 0.0,
+                    "stale_reason": "live_model",
                 }
             )
             return out

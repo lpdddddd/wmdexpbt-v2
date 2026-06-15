@@ -1,0 +1,18 @@
+{
+  "report": "SOFT_CANDIDATE_RETRIEVAL_AUDIT",
+  "status": "stub",
+  "eir_candidate_gate_modes": ["hard_tol", "soft_tol", "profile_soft"],
+  "default_min_weight_for_retrieval": 0.05,
+  "launcher_enabled": {
+    "soft_candidate_retrieval": true,
+    "eir_candidate_gate_mode": "profile_soft"
+  },
+  "residual_rollout_apply": false,
+  "telemetry_fields": [
+    "elite_candidate_gate_weight",
+    "elite_retrieval_allowed",
+    "rssm_candidate_gate_weight",
+    "rssm_retrieval_allowed"
+  ],
+  "tests": ["tests/test_eir_soft_candidate_gate.py"]
+}

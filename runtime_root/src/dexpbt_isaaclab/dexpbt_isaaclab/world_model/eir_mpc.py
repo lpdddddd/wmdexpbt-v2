@@ -40,6 +40,13 @@ from .wm_activation_gate import (
     soft_tol_weight,
     tol_bin,
 )
+from .eir_candidate_gate import (
+    CandidateGateConfig,
+    allow_retrieval,
+    candidate_gate_mode_id,
+    elite_candidate_weight,
+    rssm_candidate_weight,
+)
 
 # EIR distill block reasons (parallel to ERD's).
 EIR_OK = 0
@@ -151,6 +158,17 @@ class EIRConfig:
     actor_distill_ramp_frames: int = 300_000_000
     actor_distill_nsucc_ref: float = 20.0
 
+    # Soft candidate-retrieval gate (default hard_tol = legacy behaviour).
+    candidate_gate_mode: str = "hard_tol"
+    elite_candidate_tol_start: float = 0.070
+    elite_candidate_tol_full: float = 0.045
+    rssm_candidate_tol_start: float = 0.060
+    rssm_candidate_tol_full: float = 0.040
+    conservative_rssm_candidate_tol_start: float = 0.055
+    conservative_rssm_candidate_tol_full: float = 0.035
+    candidate_min_weight_for_retrieval: float = 0.05
+    wm_strategy_profile_name: str = ""
+
     def __post_init__(self) -> None:
         self.horizons = tuple(int(h) for h in self.horizons if int(h) > 0) or (4, 8)
 
@@ -177,6 +195,25 @@ class EIRConfig:
             archive_source_weight=1.0,
             gaussian_source_weight=0.0,
             actor_source_weight=0.0,
+        )
+
+    def candidate_gate_config(self):
+        from .eir_candidate_gate import CandidateGateConfig
+
+        return CandidateGateConfig(
+            mode=str(self.candidate_gate_mode),
+            elite_tol_start=float(self.elite_candidate_tol_start),
+            elite_tol_full=float(self.elite_candidate_tol_full),
+            rssm_tol_start=float(self.rssm_candidate_tol_start),
+            rssm_tol_full=float(self.rssm_candidate_tol_full),
+            conservative_rssm_tol_start=float(
+                self.conservative_rssm_candidate_tol_start
+            ),
+            conservative_rssm_tol_full=float(
+                self.conservative_rssm_candidate_tol_full
+            ),
+            min_weight_for_retrieval=float(self.candidate_min_weight_for_retrieval),
+            profile_name=str(self.wm_strategy_profile_name or ""),
         )
 
     def distill_lambda_for_tol(self, tol: float) -> float:
@@ -462,6 +499,9 @@ def generate_eir_candidates(
     tol_mean: float = 1.0,
     stage: Optional[int] = None,
     rssm_actions: Optional[torch.Tensor] = None,
+    elite_gate_weight: float = 1.0,
+    rssm_gate_weight: float = 1.0,
+    min_weight: float = 0.05,
 ) -> dict[str, torch.Tensor]:
     """Build the EIR candidate set around the clipped actor mean.
 
@@ -471,6 +511,12 @@ def generate_eir_candidates(
     B, A = mu_r.shape
     dev, dtype = mu_r.device, mu_r.dtype
     base = mu_r.detach().clamp(-1.0, 1.0)
+    elite_w = float(elite_gate_weight)
+    rssm_w = float(rssm_gate_weight)
+    min_w = float(min_weight)
+    elite_allowed = elite_w >= min_w
+    elite_count = 0
+    archive_count = 0
 
     cand_blocks: list[torch.Tensor] = []
     src_blocks: list[torch.Tensor] = []
@@ -503,25 +549,54 @@ def generate_eir_candidates(
 
     # elite local
     ke = max(0, int(cfg.elite_candidate_k))
-    if ke > 0 and bank is not None and feat_r is not None and getattr(bank, "size", 0) > 0:
+    if (
+        elite_allowed
+        and ke > 0
+        and bank is not None
+        and feat_r is not None
+        and getattr(bank, "size", 0) > 0
+    ):
         acts, sim, pri, valid = bank.retrieve_candidates(feat_r, k=ke, stage=stage)
         if valid:
+            elite_count = int(acts.shape[1])
+            if elite_w < 1.0:
+                pri = pri.to(dtype) * elite_w
+                sim = sim.to(dtype) * elite_w
             _add(acts.to(dtype), SRC_ELITE_LOCAL, pri.to(dtype), sim.to(dtype))
 
     # elite archive
     ka = max(0, int(cfg.archive_candidate_k))
-    if ka > 0 and archive_bank is not None and feat_r is not None and getattr(archive_bank, "size", 0) > 0:
+    if (
+        elite_allowed
+        and ka > 0
+        and archive_bank is not None
+        and feat_r is not None
+        and getattr(archive_bank, "size", 0) > 0
+    ):
         acts, sim, pri, valid = archive_bank.retrieve_candidates(feat_r, k=ka, stage=stage)
         if valid:
+            archive_count = int(acts.shape[1])
+            if elite_w < 1.0:
+                pri = pri.to(dtype) * elite_w
+                sim = sim.to(dtype) * elite_w
             _add(acts.to(dtype), SRC_ELITE_ARCHIVE, pri.to(dtype), sim.to(dtype))
 
     # rssm reranked candidate(s) - actions supplied by planner
-    if rssm_actions is not None and rssm_actions.numel() > 0:
+    if (
+        rssm_actions is not None
+        and rssm_actions.numel() > 0
+        and rssm_w >= min_w
+    ):
         ra = rssm_actions.to(device=dev, dtype=dtype)
         if ra.dim() == 2:
             ra = ra[:, None, :]
         kr = ra.shape[1]
-        _add(ra.clamp(-1.0, 1.0), SRC_RSSM, zeros_k(kr), zeros_k(kr))
+        _add(
+            ra.clamp(-1.0, 1.0),
+            SRC_RSSM,
+            zeros_k(kr) * rssm_w,
+            zeros_k(kr) * rssm_w,
+        )
 
     cand = torch.cat(cand_blocks, dim=1)
     source_id = torch.cat(src_blocks, dim=1)
@@ -532,6 +607,10 @@ def generate_eir_candidates(
         "source_id": source_id,
         "priority": priority,
         "similarity": similarity,
+        "elite_candidate_gate_weight": float(elite_w),
+        "elite_retrieval_allowed": float(1.0 if elite_allowed else 0.0),
+        "elite_candidate_count": float(elite_count),
+        "archive_candidate_count": float(archive_count),
     }
 
 
@@ -840,6 +919,17 @@ class EIRBridge:
     last_actor_distill_tol_bin: str = "le_004"
     # Runtime context fed by train.py; -1.0 means "unknown" (perf gate neutral).
     last_nsucc_mean: float = -1.0
+
+    # Soft candidate-retrieval gate telemetry.
+    last_elite_candidate_gate_weight: float = 1.0
+    last_rssm_candidate_gate_weight: float = 1.0
+    last_elite_candidate_retrieval_allowed: float = 1.0
+    last_rssm_candidate_retrieval_allowed: float = 1.0
+    last_elite_candidate_count: float = 0.0
+    last_archive_candidate_count: float = 0.0
+    last_candidate_gate_mode_id: float = 0.0
+    teacher_candidate_available_above_004: float = 0.0
+    teacher_selected_above_004: float = 0.0
 
     def record_bank_feature_source(self, source_flag: int) -> None:
         """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
@@ -1155,9 +1245,42 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         feat_r = feat_d[risky]
         mu_r = mu_live[risky]
         stage = _stage_for_tol(eir_cfg, cache.tol_mean)
+        _gate_cfg = eir_cfg.candidate_gate_config()
+        _elite_w = elite_candidate_weight(_gate_cfg, float(cache.tol_mean))
+        _rssm_w = rssm_candidate_weight(_gate_cfg, float(cache.tol_mean))
+        _min_w = float(_gate_cfg.min_weight_for_retrieval)
+        bridge.last_candidate_gate_mode_id = float(candidate_gate_mode_id(_gate_cfg.mode))
+        bridge.last_elite_candidate_gate_weight = float(_elite_w)
+        bridge.last_rssm_candidate_gate_weight = float(_rssm_w)
+        bridge.last_elite_candidate_retrieval_allowed = float(
+            1.0 if allow_retrieval(_elite_w, _min_w) else 0.0
+        )
+        bridge.last_rssm_candidate_retrieval_allowed = float(
+            1.0 if allow_retrieval(_rssm_w, _min_w) else 0.0
+        )
+        tol_above_004 = float(cache.tol_mean) > 0.04
+        bridge.teacher_candidate_available_above_004 = float(
+            1.0
+            if tol_above_004 and allow_retrieval(_elite_w, _min_w)
+            else 0.0
+        )
         cand_out = generate_eir_candidates(
-            mu_r, cfg=eir_cfg, bank=bridge.bank, archive_bank=bridge.archive_bank,
-            feat_r=feat_r, tol_mean=cache.tol_mean, stage=stage,
+            mu_r,
+            cfg=eir_cfg,
+            bank=bridge.bank,
+            archive_bank=bridge.archive_bank,
+            feat_r=feat_r,
+            tol_mean=cache.tol_mean,
+            stage=stage,
+            elite_gate_weight=_elite_w,
+            rssm_gate_weight=_rssm_w,
+            min_weight=_min_w,
+        )
+        bridge.last_elite_candidate_count = float(
+            cand_out.get("elite_candidate_count", 0.0)
+        )
+        bridge.last_archive_candidate_count = float(
+            cand_out.get("archive_candidate_count", 0.0)
         )
         # RSSM candidate injection. Preference order:
         #   1. FULL H-step MPPI (rssm_planner + rssm_model + per-rollout belief
@@ -1171,10 +1294,12 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         bridge.last_rssm_candidate_added = 0.0
         bridge.last_mppi_active = 0.0
         bridge.last_mppi_belief_valid = 0.0
-        rssm_action = _maybe_rssm_candidate_action(
-            bridge, feat_r=feat_r, mu_r=mu_r, cand_out=cand_out,
-            start=start, end=end, risky=risky, frames=int(frames),
-        )
+        rssm_action = None
+        if allow_retrieval(_rssm_w, _min_w):
+            rssm_action = _maybe_rssm_candidate_action(
+                bridge, feat_r=feat_r, mu_r=mu_r, cand_out=cand_out,
+                start=start, end=end, risky=risky, frames=int(frames),
+            )
         if rssm_action is not None:
             ra = rssm_action.to(
                 device=cand_out["cand"].device, dtype=cand_out["cand"].dtype
@@ -1186,9 +1311,13 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                  torch.full((Bc, 1), SRC_RSSM, device=ra.device, dtype=torch.long)],
                 dim=1,
             )
-            zk = torch.zeros(Bc, 1, device=ra.device, dtype=cand_out["priority"].dtype)
-            cand_out["priority"] = torch.cat([cand_out["priority"], zk], dim=1)
-            cand_out["similarity"] = torch.cat([cand_out["similarity"], zk.clone()], dim=1)
+            _rssm_pri = torch.full(
+                (Bc, 1), float(_rssm_w), device=ra.device, dtype=cand_out["priority"].dtype
+            )
+            cand_out["priority"] = torch.cat([cand_out["priority"], _rssm_pri], dim=1)
+            cand_out["similarity"] = torch.cat(
+                [cand_out["similarity"], _rssm_pri.clone()], dim=1
+            )
             bridge.last_rssm_candidate_added = 1.0
 
         # Build [B,K]-aligned planner-signal tensors for the SRC_RSSM rerank
@@ -1240,6 +1369,14 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         bridge.last_rssm_candidate_margin_mean = float(rer.get("rssm_candidate_margin_mean", 0.0))
         bridge.last_rssm_candidate_uncertainty_mean = float(
             rer.get("rssm_candidate_uncertainty_mean", 0.0)
+        )
+        best_source = gather_best_source(cand_out["source_id"], rer["best_idx"])
+        _teacher_src = int(best_source[0].item()) if best_source.numel() > 0 else -1
+        bridge.teacher_selected_above_004 = float(
+            1.0
+            if tol_above_004
+            and _teacher_src in (SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_RSSM)
+            else 0.0
         )
 
         actor_distill_total = feat.new_zeros(())

@@ -770,6 +770,34 @@ parser.add_argument(
     help="Loss weight on recovery head (default 0 -> disabled).",
 )
 parser.add_argument(
+    "--seq_wm_head_balance_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Apply pos_weight balancing on horizon/recovery head BCE losses.",
+)
+parser.add_argument(
+    "--seq_wm_success_pos_weight", type=float, default=1.0,
+    help="Manual pos_weight for horizon-success head when auto is off.",
+)
+parser.add_argument(
+    "--seq_wm_drop_pos_weight", type=float, default=1.0,
+    help="Manual pos_weight for drop-risk head when auto is off.",
+)
+parser.add_argument(
+    "--seq_wm_recovery_pos_weight", type=float, default=1.0,
+    help="Manual pos_weight for recovery head when auto is off.",
+)
+parser.add_argument(
+    "--seq_wm_head_pos_weight_auto",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Auto-compute pos_weight from batch label pos_frac (clamped).",
+)
+parser.add_argument(
+    "--seq_wm_head_pos_weight_max", type=float, default=10.0,
+    help="Upper clamp for auto pos_weight.",
+)
+parser.add_argument(
     "--seq_wm_recovery_d_hat_margin", type=float, default=0.005,
     help="d_hat improvement margin used in soft-OR recovery target.",
 )
@@ -1095,6 +1123,43 @@ parser.add_argument(
     type=float,
     default=0.95,
     help="Uncertainty threshold for shadow block decision recording.",
+)
+parser.add_argument(
+    "--wm_imagined_valid_mode",
+    type=str,
+    default="strict_uncertainty",
+    choices=["strict_uncertainty", "soft_calibrated", "shadow_only"],
+    help="Imagined-valid gating mode for WM PBT ranking / diagnostics.",
+)
+parser.add_argument(
+    "--wm_imagined_valid_uncertainty_threshold",
+    type=float,
+    default=0.5,
+    help="Strict imagined-valid uncertainty threshold.",
+)
+parser.add_argument(
+    "--wm_imagined_soft_uncertainty_threshold",
+    type=float,
+    default=0.95,
+    help="Soft imagined-valid uncertainty threshold (requires head signal).",
+)
+parser.add_argument(
+    "--wm_imagined_min_logit_abs_mean",
+    type=float,
+    default=0.05,
+    help="Min mean |logit| to count as head signal for soft validity.",
+)
+parser.add_argument(
+    "--wm_imagined_min_head_signal_std",
+    type=float,
+    default=0.02,
+    help="Min head prob std to count as head signal for soft validity.",
+)
+parser.add_argument(
+    "--wm_imagined_soft_validity_weight",
+    type=float,
+    default=0.25,
+    help="WM ranking weight multiplier when soft-valid (not strict-valid).",
 )
 parser.add_argument(
     "--pbt_usable_live_min_mean",
@@ -1791,6 +1856,27 @@ parser.add_argument("--conservative_planner_tol_start", type=float, default=0.05
 parser.add_argument("--conservative_planner_tol_full", type=float, default=0.035)
 parser.add_argument("--conservative_planner_ramp_frames", type=int, default=300000000)
 parser.add_argument("--conservative_planner_nsucc_ref", type=float, default=25.0)
+# Soft candidate-retrieval gate (default hard_tol = legacy behaviour).
+parser.add_argument(
+    "--eir_candidate_gate_mode",
+    type=str,
+    default="hard_tol",
+    choices=["hard_tol", "soft_tol", "profile_soft"],
+    help="Soft tolerance gate for elite/archive/RSSM candidate retrieval.",
+)
+parser.add_argument("--eir_elite_candidate_tol_start", type=float, default=0.070)
+parser.add_argument("--eir_elite_candidate_tol_full", type=float, default=0.045)
+parser.add_argument("--eir_rssm_candidate_tol_start", type=float, default=0.060)
+parser.add_argument("--eir_rssm_candidate_tol_full", type=float, default=0.040)
+parser.add_argument(
+    "--eir_conservative_rssm_candidate_tol_start", type=float, default=0.055
+)
+parser.add_argument(
+    "--eir_conservative_rssm_candidate_tol_full", type=float, default=0.035
+)
+parser.add_argument(
+    "--eir_candidate_min_weight_for_retrieval", type=float, default=0.05
+)
 # WM PBT source selector soft gate (no tol hard gate).
 parser.add_argument("--wm_pbt_source_gate_mode", type=str, default="confidence_only",
                     choices=["off", "confidence_only"])
@@ -2556,15 +2642,26 @@ def _run_wm_runtime_wiring(
                 "uncertainty",
                 "recovery_h16",
                 "value_h16",
+                "logit_abs_mean",
+                "head_signal_std",
+                "imagined_valid_strict",
+                "imagined_valid_soft",
+                "imagined_head_has_signal",
+                "wm_validity_weight",
+                "imagined_valid_mode",
+                "imagined_valid_reason",
+                "checkpoint_age_frames",
             ):
-                if k in imag_out and isinstance(imag_out[k], (int, float)):
+                if k in imag_out and isinstance(imag_out[k], (int, float, bool)):
                     out[f"imagine_{k}"] = float(imag_out[k])
             for k, v in imag_out.items():
                 if k.startswith("success_h") or k.startswith("drop_h") or k.startswith("recovery_h"):
                     if isinstance(v, (int, float)):
                         out[f"imagine_{k}"] = float(v)
             invalid_reason = "valid" if valid else (
-                seq_wm_trainer._last_imagine_invalid_reason or "high_uncertainty"
+                imag_out.get("imagined_valid_reason")
+                or seq_wm_trainer._last_imagine_invalid_reason
+                or "high_uncertainty"
             )
             out["imagine_invalid_reason_hash"] = float(
                 hash(invalid_reason) % 1_000_003
@@ -2599,7 +2696,28 @@ def _run_wm_runtime_wiring(
                     "frames": int(frames),
                     "global_step": int(seq_wm_trainer.global_step),
                     "imagined_valid": bool(valid),
+                    "imagined_valid_strict": bool(
+                        imag_out.get("imagined_valid_strict", valid)
+                    ),
+                    "imagined_valid_soft": bool(
+                        imag_out.get("imagined_valid_soft", False)
+                    ),
+                    "imagined_head_has_signal": bool(
+                        imag_out.get("imagined_head_has_signal", False)
+                    ),
+                    "imagined_valid_mode": str(
+                        imag_out.get(
+                            "imagined_valid_mode",
+                            getattr(imag, "valid_mode", "strict_uncertainty"),
+                        )
+                    ),
+                    "valid_reason": str(
+                        imag_out.get("imagined_valid_reason", invalid_reason)
+                    ),
                     "invalid_reason": invalid_reason,
+                    "wm_validity_weight": float(
+                        imag_out.get("wm_validity_weight", 0.0)
+                    ),
                     "uncertainty": unc_val,
                     "wm_recovery_prob": float(
                         imag_out.get("wm_recovery_prob", 0.0)
@@ -2610,6 +2728,15 @@ def _run_wm_runtime_wiring(
                     "wm_drop_risk": float(imag_out.get("wm_drop_risk", 0.0)),
                     "logit_abs_mean": float(
                         imag_out.get("logit_abs_mean", 0.0)
+                    ),
+                    "head_signal_std": float(
+                        imag_out.get("head_signal_std", 0.0)
+                    ),
+                    "checkpoint_age_frames": float(
+                        imag_out.get("checkpoint_age_frames", 0.0)
+                    ),
+                    "stale_reason": str(
+                        imag_out.get("stale_reason", "live_model")
                     ),
                     "shadow_block_decision": bool(shadow_block_decision),
                     "shadow_block_reason": str(shadow_block_reason),
@@ -5269,6 +5396,12 @@ def main():
             lambda_horizon_success=float(args_cli.seq_wm_lambda_horizon_success),
             lambda_drop_risk=float(args_cli.seq_wm_lambda_drop_risk),
             lambda_recovery=float(args_cli.seq_wm_lambda_recovery),
+            head_balance_enable=bool(args_cli.seq_wm_head_balance_enable),
+            success_pos_weight=float(args_cli.seq_wm_success_pos_weight),
+            drop_pos_weight=float(args_cli.seq_wm_drop_pos_weight),
+            recovery_pos_weight=float(args_cli.seq_wm_recovery_pos_weight),
+            head_pos_weight_auto=bool(args_cli.seq_wm_head_pos_weight_auto),
+            head_pos_weight_max=float(args_cli.seq_wm_head_pos_weight_max),
             recovery_d_hat_margin=float(args_cli.seq_wm_recovery_d_hat_margin),
             recovery_d_hat_tol_min_steps=int(
                 args_cli.seq_wm_recovery_d_hat_tol_min_steps
@@ -5511,6 +5644,23 @@ def main():
             actor_distill_tol_full=float(args_cli.eir_actor_distill_tol_full),
             actor_distill_ramp_frames=int(args_cli.eir_actor_distill_ramp_frames),
             actor_distill_nsucc_ref=float(args_cli.eir_actor_distill_nsucc_ref),
+            candidate_gate_mode=str(args_cli.eir_candidate_gate_mode),
+            elite_candidate_tol_start=float(args_cli.eir_elite_candidate_tol_start),
+            elite_candidate_tol_full=float(args_cli.eir_elite_candidate_tol_full),
+            rssm_candidate_tol_start=float(args_cli.eir_rssm_candidate_tol_start),
+            rssm_candidate_tol_full=float(args_cli.eir_rssm_candidate_tol_full),
+            conservative_rssm_candidate_tol_start=float(
+                args_cli.eir_conservative_rssm_candidate_tol_start
+            ),
+            conservative_rssm_candidate_tol_full=float(
+                args_cli.eir_conservative_rssm_candidate_tol_full
+            ),
+            candidate_min_weight_for_retrieval=float(
+                args_cli.eir_candidate_min_weight_for_retrieval
+            ),
+            wm_strategy_profile_name=str(
+                getattr(args_cli, "wm_strategy_profile", "") or ""
+            ),
         )
         eir_bank_cfg = EliteRecoveryBankConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),
@@ -5691,6 +5841,16 @@ def main():
                 num_starts=int(args_cli.seq_wm_imagine_num_starts),
                 use_teacher=bool(args_cli.seq_wm_imagine_use_teacher),
                 max_uncertainty=float(args_cli.pbt_wm_max_uncertainty),
+                valid_mode=str(args_cli.wm_imagined_valid_mode),
+                strict_uncertainty_threshold=float(
+                    args_cli.wm_imagined_valid_uncertainty_threshold
+                ),
+                soft_uncertainty_threshold=float(
+                    args_cli.wm_imagined_soft_uncertainty_threshold
+                ),
+                min_logit_abs_mean=float(args_cli.wm_imagined_min_logit_abs_mean),
+                min_head_signal_std=float(args_cli.wm_imagined_min_head_signal_std),
+                soft_validity_weight=float(args_cli.wm_imagined_soft_validity_weight),
             )
             # Per-process audit counters surfaced into TB.
             seq_wm_trainer._teacher_eval_attempted_total = 0
@@ -6263,6 +6423,16 @@ def main():
             wm_imagined_shadow_uncertainty_threshold=(
                 args_cli.wm_imagined_shadow_uncertainty_threshold
             ),
+            wm_imagined_valid_mode=str(args_cli.wm_imagined_valid_mode),
+            wm_imagined_valid_uncertainty_threshold=(
+                args_cli.wm_imagined_valid_uncertainty_threshold
+            ),
+            wm_imagined_soft_uncertainty_threshold=(
+                args_cli.wm_imagined_soft_uncertainty_threshold
+            ),
+            wm_imagined_min_logit_abs_mean=args_cli.wm_imagined_min_logit_abs_mean,
+            wm_imagined_min_head_signal_std=args_cli.wm_imagined_min_head_signal_std,
+            wm_imagined_soft_validity_weight=args_cli.wm_imagined_soft_validity_weight,
             pbt_usable_live_min_mean=args_cli.pbt_usable_live_min_mean,
             pbt_usable_live_min_max=args_cli.pbt_usable_live_min_max,
             pbt_usable_live_max_drop_ratio=args_cli.pbt_usable_live_max_drop_ratio,

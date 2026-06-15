@@ -289,17 +289,35 @@ def compute_wm_pbt_source_activation_weight(
     frames: int,
     start_after_frames: int,
     ramp_frames: int,
-    wm_valid: bool,
+    wm_valid: bool = False,
     wm_uncertainty: float,
     max_uncertainty: float,
-) -> tuple[float, float, float]:
+    imagined_valid_strict: bool | None = None,
+    imagined_valid_soft: bool | None = None,
+    imagined_head_has_signal: bool | None = None,
+    wm_validity_weight: float = 1.0,
+    soft_validity_weight: float = 0.25,
+) -> tuple[float, float, float, float, bool, bool]:
     """PBT WM source-selector activation weight (time ramp * uncertainty gate).
 
-    Returns ``(weight, time_weight, unc_weight)``.  Invalid eval or disabled gate
-    yields all zeros so ranking falls back to the real score.
+    Returns ``(weight, time_weight, unc_weight, validity_weight, used_strict,
+    used_soft)``.  Invalid eval or disabled gate yields zeros so ranking falls
+    back to the real score.  When ``imagined_valid_*`` kwargs are omitted, falls
+    back to legacy ``wm_valid`` binary gating.
     """
-    if not enable or str(gate_mode) == "off" or not wm_valid:
-        return 0.0, 0.0, 0.0
+    zero = (0.0, 0.0, 0.0, 0.0, False, False)
+    if not enable or str(gate_mode) == "off":
+        return zero
+    strict = bool(wm_valid) if imagined_valid_strict is None else bool(imagined_valid_strict)
+    soft = bool(imagined_valid_soft) if imagined_valid_soft is not None else False
+    has_signal = (
+        bool(wm_valid)
+        if imagined_head_has_signal is None
+        else bool(imagined_head_has_signal)
+    )
+    v_weight = float(wm_validity_weight)
+    if not has_signal or v_weight <= 0.0:
+        return zero
     if int(frames) < int(start_after_frames):
         w_time = 0.0
     else:
@@ -309,7 +327,17 @@ def compute_wm_pbt_source_activation_weight(
     w_unc = clamp01(
         1.0 - float(wm_uncertainty) / max(1e-6, float(max_uncertainty))
     )
-    return float(w_time * w_unc), float(w_time), float(w_unc)
+    if strict:
+        eff = float(w_time * w_unc * 1.0)
+        return eff, float(w_time), float(w_unc), 1.0, True, False
+    if soft:
+        sv = float(soft_validity_weight)
+        eff = float(w_time * w_unc * sv)
+        return eff, float(w_time), float(w_unc), sv, False, True
+    if imagined_valid_strict is None and imagined_valid_soft is None and wm_valid:
+        eff = float(w_time * w_unc * v_weight)
+        return eff, float(w_time), float(w_unc), v_weight, True, False
+    return zero
 
 
 def blend_wm_ranking_score(

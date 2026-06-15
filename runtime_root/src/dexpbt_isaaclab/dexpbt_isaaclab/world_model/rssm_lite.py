@@ -98,6 +98,21 @@ def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (value * expanded).sum() / denom
 
 
+def _auto_pos_weight(
+    pos_frac: float,
+    manual: float,
+    balance_enable: bool,
+    auto: bool,
+    max_w: float,
+) -> float:
+    if not balance_enable:
+        return 1.0
+    if not auto:
+        return float(manual)
+    eps = 1e-6
+    return min(max((1 - pos_frac) / max(pos_frac, eps), 1.0), max_w)
+
+
 def _kl_diag_gauss(mu_q: torch.Tensor, std_q: torch.Tensor,
                    mu_p: torch.Tensor, std_p: torch.Tensor) -> torch.Tensor:
     """KL(q || p) for diagonal Gaussians, summed over the last dim."""
@@ -377,6 +392,13 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         recovery_shadow_tol_threshold: Optional[float] = None,
         # Skip horizon heads whose horizon ≥ seq_len-1 (target undefined).
         horizon_skip_too_long: bool = True,
+        # WM Head Rescue: balanced BCE pos_weight (default off).
+        head_balance_enable: bool = False,
+        success_pos_weight: float = 1.0,
+        drop_pos_weight: float = 1.0,
+        recovery_pos_weight: float = 1.0,
+        head_pos_weight_auto: bool = False,
+        head_pos_weight_max: float = 10.0,
         # Phase A4 P5 (2026-06-10): when True, also returns the float-metric
         # dict that previously only lived on ``self._last_metrics``. Used
         # by TeacherManager.evaluate to read per-horizon pos rates without
@@ -492,6 +514,18 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         horizon_skipped: dict[int, int] = {}
         horizon_pos_rate: dict[int, float] = {}
         drop_pos_rate: dict[int, float] = {}
+        success_label_pos_frac = 0.0
+        drop_label_pos_frac = 0.0
+        recovery_label_pos_frac = 0.0
+        success_logit_mean = 0.0
+        success_logit_std = 0.0
+        success_logit_abs_mean = 0.0
+        drop_logit_mean = 0.0
+        drop_logit_std = 0.0
+        drop_logit_abs_mean = 0.0
+        recovery_logit_mean = 0.0
+        recovery_logit_std = 0.0
+        recovery_logit_abs_mean = 0.0
         # Reuse pred for horizon/recovery. The heads, when present, are
         # called inside heads.predict_horizon / heads.predict_recovery.
         if self.with_horizon_heads and "horizon_logits" in pred:
@@ -529,11 +563,45 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 # Use binary_cross_entropy_with_logits with sample weights.
                 w = horizon_mask.reshape(T * B)
                 denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
+                with torch.no_grad():
+                    if w.sum() > 0:
+                        flat_w = w.reshape(T * B)
+                        tgt_s = target_success.reshape(T * B)
+                        tgt_d = target_drop.reshape(T * B)
+                        h_pos = float((tgt_s * flat_w).sum().item() / float(denom.item()))
+                        d_pos = float((tgt_d * flat_w).sum().item() / float(denom.item()))
+                        horizon_pos_rate[h_steps] = h_pos
+                        drop_pos_rate[h_steps] = d_pos
+                        success_label_pos_frac = h_pos
+                        drop_label_pos_frac = d_pos
+                        masked_s = logit_s[flat_w > 0]
+                        masked_d = logit_d[flat_w > 0]
+                        if masked_s.numel() > 0:
+                            success_logit_mean = float(masked_s.mean().item())
+                            success_logit_std = float(masked_s.std(unbiased=False).item())
+                            success_logit_abs_mean = float(masked_s.abs().mean().item())
+                        if masked_d.numel() > 0:
+                            drop_logit_mean = float(masked_d.mean().item())
+                            drop_logit_std = float(masked_d.std(unbiased=False).item())
+                            drop_logit_abs_mean = float(masked_d.abs().mean().item())
+                pw_s = _auto_pos_weight(
+                    success_label_pos_frac, float(success_pos_weight),
+                    bool(head_balance_enable), bool(head_pos_weight_auto),
+                    float(head_pos_weight_max),
+                )
+                pw_d = _auto_pos_weight(
+                    drop_label_pos_frac, float(drop_pos_weight),
+                    bool(head_balance_enable), bool(head_pos_weight_auto),
+                    float(head_pos_weight_max),
+                )
+                pos_w_s = belief_seq.new_tensor(pw_s)
+                pos_w_d = belief_seq.new_tensor(pw_d)
                 L_horizon_success[h_steps] = (
                     F.binary_cross_entropy_with_logits(
                         logit_s,
                         target_success.reshape(T * B),
                         weight=w,
+                        pos_weight=pos_w_s,
                         reduction="sum",
                     )
                     / denom
@@ -543,20 +611,11 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                         logit_d,
                         target_drop.reshape(T * B),
                         weight=w,
+                        pos_weight=pos_w_d,
                         reduction="sum",
                     )
                     / denom
                 )
-                with torch.no_grad():
-                    if w.sum() > 0:
-                        horizon_pos_rate[h_steps] = float(
-                            (target_success.reshape(T * B) * w).sum().item()
-                            / float(denom.item())
-                        )
-                        drop_pos_rate[h_steps] = float(
-                            (target_drop.reshape(T * B) * w).sum().item()
-                            / float(denom.item())
-                        )
 
         if self.with_recovery_head and "recovery_logits" in pred:
             recovery_logit = pred["recovery_logits"].squeeze(-1)
@@ -578,15 +637,6 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             )
             w = recovery_mask.reshape(T * B)
             denom = w.sum().clamp_min(torch.tensor(1.0, device=belief_seq.device))
-            L_recovery = (
-                F.binary_cross_entropy_with_logits(
-                    recovery_logit,
-                    recovery_target.reshape(T * B),
-                    weight=w,
-                    reduction="sum",
-                )
-                / denom
-            )
             with torch.no_grad():
                 # `recovery_floor_sample_fraction` reports how many
                 # (T,B) entries the shadow mask actually covers. A value
@@ -601,8 +651,30 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                         (recovery_target.reshape(T * B) * w).sum().item()
                         / float(denom.item())
                     )
+                    recovery_label_pos_frac = recovery_pos_rate
+                    masked_r = recovery_logit[w > 0]
+                    if masked_r.numel() > 0:
+                        recovery_logit_mean = float(masked_r.mean().item())
+                        recovery_logit_std = float(masked_r.std(unbiased=False).item())
+                        recovery_logit_abs_mean = float(masked_r.abs().mean().item())
                 else:
                     recovery_missing_target_count = 1.0
+            pw_r = _auto_pos_weight(
+                recovery_label_pos_frac, float(recovery_pos_weight),
+                bool(head_balance_enable), bool(head_pos_weight_auto),
+                float(head_pos_weight_max),
+            )
+            pos_w_r = belief_seq.new_tensor(pw_r)
+            L_recovery = (
+                F.binary_cross_entropy_with_logits(
+                    recovery_logit,
+                    recovery_target.reshape(T * B),
+                    weight=w,
+                    pos_weight=pos_w_r,
+                    reduction="sum",
+                )
+                / denom
+            )
 
         # Phase A4 P4 (2026-06-09): floor-aware loss multiplier (Part B).
         floor_mult = belief_seq.new_ones(())
@@ -633,14 +705,28 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
             + beta_kl * L_kl
             + floor_mult * loss_weights.get("value", 0.0) * L_value
         )
+        head_loss_weighted = belief_seq.new_zeros(())
         for h_steps, lh in L_horizon_success.items():
             key = f"horizon_success_h{int(h_steps)}"
-            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * lh
+            term = floor_mult * loss_weights.get(key, 0.0) * lh
+            L_total = L_total + term
+            head_loss_weighted = head_loss_weighted + term
         for h_steps, ld in L_drop_risk.items():
             key = f"drop_risk_h{int(h_steps)}"
-            L_total = L_total + floor_mult * loss_weights.get(key, 0.0) * ld
+            term = floor_mult * loss_weights.get(key, 0.0) * ld
+            L_total = L_total + term
+            head_loss_weighted = head_loss_weighted + term
         if self.with_recovery_head:
-            L_total = L_total + floor_mult * loss_weights.get("recovery", 0.0) * L_recovery
+            rec_term = floor_mult * loss_weights.get("recovery", 0.0) * L_recovery
+            L_total = L_total + rec_term
+            head_loss_weighted = head_loss_weighted + rec_term
+
+        loss_dynamics_or_recon = (
+            loss_weights["state"] * L_state
+            + loss_weights["reward"] * L_reward
+            + loss_weights["done"] * L_done
+            + beta_kl * L_kl
+        )
 
         # Cache scalar metrics for telemetry.
         with torch.no_grad():
@@ -686,6 +772,24 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
                 metrics[f"drop_risk_pos_rate_h{int(h_steps)}"] = float(pr)
             for h_steps, code in horizon_skipped.items():
                 metrics[f"horizon_skipped_h{int(h_steps)}"] = float(code)
+            metrics.update({
+                "success_label_pos_frac": float(success_label_pos_frac),
+                "drop_label_pos_frac": float(drop_label_pos_frac),
+                "recovery_label_pos_frac": float(recovery_label_pos_frac),
+                "success_logit_mean": float(success_logit_mean),
+                "success_logit_std": float(success_logit_std),
+                "success_logit_abs_mean": float(success_logit_abs_mean),
+                "drop_logit_mean": float(drop_logit_mean),
+                "drop_logit_std": float(drop_logit_std),
+                "drop_logit_abs_mean": float(drop_logit_abs_mean),
+                "recovery_logit_mean": float(recovery_logit_mean),
+                "recovery_logit_std": float(recovery_logit_std),
+                "recovery_logit_abs_mean": float(recovery_logit_abs_mean),
+                "loss_dynamics_or_recon": float(loss_dynamics_or_recon.detach().item()),
+                "head_loss_weighted_fraction": float(
+                    (head_loss_weighted.detach() / L_total.detach().clamp_min(1e-9)).item()
+                ),
+            })
             self._last_metrics = metrics
 
         result = {

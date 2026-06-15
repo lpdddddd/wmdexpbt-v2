@@ -98,6 +98,13 @@ class SeqWMConfig:
     lambda_horizon_success: float = 0.0
     lambda_drop_risk: float = 0.0
     lambda_recovery: float = 0.0
+    # WM Head Rescue: balanced BCE pos_weight (default off).
+    head_balance_enable: bool = False
+    success_pos_weight: float = 1.0
+    drop_pos_weight: float = 1.0
+    recovery_pos_weight: float = 1.0
+    head_pos_weight_auto: bool = False
+    head_pos_weight_max: float = 10.0
     recovery_d_hat_margin: float = 0.005
     recovery_d_hat_tol_min_steps: int = 0
     # Phase A4 P4 wired (2026-06-10): widen recovery target/mask above
@@ -126,6 +133,39 @@ class SeqWMConfig:
     imagine_action_mode: str = "recorded"  # "recorded" | "policy"
     imagine_num_starts: int = 256
     imagine_use_teacher: bool = True
+
+    # WM Head Rescue: balanced head BCE pos_weight.
+    head_balance_enable: bool = False
+    success_pos_weight: float = 1.0
+    drop_pos_weight: float = 1.0
+    recovery_pos_weight: float = 1.0
+    head_pos_weight_auto: bool = False
+    head_pos_weight_max: float = 10.0
+
+
+def _head_param_groups(model: SequenceWorldModelBase) -> dict[str, list[torch.nn.Parameter]]:
+    """Collect horizon/recovery head parameters for grad-norm telemetry."""
+    heads = getattr(model, "heads", None)
+    if heads is None:
+        return {}
+    groups: dict[str, list[torch.nn.Parameter]] = {}
+    if getattr(heads, "success_horizon_heads", None) is not None:
+        for key, mod in heads.success_horizon_heads.items():
+            groups[f"success_{key}"] = list(mod.parameters())
+    if getattr(heads, "drop_risk_heads", None) is not None:
+        for key, mod in heads.drop_risk_heads.items():
+            groups[f"drop_{key}"] = list(mod.parameters())
+    if getattr(heads, "recovery_head", None) is not None:
+        groups["recovery"] = list(heads.recovery_head.parameters())
+    return groups
+
+
+def _param_grad_norm(params: list[torch.nn.Parameter]) -> float:
+    sq = 0.0
+    for p in params:
+        if p.grad is not None:
+            sq += float(p.grad.data.norm(2).item()) ** 2
+    return float(sq ** 0.5) if sq > 0 else 0.0
 
 
 _LOSS_PRESETS: dict[str, dict[str, float]] = {
@@ -316,6 +356,12 @@ class SeqWMTrainer:
                         self.cfg.recovery_shadow_tol_threshold
                     ),
                     horizon_skip_too_long=bool(self.cfg.horizon_skip_too_long),
+                    head_balance_enable=bool(self.cfg.head_balance_enable),
+                    success_pos_weight=float(self.cfg.success_pos_weight),
+                    drop_pos_weight=float(self.cfg.drop_pos_weight),
+                    recovery_pos_weight=float(self.cfg.recovery_pos_weight),
+                    head_pos_weight_auto=bool(self.cfg.head_pos_weight_auto),
+                    head_pos_weight_max=float(self.cfg.head_pos_weight_max),
                     **kwargs,
                 )
             except TypeError:
@@ -344,6 +390,14 @@ class SeqWMTrainer:
             scaled = self.cfg.lambda_total * losses["loss_total"]
             self.optimizer.zero_grad(set_to_none=True)
             scaled.backward()
+            head_grad_metrics: dict[str, float] = {}
+            for name, params in _head_param_groups(self.model).items():
+                head_grad_metrics[f"seq_wm_head/{name}_grad_norm"] = _param_grad_norm(params)
+            if head_grad_metrics:
+                all_head_params = [
+                    p for ps in _head_param_groups(self.model).values() for p in ps
+                ]
+                head_grad_metrics["seq_wm_head/grad_norm"] = _param_grad_norm(all_head_params)
             grad_norm = nn_utils.clip_grad_norm_(
                 self.model.parameters(), self.cfg.grad_clip
             )
@@ -361,6 +415,20 @@ class SeqWMTrainer:
                 "seq_batch_size": int(self.cfg.seq_batch_size),
                 "active_strategy_id": float(hash(self.strategy) % 1_000_003),
             })
+            metrics.update(head_grad_metrics)
+            replay_m = getattr(self.sampler, "last_replay_metrics", None) or {}
+            for rk, rv in replay_m.items():
+                metrics[f"seq_wm_replay/{rk}"] = float(rv)
+            for hk in (
+                "success_label_pos_frac", "drop_label_pos_frac", "recovery_label_pos_frac",
+                "success_logit_mean", "success_logit_std", "success_logit_abs_mean",
+                "drop_logit_mean", "drop_logit_std", "drop_logit_abs_mean",
+                "recovery_logit_mean", "recovery_logit_std", "recovery_logit_abs_mean",
+                "head_loss_weighted_fraction", "loss_dynamics_or_recon",
+                "loss_recovery",
+            ):
+                if hk in metrics:
+                    metrics[f"seq_wm_head/{hk}"] = float(metrics[hk])
             # Accumulate (for last-update visibility, just keep the latest).
             cumulative_metrics = metrics
 

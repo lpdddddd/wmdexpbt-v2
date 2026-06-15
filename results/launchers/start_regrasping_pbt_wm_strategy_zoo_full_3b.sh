@@ -23,6 +23,26 @@ MAX_ITER="${MAX_ITER:-22889}"
 PBT_START_AFTER="${PBT_START_AFTER:-200000000}"
 PBT_INITIAL_DELAY="${PBT_INITIAL_DELAY:-50000000}"
 
+# WM Head Rescue + soft candidate retrieval (shared across zoo profiles).
+SHARED_WM_HEAD_FLAGS=(
+  --seq_wm_head_balance_enable
+  --seq_wm_head_pos_weight_auto
+  --seq_wm_head_pos_weight_max 10.0
+  --seq_wm_lambda_horizon_success 0.5
+  --seq_wm_lambda_drop_risk 0.5
+  --seq_wm_lambda_recovery 0.5
+  --seq_wm_replay_prioritize_floor_recovery
+  --seq_wm_floor_aware_weighting
+  --wm_imagined_valid_mode soft_calibrated
+  --wm_imagined_valid_uncertainty_threshold 0.5
+  --wm_imagined_soft_uncertainty_threshold 0.95
+  --wm_imagined_min_logit_abs_mean 0.05
+  --wm_imagined_min_head_signal_std 0.02
+  --wm_imagined_soft_validity_weight 0.25
+  --eir_candidate_gate_mode profile_soft
+  --eir_candidate_min_weight_for_retrieval 0.05
+)
+
 PROFILE_LIST="ppo_only,rssm_mppi_actor_distill,wm_curriculum_controller,wm_pbt_source_selector,elite_bank_actor_distill,conservative_rssm_planner_distill"
 
 export DEXPBT_MAX_ACTIVE="${DEXPBT_MAX_ACTIVE:-2}"
@@ -72,6 +92,11 @@ danger_tol=0.030
 strong_shrink_global_retention_gate=true
 rollback_to_last_mastered=true
 wm_imagined_shadow_only=true
+wm_imagined_head_rescue=true
+wm_imagined_valid_mode=soft_calibrated
+wm_head_balance=true
+soft_candidate_retrieval=true
+residual_rollout_apply=false
 note=PBT-WM Strategy Zoo v1.0 full population: six distinct wm_strategy_profile workers; profile propagation after 1B; no global residual rollout apply.
 ppo_only_note=ppo_only is the PPO/PBT anchor under the shared strategy-zoo PBT/curriculum scaffold. It disables WM/EIR/action-level intervention, but it is not an exact original DexPBT reproduction.
 soft_activation_gate=PBT-WM Soft Activation Gate v1: actor_distill / WM source score / WM curriculum diagnostics use a continuous activation weight (w_time*w_tol*w_perf*w_conf*w_unc*w_source) instead of a tol<=0.04 hard gate.
@@ -191,6 +216,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --wm_imagined_diagnostic_enable \
   --wm_imagined_shadow_block_enable \
   --wm_imagined_shadow_uncertainty_threshold 0.95 \
+  "${SHARED_WM_HEAD_FLAGS[@]}" \
   >"$LOG" 2>&1 &
 
 echo $! > "$PIDFILE"
