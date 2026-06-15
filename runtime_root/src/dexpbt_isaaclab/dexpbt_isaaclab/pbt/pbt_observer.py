@@ -696,6 +696,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._last_wm_score_effective_weight = 0.0
         self._last_wm_score_used_strict = 0.0
         self._last_wm_score_used_soft = 0.0
+        self._last_wm_ranking_uncertainty_threshold = 0.0
+        self._last_wm_ranking_uncertainty_gate_mode = "none"
         self.pbt_wm_profile_copy_enable = bool(pbt_wm_profile_copy_enable)
         self.pbt_wm_profile_copy_after_frames = int(pbt_wm_profile_copy_after_frames)
         self.pbt_wm_profile_copy_prob = float(pbt_wm_profile_copy_prob)
@@ -4611,6 +4613,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "wm_score_used_soft": float(
                     getattr(self, "_last_wm_score_used_soft", 0.0)
                 ),
+                "wm_ranking_uncertainty_threshold": float(
+                    getattr(self, "_last_wm_ranking_uncertainty_threshold", 0.0)
+                ),
+                "wm_ranking_uncertainty_gate_mode": str(
+                    getattr(self, "_last_wm_ranking_uncertainty_gate_mode", "none")
+                ),
                 "curriculum_tol_bin": str(_curriculum_tol_bin),
                 "actor_distill_tol_bin": _actor_distill_tol_bin,
                 "tier": str(tier),
@@ -5159,84 +5167,107 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 "valid_reason",
                                 wm_eval.get("invalid_reason", "no_imagined_valid"),
                             )
-                        elif wm_unc > float(self.pbt_wm_max_uncertainty):
-                            fallback_reason_pidx = "high_uncertainty"
-                        elif target_degenerate:
-                            fallback_reason_pidx = "target_degenerate"
-                        elif teacher_step < 0:
-                            fallback_reason_pidx = "no_promoted_teacher"
                         else:
-                            from dexpbt_isaaclab.dexpbt_utils import (
-                                combine_wm_recovery_score,
-                            )
                             from dexpbt_isaaclab.world_model.wm_activation_gate import (
-                                blend_wm_ranking_score,
-                                compute_wm_pbt_source_activation_weight,
-                            )
-                            score_with_wm, _ = combine_wm_recovery_score(
-                                score_real_for_pidx,
-                                wm_recovery_prob=float(
-                                    wm_eval.get("wm_recovery_prob", 0.0)
-                                ),
-                                wm_success_prob=float(
-                                    wm_eval.get("wm_success_prob", 0.0)
-                                ),
-                                wm_drop_risk=float(
-                                    wm_eval.get("wm_drop_risk", 0.0)
-                                ),
-                                wm_uncertainty=wm_unc,
-                                recovery_weight=self.pbt_wm_recovery_weight,
-                                success_weight=self.pbt_wm_success_weight,
-                                drop_penalty=self.pbt_wm_drop_penalty,
-                                uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
+                                resolve_wm_ranking_uncertainty_gate,
                             )
                             (
-                                _src_w,
-                                _w_time_p,
-                                _w_unc_p,
-                                _v_w_p,
-                                _used_strict_p,
-                                _used_soft_p,
-                            ) = compute_wm_pbt_source_activation_weight(
-                                enable=bool(self.wm_activation_enable),
-                                gate_mode=str(self.wm_pbt_source_gate_mode),
-                                frames=int(env_frames),
-                                start_after_frames=int(
-                                    self.wm_pbt_source_start_after_frames
-                                ),
-                                ramp_frames=int(self.wm_pbt_source_ramp_frames),
-                                wm_uncertainty=float(wm_unc),
-                                max_uncertainty=float(self.pbt_wm_max_uncertainty),
-                                imagined_valid_strict=wm_strict,
-                                imagined_valid_soft=wm_soft,
-                                imagined_head_has_signal=wm_has_signal,
-                                wm_validity_weight=wm_v_weight,
-                                soft_validity_weight=float(
-                                    self.wm_imagined_soft_validity_weight
+                                ranking_unc_threshold,
+                                ranking_gate_mode,
+                                unc_fallback,
+                            ) = resolve_wm_ranking_uncertainty_gate(
+                                wm_strict=wm_strict,
+                                wm_soft=wm_soft,
+                                wm_unc=wm_unc,
+                                strict_threshold=float(self.pbt_wm_max_uncertainty),
+                                soft_threshold=float(
+                                    self.wm_imagined_soft_uncertainty_threshold
                                 ),
                             )
-                            score_with_wm = blend_wm_ranking_score(
-                                score_real_for_pidx, score_with_wm, _src_w
-                            )
-                            used_wm_for_pidx = _src_w > 0.0
-                            fallback_reason_pidx = (
-                                "ok" if used_wm_for_pidx else "wm_source_activation_zero"
-                            )
-                            if pidx == self.policy_idx:
-                                self._last_wm_source_activation_weight = float(_src_w)
-                                self._last_wm_source_activation_nonzero = (
-                                    1.0 if _src_w > 0.0 else 0.0
+                            if unc_fallback is not None:
+                                fallback_reason_pidx = unc_fallback
+                            elif target_degenerate:
+                                fallback_reason_pidx = "target_degenerate"
+                            elif teacher_step < 0:
+                                fallback_reason_pidx = "no_promoted_teacher"
+                            else:
+                                from dexpbt_isaaclab.dexpbt_utils import (
+                                    combine_wm_recovery_score,
                                 )
-                                self._last_wm_source_unc_weight = float(_w_unc_p)
-                                self._last_wm_source_time_weight = float(_w_time_p)
-                                self._last_wm_validity_weight = float(_v_w_p)
-                                self._last_wm_score_effective_weight = float(_src_w)
-                                self._last_wm_score_used_strict = (
-                                    1.0 if _used_strict_p else 0.0
+                                from dexpbt_isaaclab.world_model.wm_activation_gate import (
+                                    blend_wm_ranking_score,
+                                    compute_wm_pbt_source_activation_weight,
                                 )
-                                self._last_wm_score_used_soft = (
-                                    1.0 if _used_soft_p else 0.0
+                                score_with_wm, _ = combine_wm_recovery_score(
+                                    score_real_for_pidx,
+                                    wm_recovery_prob=float(
+                                        wm_eval.get("wm_recovery_prob", 0.0)
+                                    ),
+                                    wm_success_prob=float(
+                                        wm_eval.get("wm_success_prob", 0.0)
+                                    ),
+                                    wm_drop_risk=float(
+                                        wm_eval.get("wm_drop_risk", 0.0)
+                                    ),
+                                    wm_uncertainty=wm_unc,
+                                    recovery_weight=self.pbt_wm_recovery_weight,
+                                    success_weight=self.pbt_wm_success_weight,
+                                    drop_penalty=self.pbt_wm_drop_penalty,
+                                    uncertainty_penalty=self.pbt_wm_uncertainty_penalty,
                                 )
+                                (
+                                    _src_w,
+                                    _w_time_p,
+                                    _w_unc_p,
+                                    _v_w_p,
+                                    _used_strict_p,
+                                    _used_soft_p,
+                                ) = compute_wm_pbt_source_activation_weight(
+                                    enable=bool(self.wm_activation_enable),
+                                    gate_mode=str(self.wm_pbt_source_gate_mode),
+                                    frames=int(env_frames),
+                                    start_after_frames=int(
+                                        self.wm_pbt_source_start_after_frames
+                                    ),
+                                    ramp_frames=int(self.wm_pbt_source_ramp_frames),
+                                    wm_uncertainty=float(wm_unc),
+                                    max_uncertainty=float(ranking_unc_threshold),
+                                    imagined_valid_strict=wm_strict,
+                                    imagined_valid_soft=wm_soft,
+                                    imagined_head_has_signal=wm_has_signal,
+                                    wm_validity_weight=wm_v_weight,
+                                    soft_validity_weight=float(
+                                        self.wm_imagined_soft_validity_weight
+                                    ),
+                                )
+                                score_with_wm = blend_wm_ranking_score(
+                                    score_real_for_pidx, score_with_wm, _src_w
+                                )
+                                used_wm_for_pidx = _src_w > 0.0
+                                fallback_reason_pidx = (
+                                    "ok" if used_wm_for_pidx else "wm_source_activation_zero"
+                                )
+                                if pidx == self.policy_idx:
+                                    self._last_wm_source_activation_weight = float(_src_w)
+                                    self._last_wm_source_activation_nonzero = (
+                                        1.0 if _src_w > 0.0 else 0.0
+                                    )
+                                    self._last_wm_source_unc_weight = float(_w_unc_p)
+                                    self._last_wm_source_time_weight = float(_w_time_p)
+                                    self._last_wm_validity_weight = float(_v_w_p)
+                                    self._last_wm_score_effective_weight = float(_src_w)
+                                    self._last_wm_score_used_strict = (
+                                        1.0 if _used_strict_p else 0.0
+                                    )
+                                    self._last_wm_score_used_soft = (
+                                        1.0 if _used_soft_p else 0.0
+                                    )
+                                    self._last_wm_ranking_uncertainty_threshold = float(
+                                        ranking_unc_threshold
+                                    )
+                                    self._last_wm_ranking_uncertainty_gate_mode = str(
+                                        ranking_gate_mode
+                                    )
                     # Both paths place the alt score on the 0..50 scale so
                     # mixing with non-floor base_obj is meaningful.
                     alt_objectives[pidx] = float(score_with_wm)
@@ -5353,8 +5384,33 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     # PBT-WM Soft Activation Gate v1 diagnostics (local policy).
                     from dexpbt_isaaclab.world_model.wm_activation_gate import (
                         compute_wm_pbt_source_activation_weight,
+                        resolve_wm_ranking_uncertainty_gate,
                     )
                     _le_diag = self._wm_imagined_eval_per_policy.get(self.policy_idx) or {}
+                    _diag_strict = bool(
+                        _le_diag.get(
+                            "imagined_valid_strict",
+                            _le_diag.get("imagined_valid", False),
+                        )
+                    )
+                    _diag_soft = bool(_le_diag.get("imagined_valid_soft", False))
+                    (
+                        _rank_unc_threshold,
+                        _rank_gate_mode,
+                        _rank_unc_fallback,
+                    ) = resolve_wm_ranking_uncertainty_gate(
+                        wm_strict=_diag_strict,
+                        wm_soft=_diag_soft,
+                        wm_unc=float(local_wm_unc),
+                        strict_threshold=float(self.pbt_wm_max_uncertainty),
+                        soft_threshold=float(
+                            self.wm_imagined_soft_uncertainty_threshold
+                        ),
+                    )
+                    self._last_wm_ranking_uncertainty_threshold = float(
+                        _rank_unc_threshold
+                    )
+                    self._last_wm_ranking_uncertainty_gate_mode = str(_rank_gate_mode)
                     (
                         _src_w,
                         _w_time,
@@ -5369,7 +5425,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         start_after_frames=int(self.wm_pbt_source_start_after_frames),
                         ramp_frames=int(self.wm_pbt_source_ramp_frames),
                         wm_uncertainty=float(local_wm_unc),
-                        max_uncertainty=float(self.pbt_wm_max_uncertainty),
+                        max_uncertainty=float(_rank_unc_threshold),
                         imagined_valid_strict=bool(
                             _le_diag.get(
                                 "imagined_valid_strict",

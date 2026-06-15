@@ -123,6 +123,23 @@ class TestGenerateEIRCandidatesGating(unittest.TestCase):
                 msg=f"{profile} must keep residual rollout apply off",
             )
 
+    def test_teacher_candidate_available_above_004_counts_rssm_gate(self):
+        tol = 0.055
+        tol_above_004 = tol > 0.04
+        elite_w = 0.0
+        rssm_w = rssm_candidate_weight(
+            CandidateGateConfig(mode="profile_soft"), tol
+        )
+        min_w = 0.05
+        elite_avail = tol_above_004 and allow_retrieval(elite_w, min_w)
+        rssm_avail = tol_above_004 and allow_retrieval(rssm_w, min_w)
+        any_avail = elite_avail or rssm_avail
+        self.assertFalse(elite_avail)
+        self.assertTrue(rssm_avail)
+        self.assertTrue(any_avail)
+        self.assertEqual(float(any_avail), float(rssm_avail))
+        self.assertEqual(float(any_avail), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

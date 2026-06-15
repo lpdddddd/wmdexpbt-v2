@@ -929,6 +929,9 @@ class EIRBridge:
     last_archive_candidate_count: float = 0.0
     last_candidate_gate_mode_id: float = 0.0
     teacher_candidate_available_above_004: float = 0.0
+    elite_teacher_candidate_available_above_004: float = 0.0
+    rssm_teacher_candidate_available_above_004: float = 0.0
+    any_teacher_candidate_available_above_004: float = 0.0
     teacher_selected_above_004: float = 0.0
 
     def record_bank_feature_source(self, source_flag: int) -> None:
@@ -1259,11 +1262,23 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             1.0 if allow_retrieval(_rssm_w, _min_w) else 0.0
         )
         tol_above_004 = float(cache.tol_mean) > 0.04
-        bridge.teacher_candidate_available_above_004 = float(
-            1.0
-            if tol_above_004 and allow_retrieval(_elite_w, _min_w)
-            else 0.0
+        elite_avail_above_004 = bool(
+            tol_above_004 and allow_retrieval(_elite_w, _min_w)
         )
+        rssm_avail_above_004 = bool(
+            tol_above_004 and allow_retrieval(_rssm_w, _min_w)
+        )
+        any_avail_above_004 = elite_avail_above_004 or rssm_avail_above_004
+        bridge.elite_teacher_candidate_available_above_004 = float(
+            elite_avail_above_004
+        )
+        bridge.rssm_teacher_candidate_available_above_004 = float(
+            rssm_avail_above_004
+        )
+        bridge.any_teacher_candidate_available_above_004 = float(
+            any_avail_above_004
+        )
+        bridge.teacher_candidate_available_above_004 = float(any_avail_above_004)
         cand_out = generate_eir_candidates(
             mu_r,
             cfg=eir_cfg,

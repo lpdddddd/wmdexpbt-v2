@@ -3538,6 +3538,33 @@ def _patch_actor_train_for_seq_wm(
                         "rssm_candidate_uncertainty_mean": float(
                             getattr(xb, "last_rssm_candidate_uncertainty_mean", 0.0)
                         ),
+                        "elite_candidate_gate_weight": float(
+                            xb.last_elite_candidate_gate_weight
+                        ),
+                        "rssm_candidate_gate_weight": float(
+                            xb.last_rssm_candidate_gate_weight
+                        ),
+                        "elite_candidate_retrieval_allowed": float(
+                            xb.last_elite_candidate_retrieval_allowed
+                        ),
+                        "rssm_candidate_retrieval_allowed": float(
+                            xb.last_rssm_candidate_retrieval_allowed
+                        ),
+                        "elite_teacher_candidate_available_above_004": float(
+                            xb.elite_teacher_candidate_available_above_004
+                        ),
+                        "rssm_teacher_candidate_available_above_004": float(
+                            xb.rssm_teacher_candidate_available_above_004
+                        ),
+                        "any_teacher_candidate_available_above_004": float(
+                            xb.any_teacher_candidate_available_above_004
+                        ),
+                        "teacher_candidate_available_above_004": float(
+                            xb.teacher_candidate_available_above_004
+                        ),
+                        "teacher_selected_above_004": float(
+                            xb.teacher_selected_above_004
+                        ),
                     }
                     for k, v in extra_eir.items():
                         try:

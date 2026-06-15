@@ -282,6 +282,34 @@ def compute_wm_activation(
     )
 
 
+def resolve_wm_ranking_uncertainty_gate(
+    *,
+    wm_strict: bool,
+    wm_soft: bool,
+    wm_unc: float,
+    strict_threshold: float,
+    soft_threshold: float,
+) -> tuple[float, str, str | None]:
+    """PBT WM source ranking uncertainty gate.
+
+    Returns ``(threshold, gate_mode, fallback_reason)`` where
+    ``fallback_reason`` is ``None`` when uncertainty is within threshold.
+    """
+    if wm_strict:
+        threshold, mode = float(strict_threshold), "strict"
+    elif wm_soft:
+        threshold, mode = float(soft_threshold), "soft"
+    else:
+        threshold, mode = float(strict_threshold), "legacy"
+    if float(wm_unc) > threshold:
+        if mode == "strict":
+            return threshold, mode, "high_uncertainty_strict"
+        if mode == "soft":
+            return threshold, mode, "high_uncertainty_soft"
+        return threshold, mode, "high_uncertainty"
+    return threshold, mode, None
+
+
 def compute_wm_pbt_source_activation_weight(
     *,
     enable: bool,
@@ -357,6 +385,7 @@ __all__ = [
     "TOL_BINS",
     "source_weight",
     "compute_wm_activation",
+    "resolve_wm_ranking_uncertainty_gate",
     "compute_wm_pbt_source_activation_weight",
     "blend_wm_ranking_score",
 ]

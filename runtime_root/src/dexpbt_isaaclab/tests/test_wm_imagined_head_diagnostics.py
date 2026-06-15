@@ -6,6 +6,7 @@ import unittest
 
 from dexpbt_isaaclab.world_model.wm_activation_gate import (
     compute_wm_pbt_source_activation_weight,
+    resolve_wm_ranking_uncertainty_gate,
 )
 from dexpbt_isaaclab.world_model.wm_imagined_evaluator import WMImaginedEvaluator
 from dexpbt_isaaclab.world_model.wm_imagined_validity import (
@@ -139,6 +140,62 @@ class TestWMImaginedEvaluatorModes(unittest.TestCase):
         )
         self.assertEqual(ev.valid_mode, "strict_uncertainty")
         self.assertAlmostEqual(ev.soft_validity_weight, 0.25)
+
+
+class TestSoftValidWMRankingUncertaintyGate(unittest.TestCase):
+    def test_soft_valid_uses_soft_uncertainty_threshold_for_wm_ranking(self):
+        threshold, mode, fallback = resolve_wm_ranking_uncertainty_gate(
+            wm_strict=False,
+            wm_soft=True,
+            wm_unc=0.80,
+            strict_threshold=0.5,
+            soft_threshold=0.95,
+        )
+        self.assertIsNone(fallback)
+        self.assertAlmostEqual(threshold, 0.95)
+        self.assertEqual(mode, "soft")
+        w, _t, _u, _v, _us, used_soft = compute_wm_pbt_source_activation_weight(
+            enable=True,
+            gate_mode="confidence_only",
+            frames=500_000_000,
+            start_after_frames=300_000_000,
+            ramp_frames=300_000_000,
+            wm_uncertainty=0.80,
+            max_uncertainty=threshold,
+            imagined_valid_strict=False,
+            imagined_valid_soft=True,
+            imagined_head_has_signal=True,
+            wm_validity_weight=0.25,
+            soft_validity_weight=0.25,
+        )
+        self.assertGreater(w, 0.0)
+        self.assertTrue(used_soft)
+
+    def test_soft_valid_still_falls_back_when_above_soft_uncertainty_threshold(self):
+        threshold, mode, fallback = resolve_wm_ranking_uncertainty_gate(
+            wm_strict=False,
+            wm_soft=True,
+            wm_unc=0.98,
+            strict_threshold=0.5,
+            soft_threshold=0.95,
+        )
+        self.assertEqual(fallback, "high_uncertainty_soft")
+        self.assertEqual(mode, "soft")
+        w, *_ = compute_wm_pbt_source_activation_weight(
+            enable=True,
+            gate_mode="confidence_only",
+            frames=500_000_000,
+            start_after_frames=300_000_000,
+            ramp_frames=300_000_000,
+            wm_uncertainty=0.98,
+            max_uncertainty=threshold,
+            imagined_valid_strict=False,
+            imagined_valid_soft=True,
+            imagined_head_has_signal=True,
+            wm_validity_weight=0.25,
+            soft_validity_weight=0.25,
+        )
+        self.assertEqual(w, 0.0)
 
 
 if __name__ == "__main__":
