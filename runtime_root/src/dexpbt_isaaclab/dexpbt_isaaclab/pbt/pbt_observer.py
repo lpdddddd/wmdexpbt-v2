@@ -466,6 +466,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_wm_profile_copy_after_frames: int = 1_000_000_000,
         pbt_wm_profile_copy_prob: float = 0.3,
         pbt_wm_profile_keep_diversity_min_profiles: int = 3,
+        pbt_wm_profile_copy_min_nsucc_gap: float = 0.0,
+        pbt_wm_profile_copy_min_source_retention: float = 0.0,
+        pbt_wm_profile_copy_cooldown_frames: int = 0,
+        pbt_wm_profile_copy_bottom_k: int = 0,
+        pbt_wm_profile_copy_top_k: int = 0,
         profile_actor_distill_enabled: bool = False,
         profile_residual_apply_enabled: bool = False,
         profile_rssm_mppi_enabled: bool = False,
@@ -704,6 +709,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.pbt_wm_profile_keep_diversity_min_profiles = int(
             pbt_wm_profile_keep_diversity_min_profiles
         )
+        self.pbt_wm_profile_copy_min_nsucc_gap = float(
+            pbt_wm_profile_copy_min_nsucc_gap
+        )
+        self.pbt_wm_profile_copy_min_source_retention = float(
+            pbt_wm_profile_copy_min_source_retention
+        )
+        self.pbt_wm_profile_copy_cooldown_frames = int(
+            pbt_wm_profile_copy_cooldown_frames
+        )
+        self.pbt_wm_profile_copy_bottom_k = int(pbt_wm_profile_copy_bottom_k)
+        self.pbt_wm_profile_copy_top_k = int(pbt_wm_profile_copy_top_k)
         self.profile_actor_distill_enabled = bool(profile_actor_distill_enabled)
         self.profile_residual_apply_enabled = bool(profile_residual_apply_enabled)
         self.profile_rssm_mppi_enabled = bool(profile_rssm_mppi_enabled)
@@ -719,6 +735,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._last_wm_curriculum_audit: dict[str, Any] = {}
         self._last_pbt_wm_profile_copy_decision: str = "disabled"
         self._last_pbt_wm_profile_diversity_count: int = 0
+        self._last_profile_copy_eligible: bool = False
+        self._last_profile_copy_reject_reason: str = ""
+        self._last_profile_copy_source_policy: int = -1
+        self._last_profile_copy_source_profile: str = ""
+        self._last_profile_copy_target_old_profile: str = ""
+        self._last_profile_copy_target_new_profile: str = ""
+        self._last_profile_copy_weighted_prob: float = 0.0
+        self._profile_copy_attempt_count: int = 0
+        self._profile_copy_accept_count: int = 0
+        self._profile_copy_reject_count: int = 0
+        self._profile_copy_reject_reason_counts: dict[str, int] = {}
+        self._weight_copy_count: int = 0
+        self._weight_copy_with_profile_copy_count: int = 0
+        self._weight_copy_without_profile_copy_count: int = 0
+        self._last_profile_copy_frame: int = -10**18
         # Per-policy floor-recovery state (Part A).
         self._first_floor_frame: dict[int, int] = {}
         self._first_hard_floor_frame: dict[int, int] = {}
@@ -3247,6 +3278,44 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         except Exception as exc:  # pragma: no cover - best effort
             print(f"[pbt-copy-events] write failed: {exc}")
 
+    def _write_profile_copy_event(self, payload: dict[str, Any]) -> None:
+        try:
+            path = self.workspace / "metrics" / "profile_copy_events.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload.setdefault("timestamp", time.time())
+            payload.setdefault("policy_idx", int(self.policy_idx))
+            payload.setdefault("pbt_iteration", int(self.pbt_iteration))
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"[profile-copy-events] write failed: {exc}")
+
+    def _update_policy_lineage(self, env_frames: int) -> None:
+        try:
+            path = self.workspace / "policy_lineage.json"
+            lineage: dict[str, Any] = {}
+            if path.is_file():
+                lineage = json.loads(path.read_text())
+            policies = lineage.setdefault("policies", {})
+            policies[f"{int(self.policy_idx):03d}"] = {
+                "policy_idx": int(self.policy_idx),
+                "wm_strategy_profile_name": str(self.wm_strategy_profile_name),
+                "wm_strategy_profile_id": int(self.wm_strategy_profile_id),
+                "wm_strategy_profile_generation": int(
+                    self._wm_strategy_profile_generation
+                ),
+                "wm_strategy_profile_parent": int(self._wm_strategy_profile_parent),
+                "wm_strategy_profile_copied_from_source": bool(
+                    self._wm_strategy_profile_copied_from_source
+                ),
+                "env_frames": int(env_frames),
+                "pbt_iteration": int(self.pbt_iteration),
+            }
+            lineage["updated_at"] = time.time()
+            path.write_text(json.dumps(lineage, indent=2))
+        except Exception as exc:  # pragma: no cover - best effort
+            print(f"[policy-lineage] write failed: {exc}")
+
     # ------------------------------------------------------------------
     # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT helpers (Part A).
     # All methods are read-only / pure-derivation when called from a
@@ -4421,6 +4490,50 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 ),
                 "pbt_wm_profile_copy_prob": float(self.pbt_wm_profile_copy_prob),
                 "pbt_wm_profile_diversity_count": int(
+                    getattr(self, "_last_pbt_wm_profile_diversity_count", 0)
+                ),
+                "profile_copy_enabled": bool(self.pbt_wm_profile_copy_enable),
+                "profile_copy_eligible": bool(
+                    getattr(self, "_last_profile_copy_eligible", False)
+                ),
+                "profile_copy_attempt_count": int(
+                    getattr(self, "_profile_copy_attempt_count", 0)
+                ),
+                "profile_copy_accept_count": int(
+                    getattr(self, "_profile_copy_accept_count", 0)
+                ),
+                "profile_copy_reject_count": int(
+                    getattr(self, "_profile_copy_reject_count", 0)
+                ),
+                "profile_copy_reject_reason": str(
+                    getattr(self, "_last_profile_copy_reject_reason", "")
+                ),
+                "profile_copy_reject_reason_counts": dict(
+                    getattr(self, "_profile_copy_reject_reason_counts", {})
+                ),
+                "profile_copy_source_policy": int(
+                    getattr(self, "_last_profile_copy_source_policy", -1)
+                ),
+                "profile_copy_target_policy": int(self.policy_idx),
+                "profile_copy_source_profile": str(
+                    getattr(self, "_last_profile_copy_source_profile", "")
+                ),
+                "profile_copy_target_old_profile": str(
+                    getattr(self, "_last_profile_copy_target_old_profile", "")
+                ),
+                "profile_copy_target_new_profile": str(
+                    getattr(self, "_last_profile_copy_target_new_profile", "")
+                ),
+                "profile_copy_generation": int(self._wm_strategy_profile_generation),
+                "weight_generation": int(self._wm_strategy_profile_generation),
+                "weight_copy_count": int(getattr(self, "_weight_copy_count", 0)),
+                "weight_copy_with_profile_copy_count": int(
+                    getattr(self, "_weight_copy_with_profile_copy_count", 0)
+                ),
+                "weight_copy_without_profile_copy_count": int(
+                    getattr(self, "_weight_copy_without_profile_copy_count", 0)
+                ),
+                "profile_diversity_count": int(
                     getattr(self, "_last_pbt_wm_profile_diversity_count", 0)
                 ),
                 "wm_curriculum_controller_active": bool(
@@ -7369,38 +7482,135 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             f"--last_recovery_frame_resume={int(self._last_recovery_frame)}"
         )
 
-        # PBT-WM Strategy Zoo v1.0: optional profile inheritance on cross-copy.
-        from dexpbt_isaaclab.world_model.wm_strategy_profiles import PROFILE_IDS
+        # PBT-WM Strategy Zoo v1.2: optional profile inheritance on cross-copy.
+        from dexpbt_isaaclab.pbt.pbt_profile_copy import (
+            ProfileCopyConfig,
+            decide_profile_copy,
+        )
+        from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+            PROFILE_IDS,
+            profile_copy_restart_train_args,
+            resolve_profile_copy_restart_config,
+        )
 
         population_meta = self._load_population_checkpoints()
-        diversity_count, _profiles = self._count_profile_diversity(population_meta)
+        diversity_count, profiles_set = self._count_profile_diversity(population_meta)
         self._last_pbt_wm_profile_diversity_count = int(diversity_count)
-        profile_copy_decision = "weights_only"
-        new_profile_name = str(self.wm_strategy_profile_name or "legacy")
-        if self.pbt_wm_profile_copy_enable:
-            if int(env_frames) < int(self.pbt_wm_profile_copy_after_frames):
-                profile_copy_decision = "before_after_frames"
-            elif diversity_count <= int(
+        (
+            copy_enable,
+            copy_after,
+            copy_prob,
+            copy_keep_min,
+            copy_min_nsucc_gap,
+            copy_min_source_retention,
+            copy_cooldown_frames,
+            copy_bottom_k,
+            copy_top_k,
+        ) = resolve_profile_copy_restart_config(
+            enable=self.pbt_wm_profile_copy_enable,
+            after_frames=self.pbt_wm_profile_copy_after_frames,
+            prob=self.pbt_wm_profile_copy_prob,
+            keep_diversity_min_profiles=(
                 self.pbt_wm_profile_keep_diversity_min_profiles
-            ):
-                profile_copy_decision = "diversity_guard"
-            else:
-                source_name, source_gen, _ = self._profile_from_population_state(
-                    population_meta, int(source_policy)
-                )
-                rng = random.Random(
-                    int(env_frames) + int(self.policy_idx) + int(source_policy)
-                )
-                if rng.random() < float(self.pbt_wm_profile_copy_prob):
-                    new_profile_name = source_name
-                    self._wm_strategy_profile_generation = int(source_gen) + 1
-                    self._wm_strategy_profile_parent = int(source_policy)
-                    self._wm_strategy_profile_copied_from_source = True
-                    profile_copy_decision = "copied"
-                else:
-                    profile_copy_decision = "rng_skip"
+            ),
+            min_nsucc_gap=self.pbt_wm_profile_copy_min_nsucc_gap,
+            min_source_retention=self.pbt_wm_profile_copy_min_source_retention,
+            cooldown_frames=self.pbt_wm_profile_copy_cooldown_frames,
+            bottom_k=self.pbt_wm_profile_copy_bottom_k,
+            top_k=self.pbt_wm_profile_copy_top_k,
+            metadata_path=self.train_dir.parent / "metadata.txt",
+        )
+        old_profile_name = str(self.wm_strategy_profile_name or "legacy")
+        source_name, source_gen, _ = self._profile_from_population_state(
+            population_meta, int(source_policy)
+        )
+        source_state = (population_meta or {}).get(int(source_policy)) or {}
+        target_state = (population_meta or {}).get(int(self.policy_idx)) or {}
+        source_meta = self._extract_source_curriculum_metadata(
+            source_state=source_state,
+            source_policy_idx=int(source_policy),
+        )
+        target_meta = self._extract_source_curriculum_metadata(
+            source_state=target_state,
+            source_policy_idx=int(self.policy_idx),
+        )
+        window_nsucc: dict[int, float] = {}
+        for pid, win in self._policy_nsucc_windows.items():
+            if win.samples:
+                window_nsucc[int(pid)] = float(win.samples[-1].nsucc_mean)
+        source_ctrl_path = (
+            self._curriculum_control_dir / f"{int(source_policy):03d}.json"
+        )
+        source_ctrl = read_curriculum_control(source_ctrl_path)
+        source_in_collapse = bool(
+            source_ctrl is not None
+            and bool(getattr(source_ctrl, "hard_collapse_triggered", False))
+        )
+        if not source_in_collapse and source_meta.get("has_source_retention"):
+            ret = float(source_meta.get("source_retention", float("nan")))
+            source_in_collapse = not math.isnan(ret) and ret < 0.50
+        target_protected_until = max(
+            int(self._promising_protect_until.get(self.policy_idx, 0)),
+            int(self._floor_recovery_protect_until.get(self.policy_idx, 0)),
+        )
+        copy_cfg = ProfileCopyConfig(
+            enable=bool(copy_enable),
+            after_frames=int(copy_after),
+            base_prob=float(copy_prob),
+            keep_diversity_min_profiles=int(copy_keep_min),
+            min_nsucc_gap=float(copy_min_nsucc_gap),
+            min_source_retention=float(copy_min_source_retention),
+            cooldown_frames=int(copy_cooldown_frames),
+            bottom_k=int(copy_bottom_k),
+            top_k=int(copy_top_k),
+        )
+        copy_result = decide_profile_copy(
+            cfg=copy_cfg,
+            env_frames=int(env_frames),
+            target_policy_idx=int(self.policy_idx),
+            source_policy_idx=int(source_policy),
+            target_profile_name=old_profile_name,
+            source_profile_name=source_name,
+            source_generation=int(source_gen),
+            diversity_count=int(diversity_count),
+            profiles_set=set(profiles_set),
+            population=population_meta,
+            source_meta=source_meta,
+            target_meta=target_meta,
+            source_checkpoint_type=str(self._last_source_checkpoint_type),
+            target_protected_until=int(target_protected_until),
+            last_profile_copy_frame=int(self._last_profile_copy_frame),
+            window_nsucc=window_nsucc,
+            source_in_collapse=bool(source_in_collapse),
+        )
+        profile_copy_decision = str(copy_result.decision)
+        new_profile_name = str(copy_result.new_profile_name or old_profile_name)
+        self._last_profile_copy_eligible = bool(copy_result.eligible)
+        self._last_profile_copy_reject_reason = str(copy_result.reject_reason or "")
+        self._last_profile_copy_source_policy = int(source_policy)
+        self._last_profile_copy_source_profile = str(source_name)
+        self._last_profile_copy_target_old_profile = str(old_profile_name)
+        self._last_profile_copy_target_new_profile = str(new_profile_name)
+        self._last_profile_copy_weighted_prob = float(copy_result.weighted_prob)
+        self._weight_copy_count += 1
+        if copy_result.attempted:
+            self._profile_copy_attempt_count += 1
+        if copy_result.accepted:
+            self._profile_copy_accept_count += 1
+            self._wm_strategy_profile_generation = int(copy_result.source_generation) + 1
+            self._wm_strategy_profile_parent = int(source_policy)
+            self._wm_strategy_profile_copied_from_source = True
+            self._last_profile_copy_frame = int(env_frames)
+            self._weight_copy_with_profile_copy_count += 1
         else:
-            profile_copy_decision = "disabled"
+            if copy_result.reject_reason:
+                reason = str(copy_result.reject_reason)
+                self._profile_copy_reject_reason_counts[reason] = (
+                    int(self._profile_copy_reject_reason_counts.get(reason, 0)) + 1
+                )
+            if copy_result.attempted:
+                self._profile_copy_reject_count += 1
+            self._weight_copy_without_profile_copy_count += 1
         self.wm_strategy_profile_name = new_profile_name
         self.wm_strategy_profile_id = int(PROFILE_IDS.get(new_profile_name, 0))
         train_args = self._rewrite_train_arg_profile(train_args, new_profile_name)
@@ -7416,7 +7626,47 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             f"--wm_strategy_profile_copied_from_source_resume="
             f"{1 if self._wm_strategy_profile_copied_from_source else 0}"
         )
+        train_args.extend(
+            profile_copy_restart_train_args(
+                enable=copy_enable,
+                after_frames=copy_after,
+                prob=copy_prob,
+                keep_diversity_min_profiles=copy_keep_min,
+                min_nsucc_gap=copy_min_nsucc_gap,
+                min_source_retention=copy_min_source_retention,
+                cooldown_frames=copy_cooldown_frames,
+                bottom_k=copy_bottom_k,
+                top_k=copy_top_k,
+            )
+        )
         self._last_pbt_wm_profile_copy_decision = str(profile_copy_decision)
+        self._write_profile_copy_event(
+            {
+                "env_frames": int(env_frames),
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "source_profile": str(source_name),
+                "target_old_profile": str(old_profile_name),
+                "target_new_profile": str(new_profile_name),
+                "decision": str(profile_copy_decision),
+                "reject_reason": str(copy_result.reject_reason or ""),
+                "eligible": bool(copy_result.eligible),
+                "attempted": bool(copy_result.attempted),
+                "accepted": bool(copy_result.accepted),
+                "weighted_prob": float(copy_result.weighted_prob),
+                "source_bonus": float(copy_result.source_bonus),
+                "target_need_factor": float(copy_result.target_need_factor),
+                "diversity_count": int(diversity_count),
+                "diversity_after_copy": int(copy_result.diversity_after_copy),
+                "source_nsucc_mean": float(source_meta.get("source_nsucc_mean", float("nan"))),
+                "target_nsucc_mean": float(target_meta.get("source_nsucc_mean", float("nan"))),
+                "source_retention": float(source_meta.get("source_retention", float("nan"))),
+                "target_retention": float(target_meta.get("source_retention", float("nan"))),
+                "profile_generation": int(self._wm_strategy_profile_generation),
+                "weight_generation": int(self._wm_strategy_profile_generation),
+            }
+        )
+        self._update_policy_lineage(int(env_frames))
 
         # Write restart manifest so the supervisor can pick up new params.
         # The supervisor script ($RUN_DIR) is the parent of train_dir ($RUN_DIR/rl_games).
@@ -7463,9 +7713,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "recovery_restart_count": int(self._recovery_restart_count),
             "last_recovery_frame": int(self._last_recovery_frame),
             "enable_best_nsucc_recovery": bool(self.enable_best_nsucc_recovery),
-            "pbt_wm_profile_copy_enable": bool(self.pbt_wm_profile_copy_enable),
+            "pbt_wm_profile_copy_enable": bool(copy_enable),
             "pbt_wm_profile_copy_decision": str(profile_copy_decision),
-            "pbt_wm_profile_copy_prob": float(self.pbt_wm_profile_copy_prob),
+            "pbt_wm_profile_copy_prob": float(copy_prob),
             "pbt_wm_profile_diversity_count": int(diversity_count),
             "wm_strategy_profile_name": str(new_profile_name),
             "wm_strategy_profile_id": int(PROFILE_IDS.get(new_profile_name, 0)),

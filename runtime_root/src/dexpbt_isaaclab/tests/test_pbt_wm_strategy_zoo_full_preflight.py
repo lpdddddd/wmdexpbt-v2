@@ -26,6 +26,10 @@ LAUNCHER = (
     REPO_ROOT
     / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_full_3b.sh"
 )
+V12_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v12_2b_debug.sh"
+)
 
 ZOO_PROFILES = [
     "ppo_only",
@@ -34,6 +38,15 @@ ZOO_PROFILES = [
     "wm_pbt_source_selector",
     "elite_bank_actor_distill",
     "conservative_rssm_planner_distill",
+]
+
+ZOO_PROFILES_V12 = [
+    "ppo_only",
+    "light_rssm_mppi_actor_distill",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector",
+    "elite_bank_actor_distill",
+    "light_conservative_rssm_planner_distill",
 ]
 
 
@@ -78,6 +91,18 @@ class TestStrategyZooLauncher(unittest.TestCase):
         profiles = line.split("=", 1)[1].strip().strip('"').split(",")
         self.assertEqual(len(profiles), 6)
         self.assertEqual(len(set(profiles)), 6)
+
+    def test_v12_launcher_has_six_distinct_profiles(self):
+        self.assertTrue(V12_LAUNCHER.is_file(), f"missing launcher {V12_LAUNCHER}")
+        text = V12_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V12:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(set(profiles)), 6)
+        self.assertIn("strategy_zoo_v1.2_performance_debug", text)
 
     def test_strategy_zoo_launcher_does_not_assign_aggressive_residual(self):
         text = LAUNCHER.read_text()

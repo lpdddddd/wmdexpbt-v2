@@ -933,6 +933,9 @@ class EIRBridge:
     rssm_teacher_candidate_available_above_004: float = 0.0
     any_teacher_candidate_available_above_004: float = 0.0
     teacher_selected_above_004: float = 0.0
+    teacher_selected_below_004: float = 0.0
+    best_source_frac_elite_below_004: float = 0.0
+    actor_distill_nonzero_below_004: float = 0.0
 
     def record_bank_feature_source(self, source_flag: int) -> None:
         """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
@@ -1262,6 +1265,7 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             1.0 if allow_retrieval(_rssm_w, _min_w) else 0.0
         )
         tol_above_004 = float(cache.tol_mean) > 0.04
+        tol_below_004 = float(cache.tol_mean) <= 0.04
         elite_avail_above_004 = bool(
             tol_above_004 and allow_retrieval(_elite_w, _min_w)
         )
@@ -1393,6 +1397,17 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             and _teacher_src in (SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_RSSM)
             else 0.0
         )
+        bridge.teacher_selected_below_004 = float(
+            1.0
+            if tol_below_004
+            and _teacher_src in (SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_RSSM)
+            else 0.0
+        )
+        elite_frac = float(
+            bridge.last_best_source_frac.get("elite", 0.0)
+            + bridge.last_best_source_frac.get("archive", 0.0)
+        )
+        bridge.best_source_frac_elite_below_004 = float(elite_frac if tol_below_004 else 0.0)
 
         actor_distill_total = feat.new_zeros(())
         if bool(getattr(eir_cfg, "actor_distill_enable", False)):
@@ -1445,6 +1460,9 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             bridge.last_actor_distill_tol_bin = str(_act["tol_bin"])
             bridge.last_actor_distill_activation_weight_mean = float(_act["weight_mean"])
             bridge.last_actor_distill_activation_nonzero_frac = float(_act["nonzero_frac"])
+            bridge.actor_distill_nonzero_below_004 = float(
+                _act["nonzero_frac"] if tol_below_004 else 0.0
+            )
             bridge.last_actor_distill_tol_weight_mean = float(_act["tol_weight"])
             bridge.last_actor_distill_time_weight_mean = float(_act["time_weight"])
             bridge.last_actor_distill_perf_weight_mean = float(_act["perf_weight"])

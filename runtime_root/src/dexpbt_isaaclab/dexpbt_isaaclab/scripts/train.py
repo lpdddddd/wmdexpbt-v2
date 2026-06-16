@@ -629,6 +629,26 @@ parser.add_argument(
     "--pbt_wm_profile_keep_diversity_min_profiles", type=int, default=3,
     help="Profile copy blocked when active distinct profiles <= this count.",
 )
+parser.add_argument(
+    "--pbt_wm_profile_copy_min_nsucc_gap", type=float, default=0.0,
+    help="Minimum nsucc gap (source - target) required for profile copy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_min_source_retention", type=float, default=0.0,
+    help="Minimum source retention required for profile copy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_cooldown_frames", type=int, default=0,
+    help="Minimum frames between profile copies for a target policy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_bottom_k", type=int, default=0,
+    help="Target must be in bottom-k by ranking (or retention collapse).",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top_k", type=int, default=0,
+    help="Source must be in top-k by ranking (unless archive source).",
+)
 # WM curriculum controller (Strategy Zoo profile: wm_curriculum_controller).
 parser.add_argument(
     "--wm_curriculum_controller_enable",
@@ -1293,6 +1313,9 @@ parser.add_argument(
         "wm_pbt_source_selector",
         "elite_bank_actor_distill",
         "conservative_rssm_planner_distill",
+        "light_rssm_mppi_actor_distill",
+        "wm_pbt_source_selector_v2",
+        "light_conservative_rssm_planner_distill",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -3564,6 +3587,15 @@ def _patch_actor_train_for_seq_wm(
                         ),
                         "teacher_selected_above_004": float(
                             xb.teacher_selected_above_004
+                        ),
+                        "teacher_selected_below_004": float(
+                            getattr(xb, "teacher_selected_below_004", 0.0)
+                        ),
+                        "best_source_frac_elite_below_004": float(
+                            getattr(xb, "best_source_frac_elite_below_004", 0.0)
+                        ),
+                        "actor_distill_nonzero_below_004": float(
+                            getattr(xb, "actor_distill_nonzero_below_004", 0.0)
                         ),
                     }
                     for k, v in extra_eir.items():
@@ -6545,6 +6577,17 @@ def main():
             pbt_wm_profile_keep_diversity_min_profiles=(
                 args_cli.pbt_wm_profile_keep_diversity_min_profiles
             ),
+            pbt_wm_profile_copy_min_nsucc_gap=(
+                args_cli.pbt_wm_profile_copy_min_nsucc_gap
+            ),
+            pbt_wm_profile_copy_min_source_retention=(
+                args_cli.pbt_wm_profile_copy_min_source_retention
+            ),
+            pbt_wm_profile_copy_cooldown_frames=(
+                args_cli.pbt_wm_profile_copy_cooldown_frames
+            ),
+            pbt_wm_profile_copy_bottom_k=args_cli.pbt_wm_profile_copy_bottom_k,
+            pbt_wm_profile_copy_top_k=args_cli.pbt_wm_profile_copy_top_k,
             profile_actor_distill_enabled=_wm_profile_caps.get(
                 "profile_actor_distill_enabled", False
             ),

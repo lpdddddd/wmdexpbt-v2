@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 import unittest
+from pathlib import Path
 
 from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
 from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
@@ -14,6 +16,8 @@ from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
     collect_explicit_dests,
     profile_capability_flags,
     profile_controlled_restart_skip_flags,
+    profile_copy_restart_train_args,
+    resolve_profile_copy_restart_config,
 )
 
 
@@ -37,6 +41,9 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertEqual(PROFILE_IDS["wm_pbt_source_selector"], 4)
         self.assertEqual(PROFILE_IDS["elite_bank_actor_distill"], 5)
         self.assertEqual(PROFILE_IDS["conservative_rssm_planner_distill"], 6)
+        self.assertEqual(PROFILE_IDS["light_rssm_mppi_actor_distill"], 7)
+        self.assertEqual(PROFILE_IDS["wm_pbt_source_selector_v2"], 8)
+        self.assertEqual(PROFILE_IDS["light_conservative_rssm_planner_distill"], 9)
 
     def test_ppo_only_description_is_not_original_dexpbt(self):
         desc = PROFILE_DESCRIPTIONS["ppo_only"]
@@ -193,6 +200,41 @@ class TestWMStrategyProfiles(unittest.TestCase):
         for dest in _all_profile_dests():
             self.assertIn(f"--{dest}", skip)
 
+    def test_light_rssm_mppi_actor_distill_lightens_mppi(self):
+        args = _ns(
+            wm_strategy_profile="light_rssm_mppi_actor_distill",
+            eir_mppi_num_sequences=64,
+            eir_mppi_use_model_ensemble=True,
+        )
+        apply_wm_strategy_profile(args)
+        self.assertEqual(args.eir_mppi_num_sequences, 16)
+        self.assertEqual(args.eir_mppi_num_elite, 2)
+        self.assertFalse(args.eir_mppi_use_model_ensemble)
+        self.assertEqual(args.eir_actor_distill_start_after_frames, 300_000_000)
+
+    def test_wm_pbt_source_selector_v2_conservative_weights(self):
+        args = _ns(
+            wm_strategy_profile="wm_pbt_source_selector_v2",
+            pbt_wm_recovery_weight=0.3,
+            wm_imagined_soft_uncertainty_threshold=0.95,
+        )
+        apply_wm_strategy_profile(args)
+        self.assertEqual(args.pbt_wm_recovery_weight, 0.20)
+        self.assertEqual(args.wm_imagined_soft_uncertainty_threshold, 0.90)
+        self.assertFalse(args.eir_enable)
+        self.assertFalse(args.eir_actor_distill_enable)
+
+    def test_light_conservative_planner_detected_by_family(self):
+        args = _ns(
+            wm_strategy_profile="light_conservative_rssm_planner_distill",
+            eir_mppi_num_sequences=64,
+        )
+        apply_wm_strategy_profile(args)
+        caps = profile_capability_flags(args)
+        self.assertTrue(caps["profile_conservative_planner_enabled"])
+        self.assertEqual(args.eir_mppi_num_sequences, 24)
+        self.assertEqual(args.eir_actor_distill_allowed_sources, "rssm")
+
     def test_profile_capability_flags(self):
         args = _ns(
             wm_strategy_profile="rssm_mppi_actor_distill",
@@ -278,6 +320,9 @@ class TestSoftActivationGateProfiles(unittest.TestCase):
             "wm_pbt_source_selector",
             "elite_bank_actor_distill",
             "conservative_rssm_planner_distill",
+            "light_rssm_mppi_actor_distill",
+            "wm_pbt_source_selector_v2",
+            "light_conservative_rssm_planner_distill",
         ):
             a = self._expand(profile)
             self.assertFalse(
@@ -303,6 +348,71 @@ class TestRewriteTrainArgProfile(unittest.TestCase):
         self.assertEqual(
             sum(1 for a in out if a.startswith("--wm_strategy_profile=")), 1
         )
+
+
+class TestProfileCopyRestartArgs(unittest.TestCase):
+    def test_profile_copy_restart_train_args_enabled(self):
+        out = profile_copy_restart_train_args(
+            enable=True,
+            after_frames=500_000_000,
+            prob=0.5,
+            keep_diversity_min_profiles=3,
+        )
+        self.assertEqual(
+            out,
+            [
+                "--pbt_wm_profile_copy_enable",
+                "--pbt_wm_profile_copy_after_frames=500000000",
+                "--pbt_wm_profile_copy_prob=0.5",
+                "--pbt_wm_profile_keep_diversity_min_profiles=3",
+                "--pbt_wm_profile_copy_min_nsucc_gap=0.0",
+                "--pbt_wm_profile_copy_min_source_retention=0.0",
+                "--pbt_wm_profile_copy_cooldown_frames=0",
+                "--pbt_wm_profile_copy_bottom_k=0",
+                "--pbt_wm_profile_copy_top_k=0",
+            ],
+        )
+
+    def test_profile_copy_restart_train_args_disabled(self):
+        out = profile_copy_restart_train_args(
+            enable=False,
+            after_frames=1_000_000_000,
+            prob=0.3,
+            keep_diversity_min_profiles=3,
+        )
+        self.assertIn("--no-pbt_wm_profile_copy_enable", out)
+        self.assertNotIn("--pbt_wm_profile_copy_enable", out)
+
+    def test_resolve_profile_copy_restart_config_recovers_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = Path(tmp) / "metadata.txt"
+            meta.write_text(
+                "train_args=--pbt_wm_profile_copy_enable "
+                "train_args=--pbt_wm_profile_copy_after_frames=500000000 "
+                "train_args=--pbt_wm_profile_copy_prob=0.5 "
+                "train_args=--pbt_wm_profile_keep_diversity_min_profiles=3\n"
+            )
+            resolved = resolve_profile_copy_restart_config(
+                enable=False,
+                after_frames=1_000_000_000,
+                prob=0.3,
+                keep_diversity_min_profiles=3,
+                metadata_path=meta,
+            )
+            self.assertEqual(
+                resolved,
+                (True, 500_000_000, 0.5, 3, 0.0, 0.0, 0, 0, 0),
+            )
+
+    def test_resolve_profile_copy_restart_config_keeps_explicit_values(self):
+        resolved = resolve_profile_copy_restart_config(
+            enable=True,
+            after_frames=250_000_000,
+            prob=0.4,
+            keep_diversity_min_profiles=2,
+            metadata_path=None,
+        )
+        self.assertEqual(resolved, (True, 250_000_000, 0.4, 2, 0.0, 0.0, 0, 0, 0))
 
 
 class TestProfileCopyDefaults(unittest.TestCase):

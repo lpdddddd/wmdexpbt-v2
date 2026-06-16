@@ -1,4 +1,4 @@
-"""PBT-WM Strategy Zoo v1.0 — per-worker WM usage profiles.
+"""PBT-WM Strategy Zoo v1.0/v1.2 — per-worker WM usage profiles.
 
 Each profile expands to a full set of train.py CLI flag values.  ``legacy``
 is a no-op so existing launchers remain unchanged.
@@ -10,6 +10,7 @@ it is **not** an exact original DexPBT reproduction.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any
 
 PROFILE_IDS: dict[str, int] = {
@@ -20,6 +21,10 @@ PROFILE_IDS: dict[str, int] = {
     "wm_pbt_source_selector": 4,
     "elite_bank_actor_distill": 5,
     "conservative_rssm_planner_distill": 6,
+    # Strategy Zoo v1.2 performance-debug profiles.
+    "light_rssm_mppi_actor_distill": 7,
+    "wm_pbt_source_selector_v2": 8,
+    "light_conservative_rssm_planner_distill": 9,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -34,6 +39,15 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "wm_pbt_source_selector": "Active WM score in PBT floor-recovery ranking.",
     "elite_bank_actor_distill": "Elite/archive guidance + actor distillation (no MPPI).",
     "conservative_rssm_planner_distill": "Conservative RSSM-MPPI + RSSM-only actor distill.",
+    "light_rssm_mppi_actor_distill": (
+        "Light RSSM-MPPI teacher-candidate provider + actor distill (v1.2)."
+    ),
+    "wm_pbt_source_selector_v2": (
+        "Conservative WM PBT source selector (stricter soft gate, v1.2)."
+    ),
+    "light_conservative_rssm_planner_distill": (
+        "Light conservative RSSM-MPPI planner + RSSM-only actor distill (v1.2)."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -44,6 +58,22 @@ PROFILE_FAMILY: dict[str, str] = {
     "wm_pbt_source_selector": "pbt_selector",
     "elite_bank_actor_distill": "elite_imitation",
     "conservative_rssm_planner_distill": "planner",
+    "light_rssm_mppi_actor_distill": "actor_distill",
+    "wm_pbt_source_selector_v2": "pbt_selector",
+    "light_conservative_rssm_planner_distill": "planner",
+}
+
+# Profile-copy source bonus weights (v1.2).
+PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
+    "elite_bank_actor_distill": 1.2,
+    "wm_pbt_source_selector": 1.1,
+    "wm_pbt_source_selector_v2": 1.0,
+    "ppo_only": 0.6,
+    "light_rssm_mppi_actor_distill": 0.8,
+    "light_conservative_rssm_planner_distill": 0.8,
+    "rssm_mppi_actor_distill": 0.8,
+    "conservative_rssm_planner_distill": 0.8,
+    "wm_curriculum_controller": 0.9,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -118,7 +148,7 @@ _RSSM_MPPI_ACTOR_DISTILL: dict[str, Any] = {
     "eir_mppi_ensemble_drop_weight": 0.5,
     "eir_mppi_ensemble_uncertainty_weight": 0.2,
     "eir_mppi_ensemble_min_valid_models": 2,
-    "eir_mppi_ensemble_max_models_per_plan": 3,
+    "eir_mppi_ensemble_max_models_per_plan": 2,
     "eir_mppi_ensemble_uncertainty_threshold": 2.0,
     "eir_mppi_ensemble_uncertainty_allow_margin": 0.10,
     "eir_actor_distill_enable": True,
@@ -329,12 +359,12 @@ _CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "eir_use_rssm_mppi": True,
     "eir_mppi_mode": "full",
     "eir_mppi_horizon": 4,
-    "eir_mppi_num_sequences": 64,
-    "eir_mppi_num_elite": 8,
+    "eir_mppi_num_sequences": 32,
+    "eir_mppi_num_elite": 4,
     "eir_mppi_cem_iters": 1,
     "eir_mppi_action_noise_std": 0.10,
     "eir_mppi_max_action_delta": 0.35,
-    "eir_mppi_min_sequence_margin": 0.03,
+    "eir_mppi_min_sequence_margin": 0.02,
     "eir_mppi_stochastic_rollouts": True,
     "eir_mppi_num_latent_samples": 2,
     "eir_mppi_score_aggregation": "mean_minus_std",
@@ -347,7 +377,7 @@ _CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "eir_mppi_ensemble_drop_weight": 0.8,
     "eir_mppi_ensemble_uncertainty_weight": 0.4,
     "eir_mppi_ensemble_min_valid_models": 2,
-    "eir_mppi_ensemble_max_models_per_plan": 3,
+    "eir_mppi_ensemble_max_models_per_plan": 2,
     "eir_mppi_ensemble_uncertainty_threshold": 1.5,
     "eir_mppi_ensemble_uncertainty_allow_margin": 0.12,
     "eir_guidance_enable": True,
@@ -359,7 +389,7 @@ _CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "eir_actor_distill_loss_cap": 0.05,
     "eir_actor_distill_start_after_frames": 500_000_000,
     "eir_actor_distill_tol": 0.04,
-    "eir_actor_distill_min_margin": 0.03,
+    "eir_actor_distill_min_margin": 0.015,
     "eir_actor_distill_margin_norm": 0.05,
     "eir_actor_distill_max_delta": 0.30,
     "eir_actor_distill_allowed_sources": "rssm",
@@ -394,6 +424,65 @@ _CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "wm_curriculum_controller_enable": False,
 }
 
+_LIGHT_RSSM_MPPI_ACTOR_DISTILL: dict[str, Any] = {
+    **_RSSM_MPPI_ACTOR_DISTILL,
+    "eir_mppi_num_sequences": 16,
+    "eir_mppi_num_elite": 2,
+    "eir_mppi_num_latent_samples": 1,
+    "eir_mppi_use_model_ensemble": False,
+    "eir_mppi_ensemble_max_models_per_plan": 1,
+    "eir_mppi_ensemble_min_valid_models": 1,
+    "eir_mppi_drop_cvar_weight": 0.5,
+    "eir_mppi_uncertainty_cvar_weight": 0.1,
+    "eir_mppi_min_sequence_margin": 0.02,
+    "eir_actor_distill_start_after_frames": 300_000_000,
+    "eir_actor_distill_tol_start": 0.065,
+    "eir_actor_distill_tol_full": 0.040,
+    "eir_actor_distill_min_margin": 0.01,
+    "eir_rssm_candidate_tol_start": 0.065,
+    "eir_elite_candidate_tol_start": 0.070,
+    "eir_elite_candidate_tol_full": 0.045,
+}
+
+_WM_PBT_SOURCE_SELECTOR_V2: dict[str, Any] = {
+    **_WM_PBT_SOURCE_SELECTOR,
+    "pbt_wm_recovery_weight": 0.20,
+    "pbt_wm_success_weight": 0.15,
+    "pbt_wm_drop_penalty": 0.25,
+    "pbt_wm_uncertainty_penalty": 0.20,
+    "wm_imagined_soft_uncertainty_threshold": 0.90,
+    "wm_imagined_min_logit_abs_mean": 0.10,
+    "wm_imagined_min_head_signal_std": 0.05,
+    "wm_imagined_soft_validity_weight": 0.10,
+}
+
+_LIGHT_CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
+    **_CONSERVATIVE_RSSM_PLANNER,
+    "eir_mppi_num_sequences": 24,
+    "eir_mppi_num_elite": 2,
+    "eir_mppi_num_latent_samples": 1,
+    "eir_mppi_use_model_ensemble": False,
+    "eir_mppi_ensemble_max_models_per_plan": 1,
+    "eir_mppi_ensemble_min_valid_models": 1,
+    "eir_mppi_risk_beta": 0.7,
+    "eir_mppi_drop_cvar_weight": 0.8,
+    "eir_mppi_uncertainty_cvar_weight": 0.2,
+    "eir_mppi_min_sequence_margin": 0.015,
+    "eir_actor_distill_uncertainty_threshold": 1.5,
+    "eir_actor_distill_min_margin": 0.01,
+    "eir_actor_distill_max_delta": 0.30,
+    "eir_actor_distill_allowed_sources": "rssm",
+    "eir_actor_distill_start_after_frames": 400_000_000,
+    "eir_actor_distill_tol_start": 0.060,
+    "eir_actor_distill_tol_full": 0.035,
+    "eir_actor_distill_nsucc_ref": 20.0,
+    "conservative_planner_tol_start": 0.060,
+    "conservative_planner_tol_full": 0.035,
+    "conservative_planner_nsucc_ref": 20.0,
+    "eir_conservative_rssm_candidate_tol_start": 0.060,
+    "eir_conservative_rssm_candidate_tol_full": 0.035,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -402,6 +491,9 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "wm_pbt_source_selector": _WM_PBT_SOURCE_SELECTOR,
     "elite_bank_actor_distill": _ELITE_BANK_ACTOR_DISTILL,
     "conservative_rssm_planner_distill": _CONSERVATIVE_RSSM_PLANNER,
+    "light_rssm_mppi_actor_distill": _LIGHT_RSSM_MPPI_ACTOR_DISTILL,
+    "wm_pbt_source_selector_v2": _WM_PBT_SOURCE_SELECTOR_V2,
+    "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.
@@ -538,6 +630,11 @@ def profile_controlled_restart_skip_flags() -> frozenset[str]:
         "--pbt_wm_profile_copy_after_frames",
         "--pbt_wm_profile_copy_prob",
         "--pbt_wm_profile_keep_diversity_min_profiles",
+        "--pbt_wm_profile_copy_min_nsucc_gap",
+        "--pbt_wm_profile_copy_min_source_retention",
+        "--pbt_wm_profile_copy_cooldown_frames",
+        "--pbt_wm_profile_copy_bottom_k",
+        "--pbt_wm_profile_copy_top_k",
     }
     for dest in _all_profile_controlled_dests():
         skip.add(f"--{dest}")
@@ -545,6 +642,156 @@ def profile_controlled_restart_skip_flags() -> frozenset[str]:
         skip.add(f"--no-{dest}")
         skip.add(f"--no-{dest.replace('_', '-')}")
     return frozenset(skip)
+
+
+def profile_copy_restart_train_args(
+    *,
+    enable: bool,
+    after_frames: int,
+    prob: float,
+    keep_diversity_min_profiles: int,
+    min_nsucc_gap: float = 0.0,
+    min_source_retention: float = 0.0,
+    cooldown_frames: int = 0,
+    bottom_k: int = 0,
+    top_k: int = 0,
+) -> list[str]:
+    """Re-inject profile-copy CLI after restart argv stripping."""
+    return [
+        (
+            "--pbt_wm_profile_copy_enable"
+            if enable
+            else "--no-pbt_wm_profile_copy_enable"
+        ),
+        f"--pbt_wm_profile_copy_after_frames={int(after_frames)}",
+        f"--pbt_wm_profile_copy_prob={float(prob)}",
+        (
+            "--pbt_wm_profile_keep_diversity_min_profiles="
+            f"{int(keep_diversity_min_profiles)}"
+        ),
+        f"--pbt_wm_profile_copy_min_nsucc_gap={float(min_nsucc_gap)}",
+        f"--pbt_wm_profile_copy_min_source_retention={float(min_source_retention)}",
+        f"--pbt_wm_profile_copy_cooldown_frames={int(cooldown_frames)}",
+        f"--pbt_wm_profile_copy_bottom_k={int(bottom_k)}",
+        f"--pbt_wm_profile_copy_top_k={int(top_k)}",
+    ]
+
+
+def _parse_profile_copy_config_from_metadata(
+    metadata_path: Path,
+) -> dict[str, Any] | None:
+    """Read profile-copy flags from supervisor ``metadata.txt`` train_args."""
+    if not metadata_path.is_file():
+        return None
+    tokens: list[str] = []
+    for line in metadata_path.read_text().splitlines():
+        if not line.startswith("train_args="):
+            continue
+        for part in line.split("train_args=")[1:]:
+            tok = part.strip()
+            if tok:
+                tokens.append(tok)
+    if not tokens:
+        return None
+
+    enable: bool | None = None
+    after_frames: int | None = None
+    prob: float | None = None
+    keep_diversity_min_profiles: int | None = None
+    min_nsucc_gap: float | None = None
+    min_source_retention: float | None = None
+    cooldown_frames: int | None = None
+    bottom_k: int | None = None
+    top_k: int | None = None
+    for tok in tokens:
+        if tok == "--pbt_wm_profile_copy_enable":
+            enable = True
+        elif tok == "--no-pbt_wm_profile_copy_enable":
+            enable = False
+        elif tok.startswith("--pbt_wm_profile_copy_after_frames="):
+            after_frames = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_prob="):
+            prob = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_keep_diversity_min_profiles="):
+            keep_diversity_min_profiles = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_min_nsucc_gap="):
+            min_nsucc_gap = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_min_source_retention="):
+            min_source_retention = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_cooldown_frames="):
+            cooldown_frames = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_bottom_k="):
+            bottom_k = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_top_k="):
+            top_k = int(tok.split("=", 1)[1])
+    if enable is None and after_frames is None and prob is None:
+        return None
+    return {
+        "enable": bool(enable) if enable is not None else False,
+        "after_frames": int(after_frames if after_frames is not None else 1_000_000_000),
+        "prob": float(prob if prob is not None else 0.3),
+        "keep_diversity_min_profiles": int(
+            keep_diversity_min_profiles
+            if keep_diversity_min_profiles is not None
+            else 3
+        ),
+        "min_nsucc_gap": float(min_nsucc_gap if min_nsucc_gap is not None else 0.0),
+        "min_source_retention": float(
+            min_source_retention if min_source_retention is not None else 0.0
+        ),
+        "cooldown_frames": int(cooldown_frames if cooldown_frames is not None else 0),
+        "bottom_k": int(bottom_k if bottom_k is not None else 0),
+        "top_k": int(top_k if top_k is not None else 0),
+    }
+
+
+def resolve_profile_copy_restart_config(
+    *,
+    enable: bool,
+    after_frames: int,
+    prob: float,
+    keep_diversity_min_profiles: int,
+    min_nsucc_gap: float = 0.0,
+    min_source_retention: float = 0.0,
+    cooldown_frames: int = 0,
+    bottom_k: int = 0,
+    top_k: int = 0,
+    metadata_path: Path | None,
+) -> tuple[bool, int, float, int, float, float, int, int, int]:
+    """Resolve profile-copy settings for PBT restart argv re-injection."""
+    defaults = (False, 1_000_000_000, 0.3, 3, 0.0, 0.0, 0, 0, 0)
+    current = (
+        bool(enable),
+        int(after_frames),
+        float(prob),
+        int(keep_diversity_min_profiles),
+        float(min_nsucc_gap),
+        float(min_source_retention),
+        int(cooldown_frames),
+        int(bottom_k),
+        int(top_k),
+    )
+    if current != defaults or metadata_path is None:
+        return current
+    parsed = _parse_profile_copy_config_from_metadata(metadata_path)
+    if not parsed:
+        return current
+    return (
+        bool(parsed["enable"]),
+        int(parsed["after_frames"]),
+        float(parsed["prob"]),
+        int(parsed["keep_diversity_min_profiles"]),
+        float(parsed["min_nsucc_gap"]),
+        float(parsed["min_source_retention"]),
+        int(parsed["cooldown_frames"]),
+        int(parsed["bottom_k"]),
+        int(parsed["top_k"]),
+    )
+
+
+def profile_copy_source_bonus(profile_name: str) -> float:
+    """Return source-profile copy bonus weight."""
+    return float(PROFILE_COPY_SOURCE_BONUS.get(str(profile_name or "legacy"), 1.0))
 
 
 def _all_profile_controlled_dests() -> set[str]:
@@ -668,8 +915,8 @@ def profile_capability_flags(args_cli) -> dict[str, bool]:
             getattr(args_cli, "eir_enable", False)
             and getattr(args_cli, "eir_use_elite_bank", False)
         ),
-        "profile_conservative_planner_enabled": profile
-        == "conservative_rssm_planner_distill",
+        "profile_conservative_planner_enabled": PROFILE_FAMILY.get(profile, profile)
+        in ("planner",),
         "wm_strategy_profile_name": profile,
         "wm_strategy_profile_id": int(PROFILE_IDS.get(profile, 0)),
         "wm_strategy_profile_family": PROFILE_FAMILY.get(profile, profile),

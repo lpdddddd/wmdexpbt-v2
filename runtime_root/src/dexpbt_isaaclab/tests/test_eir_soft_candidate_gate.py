@@ -114,6 +114,36 @@ class TestGenerateEIRCandidatesGating(unittest.TestCase):
         w = rssm_candidate_weight(gate, 0.055)
         self.assertTrue(allow_retrieval(w, gate.min_weight_for_retrieval))
 
+    def test_light_rssm_profile_gate_tols(self):
+        args = SimpleNamespace(wm_strategy_profile="light_rssm_mppi_actor_distill")
+        apply_wm_strategy_profile(args)
+        cfg = CandidateGateConfig(
+            mode="profile_soft",
+            profile_name="light_rssm_mppi_actor_distill",
+            rssm_tol_start=float(args.eir_rssm_candidate_tol_start),
+            rssm_tol_full=float(args.eir_rssm_candidate_tol_full),
+        )
+        w = rssm_candidate_weight(cfg, 0.060)
+        self.assertGreater(w, 0.0)
+
+    def test_light_conservative_profile_gate_tols(self):
+        args = SimpleNamespace(
+            wm_strategy_profile="light_conservative_rssm_planner_distill"
+        )
+        apply_wm_strategy_profile(args)
+        cfg = CandidateGateConfig(
+            mode="profile_soft",
+            profile_name="light_conservative_rssm_planner_distill",
+            conservative_rssm_tol_start=float(
+                args.eir_conservative_rssm_candidate_tol_start
+            ),
+            conservative_rssm_tol_full=float(
+                args.eir_conservative_rssm_candidate_tol_full
+            ),
+        )
+        self.assertFalse(allow_retrieval(rssm_candidate_weight(cfg, 0.060), 0.05))
+        self.assertTrue(allow_retrieval(rssm_candidate_weight(cfg, 0.040), 0.05))
+
     def test_all_zoo_profiles_keep_residual_apply_off(self):
         for profile, table in PROFILE_TABLES.items():
             if not table:
