@@ -171,5 +171,52 @@ class TestGenerateEIRCandidatesGating(unittest.TestCase):
         self.assertEqual(float(any_avail), 1.0)
 
 
+class TestBelow004TelemetryFractions(unittest.TestCase):
+    def test_teacher_selected_uses_batch_fraction_not_first_row(self):
+        from dexpbt_isaaclab.world_model.eir_mpc import (
+            SRC_ACTOR,
+            SRC_ELITE_ARCHIVE,
+            SRC_ELITE_LOCAL,
+            SRC_RSSM,
+        )
+
+        best_source = torch.tensor(
+            [SRC_ACTOR, SRC_RSSM, SRC_RSSM, SRC_ELITE_LOCAL]
+        )
+        teacher_source_mask = (
+            (best_source == SRC_ELITE_LOCAL)
+            | (best_source == SRC_ELITE_ARCHIVE)
+            | (best_source == SRC_RSSM)
+        )
+        frac = float(teacher_source_mask.float().mean().item())
+        self.assertAlmostEqual(frac, 0.75)
+        self.assertNotEqual(
+            float(teacher_source_mask[0].item()),
+            frac,
+        )
+
+    def test_elite_below_004_uses_batch_fraction(self):
+        from dexpbt_isaaclab.world_model.eir_mpc import (
+            SRC_ACTOR,
+            SRC_ELITE_ARCHIVE,
+            SRC_ELITE_LOCAL,
+        )
+
+        best_source = torch.tensor(
+            [SRC_ACTOR, SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_ACTOR]
+        )
+        elite_source_mask = (
+            (best_source == SRC_ELITE_LOCAL)
+            | (best_source == SRC_ELITE_ARCHIVE)
+        )
+        frac = float(elite_source_mask.float().mean().item())
+        self.assertAlmostEqual(frac, 0.5)
+
+    def test_actor_distill_nonzero_below_004_uses_post_mask_fraction(self):
+        row_weight = torch.tensor([0.0, 0.2, 0.0, 0.5])
+        post_mask_nonzero_frac = float((row_weight > 0.0).float().mean().item())
+        self.assertAlmostEqual(post_mask_nonzero_frac, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7660,8 +7660,22 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "diversity_after_copy": int(copy_result.diversity_after_copy),
                 "source_nsucc_mean": float(source_meta.get("source_nsucc_mean", float("nan"))),
                 "target_nsucc_mean": float(target_meta.get("source_nsucc_mean", float("nan"))),
-                "source_retention": float(source_meta.get("source_retention", float("nan"))),
-                "target_retention": float(target_meta.get("source_retention", float("nan"))),
+                "source_has_retention": bool(
+                    source_meta.get("has_source_retention", False)
+                ),
+                "target_has_retention": bool(
+                    target_meta.get("has_source_retention", False)
+                ),
+                "source_retention": (
+                    float(source_meta["source_retention"])
+                    if source_meta.get("has_source_retention")
+                    else None
+                ),
+                "target_retention": (
+                    float(target_meta["source_retention"])
+                    if target_meta.get("has_source_retention")
+                    else None
+                ),
                 "profile_generation": int(self._wm_strategy_profile_generation),
                 "weight_generation": int(self._wm_strategy_profile_generation),
             }

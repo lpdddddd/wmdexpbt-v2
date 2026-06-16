@@ -217,10 +217,27 @@ class TestWMStrategyProfiles(unittest.TestCase):
             wm_strategy_profile="wm_pbt_source_selector_v2",
             pbt_wm_recovery_weight=0.3,
             wm_imagined_soft_uncertainty_threshold=0.95,
+            wm_imagined_min_logit_abs_mean=0.05,
+            wm_imagined_min_head_signal_std=0.02,
+            wm_imagined_soft_validity_weight=0.25,
         )
-        apply_wm_strategy_profile(args)
+        apply_wm_strategy_profile(
+            args,
+            argv=[
+                "train.py",
+                "--wm_strategy_profile=wm_pbt_source_selector_v2",
+                "--wm_imagined_soft_uncertainty_threshold=0.95",
+                "--wm_imagined_min_logit_abs_mean=0.05",
+                "--wm_imagined_min_head_signal_std=0.02",
+                "--wm_imagined_soft_validity_weight=0.25",
+            ],
+            authoritative=True,
+        )
         self.assertEqual(args.pbt_wm_recovery_weight, 0.20)
         self.assertEqual(args.wm_imagined_soft_uncertainty_threshold, 0.90)
+        self.assertEqual(args.wm_imagined_min_logit_abs_mean, 0.10)
+        self.assertEqual(args.wm_imagined_min_head_signal_std, 0.05)
+        self.assertEqual(args.wm_imagined_soft_validity_weight, 0.10)
         self.assertFalse(args.eir_enable)
         self.assertFalse(args.eir_actor_distill_enable)
 

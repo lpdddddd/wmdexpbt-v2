@@ -1390,24 +1390,34 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             rer.get("rssm_candidate_uncertainty_mean", 0.0)
         )
         best_source = gather_best_source(cand_out["source_id"], rer["best_idx"])
-        _teacher_src = int(best_source[0].item()) if best_source.numel() > 0 else -1
-        bridge.teacher_selected_above_004 = float(
-            1.0
-            if tol_above_004
-            and _teacher_src in (SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_RSSM)
+        teacher_source_mask = (
+            (best_source == SRC_ELITE_LOCAL)
+            | (best_source == SRC_ELITE_ARCHIVE)
+            | (best_source == SRC_RSSM)
+        )
+        teacher_selected_frac = (
+            float(teacher_source_mask.float().mean().detach().item())
+            if best_source.numel() > 0
             else 0.0
         )
-        bridge.teacher_selected_below_004 = float(
-            1.0
-            if tol_below_004
-            and _teacher_src in (SRC_ELITE_LOCAL, SRC_ELITE_ARCHIVE, SRC_RSSM)
+        bridge.teacher_selected_above_004 = (
+            teacher_selected_frac if tol_above_004 else 0.0
+        )
+        bridge.teacher_selected_below_004 = (
+            teacher_selected_frac if tol_below_004 else 0.0
+        )
+        elite_source_mask = (
+            (best_source == SRC_ELITE_LOCAL)
+            | (best_source == SRC_ELITE_ARCHIVE)
+        )
+        elite_selected_frac = (
+            float(elite_source_mask.float().mean().detach().item())
+            if best_source.numel() > 0
             else 0.0
         )
-        elite_frac = float(
-            bridge.last_best_source_frac.get("elite", 0.0)
-            + bridge.last_best_source_frac.get("archive", 0.0)
+        bridge.best_source_frac_elite_below_004 = (
+            elite_selected_frac if tol_below_004 else 0.0
         )
-        bridge.best_source_frac_elite_below_004 = float(elite_frac if tol_below_004 else 0.0)
 
         actor_distill_total = feat.new_zeros(())
         if bool(getattr(eir_cfg, "actor_distill_enable", False)):
@@ -1460,8 +1470,13 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             bridge.last_actor_distill_tol_bin = str(_act["tol_bin"])
             bridge.last_actor_distill_activation_weight_mean = float(_act["weight_mean"])
             bridge.last_actor_distill_activation_nonzero_frac = float(_act["nonzero_frac"])
-            bridge.actor_distill_nonzero_below_004 = float(
-                _act["nonzero_frac"] if tol_below_004 else 0.0
+            post_mask_nonzero_frac = (
+                float((row_weight > 0.0).float().mean().detach().item())
+                if row_weight.numel() > 0
+                else 0.0
+            )
+            bridge.actor_distill_nonzero_below_004 = (
+                post_mask_nonzero_frac if tol_below_004 else 0.0
             )
             bridge.last_actor_distill_tol_weight_mean = float(_act["tol_weight"])
             bridge.last_actor_distill_time_weight_mean = float(_act["time_weight"])

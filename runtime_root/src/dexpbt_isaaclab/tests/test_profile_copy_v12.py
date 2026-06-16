@@ -160,7 +160,7 @@ class TestProfileCopyEligibility(unittest.TestCase):
         )
         self.assertEqual(out.decision, "target_not_bottom")
 
-    def test_diversity_guard(self):
+    def test_diversity_guard_rejects_when_after_below_keep_min(self):
         cfg = ProfileCopyConfig(
             enable=True,
             after_frames=100,
@@ -184,6 +184,70 @@ class TestProfileCopyEligibility(unittest.TestCase):
             source_checkpoint_type="live",
         )
         self.assertEqual(out.decision, "diversity_min")
+        self.assertEqual(out.diversity_after_copy, 1)
+
+    def test_diversity_after_equals_keep_min_allows_eligibility(self):
+        cfg = ProfileCopyConfig(
+            enable=True,
+            after_frames=100,
+            keep_diversity_min_profiles=2,
+            bottom_k=2,
+            top_k=2,
+            base_prob=0.0,
+        )
+        out = decide_profile_copy(
+            cfg=cfg,
+            env_frames=500,
+            target_policy_idx=0,
+            source_policy_idx=1,
+            target_profile_name="ppo_only",
+            source_profile_name="elite_bank_actor_distill",
+            source_generation=2,
+            diversity_count=3,
+            profiles_set={
+                "ppo_only",
+                "elite_bank_actor_distill",
+                "wm_pbt_source_selector",
+            },
+            population=_population(),
+            source_meta={"has_source_retention": True, "source_retention": 0.9},
+            target_meta={},
+            source_checkpoint_type="live",
+        )
+        self.assertEqual(out.diversity_after_copy, 2)
+        self.assertNotEqual(out.decision, "diversity_min")
+        self.assertTrue(out.eligible)
+
+    def test_retention_low_when_source_has_no_retention_metadata(self):
+        cfg = ProfileCopyConfig(
+            enable=True,
+            after_frames=100,
+            min_source_retention=0.8,
+            keep_diversity_min_profiles=1,
+            bottom_k=2,
+            top_k=2,
+        )
+        out = decide_profile_copy(
+            cfg=cfg,
+            env_frames=500,
+            target_policy_idx=0,
+            source_policy_idx=1,
+            target_profile_name="ppo_only",
+            source_profile_name="elite_bank_actor_distill",
+            source_generation=2,
+            diversity_count=3,
+            profiles_set={
+                "ppo_only",
+                "elite_bank_actor_distill",
+                "wm_pbt_source_selector",
+            },
+            population=_population(),
+            source_meta={},
+            target_meta={},
+            source_checkpoint_type="live",
+        )
+        self.assertEqual(out.decision, "retention_low")
+        self.assertEqual(out.reject_reason, "retention_low")
 
     def test_source_bonus_and_prob_clip(self):
         p = compute_weighted_copy_prob(
@@ -303,6 +367,44 @@ class TestProfileCopyEvents(unittest.TestCase):
                 data["policies"]["002"]["wm_strategy_profile_name"],
                 "elite_bank_actor_distill",
             )
+
+    def test_profile_copy_event_retention_diagnostic_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = Path(td)
+            obs = object.__new__(DexPBTPbtAlgoObserver)
+            obs.workspace = ws
+            obs.policy_idx = 1
+            obs.pbt_iteration = 2
+            source_meta = {"has_source_retention": False, "source_retention": float("nan")}
+            target_meta = {"has_source_retention": True, "source_retention": 0.75}
+            obs._write_profile_copy_event(
+                {
+                    "decision": "retention_low",
+                    "reject_reason": "retention_low",
+                    "source_has_retention": bool(
+                        source_meta.get("has_source_retention", False)
+                    ),
+                    "target_has_retention": bool(
+                        target_meta.get("has_source_retention", False)
+                    ),
+                    "source_retention": (
+                        float(source_meta["source_retention"])
+                        if source_meta.get("has_source_retention")
+                        else None
+                    ),
+                    "target_retention": (
+                        float(target_meta["source_retention"])
+                        if target_meta.get("has_source_retention")
+                        else None
+                    ),
+                }
+            )
+            path = ws / "metrics" / "profile_copy_events.jsonl"
+            event = json.loads(path.read_text().strip())
+            self.assertFalse(event["source_has_retention"])
+            self.assertIsNone(event["source_retention"])
+            self.assertTrue(event["target_has_retention"])
+            self.assertAlmostEqual(event["target_retention"], 0.75)
 
     def test_profile_copy_rng_deterministic(self):
         cfg = ProfileCopyConfig(

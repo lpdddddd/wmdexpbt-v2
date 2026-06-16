@@ -104,6 +104,23 @@ class TestStrategyZooLauncher(unittest.TestCase):
         self.assertEqual(len(set(profiles)), 6)
         self.assertIn("strategy_zoo_v1.2_performance_debug", text)
 
+    def test_wm_pbt_source_selector_v2_not_polluted_by_shared_launcher_flags(self):
+        args, caps = _simulate_profile_expansion(
+            "wm_pbt_source_selector_v2",
+            restart_pollution=[
+                "--wm_imagined_soft_uncertainty_threshold=0.95",
+                "--wm_imagined_min_logit_abs_mean=0.05",
+                "--wm_imagined_min_head_signal_std=0.02",
+                "--wm_imagined_soft_validity_weight=0.25",
+            ],
+        )
+        self.assertEqual(args.wm_imagined_soft_uncertainty_threshold, 0.90)
+        self.assertEqual(args.wm_imagined_min_logit_abs_mean, 0.10)
+        self.assertEqual(args.wm_imagined_min_head_signal_std, 0.05)
+        self.assertEqual(args.wm_imagined_soft_validity_weight, 0.10)
+        self.assertFalse(args.eir_residual_apply_to_rollout)
+        self.assertFalse(caps["profile_residual_apply_enabled"])
+
     def test_strategy_zoo_launcher_does_not_assign_aggressive_residual(self):
         text = LAUNCHER.read_text()
         self.assertIn("--no-eir_residual_apply_to_rollout", text)

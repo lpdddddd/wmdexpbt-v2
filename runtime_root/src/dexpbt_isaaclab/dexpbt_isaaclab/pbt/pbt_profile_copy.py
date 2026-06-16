@@ -254,7 +254,7 @@ def decide_profile_copy(
     profiles_after.add(str(source_profile_name or "legacy"))
     diversity_after = len(profiles_after)
     out.diversity_after_copy = int(diversity_after)
-    if diversity_after <= int(cfg.keep_diversity_min_profiles):
+    if diversity_after < int(cfg.keep_diversity_min_profiles):
         out.decision = "diversity_min"
         out.reject_reason = "diversity_min"
         return out

@@ -627,7 +627,8 @@ parser.add_argument(
 )
 parser.add_argument(
     "--pbt_wm_profile_keep_diversity_min_profiles", type=int, default=3,
-    help="Profile copy blocked when active distinct profiles <= this count.",
+    help="Profile copy is blocked only when distinct profiles after copy "
+    "would be below this count.",
 )
 parser.add_argument(
     "--pbt_wm_profile_copy_min_nsucc_gap", type=float, default=0.0,
