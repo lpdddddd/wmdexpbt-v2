@@ -1253,6 +1253,7 @@ parser.add_argument("--cross_restart_count_resume", type=int, default=None)
 # Patch G (2026-05-31): archive-recovery accounting resume hooks.
 parser.add_argument("--recovery_restart_count_resume", type=int, default=None)
 parser.add_argument("--last_recovery_frame_resume", type=int, default=None)
+parser.add_argument("--last_profile_copy_frame_resume", type=int, default=None)
 # PBT-WM Strategy Zoo v1.0: profile lineage resume hooks (forwarded by observer).
 parser.add_argument("--wm_strategy_profile_generation_resume", type=int, default=None)
 parser.add_argument("--wm_strategy_profile_parent_resume", type=int, default=None)
@@ -6524,6 +6525,9 @@ def main():
                 args_cli.recovery_restart_count_resume
             ),
             last_recovery_frame_resume=args_cli.last_recovery_frame_resume,
+            last_profile_copy_frame_resume=(
+                args_cli.last_profile_copy_frame_resume
+            ),
             # PBT-WM Strategy Zoo v1.0
             wm_strategy_profile_name=str(args_cli.wm_strategy_profile),
             wm_strategy_profile_id=int(

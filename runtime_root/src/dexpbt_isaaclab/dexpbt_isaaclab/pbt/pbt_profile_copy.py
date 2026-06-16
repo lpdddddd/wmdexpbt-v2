@@ -249,6 +249,15 @@ def decide_profile_copy(
         out.reject_reason = "retention_low"
         return out
 
+    src_profile = str(source_profile_name or "legacy")
+    tgt_profile = str(target_profile_name or "legacy")
+    if src_profile == tgt_profile:
+        out.decision = "same_profile"
+        out.reject_reason = "same_profile"
+        out.new_profile_name = tgt_profile
+        out.diversity_after_copy = int(diversity_count)
+        return out
+
     profiles_after = set(profiles_set)
     profiles_after.discard(str(target_profile_name or "legacy"))
     profiles_after.add(str(source_profile_name or "legacy"))

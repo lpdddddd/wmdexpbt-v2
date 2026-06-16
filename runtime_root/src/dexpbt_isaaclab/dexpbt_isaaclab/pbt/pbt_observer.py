@@ -490,6 +490,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Patch G (2026-05-31): recovery-from-archive accounting.
         recovery_restart_count_resume: int | None = None,
         last_recovery_frame_resume: int | None = None,
+        last_profile_copy_frame_resume: int | None = None,
     ):
         super().__init__()
         self.policy_idx = policy_idx
@@ -749,7 +750,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._weight_copy_count: int = 0
         self._weight_copy_with_profile_copy_count: int = 0
         self._weight_copy_without_profile_copy_count: int = 0
-        self._last_profile_copy_frame: int = -10**18
         # Per-policy floor-recovery state (Part A).
         self._first_floor_frame: dict[int, int] = {}
         self._first_hard_floor_frame: dict[int, int] = {}
@@ -1180,6 +1180,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._last_recovery_frame = int(last_recovery_frame_resume)
         else:
             self._last_recovery_frame = -10**18
+        if last_profile_copy_frame_resume is not None:
+            self._last_profile_copy_frame = int(last_profile_copy_frame_resume)
+        else:
+            self._last_profile_copy_frame = -10**18
         # Source selection tier counters; bumped per-tick whenever the
         # bottom branch terminates in each tier.
         self._source_tier_counts: dict[str, int] = {
@@ -7280,6 +7284,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "--restart_count_resume",
             "--frames_at_restart_resume",
             "--last_mutation_frame_resume",
+            "--last_profile_copy_frame_resume",
             # The supervisor re-injects DEXPBT_KIT_ARGS at attempt start; if we
             # keep --kit_args from _original_sys_argv it would be duplicated.
             "--kit_args",
@@ -7480,6 +7485,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         train_args.append(
             f"--last_recovery_frame_resume={int(self._last_recovery_frame)}"
+        )
+        train_args.append(
+            f"--last_profile_copy_frame_resume={int(self._last_profile_copy_frame)}"
         )
 
         # PBT-WM Strategy Zoo v1.2: optional profile inheritance on cross-copy.

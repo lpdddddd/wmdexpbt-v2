@@ -249,6 +249,40 @@ class TestProfileCopyEligibility(unittest.TestCase):
         self.assertEqual(out.decision, "retention_low")
         self.assertEqual(out.reject_reason, "retention_low")
 
+    def test_same_profile_copy_not_accepted(self):
+        cfg = ProfileCopyConfig(
+            enable=True,
+            after_frames=100,
+            keep_diversity_min_profiles=1,
+            bottom_k=2,
+            top_k=2,
+            base_prob=1.0,
+        )
+        out = decide_profile_copy(
+            cfg=cfg,
+            env_frames=500,
+            target_policy_idx=0,
+            source_policy_idx=1,
+            target_profile_name="elite_bank_actor_distill",
+            source_profile_name="elite_bank_actor_distill",
+            source_generation=2,
+            diversity_count=3,
+            profiles_set={
+                "ppo_only",
+                "elite_bank_actor_distill",
+                "wm_pbt_source_selector",
+            },
+            population=_population(),
+            source_meta={"has_source_retention": True, "source_retention": 0.9},
+            target_meta={},
+            source_checkpoint_type="live",
+        )
+        self.assertEqual(out.decision, "same_profile")
+        self.assertEqual(out.reject_reason, "same_profile")
+        self.assertFalse(out.accepted)
+        self.assertFalse(out.attempted)
+        self.assertEqual(out.new_profile_name, "elite_bank_actor_distill")
+
     def test_source_bonus_and_prob_clip(self):
         p = compute_weighted_copy_prob(
             base_prob=0.7,
@@ -259,6 +293,48 @@ class TestProfileCopyEligibility(unittest.TestCase):
         self.assertAlmostEqual(p, 0.9)
         self.assertAlmostEqual(profile_copy_source_bonus("ppo_only"), 0.6)
         self.assertAlmostEqual(profile_copy_source_bonus("wm_pbt_source_selector"), 1.1)
+
+
+class TestProfileCopyCooldownResume(unittest.TestCase):
+    def test_profile_copy_cooldown_frame_resume(self):
+        obs = object.__new__(DexPBTPbtAlgoObserver)
+        DexPBTPbtAlgoObserver.__init__(
+            obs,
+            policy_idx=0,
+            num_policies=6,
+            mutable_params={},
+            workspace="/tmp/ws",
+            train_dir="/tmp/ws/rl_games",
+            task_name="test",
+            interval_steps=1,
+            start_after=0,
+            initial_delay=0,
+            last_profile_copy_frame_resume=123_456_789,
+        )
+        self.assertEqual(obs._last_profile_copy_frame, 123_456_789)
+
+    def test_restart_train_args_include_last_profile_copy_frame_resume(self):
+        skip_flags = {
+            "--last_profile_copy_frame_resume",
+        }
+        stale_argv = [
+            "--gamma=0.99",
+            "--last_profile_copy_frame_resume=1",
+        ]
+        filtered = [
+            a
+            for a in stale_argv
+            if a.split("=")[0] not in skip_flags
+        ]
+        last_frame = 456_789_012
+        restored = filtered + [
+            f"--last_profile_copy_frame_resume={int(last_frame)}"
+        ]
+        self.assertIn(
+            "--last_profile_copy_frame_resume=456789012",
+            restored,
+        )
+        self.assertNotIn("--last_profile_copy_frame_resume=1", restored)
 
 
 class TestProfileCopyRestartSurvival(unittest.TestCase):
