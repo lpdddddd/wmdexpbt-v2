@@ -28,6 +28,9 @@ PROFILE_IDS: dict[str, int] = {
     # Strategy Zoo v1.3 elite-centered performance profiles.
     "elite_bank_actor_distill_fast": 10,
     "elite_bank_actor_distill_strong": 11,
+    # Strategy Zoo v1.4 elite distill rescue profiles.
+    "elite_bank_actor_distill_fast_v2": 12,
+    "elite_bank_actor_distill_strong_v2": 13,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -57,6 +60,12 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "elite_bank_actor_distill_strong": (
         "Strong elite/archive actor distill for v1.3 performance runs (no MPPI)."
     ),
+    "elite_bank_actor_distill_fast_v2": (
+        "v1.4 elite distill rescue: clip large delta, permissive margin (no MPPI)."
+    ),
+    "elite_bank_actor_distill_strong_v2": (
+        "v1.4 strong elite distill rescue: clip large delta, higher weight (no MPPI)."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -72,21 +81,25 @@ PROFILE_FAMILY: dict[str, str] = {
     "light_conservative_rssm_planner_distill": "planner",
     "elite_bank_actor_distill_fast": "elite_imitation",
     "elite_bank_actor_distill_strong": "elite_imitation",
+    "elite_bank_actor_distill_fast_v2": "elite_imitation",
+    "elite_bank_actor_distill_strong_v2": "elite_imitation",
 }
 
-# Profile-copy source bonus weights (v1.3 elite-centered).
+# Profile-copy source bonus weights (v1.4 selector-preserving).
 PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
-    "elite_bank_actor_distill_fast": 1.2,
-    "elite_bank_actor_distill": 1.3,
-    "elite_bank_actor_distill_strong": 1.3,
-    "wm_pbt_source_selector": 1.1,
-    "wm_pbt_source_selector_v2": 1.0,
+    "elite_bank_actor_distill_fast_v2": 1.0,
+    "elite_bank_actor_distill": 1.1,
+    "elite_bank_actor_distill_strong_v2": 1.1,
+    "elite_bank_actor_distill_fast": 1.0,
+    "elite_bank_actor_distill_strong": 1.0,
+    "wm_pbt_source_selector": 1.3,
+    "wm_pbt_source_selector_v2": 1.1,
     "ppo_only": 0.6,
     "light_rssm_mppi_actor_distill": 0.5,
     "light_conservative_rssm_planner_distill": 0.5,
     "rssm_mppi_actor_distill": 0.5,
     "conservative_rssm_planner_distill": 0.5,
-    "wm_curriculum_controller": 0.9,
+    "wm_curriculum_controller": 0.8,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -546,6 +559,28 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG: dict[str, Any] = {
     "eir_residual_apply_to_rollout": False,
 }
 
+_ELITE_BANK_ACTOR_DISTILL_FAST_V2: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL_FAST,
+    "eir_actor_distill_large_delta_mode": "clip",
+    "eir_actor_distill_max_delta": 1.0,
+    "eir_actor_distill_target_delta_clip": 0.35,
+    "eir_actor_distill_min_margin": 0.0,
+    "eir_actor_distill_weight": 0.002,
+    "eir_actor_distill_loss_cap": 0.03,
+    "eir_residual_apply_to_rollout": False,
+}
+
+_ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL_STRONG,
+    "eir_actor_distill_large_delta_mode": "clip",
+    "eir_actor_distill_max_delta": 1.0,
+    "eir_actor_distill_target_delta_clip": 0.50,
+    "eir_actor_distill_min_margin": 0.0,
+    "eir_actor_distill_weight": 0.003,
+    "eir_actor_distill_loss_cap": 0.03,
+    "eir_residual_apply_to_rollout": False,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -559,6 +594,8 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
     "elite_bank_actor_distill_fast": _ELITE_BANK_ACTOR_DISTILL_FAST,
     "elite_bank_actor_distill_strong": _ELITE_BANK_ACTOR_DISTILL_STRONG,
+    "elite_bank_actor_distill_fast_v2": _ELITE_BANK_ACTOR_DISTILL_FAST_V2,
+    "elite_bank_actor_distill_strong_v2": _ELITE_BANK_ACTOR_DISTILL_STRONG_V2,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.
@@ -700,6 +737,15 @@ def profile_controlled_restart_skip_flags() -> frozenset[str]:
         "--pbt_wm_profile_copy_cooldown_frames",
         "--pbt_wm_profile_copy_bottom_k",
         "--pbt_wm_profile_copy_top_k",
+        "--pbt_wm_profile_copy_source_min_nsucc_mean",
+        "--pbt_wm_profile_copy_source_min_frames",
+        "--pbt_wm_profile_copy_top1_override_enable",
+        "--no-pbt_wm_profile_copy_top1_override_enable",
+        "--pbt_wm_profile_copy_top1_override_after_frames",
+        "--pbt_wm_profile_copy_top1_override_min_nsucc_gap",
+        "--pbt_wm_profile_copy_top1_override_min_diversity",
+        "--pbt_wm_profile_copy_top1_override_allow_target_protected",
+        "--no-pbt_wm_profile_copy_top1_override_allow_target_protected",
     }
     for dest in _all_profile_controlled_dests():
         skip.add(f"--{dest}")
@@ -720,6 +766,13 @@ def profile_copy_restart_train_args(
     cooldown_frames: int = 0,
     bottom_k: int = 0,
     top_k: int = 0,
+    source_min_nsucc_mean: float = 0.0,
+    source_min_frames: int = 0,
+    top1_override_enable: bool = False,
+    top1_override_after_frames: int = 0,
+    top1_override_min_nsucc_gap: float = 5.0,
+    top1_override_min_diversity: int = 2,
+    top1_override_allow_target_protected: bool = False,
 ) -> list[str]:
     """Re-inject profile-copy CLI after restart argv stripping."""
     return [
@@ -739,6 +792,30 @@ def profile_copy_restart_train_args(
         f"--pbt_wm_profile_copy_cooldown_frames={int(cooldown_frames)}",
         f"--pbt_wm_profile_copy_bottom_k={int(bottom_k)}",
         f"--pbt_wm_profile_copy_top_k={int(top_k)}",
+        f"--pbt_wm_profile_copy_source_min_nsucc_mean={float(source_min_nsucc_mean)}",
+        f"--pbt_wm_profile_copy_source_min_frames={int(source_min_frames)}",
+        (
+            "--pbt_wm_profile_copy_top1_override_enable"
+            if top1_override_enable
+            else "--no-pbt_wm_profile_copy_top1_override_enable"
+        ),
+        (
+            "--pbt_wm_profile_copy_top1_override_after_frames="
+            f"{int(top1_override_after_frames)}"
+        ),
+        (
+            "--pbt_wm_profile_copy_top1_override_min_nsucc_gap="
+            f"{float(top1_override_min_nsucc_gap)}"
+        ),
+        (
+            "--pbt_wm_profile_copy_top1_override_min_diversity="
+            f"{int(top1_override_min_diversity)}"
+        ),
+        (
+            "--pbt_wm_profile_copy_top1_override_allow_target_protected"
+            if top1_override_allow_target_protected
+            else "--no-pbt_wm_profile_copy_top1_override_allow_target_protected"
+        ),
     ]
 
 

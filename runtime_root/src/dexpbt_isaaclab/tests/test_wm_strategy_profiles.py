@@ -391,6 +391,13 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
                 "--pbt_wm_profile_copy_cooldown_frames=0",
                 "--pbt_wm_profile_copy_bottom_k=0",
                 "--pbt_wm_profile_copy_top_k=0",
+                "--pbt_wm_profile_copy_source_min_nsucc_mean=0.0",
+                "--pbt_wm_profile_copy_source_min_frames=0",
+                "--no-pbt_wm_profile_copy_top1_override_enable",
+                "--pbt_wm_profile_copy_top1_override_after_frames=0",
+                "--pbt_wm_profile_copy_top1_override_min_nsucc_gap=5.0",
+                "--pbt_wm_profile_copy_top1_override_min_diversity=2",
+                "--no-pbt_wm_profile_copy_top1_override_allow_target_protected",
             ],
         )
 

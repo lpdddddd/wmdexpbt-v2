@@ -1,4 +1,4 @@
-"""PBT-WM Strategy Zoo v1.2 profile-copy eligibility and decision logic."""
+"""PBT-WM Strategy Zoo v1.2/v1.4 profile-copy eligibility and decision logic."""
 from __future__ import annotations
 
 import math
@@ -21,6 +21,13 @@ class ProfileCopyConfig:
     bottom_k: int = 0
     top_k: int = 0
     prob_clip_max: float = 0.9
+    source_min_nsucc_mean: float = 0.0
+    source_min_frames: int = 0
+    top1_override_enable: bool = False
+    top1_override_after_frames: int = 0
+    top1_override_min_nsucc_gap: float = 5.0
+    top1_override_min_diversity: int = 2
+    top1_override_allow_target_protected: bool = False
 
 
 @dataclass
@@ -38,6 +45,11 @@ class ProfileCopyDecision:
     diversity_after_copy: int = 0
     target_need_factor: float = 1.0
     source_bonus: float = 1.0
+    top1_override_used: bool = False
+    source_frames: int = 0
+    source_min_frames: int = 0
+    source_nsucc_mean: float = float("nan")
+    source_min_nsucc_mean: float = 0.0
 
 
 def _policy_score(state: dict[str, Any] | None) -> float:
@@ -64,6 +76,18 @@ def _policy_nsucc_mean(state: dict[str, Any] | None, window_mean: float | None) 
     return float("nan")
 
 
+def _policy_frames(state: dict[str, Any] | None) -> int:
+    if not state:
+        return 0
+    for key in ("frame", "env_frames"):
+        if key in state:
+            try:
+                return int(state[key])
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
 def _ranked_policies(
     population: dict[int, dict[str, Any] | None],
     *,
@@ -80,6 +104,28 @@ def _ranked_policies(
         rows.append((int(pid), float(score)))
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows
+
+
+def _top1_override_ok(
+    *,
+    cfg: ProfileCopyConfig,
+    env_frames: int,
+    source_rank: int,
+    source_nsucc: float,
+    target_nsucc: float,
+) -> bool:
+    if not cfg.top1_override_enable:
+        return False
+    if int(env_frames) < int(cfg.top1_override_after_frames):
+        return False
+    if int(source_rank) != 0:
+        return False
+    gap = float(cfg.top1_override_min_nsucc_gap)
+    if math.isnan(source_nsucc) or math.isnan(target_nsucc):
+        return False
+    if source_nsucc < target_nsucc + gap:
+        return False
+    return True
 
 
 def compute_target_need_factor(
@@ -133,6 +179,7 @@ def decide_profile_copy(
     last_profile_copy_frame: int = -10**18,
     window_nsucc: dict[int, float] | None = None,
     source_in_collapse: bool = False,
+    source_frames: int | None = None,
     rng: random.Random | None = None,
 ) -> ProfileCopyDecision:
     """Evaluate profile-copy eligibility and draw copy decision."""
@@ -141,6 +188,8 @@ def decide_profile_copy(
         source_profile_name=str(source_profile_name or "legacy"),
         source_generation=int(source_generation),
         diversity_count=int(diversity_count),
+        source_min_frames=int(cfg.source_min_frames),
+        source_min_nsucc_mean=float(cfg.source_min_nsucc_mean),
     )
     if not cfg.enable:
         out.decision = "disabled"
@@ -150,11 +199,6 @@ def decide_profile_copy(
     if int(env_frames) < int(cfg.after_frames):
         out.decision = "before_after_frames"
         out.reject_reason = "before_after_frames"
-        return out
-
-    if int(env_frames) < int(target_protected_until):
-        out.decision = "target_protected"
-        out.reject_reason = "target_protected"
         return out
 
     if (
@@ -172,14 +216,37 @@ def decide_profile_copy(
     target_rank = rank_by_pid.get(int(target_policy_idx), num_policies - 1)
     source_rank = rank_by_pid.get(int(source_policy_idx), num_policies)
 
+    source_state = (population or {}).get(int(source_policy_idx))
+    target_state = (population or {}).get(int(target_policy_idx))
     target_nsucc = _policy_nsucc_mean(
-        target_meta,
+        target_state,
         (window_nsucc or {}).get(int(target_policy_idx)),
     )
     source_nsucc = _policy_nsucc_mean(
-        source_meta,
+        source_state,
         (window_nsucc or {}).get(int(source_policy_idx)),
     )
+    out.source_nsucc_mean = float(source_nsucc)
+    if source_frames is None:
+        source_frames = _policy_frames(source_state)
+    out.source_frames = int(source_frames)
+
+    top1_override = _top1_override_ok(
+        cfg=cfg,
+        env_frames=int(env_frames),
+        source_rank=int(source_rank),
+        source_nsucc=float(source_nsucc),
+        target_nsucc=float(target_nsucc),
+    )
+    out.top1_override_used = bool(top1_override)
+
+    target_protected = int(env_frames) < int(target_protected_until)
+    if target_protected and not (
+        top1_override and cfg.top1_override_allow_target_protected
+    ):
+        out.decision = "target_protected"
+        out.reject_reason = "target_protected"
+        return out
 
     target_retention = None
     if target_meta:
@@ -215,6 +282,18 @@ def decide_profile_copy(
         out.decision = "source_not_top"
         out.reject_reason = "source_not_top"
         return out
+
+    if float(cfg.source_min_nsucc_mean) > 0.0:
+        if math.isnan(source_nsucc) or source_nsucc < float(cfg.source_min_nsucc_mean):
+            out.decision = "source_nsucc_too_low"
+            out.reject_reason = "source_nsucc_too_low"
+            return out
+
+    if int(cfg.source_min_frames) > 0:
+        if int(source_frames) < int(cfg.source_min_frames):
+            out.decision = "source_frames_too_low"
+            out.reject_reason = "source_frames_too_low"
+            return out
 
     if source_in_collapse:
         out.decision = "source_unhealthy"
@@ -263,7 +342,12 @@ def decide_profile_copy(
     profiles_after.add(str(source_profile_name or "legacy"))
     diversity_after = len(profiles_after)
     out.diversity_after_copy = int(diversity_after)
-    if diversity_after < int(cfg.keep_diversity_min_profiles):
+    effective_min_diversity = (
+        int(cfg.top1_override_min_diversity)
+        if top1_override
+        else int(cfg.keep_diversity_min_profiles)
+    )
+    if diversity_after < effective_min_diversity:
         out.decision = "diversity_min"
         out.reject_reason = "diversity_min"
         return out

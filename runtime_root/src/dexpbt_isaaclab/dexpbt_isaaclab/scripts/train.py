@@ -650,6 +650,38 @@ parser.add_argument(
     "--pbt_wm_profile_copy_top_k", type=int, default=0,
     help="Source must be in top-k by ranking (unless archive source).",
 )
+parser.add_argument(
+    "--pbt_wm_profile_copy_source_min_nsucc_mean", type=float, default=0.0,
+    help="Minimum source nsucc mean required for profile copy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_source_min_frames", type=int, default=0,
+    help="Minimum source env frames required for profile copy.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top1_override_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Allow top1 source to override target_protected and relax diversity min.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top1_override_after_frames", type=int, default=0,
+    help="Earliest env frame for top1 profile-copy override.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top1_override_min_nsucc_gap", type=float, default=5.0,
+    help="Minimum nsucc gap for top1 profile-copy override.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top1_override_min_diversity", type=int, default=2,
+    help="Relaxed diversity minimum when top1 override applies.",
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_top1_override_allow_target_protected",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Top1 override may waive target_protected guard.",
+)
 # WM curriculum controller (Strategy Zoo profile: wm_curriculum_controller).
 parser.add_argument(
     "--wm_curriculum_controller_enable",
@@ -1320,6 +1352,8 @@ parser.add_argument(
         "light_conservative_rssm_planner_distill",
         "elite_bank_actor_distill_fast",
         "elite_bank_actor_distill_strong",
+        "elite_bank_actor_distill_fast_v2",
+        "elite_bank_actor_distill_strong_v2",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -1852,6 +1886,17 @@ parser.add_argument("--eir_actor_distill_tol", type=float, default=0.04)
 parser.add_argument("--eir_actor_distill_min_margin", type=float, default=0.02)
 parser.add_argument("--eir_actor_distill_margin_norm", type=float, default=0.05)
 parser.add_argument("--eir_actor_distill_max_delta", type=float, default=0.35)
+parser.add_argument(
+    "--eir_actor_distill_large_delta_mode",
+    type=str,
+    default="reject",
+    choices=["reject", "clip"],
+    help="How to handle teacher-mu delta above max_delta in actor distill mask.",
+)
+parser.add_argument(
+    "--eir_actor_distill_target_delta_clip", type=float, default=0.35,
+    help="Per-dim clip for teacher target when large_delta_mode=clip.",
+)
 parser.add_argument("--eir_actor_distill_allowed_sources", type=str, default="rssm,elite,archive")
 parser.add_argument("--eir_actor_distill_uncertainty_threshold", type=float, default=2.0)
 parser.add_argument("--eir_actor_distill_loss_cap", type=float, default=0.05)
@@ -3517,6 +3562,12 @@ def _patch_actor_train_for_seq_wm(
                         "actor_distill_reject_low_margin": xb.last_actor_distill_reject_low_margin,
                         "actor_distill_reject_bad_source": xb.last_actor_distill_reject_bad_source,
                         "actor_distill_reject_large_delta": xb.last_actor_distill_reject_large_delta,
+                        "actor_distill_clip_large_delta": xb.last_actor_distill_clip_large_delta,
+                        "actor_distill_large_delta_mode": xb.last_actor_distill_large_delta_mode,
+                        "actor_distill_target_delta_clip": xb.last_actor_distill_target_delta_clip,
+                        "actor_distill_delta_linf_mean_all": xb.last_actor_distill_delta_linf_mean_all,
+                        "actor_distill_delta_linf_p50_all": xb.last_actor_distill_delta_linf_p50_all,
+                        "actor_distill_delta_linf_p90_all": xb.last_actor_distill_delta_linf_p90_all,
                         "actor_distill_reject_high_uncertainty": xb.last_actor_distill_reject_high_uncertainty,
                         "actor_distill_reject_tol": xb.last_actor_distill_reject_tol,
                         "actor_distill_reject_uncertainty_missing": xb.last_actor_distill_reject_uncertainty_missing,
@@ -5694,6 +5745,12 @@ def main():
             actor_distill_min_margin=float(args_cli.eir_actor_distill_min_margin),
             actor_distill_margin_norm=float(args_cli.eir_actor_distill_margin_norm),
             actor_distill_max_delta=float(args_cli.eir_actor_distill_max_delta),
+            actor_distill_large_delta_mode=str(
+                args_cli.eir_actor_distill_large_delta_mode
+            ),
+            actor_distill_target_delta_clip=float(
+                args_cli.eir_actor_distill_target_delta_clip
+            ),
             actor_distill_uncertainty_threshold=float(
                 args_cli.eir_actor_distill_uncertainty_threshold
             ),
@@ -6595,6 +6652,27 @@ def main():
             ),
             pbt_wm_profile_copy_bottom_k=args_cli.pbt_wm_profile_copy_bottom_k,
             pbt_wm_profile_copy_top_k=args_cli.pbt_wm_profile_copy_top_k,
+            pbt_wm_profile_copy_source_min_nsucc_mean=(
+                args_cli.pbt_wm_profile_copy_source_min_nsucc_mean
+            ),
+            pbt_wm_profile_copy_source_min_frames=(
+                args_cli.pbt_wm_profile_copy_source_min_frames
+            ),
+            pbt_wm_profile_copy_top1_override_enable=(
+                args_cli.pbt_wm_profile_copy_top1_override_enable
+            ),
+            pbt_wm_profile_copy_top1_override_after_frames=(
+                args_cli.pbt_wm_profile_copy_top1_override_after_frames
+            ),
+            pbt_wm_profile_copy_top1_override_min_nsucc_gap=(
+                args_cli.pbt_wm_profile_copy_top1_override_min_nsucc_gap
+            ),
+            pbt_wm_profile_copy_top1_override_min_diversity=(
+                args_cli.pbt_wm_profile_copy_top1_override_min_diversity
+            ),
+            pbt_wm_profile_copy_top1_override_allow_target_protected=(
+                args_cli.pbt_wm_profile_copy_top1_override_allow_target_protected
+            ),
             profile_actor_distill_enabled=_wm_profile_caps.get(
                 "profile_actor_distill_enabled", False
             ),

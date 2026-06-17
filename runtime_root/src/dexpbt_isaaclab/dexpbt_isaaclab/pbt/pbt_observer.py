@@ -471,6 +471,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_wm_profile_copy_cooldown_frames: int = 0,
         pbt_wm_profile_copy_bottom_k: int = 0,
         pbt_wm_profile_copy_top_k: int = 0,
+        pbt_wm_profile_copy_source_min_nsucc_mean: float = 0.0,
+        pbt_wm_profile_copy_source_min_frames: int = 0,
+        pbt_wm_profile_copy_top1_override_enable: bool = False,
+        pbt_wm_profile_copy_top1_override_after_frames: int = 0,
+        pbt_wm_profile_copy_top1_override_min_nsucc_gap: float = 5.0,
+        pbt_wm_profile_copy_top1_override_min_diversity: int = 2,
+        pbt_wm_profile_copy_top1_override_allow_target_protected: bool = False,
         profile_actor_distill_enabled: bool = False,
         profile_residual_apply_enabled: bool = False,
         profile_rssm_mppi_enabled: bool = False,
@@ -721,6 +728,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self.pbt_wm_profile_copy_bottom_k = int(pbt_wm_profile_copy_bottom_k)
         self.pbt_wm_profile_copy_top_k = int(pbt_wm_profile_copy_top_k)
+        self.pbt_wm_profile_copy_source_min_nsucc_mean = float(
+            pbt_wm_profile_copy_source_min_nsucc_mean
+        )
+        self.pbt_wm_profile_copy_source_min_frames = int(
+            pbt_wm_profile_copy_source_min_frames
+        )
+        self.pbt_wm_profile_copy_top1_override_enable = bool(
+            pbt_wm_profile_copy_top1_override_enable
+        )
+        self.pbt_wm_profile_copy_top1_override_after_frames = int(
+            pbt_wm_profile_copy_top1_override_after_frames
+        )
+        self.pbt_wm_profile_copy_top1_override_min_nsucc_gap = float(
+            pbt_wm_profile_copy_top1_override_min_nsucc_gap
+        )
+        self.pbt_wm_profile_copy_top1_override_min_diversity = int(
+            pbt_wm_profile_copy_top1_override_min_diversity
+        )
+        self.pbt_wm_profile_copy_top1_override_allow_target_protected = bool(
+            pbt_wm_profile_copy_top1_override_allow_target_protected
+        )
         self.profile_actor_distill_enabled = bool(profile_actor_distill_enabled)
         self.profile_residual_apply_enabled = bool(profile_residual_apply_enabled)
         self.profile_rssm_mppi_enabled = bool(profile_rssm_mppi_enabled)
@@ -7571,6 +7599,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             cooldown_frames=int(copy_cooldown_frames),
             bottom_k=int(copy_bottom_k),
             top_k=int(copy_top_k),
+            source_min_nsucc_mean=float(
+                self.pbt_wm_profile_copy_source_min_nsucc_mean
+            ),
+            source_min_frames=int(self.pbt_wm_profile_copy_source_min_frames),
+            top1_override_enable=bool(
+                self.pbt_wm_profile_copy_top1_override_enable
+            ),
+            top1_override_after_frames=int(
+                self.pbt_wm_profile_copy_top1_override_after_frames
+            ),
+            top1_override_min_nsucc_gap=float(
+                self.pbt_wm_profile_copy_top1_override_min_nsucc_gap
+            ),
+            top1_override_min_diversity=int(
+                self.pbt_wm_profile_copy_top1_override_min_diversity
+            ),
+            top1_override_allow_target_protected=bool(
+                self.pbt_wm_profile_copy_top1_override_allow_target_protected
+            ),
+        )
+        source_frames = int(
+            source_state.get("frame", source_state.get("env_frames", env_frames))
         )
         copy_result = decide_profile_copy(
             cfg=copy_cfg,
@@ -7590,6 +7640,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             last_profile_copy_frame=int(self._last_profile_copy_frame),
             window_nsucc=window_nsucc,
             source_in_collapse=bool(source_in_collapse),
+            source_frames=source_frames,
         )
         profile_copy_decision = str(copy_result.decision)
         new_profile_name = str(copy_result.new_profile_name or old_profile_name)
@@ -7645,6 +7696,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 cooldown_frames=copy_cooldown_frames,
                 bottom_k=copy_bottom_k,
                 top_k=copy_top_k,
+                source_min_nsucc_mean=float(
+                    self.pbt_wm_profile_copy_source_min_nsucc_mean
+                ),
+                source_min_frames=int(self.pbt_wm_profile_copy_source_min_frames),
+                top1_override_enable=bool(
+                    self.pbt_wm_profile_copy_top1_override_enable
+                ),
+                top1_override_after_frames=int(
+                    self.pbt_wm_profile_copy_top1_override_after_frames
+                ),
+                top1_override_min_nsucc_gap=float(
+                    self.pbt_wm_profile_copy_top1_override_min_nsucc_gap
+                ),
+                top1_override_min_diversity=int(
+                    self.pbt_wm_profile_copy_top1_override_min_diversity
+                ),
+                top1_override_allow_target_protected=bool(
+                    self.pbt_wm_profile_copy_top1_override_allow_target_protected
+                ),
             )
         )
         self._last_pbt_wm_profile_copy_decision = str(profile_copy_decision)
@@ -7666,7 +7736,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "target_need_factor": float(copy_result.target_need_factor),
                 "diversity_count": int(diversity_count),
                 "diversity_after_copy": int(copy_result.diversity_after_copy),
-                "source_nsucc_mean": float(source_meta.get("source_nsucc_mean", float("nan"))),
+                "top1_override_used": bool(copy_result.top1_override_used),
+                "source_frames": int(copy_result.source_frames),
+                "source_min_frames": int(copy_result.source_min_frames),
+                "source_nsucc_mean": float(copy_result.source_nsucc_mean),
+                "source_min_nsucc_mean": float(copy_result.source_min_nsucc_mean),
                 "target_nsucc_mean": float(target_meta.get("source_nsucc_mean", float("nan"))),
                 "source_has_retention": bool(
                     source_meta.get("has_source_retention", False)

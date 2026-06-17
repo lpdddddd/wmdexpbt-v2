@@ -137,6 +137,8 @@ class EIRConfig:
     actor_distill_min_margin: float = 0.02
     actor_distill_margin_norm: float = 0.05
     actor_distill_max_delta: float = 0.35
+    actor_distill_large_delta_mode: str = "reject"  # reject | clip
+    actor_distill_target_delta_clip: float = 0.35
     actor_distill_uncertainty_threshold: float = 2.0
     actor_distill_loss_cap: float = 0.05
     actor_distill_feature_detach: bool = True
@@ -294,6 +296,7 @@ def build_actor_distill_mask(
     rssm_unc_bk: Optional[torch.Tensor],
     uncertainty_threshold: float,
     soft_tol_gate: bool = False,
+    large_delta_mode: str = "reject",
 ) -> tuple[torch.Tensor, dict[str, int]]:
     """Build per-row actor-distill mask and per-reason reject counts.
 
@@ -309,6 +312,7 @@ def build_actor_distill_mask(
         "reject_bad_source": 0,
         "reject_low_margin": 0,
         "reject_large_delta": 0,
+        "clip_large_delta": 0,
         "reject_high_uncertainty": 0,
         "reject_tol": 0,
         "reject_uncertainty_missing": 0,
@@ -329,8 +333,15 @@ def build_actor_distill_mask(
 
     delta_linf = (teacher - mu_r).abs().max(dim=-1).values
     large_delta = delta_linf > float(max_delta)
-    rejects["reject_large_delta"] = int((m & large_delta).sum().item())
-    m = m & ~large_delta
+    mode = str(large_delta_mode or "reject")
+    if mode == "reject":
+        rejects["reject_large_delta"] = int((m & large_delta).sum().item())
+        m = m & ~large_delta
+    elif mode == "clip":
+        rejects["reject_large_delta"] = 0
+        rejects["clip_large_delta"] = int((m & large_delta).sum().item())
+    else:
+        raise ValueError(f"unknown actor_distill_large_delta_mode: {mode!r}")
 
     if not soft_tol_gate:
         tol_ok = (
@@ -899,6 +910,12 @@ class EIRBridge:
     last_actor_distill_reject_low_margin: float = 0.0
     last_actor_distill_reject_bad_source: float = 0.0
     last_actor_distill_reject_large_delta: float = 0.0
+    last_actor_distill_clip_large_delta: float = 0.0
+    last_actor_distill_large_delta_mode: float = 0.0
+    last_actor_distill_target_delta_clip: float = 0.0
+    last_actor_distill_delta_linf_mean_all: float = 0.0
+    last_actor_distill_delta_linf_p50_all: float = 0.0
+    last_actor_distill_delta_linf_p90_all: float = 0.0
     last_actor_distill_reject_high_uncertainty: float = 0.0
     last_actor_distill_reject_tol: float = 0.0
     last_actor_distill_reject_uncertainty_missing: float = 0.0
@@ -1454,6 +1471,30 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 rssm_unc_bk=rssm_unc_bk,
                 uncertainty_threshold=float(eir_cfg.actor_distill_uncertainty_threshold),
                 soft_tol_gate=_soft_gate,
+                large_delta_mode=str(
+                    getattr(eir_cfg, "actor_distill_large_delta_mode", "reject")
+                ),
+            )
+            _elig = rer["eligible"].bool()
+            if bool(_elig.any()):
+                _delta_linf_all = (teacher_all - mu_r).abs().max(dim=-1).values[_elig]
+                bridge.last_actor_distill_delta_linf_mean_all = float(
+                    _delta_linf_all.mean().item()
+                )
+                bridge.last_actor_distill_delta_linf_p50_all = float(
+                    _delta_linf_all.quantile(0.5).item()
+                )
+                bridge.last_actor_distill_delta_linf_p90_all = float(
+                    _delta_linf_all.quantile(0.9).item()
+                )
+            bridge.last_actor_distill_large_delta_mode = (
+                1.0
+                if str(getattr(eir_cfg, "actor_distill_large_delta_mode", "reject"))
+                == "clip"
+                else 0.0
+            )
+            bridge.last_actor_distill_target_delta_clip = float(
+                getattr(eir_cfg, "actor_distill_target_delta_clip", 0.35)
             )
             # Per-row soft activation weight (also drives telemetry).
             _act = compute_actor_distill_activation(
@@ -1502,6 +1543,9 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             bridge.last_actor_distill_reject_large_delta = float(
                 reject_counts["reject_large_delta"]
             )
+            bridge.last_actor_distill_clip_large_delta = float(
+                reject_counts.get("clip_large_delta", 0)
+            )
             bridge.last_actor_distill_reject_high_uncertainty = float(
                 reject_counts["reject_high_uncertainty"]
             )
@@ -1541,8 +1585,20 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 mu_act = getattr(a2c, "mu_act", None)
                 if mu_act is not None:
                     mu_distill = mu_act(mu_distill)
+                if (
+                    str(getattr(eir_cfg, "actor_distill_large_delta_mode", "reject"))
+                    == "clip"
+                ):
+                    raw_delta = teacher_all - mu_r
+                    clipped_delta = raw_delta.clamp(
+                        -float(eir_cfg.actor_distill_target_delta_clip),
+                        float(eir_cfg.actor_distill_target_delta_clip),
+                    )
+                    teacher_for_loss = (mu_r + clipped_delta).detach()
+                else:
+                    teacher_for_loss = teacher_all.detach()
                 per_row = F.smooth_l1_loss(
-                    mu_distill, teacher_all, reduction="none"
+                    mu_distill, teacher_for_loss, reduction="none"
                 ).mean(dim=-1)
                 # weighted mean over per-row activation weight (teacher detached).
                 denom = row_weight.sum().clamp(min=1.0)
