@@ -293,6 +293,10 @@ class TestProfileCopyEligibility(unittest.TestCase):
         self.assertAlmostEqual(p, 0.9)
         self.assertAlmostEqual(profile_copy_source_bonus("ppo_only"), 0.6)
         self.assertAlmostEqual(profile_copy_source_bonus("wm_pbt_source_selector"), 1.1)
+        self.assertGreater(
+            profile_copy_source_bonus("elite_bank_actor_distill"),
+            profile_copy_source_bonus("light_rssm_mppi_actor_distill"),
+        )
 
 
 class TestProfileCopyCooldownResume(unittest.TestCase):

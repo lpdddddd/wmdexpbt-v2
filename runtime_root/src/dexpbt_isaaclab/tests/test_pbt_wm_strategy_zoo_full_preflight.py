@@ -30,6 +30,19 @@ V12_LAUNCHER = (
     REPO_ROOT
     / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v12_2b_debug.sh"
 )
+V13_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v13_elite_2b_debug.sh"
+)
+
+ZOO_PROFILES_V13 = [
+    "ppo_only",
+    "elite_bank_actor_distill_fast",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector",
+    "elite_bank_actor_distill",
+    "elite_bank_actor_distill_strong",
+]
 
 ZOO_PROFILES = [
     "ppo_only",
@@ -103,6 +116,32 @@ class TestStrategyZooLauncher(unittest.TestCase):
         self.assertEqual(len(profiles), 6)
         self.assertEqual(len(set(profiles)), 6)
         self.assertIn("strategy_zoo_v1.2_performance_debug", text)
+
+    def test_v13_launcher_has_six_elite_centered_profiles(self):
+        self.assertTrue(V13_LAUNCHER.is_file(), f"missing launcher {V13_LAUNCHER}")
+        text = V13_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V13:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(profiles, ZOO_PROFILES_V13)
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(set(profiles)), 6)
+        self.assertIn("strategy_zoo_v1.3_elite_centered_performance_debug", text)
+        self.assertNotIn("light_rssm_mppi_actor_distill", text)
+        self.assertIn("pbt_wm_profile_copy_min_source_retention=0.50", text)
+
+    def test_v13_elite_profiles_capability_flags(self):
+        for profile in (
+            "elite_bank_actor_distill_fast",
+            "elite_bank_actor_distill_strong",
+        ):
+            _, caps = _simulate_profile_expansion(profile)
+            self.assertTrue(caps["profile_actor_distill_enabled"])
+            self.assertTrue(caps["profile_elite_bank_enabled"])
+            self.assertFalse(caps["profile_rssm_mppi_enabled"])
+            self.assertFalse(caps["profile_residual_apply_enabled"])
 
     def test_wm_pbt_source_selector_v2_not_polluted_by_shared_launcher_flags(self):
         args, caps = _simulate_profile_expansion(

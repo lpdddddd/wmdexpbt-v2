@@ -25,6 +25,9 @@ PROFILE_IDS: dict[str, int] = {
     "light_rssm_mppi_actor_distill": 7,
     "wm_pbt_source_selector_v2": 8,
     "light_conservative_rssm_planner_distill": 9,
+    # Strategy Zoo v1.3 elite-centered performance profiles.
+    "elite_bank_actor_distill_fast": 10,
+    "elite_bank_actor_distill_strong": 11,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -48,6 +51,12 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "light_conservative_rssm_planner_distill": (
         "Light conservative RSSM-MPPI planner + RSSM-only actor distill (v1.2)."
     ),
+    "elite_bank_actor_distill_fast": (
+        "Early elite/archive actor distill for v1.3 performance runs (no MPPI)."
+    ),
+    "elite_bank_actor_distill_strong": (
+        "Strong elite/archive actor distill for v1.3 performance runs (no MPPI)."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -61,18 +70,22 @@ PROFILE_FAMILY: dict[str, str] = {
     "light_rssm_mppi_actor_distill": "actor_distill",
     "wm_pbt_source_selector_v2": "pbt_selector",
     "light_conservative_rssm_planner_distill": "planner",
+    "elite_bank_actor_distill_fast": "elite_imitation",
+    "elite_bank_actor_distill_strong": "elite_imitation",
 }
 
-# Profile-copy source bonus weights (v1.2).
+# Profile-copy source bonus weights (v1.3 elite-centered).
 PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
-    "elite_bank_actor_distill": 1.2,
+    "elite_bank_actor_distill_fast": 1.2,
+    "elite_bank_actor_distill": 1.3,
+    "elite_bank_actor_distill_strong": 1.3,
     "wm_pbt_source_selector": 1.1,
     "wm_pbt_source_selector_v2": 1.0,
     "ppo_only": 0.6,
-    "light_rssm_mppi_actor_distill": 0.8,
-    "light_conservative_rssm_planner_distill": 0.8,
-    "rssm_mppi_actor_distill": 0.8,
-    "conservative_rssm_planner_distill": 0.8,
+    "light_rssm_mppi_actor_distill": 0.5,
+    "light_conservative_rssm_planner_distill": 0.5,
+    "rssm_mppi_actor_distill": 0.5,
+    "conservative_rssm_planner_distill": 0.5,
     "wm_curriculum_controller": 0.9,
 }
 
@@ -483,6 +496,56 @@ _LIGHT_CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
     "eir_conservative_rssm_candidate_tol_full": 0.035,
 }
 
+_ELITE_BANK_ACTOR_DISTILL_FAST: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL,
+    "enable_wm": True,
+    "eir_enable": True,
+    "eir_use_elite_bank": True,
+    "eir_use_recovery_residual": True,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+    "eir_elite_candidate_k": 64,
+    "eir_archive_candidate_k": 32,
+    "eir_actor_distill_enable": True,
+    "eir_actor_distill_start_after_frames": 200_000_000,
+    "eir_actor_distill_gate_mode": "soft_tol",
+    "eir_actor_distill_tol_start": 0.075,
+    "eir_actor_distill_tol_full": 0.050,
+    "eir_actor_distill_min_margin": 0.005,
+    "eir_actor_distill_allowed_sources": "elite,archive",
+    "eir_actor_distill_weight": 0.001,
+    "eir_actor_distill_loss_cap": 0.05,
+    "eir_candidate_gate_mode": "profile_soft",
+    "eir_elite_candidate_tol_start": 0.075,
+    "eir_elite_candidate_tol_full": 0.050,
+    "eir_residual_apply_to_rollout": False,
+}
+
+_ELITE_BANK_ACTOR_DISTILL_STRONG: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL,
+    "enable_wm": True,
+    "eir_enable": True,
+    "eir_use_elite_bank": True,
+    "eir_use_recovery_residual": True,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+    "eir_elite_candidate_k": 96,
+    "eir_archive_candidate_k": 64,
+    "eir_actor_distill_enable": True,
+    "eir_actor_distill_start_after_frames": 300_000_000,
+    "eir_actor_distill_gate_mode": "soft_tol",
+    "eir_actor_distill_tol_start": 0.065,
+    "eir_actor_distill_tol_full": 0.040,
+    "eir_actor_distill_min_margin": 0.005,
+    "eir_actor_distill_allowed_sources": "elite,archive",
+    "eir_actor_distill_weight": 0.0015,
+    "eir_actor_distill_loss_cap": 0.05,
+    "eir_candidate_gate_mode": "profile_soft",
+    "eir_elite_candidate_tol_start": 0.065,
+    "eir_elite_candidate_tol_full": 0.040,
+    "eir_residual_apply_to_rollout": False,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -494,6 +557,8 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "light_rssm_mppi_actor_distill": _LIGHT_RSSM_MPPI_ACTOR_DISTILL,
     "wm_pbt_source_selector_v2": _WM_PBT_SOURCE_SELECTOR_V2,
     "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
+    "elite_bank_actor_distill_fast": _ELITE_BANK_ACTOR_DISTILL_FAST,
+    "elite_bank_actor_distill_strong": _ELITE_BANK_ACTOR_DISTILL_STRONG,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

@@ -44,6 +44,8 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertEqual(PROFILE_IDS["light_rssm_mppi_actor_distill"], 7)
         self.assertEqual(PROFILE_IDS["wm_pbt_source_selector_v2"], 8)
         self.assertEqual(PROFILE_IDS["light_conservative_rssm_planner_distill"], 9)
+        self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_fast"], 10)
+        self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_strong"], 11)
 
     def test_ppo_only_description_is_not_original_dexpbt(self):
         desc = PROFILE_DESCRIPTIONS["ppo_only"]
@@ -340,6 +342,8 @@ class TestSoftActivationGateProfiles(unittest.TestCase):
             "light_rssm_mppi_actor_distill",
             "wm_pbt_source_selector_v2",
             "light_conservative_rssm_planner_distill",
+            "elite_bank_actor_distill_fast",
+            "elite_bank_actor_distill_strong",
         ):
             a = self._expand(profile)
             self.assertFalse(

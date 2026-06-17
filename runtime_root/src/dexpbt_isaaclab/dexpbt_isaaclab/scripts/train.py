@@ -1318,6 +1318,8 @@ parser.add_argument(
         "light_rssm_mppi_actor_distill",
         "wm_pbt_source_selector_v2",
         "light_conservative_rssm_planner_distill",
+        "elite_bank_actor_distill_fast",
+        "elite_bank_actor_distill_strong",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
