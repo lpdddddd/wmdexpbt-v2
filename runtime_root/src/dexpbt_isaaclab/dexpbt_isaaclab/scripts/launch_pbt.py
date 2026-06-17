@@ -186,6 +186,8 @@ LAUNCH_PBT_BOOLEAN_FLAGS: frozenset[str] = frozenset(
         # PBT-WM Strategy Zoo v1.0 toggles.
         "--pbt_wm_profile_copy_enable",
         "--no-pbt_wm_profile_copy_enable",
+        "--pbt_wm_profile_copy_top1_override_enable",
+        "--no-pbt_wm_profile_copy_top1_override_enable",
         "--wm_curriculum_controller_enable",
         "--no-wm_curriculum_controller_enable",
         "--wm_curriculum_controller_hard_block_shrink",

@@ -568,6 +568,12 @@ _ELITE_BANK_ACTOR_DISTILL_FAST_V2: dict[str, Any] = {
     "eir_actor_distill_weight": 0.002,
     "eir_actor_distill_loss_cap": 0.03,
     "eir_residual_apply_to_rollout": False,
+    # Strategy Zoo v1.5 clip-validation: temporarily widen the guidance/bank band
+    # to 0.06 so the elite bank can fill (and teachers/soft-gate engage) before
+    # tol reaches the 0.04 floor. Diagnostic only; residual rollout stays OFF.
+    "eir_guidance_start_tol": 0.06,
+    "eir_guidance_bank_tol": 0.06,
+    "eir_guidance_apply_tol": 0.06,
 }
 
 _ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
@@ -579,6 +585,10 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
     "eir_actor_distill_weight": 0.003,
     "eir_actor_distill_loss_cap": 0.03,
     "eir_residual_apply_to_rollout": False,
+    # Strategy Zoo v1.5 clip-validation: same diagnostic widening as fast_v2.
+    "eir_guidance_start_tol": 0.06,
+    "eir_guidance_bank_tol": 0.06,
+    "eir_guidance_apply_tol": 0.06,
 }
 
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
