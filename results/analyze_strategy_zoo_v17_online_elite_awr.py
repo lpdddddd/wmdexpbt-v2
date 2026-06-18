@@ -135,6 +135,44 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
             "action_match_error_max": _get(
                 last, "awr_action_match_error_max", "awr/action_match_error_max"
             ),
+            "action_match_order_code": _get(
+                last, "awr_action_match_order_code", "awr/action_match_order_code", default=0.0
+            ),
+            "quality_mean": _stat(
+                [_get(r, "awr_quality_mean", "awr/quality_mean") for r in rows]
+            ),
+            "delta_gate_health": {
+                "full_frac": _stat(
+                    [_get(r, "awr_delta_gate_full_frac", "awr/delta_gate_full_frac") for r in rows]
+                ),
+                "mid_frac": _stat(
+                    [_get(r, "awr_delta_gate_mid_frac", "awr/delta_gate_mid_frac") for r in rows]
+                ),
+                "far_frac": _stat(
+                    [_get(r, "awr_delta_gate_far_frac", "awr/delta_gate_far_frac") for r in rows]
+                ),
+                "drop_frac": _stat(
+                    [_get(r, "awr_delta_gate_drop_frac", "awr/delta_gate_drop_frac") for r in rows]
+                ),
+            },
+            "local_inherited_status": {
+                "buffer_steps": _get(last, "awr_buffer_steps", "awr/buffer_steps"),
+                "inherit_loaded_steps": _get(
+                    last, "awr_buffer_inherit_loaded_steps", "awr/buffer_inherit_loaded_steps", default=0.0
+                ),
+                "sidecar_steps": float(sidecar_meta.get("num_steps", float("nan"))),
+            },
+            "action_convention_result": {
+                "checked": _get(
+                    last, "awr_action_convention_checked", "awr/action_convention_checked", default=0.0
+                ),
+                "mismatch": _get(
+                    last, "awr_action_convention_mismatch", "awr/action_convention_mismatch", default=0.0
+                ),
+                "order_code": _get(
+                    last, "awr_action_match_order_code", "awr/action_match_order_code", default=0.0
+                ),
+            },
             "awr_weighted_loss": _stat(
                 [_get(r, "awr_loss_weighted", "awr/loss_weighted") for r in rows]
             ),
@@ -217,19 +255,47 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
                 "active_frac": _stat(
                     [_get(r, "awr_active_frac", "awr/enabled", default=0.0) for r in rows]
                 ),
+                "delta_gate_drop_frac": _stat(
+                    [_get(r, "awr_delta_gate_drop_frac", "awr/delta_gate_drop_frac") for r in rows]
+                ),
+                "quality_mean": _stat(
+                    [_get(r, "awr_quality_mean", "awr/quality_mean") for r in rows]
+                ),
             },
         }
+
+    awr_health_summary = {
+        "local_inherited_status": {
+            pid: row.get("local_inherited_status", {})
+            for pid, row in awr_table.items()
+        },
+        "action_convention": {
+            pid: row.get("action_convention_result", {})
+            for pid, row in awr_table.items()
+        },
+        "delta_gate": {
+            pid: row.get("delta_gate_health", {})
+            for pid, row in awr_table.items()
+        },
+        "weighted_loss": {
+            pid: row.get("awr_weighted_loss", {})
+            for pid, row in awr_table.items()
+        },
+        "separation_vs_eir_actor_distill": separation,
+    }
 
     return {
         "run_dir": str(run_dir),
         "same_frame_nsucc": same_frame,
         "awr_active_table": awr_table,
+        "awr_health_summary": awr_health_summary,
         "v13_mechanism_health": v13_health,
         "separation_block": separation,
         "run_config_notes": {
             "awr_kl_gate_enable": False,
             "awr_kl_telemetry_only": True,
             "awr_broadcast_enabled": False,
+            "awr_inherit_enabled": True,
         },
     }
 
@@ -252,6 +318,17 @@ def _render_markdown(report: dict[str, Any]) -> str:
         for key, val in row.items():
             lines.append(f"- {key}: {val}")
         lines.append("")
+    lines.append("## B2. AWR health summary")
+    summary = report.get("awr_health_summary", {})
+    lines.append("### Local/inherited status")
+    lines.append(str(summary.get("local_inherited_status", {})))
+    lines.append("### Action convention check result")
+    lines.append(str(summary.get("action_convention", {})))
+    lines.append("### Delta gate health")
+    lines.append(str(summary.get("delta_gate", {})))
+    lines.append("### Weighted loss health")
+    lines.append(str(summary.get("weighted_loss", {})))
+    lines.append("")
     lines.append("## C. v13 mechanism health")
     lines.append(f"- profile_copy_events: {report['v13_mechanism_health']['profile_copy_events']}")
     lines.append(f"- lineage_events: {report['v13_mechanism_health']['lineage_events']}")
@@ -267,6 +344,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- awr_kl_gate_enable: {notes.get('awr_kl_gate_enable')}")
     lines.append(f"- awr_kl_telemetry_only: {notes.get('awr_kl_telemetry_only')}")
     lines.append(f"- awr_broadcast_enabled: {notes.get('awr_broadcast_enabled')}")
+    lines.append(f"- awr_inherit_enabled: {notes.get('awr_inherit_enabled')}")
     return "\n".join(lines)
 
 

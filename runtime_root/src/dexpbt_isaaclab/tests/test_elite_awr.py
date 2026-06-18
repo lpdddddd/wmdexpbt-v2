@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ from dexpbt_isaaclab.awr.elite_awr import (
     build_sequence_entry_from_episode,
     compute_elite_awr_loss,
     compute_elite_awr_quality,
+    consume_awr_sidecar_from_checkpoint,
     load_awr_sidecar,
     patch_model_get_aux_loss_for_awr,
     save_awr_sidecar,
@@ -364,6 +366,24 @@ class TestEliteAWR(unittest.TestCase):
         self.assertTrue(bridge.disabled)
         self.assertEqual(bridge.stats.get("awr/action_convention_mismatch"), 1.0)
 
+    def test_action_convention_accepts_transposed_flatten_order(self):
+        cfg = EliteAWRConfig()
+        bridge = EliteAWRBridge(buffer=EliteAWRBuffer(cfg, policy_idx=0), cfg=cfg)
+        captured = torch.randn(5, 3, 2)
+        ppo = captured.transpose(0, 1)
+        bridge.maybe_check_action_convention(captured, ppo)
+        self.assertFalse(bridge.disabled)
+        self.assertEqual(bridge.stats.get("awr/action_convention_checked"), 1.0)
+
+    def test_action_convention_records_best_order(self):
+        cfg = EliteAWRConfig()
+        bridge = EliteAWRBridge(buffer=EliteAWRBuffer(cfg, policy_idx=0), cfg=cfg)
+        captured = torch.randn(4, 2, 3)
+        ppo = captured.transpose(0, 1)
+        bridge.maybe_check_action_convention(captured, ppo)
+        self.assertIn("awr/action_match_order_code", bridge.stats)
+        self.assertGreater(bridge.stats["awr/action_match_order_code"], 0.0)
+
     def test_awr_kl_gate_disabled_is_explicit(self):
         cfg = EliteAWRConfig(kl_gate_enable=False, start_after_frames=0, loss_weight=0.001)
         agent = mock.Mock()
@@ -395,6 +415,70 @@ class TestEliteAWR(unittest.TestCase):
         _, stats = compute_elite_awr_loss(agent, batch, cfg, frames=agent.frame)
         self.assertEqual(stats["awr/kl_gate_enabled"], 0.0)
         self.assertEqual(stats["awr/kl_telemetry_only"], 1.0)
+
+    def _awr_loss_batch(self):
+        return {
+            "obs": torch.zeros(4, 2, 4),
+            "action": torch.zeros(4, 2, 2),
+            "loss_mask": torch.ones(4, 2, dtype=torch.bool),
+            "quality": torch.full((4, 2), 3.0),
+            "seq_length": 4,
+        }
+
+    def _awr_loss_agent(self):
+        agent = mock.Mock()
+        agent.ppo_device = torch.device("cpu")
+        agent.frame = 1_000_000_000
+        agent.is_rnn = False
+        agent.mixed_precision = False
+        agent._preproc_obs = lambda x: x
+
+        class _Net(torch.nn.Module):
+            def forward(self, input_dict):
+                t = input_dict["prev_actions"].shape[0]
+                return {
+                    "prev_neglogp": torch.ones(t),
+                    "mus": torch.zeros(t, input_dict["prev_actions"].shape[-1]),
+                }
+
+            def get_default_rnn_state(self):
+                return None
+
+        agent.model = _Net()
+        return agent
+
+    def test_awr_loss_stats_include_delta_gate_fractions(self):
+        cfg = EliteAWRConfig(start_after_frames=0, loss_weight=0.001)
+        _, stats = compute_elite_awr_loss(
+            self._awr_loss_agent(), self._awr_loss_batch(), cfg, frames=1_000_000_000
+        )
+        for key in (
+            "awr/delta_gate_full_frac",
+            "awr/delta_gate_mid_frac",
+            "awr/delta_gate_far_frac",
+            "awr/delta_gate_drop_frac",
+        ):
+            self.assertIn(key, stats)
+            self.assertTrue(math.isfinite(stats[key]))
+
+    def test_awr_active_frac_nonzero_when_weights_nonzero(self):
+        cfg = EliteAWRConfig(start_after_frames=0, loss_weight=0.001)
+        _, stats = compute_elite_awr_loss(
+            self._awr_loss_agent(), self._awr_loss_batch(), cfg, frames=1_000_000_000
+        )
+        self.assertGreater(stats["awr/active_frac"], 0.0)
+        self.assertGreater(stats["awr/nonzero_weight_frac"], 0.0)
+
+    def test_awr_loss_stats_finite_on_empty_or_zero_mask(self):
+        cfg = EliteAWRConfig(start_after_frames=0, loss_weight=0.001)
+        batch = self._awr_loss_batch()
+        batch["loss_mask"] = torch.zeros(4, 2, dtype=torch.bool)
+        _, stats = compute_elite_awr_loss(
+            self._awr_loss_agent(), batch, cfg, frames=1_000_000_000
+        )
+        self.assertIsNone(stats.get("awr/loss_raw"))
+        self.assertEqual(stats["awr/active_frac"], 0.0)
+        self.assertTrue(math.isfinite(stats["awr/delta_gate_drop_frac"]))
 
     def test_awr_profile_copy_bonus_matches_v13_base(self):
         self.assertAlmostEqual(
@@ -443,13 +527,49 @@ class TestEliteAWR(unittest.TestCase):
         entry = _make_entry(20, truncated=False, starts_at_reset=True)
         src.insert(entry)
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "policy_01_awr_topk.pt"
-            save_awr_sidecar_topk(src, path, step_budget=50)
-            dst = EliteAWRBuffer(cfg, policy_idx=3)
-            loaded = load_awr_sidecar(dst, path, source_type="inherited")
+            ws = Path(tmp)
+            sidecar = ws / "awr_buffers" / "policy_01_awr_topk.pt"
+            save_awr_sidecar_topk(src, sidecar, step_budget=50)
+            ckpt = ws / "ckpt.pth"
+            torch.save({"awr_buffer_ref": "awr_buffers/policy_01_awr_topk.pt", "awr_buffer_ref_meta": {"source_policy": 1}}, ckpt)
+            dst = EliteAWRBridge(buffer=EliteAWRBuffer(cfg, policy_idx=3), cfg=cfg)
+            loaded = consume_awr_sidecar_from_checkpoint(dst, ckpt, workspace=ws)
             self.assertGreater(loaded, 0)
-            self.assertEqual(len(dst.local), 0)
-            self.assertGreater(len(dst.inherited), 0)
+            self.assertEqual(len(dst.buffer.local), 0)
+            self.assertGreater(len(dst.buffer.inherited), 0)
+
+    def test_awr_restore_loads_source_sidecar_to_inherited_pool(self):
+        self.test_awr_inherit_loads_source_sidecar_to_inherited_pool()
+
+    def test_awr_restore_missing_sidecar_does_not_crash(self):
+        cfg = EliteAWRConfig()
+        bridge = EliteAWRBridge(buffer=EliteAWRBuffer(cfg, policy_idx=2), cfg=cfg)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            ckpt = ws / "ckpt.pth"
+            torch.save({"awr_buffer_ref": "awr_buffers/missing.pt"}, ckpt)
+            loaded = consume_awr_sidecar_from_checkpoint(bridge, ckpt, workspace=ws)
+            self.assertEqual(loaded, 0)
+            self.assertEqual(bridge.stats.get("awr/sidecar_restore_success"), 0.0)
+
+    def test_awr_restore_does_not_overwrite_local_pool(self):
+        cfg = EliteAWRConfig(copy_top_k_steps=50)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            local_entry = _make_entry(10, truncated=False, starts_at_reset=True)
+            dst_buf = EliteAWRBuffer(cfg, policy_idx=3)
+            dst_buf.insert(local_entry)
+            src = EliteAWRBuffer(cfg, policy_idx=1)
+            src.insert(_make_entry(12, truncated=False, starts_at_reset=True))
+            sidecar = ws / "awr_buffers" / "policy_01_awr_topk.pt"
+            save_awr_sidecar_topk(src, sidecar, step_budget=50)
+            ckpt = ws / "ckpt.pth"
+            torch.save({"awr_buffer_ref": "awr_buffers/policy_01_awr_topk.pt"}, ckpt)
+            bridge = EliteAWRBridge(buffer=dst_buf, cfg=cfg)
+            local_before = len(dst_buf.local)
+            consume_awr_sidecar_from_checkpoint(bridge, ckpt, workspace=ws)
+            self.assertEqual(len(dst_buf.local), local_before)
+            self.assertGreater(len(dst_buf.inherited), 0)
 
     def test_awr_sidecar_topk_respects_step_budget(self):
         cfg = EliteAWRConfig(copy_top_k_steps=35)
@@ -461,6 +581,30 @@ class TestEliteAWR(unittest.TestCase):
         payload = buf.sidecar_payload_topk(copy_step_budget=35, broadcast_step_budget=0)
         steps = int(payload["meta"]["num_steps"])
         self.assertLessEqual(steps, 35)
+
+    def test_awr_sidecar_topk_uses_global_step_budget(self):
+        cfg = EliteAWRConfig(copy_top_k_steps=40)
+        buf = EliteAWRBuffer(cfg, policy_idx=0)
+        for i, q in enumerate((6.0, 5.8, 5.6, 5.4)):
+            e = _make_entry(15, truncated=False, starts_at_reset=True)
+            e.episode_quality = q
+            e.source_type = "local" if i % 2 == 0 else "inherited"
+            pool = buf.local if e.source_type == "local" else buf.inherited
+            buf.insert(e)
+        payload = buf.sidecar_payload_topk(copy_step_budget=40, broadcast_step_budget=0)
+        self.assertLessEqual(payload["meta"]["num_steps"], 40)
+
+    def test_awr_sidecar_total_steps_not_double_budget(self):
+        cfg = EliteAWRConfig(copy_top_k_steps=30)
+        buf = EliteAWRBuffer(cfg, policy_idx=0)
+        for i in range(6):
+            e = _make_entry(12, truncated=False, starts_at_reset=True)
+            e.episode_quality = 6.0 - i * 0.1
+            e.source_type = "local" if i % 2 == 0 else "inherited"
+            buf.insert(e)
+        payload = buf.sidecar_payload_topk(copy_step_budget=30, broadcast_step_budget=0)
+        self.assertLessEqual(payload["meta"]["num_steps"], 30)
+        self.assertGreater(payload["meta"]["num_steps"], 0)
 
     def test_awr_sidecar_does_not_save_full_buffer_by_default(self):
         cfg = EliteAWRConfig(copy_top_k_steps=10)
@@ -565,6 +709,99 @@ class TestEliteAWR(unittest.TestCase):
             self.assertIn("actor_distill_active_fraction", block["eir"])
             self.assertIn("weighted_loss", block["awr"])
             self.assertNotEqual(block["eir"], block["awr"])
+
+    def test_training_curve_contains_key_awr_stats(self):
+        bridge = EliteAWRBridge(
+            buffer=EliteAWRBuffer(EliteAWRConfig(), policy_idx=1),
+            cfg=EliteAWRConfig(),
+        )
+        bridge.stats = {
+            "awr/active_frac": 0.4,
+            "awr/loss_weighted": 0.0003,
+            "awr/action_convention_checked": 1.0,
+            "awr/action_match_order_code": 6.0,
+        }
+        point: dict[str, float] = {}
+        for tag, val in bridge.stats.items():
+            if tag.startswith("awr/") and isinstance(val, (int, float)):
+                point[tag.replace("awr/", "awr_")] = float(val)
+        point["awr_buffer_steps"] = float(bridge.buffer.total_steps())
+        point["awr_buffer_sequences"] = float(bridge.buffer.num_sequences())
+        for key in (
+            "awr_active_frac",
+            "awr_loss_weighted",
+            "awr_action_convention_checked",
+            "awr_action_match_order_code",
+            "awr_buffer_steps",
+        ):
+            self.assertIn(key, point)
+
+    def test_v17_analyzer_reads_awr_stats_from_jsonl(self):
+        import importlib.util
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[4]
+        analyzer_path = repo_root / "results" / "analyze_strategy_zoo_v17_online_elite_awr.py"
+        spec = importlib.util.spec_from_file_location("v17_analyzer_jsonl", analyzer_path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["v17_analyzer_jsonl"] = mod
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = Path(tmp) / "dexpbt_8gpu_ws" / "metrics"
+            metrics.mkdir(parents=True)
+            row = {
+                "env_frames": 500_000_000,
+                "awr_active_frac": 0.2,
+                "awr_loss_weighted": 0.0004,
+                "awr_delta_gate_drop_frac": 0.1,
+                "awr_quality_mean": 3.5,
+            }
+            (metrics / "training_curve_policy_03.jsonl").write_text(json.dumps(row) + "\n")
+            report = mod.analyze_run(Path(tmp))
+            table = report["awr_active_table"]["p3"]
+            self.assertAlmostEqual(table["awr_active_frac"]["last"], 0.2)
+            self.assertAlmostEqual(table["awr_weighted_loss"]["last"], 0.0004)
+
+    def test_v17_analyzer_reports_action_convention_and_inherit(self):
+        import importlib.util
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[4]
+        analyzer_path = repo_root / "results" / "analyze_strategy_zoo_v17_online_elite_awr.py"
+        spec = importlib.util.spec_from_file_location("v17_analyzer_inherit", analyzer_path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["v17_analyzer_inherit"] = mod
+        spec.loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = Path(tmp) / "dexpbt_8gpu_ws" / "metrics"
+            metrics.mkdir(parents=True)
+            row = {
+                "env_frames": 900_000_000,
+                "awr_action_convention_checked": 1.0,
+                "awr_action_match_order_code": 8.0,
+                "awr_buffer_inherit_loaded_steps": 120.0,
+                "awr_sidecar_num_steps": 80.0,
+            }
+            (metrics / "training_curve_policy_04.jsonl").write_text(json.dumps(row) + "\n")
+            report = mod.analyze_run(Path(tmp))
+            summary = report["awr_health_summary"]
+            self.assertIn("p4", summary["action_convention"])
+            self.assertIn("p4", summary["local_inherited_status"])
+
+    def test_v17_launcher_records_kl_gate_disabled_and_inherit_enabled(self):
+        launcher = (
+            Path(__file__).resolve().parents[4]
+            / "results"
+            / "launchers"
+            / "start_regrasping_pbt_wm_strategy_zoo_v17_online_elite_awr_2b_debug.sh"
+        )
+        text = launcher.read_text()
+        self.assertIn("awr_kl_gate_enable=false", text)
+        self.assertIn("awr_kl_telemetry_only=true", text)
+        self.assertIn("awr_broadcast_enabled=false", text)
+        self.assertIn("awr_inherit_enabled=true", text)
 
 
 if __name__ == "__main__":

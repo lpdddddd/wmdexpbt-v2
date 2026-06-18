@@ -4746,6 +4746,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "env_randomization_hash": str(self._env_randomization_hash or ""),
                 "timestamp": float(own_state.get("timestamp", time.time())),
             }
+            awr_bridge = getattr(self.algo, "_awr_bridge", None)
+            if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
+                for tag, val in dict(getattr(awr_bridge, "stats", {}) or {}).items():
+                    if (
+                        isinstance(tag, str)
+                        and tag.startswith("awr/")
+                        and isinstance(val, (int, float))
+                        and math.isfinite(float(val))
+                    ):
+                        point[tag.replace("awr/", "awr_")] = float(val)
+                point["awr_buffer_steps"] = float(awr_bridge.buffer.total_steps())
+                point["awr_buffer_sequences"] = float(awr_bridge.buffer.num_sequences())
+                point["awr_enabled"] = float(
+                    0.0 if awr_bridge.disabled else awr_bridge.stats.get("awr/enabled", 1.0)
+                )
+                point.setdefault(
+                    "awr_effective_lambda",
+                    float(awr_bridge.stats.get("awr/effective_lambda", 0.0)),
+                )
             with open(out_path, "a") as fh:
                 fh.write(json.dumps(point) + "\n")
                 fh.flush()

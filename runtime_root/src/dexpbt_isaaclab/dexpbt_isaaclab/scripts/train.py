@@ -3016,10 +3016,8 @@ def _patch_actor_train_for_seq_wm(
                             "missing_capture_or_ppo_actions"
                         )
                     else:
-                        captured_flat = captured.reshape(-1, captured.shape[-1])
-                        ppo_flat = ppo_actions.reshape(-1, ppo_actions.shape[-1])
                         awr_bridge.maybe_check_action_convention(
-                            captured_flat, ppo_flat
+                            captured, ppo_actions
                         )
                 except Exception as _awr_act_exc:
                     print(f"[AWR] action convention check failed: {_awr_act_exc}")
@@ -4125,7 +4123,7 @@ def _align_optimizer_state_to_agent(
     return aligned
 
 
-def _wm_safe_restore(agent, checkpoint_path: str) -> None:
+def _wm_safe_restore(agent, checkpoint_path: str, *, workspace: str | None = None) -> None:
     """Restore rl_games agent tolerating aux_value_head / optimizer group mismatches."""
     import copy
     import torch
@@ -4200,24 +4198,20 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
 
     awr_bridge = getattr(agent, "_awr_bridge", None)
     if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
-        from pathlib import Path
+        from dexpbt_isaaclab.awr.elite_awr import consume_awr_sidecar_from_checkpoint
 
-        from dexpbt_isaaclab.awr.elite_awr import load_awr_sidecar
-
-        ref = ckpt.get("awr_buffer_ref")
-        if isinstance(ref, str) and ref:
-            ckpt_path = Path(checkpoint_path)
-            sidecar_path = ckpt_path.parent.parent / ref
-            if not sidecar_path.is_file():
-                sidecar_path = ckpt_path.parent / ref
-            loaded = load_awr_sidecar(
-                awr_bridge.buffer, sidecar_path, source_type="inherited"
+        ws = workspace or getattr(agent, "_awr_workspace", None)
+        loaded = consume_awr_sidecar_from_checkpoint(
+            awr_bridge, checkpoint_path, workspace=ws
+        )
+        if loaded > 0:
+            print(
+                f"[AWR] restore: inherited sidecar from checkpoint "
+                f"({loaded} steps, source_policy="
+                f"{awr_bridge.stats.get('awr/sidecar_source_policy', -1)})"
             )
-            if loaded > 0:
-                awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = float(loaded)
-                print(f"[AWR] restore: inherited sidecar {sidecar_path} ({loaded} steps)")
-            else:
-                print(f"[AWR] restore: sidecar missing or empty at {sidecar_path}")
+        else:
+            print("[AWR] restore: checkpoint sidecar missing or empty")
 
     if "epoch" in ckpt:
         agent.epoch_num = ckpt["epoch"]
@@ -4747,7 +4741,7 @@ class _CheckpointSafeRunner(Runner):
 
         ckpt_path = args.get("checkpoint")
         if ckpt_path:
-            _wm_safe_restore(agent, ckpt_path)
+            _wm_safe_restore(agent, ckpt_path, workspace=getattr(self, "workspace", None))
         else:
             torch_runner._restore(agent, args)
         torch_runner._override_sigma(agent, args)
@@ -5146,6 +5140,7 @@ class _WmEnabledRunner(Runner):
                 self.awr_bridge.agent_ref = agent
                 _patch_model_get_aux_loss_for_awr(agent.model, self.awr_bridge)
                 agent._awr_bridge = self.awr_bridge
+                agent._awr_workspace = getattr(self, "workspace", None)
                 print(
                     f"[AWR] aux loss patch installed (loss_weight={self.awr_bridge.cfg.loss_weight}, "
                     f"kl_gate={'on' if self.awr_bridge.cfg.kl_gate_enable else 'off'})"
@@ -5182,7 +5177,7 @@ class _WmEnabledRunner(Runner):
             # seq_wm-only profiles (wm_curriculum_controller, wm_pbt_source_selector)
             # previously fell through to rl_games _restore and crashed when a donor
             # checkpoint carried EIR/elite optimizer param groups.
-            _wm_safe_restore(agent, ckpt_path)
+            _wm_safe_restore(agent, ckpt_path, workspace=getattr(self, "workspace", None))
         else:
             torch_runner._restore(agent, args)
         torch_runner._override_sigma(agent, args)

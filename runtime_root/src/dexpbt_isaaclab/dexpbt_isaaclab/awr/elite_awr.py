@@ -568,6 +568,27 @@ class EliteAWRBuffer:
                 break
         return out
 
+    def top_entries_by_steps_global(
+        self,
+        step_budget: int,
+        *,
+        source_types: tuple[str, ...] = ("local", "inherited"),
+    ) -> list[EliteAWREntry]:
+        candidates: list[EliteAWREntry] = []
+        for source_type in source_types:
+            candidates.extend(self._pool(source_type))
+        ranked = sorted(candidates, key=lambda e: e.episode_quality, reverse=True)
+        out: list[EliteAWREntry] = []
+        steps = 0
+        for entry in ranked:
+            if steps + entry.num_valid_steps > step_budget:
+                continue
+            out.append(entry)
+            steps += entry.num_valid_steps
+            if steps >= step_budget:
+                break
+        return out
+
     def merge_entries(self, entries: list[EliteAWREntry], *, source_type: str) -> int:
         loaded = 0
         for entry in entries:
@@ -601,14 +622,17 @@ class EliteAWRBuffer:
         copy_step_budget: int,
         broadcast_step_budget: int = 0,
     ) -> dict[str, Any]:
-        local = self.top_entries_by_steps(copy_step_budget, source_type="local")
-        inherited = self.top_entries_by_steps(copy_step_budget, source_type="inherited")
+        copy_selected = self.top_entries_by_steps_global(
+            copy_step_budget, source_types=("local", "inherited")
+        )
+        local = [e for e in copy_selected if e.source_type == "local"]
+        inherited = [e for e in copy_selected if e.source_type == "inherited"]
         broadcast: list[EliteAWREntry] = []
         if broadcast_step_budget > 0:
-            broadcast = self.top_entries_by_steps(
-                broadcast_step_budget, source_type="broadcast"
+            broadcast = self.top_entries_by_steps_global(
+                broadcast_step_budget, source_types=("broadcast",)
             )
-        selected = local + inherited + broadcast
+        selected = copy_selected + broadcast
         num_steps = sum(e.num_valid_steps for e in selected)
         return {
             "format_version": self.SIDECAR_FORMAT_VERSION,
@@ -729,6 +753,173 @@ def load_awr_sidecar(
     return buffer.load_sidecar_payload(payload, target_pool="as_saved")
 
 
+def resolve_awr_sidecar_path(ref: str, checkpoint_path: str | Path, workspace: str | Path | None = None) -> Path:
+    ref_path = Path(ref)
+    if ref_path.is_file():
+        return ref_path
+    ckpt = Path(checkpoint_path)
+    candidates: list[Path] = []
+    if workspace is not None:
+        candidates.append(Path(workspace) / ref)
+    for base in (ckpt.parent, ckpt.parent.parent, ckpt.parent.parent.parent):
+        candidates.append(base / ref)
+        ws_parent = base
+        for _ in range(4):
+            candidates.append(ws_parent / ref)
+            if ws_parent.parent == ws_parent:
+                break
+            ws_parent = ws_parent.parent
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_file():
+            return path
+    if workspace is not None:
+        return Path(workspace) / ref
+    return ckpt.parent.parent / ref
+
+
+def consume_awr_sidecar_from_checkpoint(
+    awr_bridge: EliteAWRBridge,
+    checkpoint_path: str | Path,
+    *,
+    workspace: str | Path | None = None,
+) -> int:
+    """Load source checkpoint sidecar ref into target inherited pool."""
+    try:
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception:
+        awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = 0.0
+        awr_bridge.stats["awr/sidecar_restore_success"] = 0.0
+        return 0
+    if not isinstance(payload, dict):
+        awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = 0.0
+        awr_bridge.stats["awr/sidecar_restore_success"] = 0.0
+        return 0
+
+    ref = payload.get("awr_buffer_ref")
+    meta = payload.get("awr_buffer_ref_meta") or {}
+    if not isinstance(ref, str) or not ref:
+        awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = 0.0
+        awr_bridge.stats["awr/sidecar_restore_success"] = 0.0
+        return 0
+
+    sidecar_path = resolve_awr_sidecar_path(ref, checkpoint_path, workspace=workspace)
+    loaded = load_awr_sidecar(
+        awr_bridge.buffer, sidecar_path, source_type="inherited"
+    )
+    awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = float(loaded)
+    awr_bridge.stats["awr/sidecar_restore_success"] = float(loaded > 0)
+    awr_bridge.stats["awr/sidecar_source_policy"] = float(meta.get("source_policy", -1))
+    awr_bridge.stats["awr/inherit_enabled"] = 1.0
+    awr_bridge.stats["awr/broadcast_enabled"] = 0.0
+    awr_bridge.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
+    return loaded
+
+
+def _finite_float(x: float, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
+def _tensor_quantile(x: torch.Tensor, q: float) -> float:
+    flat = x.detach().reshape(-1)
+    if flat.numel() == 0:
+        return 0.0
+    qv = torch.quantile(flat, q)
+    return _finite_float(float(qv.item()))
+
+
+def _action_flatten_candidates(tensor: torch.Tensor) -> list[tuple[str, torch.Tensor]]:
+    act_dim = int(tensor.shape[-1])
+    out: list[tuple[str, torch.Tensor]] = []
+    if tensor.ndim == 1:
+        out.append(("flat", tensor.reshape(-1, 1)))
+        return out
+    if tensor.ndim == 2:
+        out.append(("direct", tensor.reshape(-1, act_dim)))
+        return out
+    if tensor.ndim == 3:
+        out.append(("direct_TNA", tensor.reshape(-1, act_dim)))
+        out.append(("transpose_TN_NT", tensor.transpose(0, 1).reshape(-1, act_dim)))
+    return out
+
+
+_ACTION_ORDER_CODES = {
+    "direct:direct": 1.0,
+    "direct:direct_TNA": 2.0,
+    "direct:transpose_TN_NT": 3.0,
+    "direct_TNA:direct": 4.0,
+    "direct_TNA:direct_TNA": 5.0,
+    "direct_TNA:transpose_TN_NT": 6.0,
+    "transpose_TN_NT:direct": 7.0,
+    "transpose_TN_NT:direct_TNA": 8.0,
+    "transpose_TN_NT:transpose_TN_NT": 9.0,
+}
+
+
+def _action_match_order_code(captured_name: str, ppo_name: str) -> float:
+    return float(_ACTION_ORDER_CODES.get(f"{captured_name}:{ppo_name}", float(hash(f"{captured_name}:{ppo_name}") % 10_000)))
+
+
+def _compute_awr_loss_health_stats(
+    *,
+    logp: torch.Tensor,
+    delta: torch.Tensor,
+    quality: torch.Tensor,
+    loss_mask: torch.Tensor,
+    delta_w: torch.Tensor,
+    w: torch.Tensor,
+    cfg: EliteAWRConfig,
+) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    loss_region = loss_mask.bool()
+    region_count = float(loss_region.float().sum().item())
+    if region_count <= 0.0:
+        stats["awr/active_frac"] = 0.0
+        stats["awr/delta_gate_drop_frac"] = 0.0
+        stats["awr/delta_gate_full_frac"] = 0.0
+        stats["awr/delta_gate_mid_frac"] = 0.0
+        stats["awr/delta_gate_far_frac"] = 0.0
+        stats["awr/nonzero_weight_frac"] = 0.0
+        return stats
+
+    active_frac = float((w > 0).float().sum().item()) / max(region_count, 1.0)
+    stats["awr/active_frac"] = _finite_float(active_frac)
+    stats["awr/logp_mean"] = _finite_float(float(logp[loss_region].mean().item()))
+    stats["awr/logp_p10"] = _tensor_quantile(logp[loss_region], 0.10)
+    stats["awr/logp_p90"] = _tensor_quantile(logp[loss_region], 0.90)
+    stats["awr/delta_linf_mean"] = _finite_float(float(delta[loss_region].mean().item()))
+    stats["awr/delta_linf_p90"] = _tensor_quantile(delta[loss_region], 0.90)
+    stats["awr/quality_mean"] = _finite_float(float(quality[loss_region].mean().item()))
+    stats["awr/quality_p90"] = _tensor_quantile(quality[loss_region], 0.90)
+    stats["awr/weight_mean"] = _finite_float(float(w[loss_region].mean().item()))
+    stats["awr/weight_p90"] = _tensor_quantile(w[loss_region], 0.90)
+    stats["awr/nonzero_weight_frac"] = _finite_float(
+        float((w[loss_region] > 0).float().sum().item()) / max(region_count, 1.0)
+    )
+
+    region = loss_region.float()
+    full = ((delta <= cfg.delta_soft) & loss_region).float().sum() / max(region_count, 1.0)
+    mid = (
+        (delta > cfg.delta_soft) & (delta <= cfg.delta_mid) & loss_region
+    ).float().sum() / max(region_count, 1.0)
+    far = (
+        (delta > cfg.delta_mid) & (delta <= cfg.delta_hard) & loss_region
+    ).float().sum() / max(region_count, 1.0)
+    drop = ((delta_w == 0) & loss_region).float().sum() / max(region_count, 1.0)
+    stats["awr/delta_gate_full_frac"] = _finite_float(float(full))
+    stats["awr/delta_gate_mid_frac"] = _finite_float(float(mid))
+    stats["awr/delta_gate_far_frac"] = _finite_float(float(far))
+    stats["awr/delta_gate_drop_frac"] = _finite_float(float(drop))
+    return stats
+
+
 class EliteAWRBridge:
     def __init__(
         self,
@@ -753,6 +944,7 @@ class EliteAWRBridge:
         self._pending_action_check: list[tuple[torch.Tensor, torch.Tensor]] = []
         self.stats["awr/broadcast_enabled"] = 0.0
         self.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
+        self.stats["awr/inherit_enabled"] = 1.0
 
     @property
     def disabled(self) -> bool:
@@ -771,31 +963,79 @@ class EliteAWRBridge:
         self.stats["awr/action_convention_skip_reason"] = float(hash(reason) % 10_000)
         self._action_checked = True
 
-    def maybe_check_action_convention(self, captured: torch.Tensor, ppo_actions: torch.Tensor) -> None:
+    def maybe_check_action_convention(
+        self,
+        captured: torch.Tensor,
+        ppo_actions: torch.Tensor,
+        *,
+        horizon_length: int | None = None,
+        num_actors: int | None = None,
+    ) -> None:
+        del horizon_length, num_actors
         if self._action_checked or self._disabled:
             return
-        captured = captured.to(device=ppo_actions.device, dtype=ppo_actions.dtype)
-        if captured.shape != ppo_actions.shape:
-            self.stats["awr/action_convention_checked"] = 1.0
-            self.stats["awr/action_match_error_mean"] = float("inf")
-            self.stats["awr/action_match_error_max"] = float("inf")
-            self.disable("action_convention_mismatch")
-            self.stats["awr/action_convention_mismatch"] = 1.0
+        captured = captured.detach()
+        ppo_actions = ppo_actions.detach()
+        device = ppo_actions.device
+        captured = captured.to(device=device, dtype=ppo_actions.dtype)
+
+        cap_cands = _action_flatten_candidates(captured)
+        ppo_cands = _action_flatten_candidates(ppo_actions)
+        if not cap_cands or not ppo_cands:
+            self.record_action_convention_unavailable("empty_candidates")
             return
-        err = (captured - ppo_actions).abs()
-        mean_err = float(err.mean().item())
-        max_err = float(err.max().item())
-        self.stats["awr/action_capture_min"] = float(captured.min().item())
-        self.stats["awr/action_capture_max"] = float(captured.max().item())
-        self.stats["awr/action_capture_mean_abs"] = float(captured.abs().mean().item())
-        self.stats["awr/ppo_buffer_action_min"] = float(ppo_actions.min().item())
-        self.stats["awr/ppo_buffer_action_max"] = float(ppo_actions.max().item())
-        self.stats["awr/action_match_error_mean"] = mean_err
-        self.stats["awr/action_match_error_max"] = max_err
+
+        best: tuple[float, float, str, str, torch.Tensor, torch.Tensor] | None = None
+        alt_means: list[float] = []
+        for c_name, c_flat in cap_cands:
+            for p_name, p_flat in ppo_cands:
+                p_flat = p_flat.to(device=device, dtype=ppo_actions.dtype)
+                c_try = c_flat.to(device=device, dtype=ppo_actions.dtype)
+                if c_try.shape != p_flat.shape:
+                    if c_try.numel() != p_flat.numel():
+                        continue
+                    try:
+                        c_try = c_try.reshape_as(p_flat)
+                    except RuntimeError:
+                        continue
+                err = (c_try - p_flat).abs()
+                if not torch.isfinite(err).all():
+                    continue
+                mean_err = float(err.mean().item())
+                max_err = float(err.max().item())
+                alt_means.append(mean_err)
+                if best is None or mean_err < best[0] or (
+                    math.isclose(mean_err, best[0]) and max_err < best[1]
+                ):
+                    best = (mean_err, max_err, c_name, p_name, c_try, p_flat)
+
         self.stats["awr/action_convention_checked"] = 1.0
         self._action_checked = True
-        tol = 1e-4
-        if not torch.isfinite(err).all() or mean_err > tol or max_err > tol * 10:
+        if best is None:
+            self.disable("action_convention_mismatch")
+            self.stats["awr/action_convention_mismatch"] = 1.0
+            self.stats["awr/action_match_error_mean"] = float("inf")
+            self.stats["awr/action_match_error_max"] = float("inf")
+            return
+
+        mean_err, max_err, c_name, p_name, best_flat, ppo_flat = best
+        self.stats["awr/action_capture_min"] = float(best_flat.min().item())
+        self.stats["awr/action_capture_max"] = float(best_flat.max().item())
+        self.stats["awr/action_capture_mean_abs"] = float(best_flat.abs().mean().item())
+        self.stats["awr/ppo_buffer_action_min"] = float(ppo_flat.min().item())
+        self.stats["awr/ppo_buffer_action_max"] = float(ppo_flat.max().item())
+        self.stats["awr/action_match_error_mean"] = mean_err
+        self.stats["awr/action_match_error_max"] = max_err
+        self.stats["awr/action_match_order_code"] = _action_match_order_code(c_name, p_name)
+        if alt_means:
+            alt = sorted(alt_means)
+            self.stats["awr/action_match_error_alt_mean"] = float(
+                alt[1] if len(alt) > 1 else alt[0]
+            )
+
+        mean_tol = 1e-4
+        max_tol = 1e-3
+        if mean_err > mean_tol or max_err > max_tol:
             self.disable("action_convention_mismatch")
             self.stats["awr/action_convention_mismatch"] = 1.0
 
@@ -869,6 +1109,19 @@ def compute_elite_awr_loss(
     loss_mask = batch["loss_mask"]
     quality = batch["quality"]
     seq_length = int(batch["seq_length"])
+    loss_region = loss_mask.bool()
+    if not bool(loss_region.any()):
+        stats["awr/active_frac"] = 0.0
+        stats.update(_compute_awr_loss_health_stats(
+            logp=torch.zeros_like(loss_mask, dtype=torch.float32),
+            delta=torch.zeros_like(loss_mask, dtype=torch.float32),
+            quality=quality,
+            loss_mask=loss_mask,
+            delta_w=torch.zeros_like(loss_mask, dtype=torch.float32),
+            w=torch.zeros_like(loss_mask, dtype=torch.float32),
+            cfg=cfg,
+        ))
+        return None, stats
 
     logp, mu = eval_policy_log_prob_sequence(
         agent, obs, action, seq_length=seq_length
@@ -877,6 +1130,17 @@ def compute_elite_awr_loss(
     delta_w = _delta_gate(delta, cfg)
     quality_w = _quality_sample_weight(quality, cfg)
     w = quality_w * delta_w * loss_mask.float()
+    stats.update(
+        _compute_awr_loss_health_stats(
+            logp=logp,
+            delta=delta,
+            quality=quality,
+            loss_mask=loss_mask,
+            delta_w=delta_w,
+            w=w,
+            cfg=cfg,
+        )
+    )
     w_sum = w.sum().clamp(min=1e-6)
     awr_loss = -(w * logp).sum() / w_sum
 
