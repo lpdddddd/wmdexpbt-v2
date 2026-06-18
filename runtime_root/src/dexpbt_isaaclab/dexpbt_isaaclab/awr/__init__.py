@@ -12,6 +12,7 @@ from dexpbt_isaaclab.awr.elite_awr import (
     load_awr_sidecar,
     patch_model_get_aux_loss_for_awr,
     save_awr_sidecar,
+    save_awr_sidecar_topk,
 )
 from dexpbt_isaaclab.awr.elite_awr_interceptor import EliteAWRInterceptorEnv
 
@@ -27,4 +28,5 @@ __all__ = [
     "compute_elite_awr_quality",
     "load_awr_sidecar",
     "save_awr_sidecar",
+    "save_awr_sidecar_topk",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, Mapping, Optional
 
 import torch
@@ -203,6 +204,9 @@ class EliteAWRInterceptorEnv:
             tol = _per_env_float(
                 _extract_env_scalar(env_attrs, "success_tolerance"), env_idx, 0.075
             )
+            d_hat = _per_env_float(
+                _extract_env_scalar(env_attrs, "closest_d_hat"), env_idx, float("nan")
+            )
             wm = infos.get("wm") if isinstance(infos, dict) else None
             drop = False
             if isinstance(wm, dict):
@@ -215,6 +219,7 @@ class EliteAWRInterceptorEnv:
                 "lifted": lifted,
                 "drop": drop,
                 "tolerance": tol,
+                "d_hat": d_hat,
                 "info_missing": info_missing,
                 "quality_step_pass": (not drop) and (lifted or tol <= 0.06),
             }
@@ -264,10 +269,7 @@ class EliteAWRInterceptorEnv:
         initial_success = _per_env_float(
             _extract_env_scalar(env_attrs, "successes"), env_idx, 0.0
         )
-        final_d = _per_env_float(
-            _extract_env_scalar(env_attrs, "closest_d_hat"), env_idx, 0.0
-        )
-        initial_d = float(pending[0].get("initial_d", final_d))
+        _ = initial_success  # reserved for future success-lift labeling
 
         for i, step in enumerate(pending):
             future_slice = pending[i : min(len(pending), i + 101)]
@@ -278,12 +280,19 @@ class EliteAWRInterceptorEnv:
             step["future_success"] = episode_success and i >= tail_start
             if done_reason != DoneReason.SUCCESS.value:
                 step["future_success"] = False
-            last_d = _per_env_float(
-                future_slice[-1].get("d_hat", final_d) if future_slice else final_d,
-                0,
-                final_d,
-            ) if False else final_d
-            step["future_improvement"] = float(initial_d - final_d)
+            current_d = float(step.get("d_hat", float("nan")))
+            if not math.isfinite(current_d):
+                step["future_improvement"] = 0.0
+                continue
+            future_d_vals = [
+                float(s.get("d_hat", float("nan")))
+                for s in future_slice
+                if math.isfinite(float(s.get("d_hat", float("nan"))))
+            ]
+            if not future_d_vals:
+                step["future_improvement"] = 0.0
+            else:
+                step["future_improvement"] = float(current_d - min(future_d_vals))
 
         tol_min = min(float(s.get("tolerance", 0.075)) for s in pending)
         lifted_frac = sum(1 for s in pending if s.get("lifted")) / max(len(pending), 1)

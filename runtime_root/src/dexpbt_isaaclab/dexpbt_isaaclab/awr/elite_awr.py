@@ -51,6 +51,7 @@ class EliteAWRConfig:
     delta_mid_weight: float = 0.3
     delta_far_weight: float = 0.1
     loss_cap: float = 0.03
+    kl_gate_enable: bool = False
     kl_soft: float = 0.05
     kl_hard: float = 0.10
     ref_update_interval_frames: int = 200_000_000
@@ -148,6 +149,7 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
         delta_mid_weight=float(getattr(args_cli, "awr_delta_mid_weight", 0.3)),
         delta_far_weight=float(getattr(args_cli, "awr_delta_far_weight", 0.1)),
         loss_cap=float(getattr(args_cli, "awr_loss_cap", 0.03)),
+        kl_gate_enable=bool(getattr(args_cli, "awr_kl_gate_enable", False)),
         kl_soft=float(getattr(args_cli, "awr_kl_soft", 0.05)),
         kl_hard=float(getattr(args_cli, "awr_kl_hard", 0.10)),
         ref_update_interval_frames=int(
@@ -576,6 +578,7 @@ class EliteAWRBuffer:
         return loaded
 
     def sidecar_payload(self) -> dict[str, Any]:
+        """Full-buffer payload for debug only; checkpoint/copy must use top-k."""
         return {
             "format_version": self.SIDECAR_FORMAT_VERSION,
             "policy_idx": self.policy_idx,
@@ -583,46 +586,147 @@ class EliteAWRBuffer:
             "inherited": self.inherited,
             "broadcast": self.broadcast,
             "total_steps": self._total_steps,
+            "meta": {
+                "num_sequences": self.num_sequences(),
+                "num_steps": self.total_steps(),
+                "step_budget": self.total_steps(),
+                "selected_from_total_steps": self._total_steps,
+                "full_buffer": True,
+            },
         }
 
-    def load_sidecar_payload(self, payload: Mapping[str, Any]) -> int:
-        self.local = list(payload.get("local") or [])
-        self.inherited = list(payload.get("inherited") or [])
-        self.broadcast = list(payload.get("broadcast") or [])
-        self._total_steps = int(payload.get("total_steps") or 0)
-        if self._total_steps <= 0:
-            self._total_steps = sum(e.num_valid_steps for e in self.all_entries())
-        return self._total_steps
+    def sidecar_payload_topk(
+        self,
+        *,
+        copy_step_budget: int,
+        broadcast_step_budget: int = 0,
+    ) -> dict[str, Any]:
+        local = self.top_entries_by_steps(copy_step_budget, source_type="local")
+        inherited = self.top_entries_by_steps(copy_step_budget, source_type="inherited")
+        broadcast: list[EliteAWREntry] = []
+        if broadcast_step_budget > 0:
+            broadcast = self.top_entries_by_steps(
+                broadcast_step_budget, source_type="broadcast"
+            )
+        selected = local + inherited + broadcast
+        num_steps = sum(e.num_valid_steps for e in selected)
+        return {
+            "format_version": self.SIDECAR_FORMAT_VERSION,
+            "policy_idx": self.policy_idx,
+            "local": local,
+            "inherited": inherited,
+            "broadcast": broadcast,
+            "total_steps": num_steps,
+            "meta": {
+                "num_sequences": len(selected),
+                "num_steps": num_steps,
+                "step_budget": int(copy_step_budget),
+                "broadcast_step_budget": int(broadcast_step_budget),
+                "selected_from_total_steps": int(self._total_steps),
+                "full_buffer": False,
+            },
+        }
+
+    def load_sidecar_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        target_pool: str = "as_saved",
+    ) -> int:
+        if target_pool == "as_saved":
+            self.local = list(payload.get("local") or [])
+            self.inherited = list(payload.get("inherited") or [])
+            self.broadcast = list(payload.get("broadcast") or [])
+            meta = payload.get("meta") or {}
+            self._total_steps = int(payload.get("total_steps") or meta.get("num_steps") or 0)
+            if self._total_steps <= 0:
+                self._total_steps = sum(e.num_valid_steps for e in self.all_entries())
+            return self._total_steps
+
+        entries: list[EliteAWREntry] = []
+        for key in ("local", "inherited", "broadcast"):
+            entries.extend(list(payload.get(key) or []))
+        if not entries:
+            return 0
+        loaded = self.merge_entries(entries, source_type=target_pool)
+        return loaded
+
+
+def _sidecar_meta_from_payload(
+    buffer: EliteAWRBuffer,
+    payload: Mapping[str, Any],
+    *,
+    save_failed: float,
+    size_mb: float,
+) -> dict[str, Any]:
+    meta = dict(payload.get("meta") or {})
+    return {
+        "num_sequences": int(meta.get("num_sequences", 0)),
+        "num_steps": int(meta.get("num_steps", payload.get("total_steps", 0))),
+        "source_policy": int(payload.get("policy_idx", buffer.policy_idx)),
+        "format_version": int(
+            payload.get("format_version", EliteAWRBuffer.SIDECAR_FORMAT_VERSION)
+        ),
+        "step_budget": int(meta.get("step_budget", 0)),
+        "selected_from_total_steps": int(meta.get("selected_from_total_steps", 0)),
+        "full_buffer": bool(meta.get("full_buffer", False)),
+        "size_mb": float(size_mb),
+        "save_failed": float(save_failed),
+    }
 
 
 def save_awr_sidecar(buffer: EliteAWRBuffer, path: Path) -> tuple[bool, dict[str, Any]]:
-    meta = {
-        "num_sequences": buffer.num_sequences(),
-        "num_steps": buffer.total_steps(),
-        "source_policy": buffer.policy_idx,
-        "format_version": EliteAWRBuffer.SIDECAR_FORMAT_VERSION,
-    }
+    """Deprecated alias: saves top-k sidecar, not the full buffer."""
+    return save_awr_sidecar_topk(
+        buffer,
+        path,
+        step_budget=buffer.cfg.copy_top_k_steps,
+        broadcast_step_budget=0,
+    )
+
+
+def save_awr_sidecar_topk(
+    buffer: EliteAWRBuffer,
+    path: Path,
+    *,
+    step_budget: int,
+    broadcast_step_budget: int = 0,
+) -> tuple[bool, dict[str, Any]]:
+    payload = buffer.sidecar_payload_topk(
+        copy_step_budget=int(step_budget),
+        broadcast_step_budget=int(broadcast_step_budget),
+    )
+    meta = _sidecar_meta_from_payload(buffer, payload, save_failed=1.0, size_mb=0.0)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        torch.save(buffer.sidecar_payload(), tmp)
+        torch.save(payload, tmp)
         tmp.replace(path)
         meta["size_mb"] = path.stat().st_size / (1024 * 1024)
         meta["save_failed"] = 0.0
         return True, meta
     except Exception:
-        meta["size_mb"] = 0.0
         meta["save_failed"] = 1.0
         return False, meta
 
 
-def load_awr_sidecar(buffer: EliteAWRBuffer, path: Path) -> int:
+def load_awr_sidecar(
+    buffer: EliteAWRBuffer,
+    path: Path,
+    *,
+    source_type: str = "local",
+) -> int:
+    """Load sidecar entries into ``local`` (default) or ``inherited`` pool."""
     if not path.is_file():
         return 0
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
         return 0
-    return buffer.load_sidecar_payload(payload)
+    if source_type == "inherited":
+        return buffer.load_sidecar_payload(payload, target_pool="inherited")
+    if source_type == "broadcast":
+        return buffer.load_sidecar_payload(payload, target_pool="broadcast")
+    return buffer.load_sidecar_payload(payload, target_pool="as_saved")
 
 
 class EliteAWRBridge:
@@ -647,6 +751,8 @@ class EliteAWRBridge:
         self._loss_cap_total = 0
         self._action_checked = False
         self._pending_action_check: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.stats["awr/broadcast_enabled"] = 0.0
+        self.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
 
     @property
     def disabled(self) -> bool:
@@ -656,15 +762,25 @@ class EliteAWRBridge:
         self._disabled = True
         self._disable_reason = reason
         self.stats["awr/enabled"] = 0.0
+        self.stats["awr/disabled_reason"] = float(hash(reason) % 10_000)
+
+    def record_action_convention_unavailable(self, reason: str = "unavailable") -> None:
+        if self._action_checked:
+            return
+        self.stats["awr/action_convention_checked"] = 0.0
+        self.stats["awr/action_convention_skip_reason"] = float(hash(reason) % 10_000)
+        self._action_checked = True
 
     def maybe_check_action_convention(self, captured: torch.Tensor, ppo_actions: torch.Tensor) -> None:
         if self._action_checked or self._disabled:
             return
         captured = captured.to(device=ppo_actions.device, dtype=ppo_actions.dtype)
         if captured.shape != ppo_actions.shape:
-            self.disable("action_convention_mismatch")
             self.stats["awr/action_convention_checked"] = 1.0
             self.stats["awr/action_match_error_mean"] = float("inf")
+            self.stats["awr/action_match_error_max"] = float("inf")
+            self.disable("action_convention_mismatch")
+            self.stats["awr/action_convention_mismatch"] = 1.0
             return
         err = (captured - ppo_actions).abs()
         mean_err = float(err.mean().item())
@@ -681,6 +797,7 @@ class EliteAWRBridge:
         tol = 1e-4
         if not torch.isfinite(err).all() or mean_err > tol or max_err > tol * 10:
             self.disable("action_convention_mismatch")
+            self.stats["awr/action_convention_mismatch"] = 1.0
 
     def _maybe_update_ref(self, frames: int, agent) -> None:
         if self._ref_snapshot is None or (
@@ -702,6 +819,10 @@ class EliteAWRBridge:
         self.stats["awr/enabled"] = 1.0
         self.stats["awr/config_enable_flag"] = float(self.cfg.enable)
         self.stats["awr/loss_weight"] = float(self.cfg.loss_weight)
+        self.stats["awr/kl_gate_enabled"] = float(self.cfg.kl_gate_enable)
+        self.stats["awr/kl_telemetry_only"] = float(not self.cfg.kl_gate_enable)
+        self.stats["awr/broadcast_enabled"] = 0.0
+        self.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
         if frames < self.cfg.start_after_frames:
             self.stats["awr/skipped_not_started"] = 1.0
             return {}
@@ -759,13 +880,13 @@ def compute_elite_awr_loss(
     w_sum = w.sum().clamp(min=1e-6)
     awr_loss = -(w * logp).sum() / w_sum
 
+    stats["awr/kl_gate_enabled"] = float(cfg.kl_gate_enable)
+    stats["awr/kl_telemetry_only"] = float(not cfg.kl_gate_enable)
     kl_scale = 1.0
+    if cfg.kl_gate_enable:
+        stats["awr/kl_gate_skip_count"] = 0.0
     if bridge is not None:
         bridge._maybe_update_ref(frames, agent)
-        if bridge._ref_snapshot is not None:
-            stats["awr/kl_telemetry_only"] = 1.0
-        if bridge.cfg.kl_hard > 0:
-            pass
     weighted = eff_lambda * kl_scale * awr_loss
     capped = weighted.clamp(max=cfg.loss_cap)
     if bridge is not None:

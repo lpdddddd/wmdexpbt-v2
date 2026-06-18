@@ -2014,6 +2014,11 @@ parser.add_argument("--awr_delta_hard", type=float, default=1.2)
 parser.add_argument("--awr_delta_mid_weight", type=float, default=0.3)
 parser.add_argument("--awr_delta_far_weight", type=float, default=0.1)
 parser.add_argument("--awr_loss_cap", type=float, default=0.03)
+parser.add_argument(
+    "--awr_kl_gate_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
 parser.add_argument("--awr_kl_soft", type=float, default=0.05)
 parser.add_argument("--awr_kl_hard", type=float, default=0.10)
 parser.add_argument("--awr_ref_update_interval_frames", type=int, default=200_000_000)
@@ -3002,13 +3007,25 @@ def _patch_actor_train_for_seq_wm(
         rollout_state["generation"] += 1
 
         if awr_bridge is not None and awr_env_wrap is not None:
-            try:
-                rollout_actions = awr_env_wrap.consume_rollout_actions()
-                ppo_actions = actor.experience_buffer.tensor_dict["actions"]
-                if rollout_actions is not None and rollout_actions.shape == ppo_actions.shape:
-                    awr_bridge.maybe_check_action_convention(rollout_actions, ppo_actions)
-            except Exception as _awr_act_exc:
-                print(f"[AWR] action convention check failed: {_awr_act_exc}")
+            if not getattr(awr_bridge, "_action_checked", False):
+                try:
+                    captured = awr_env_wrap.consume_rollout_actions()
+                    ppo_actions = actor.experience_buffer.tensor_dict.get("actions")
+                    if captured is None or ppo_actions is None:
+                        awr_bridge.record_action_convention_unavailable(
+                            "missing_capture_or_ppo_actions"
+                        )
+                    else:
+                        captured_flat = captured.reshape(-1, captured.shape[-1])
+                        ppo_flat = ppo_actions.reshape(-1, ppo_actions.shape[-1])
+                        awr_bridge.maybe_check_action_convention(
+                            captured_flat, ppo_flat
+                        )
+                except Exception as _awr_act_exc:
+                    print(f"[AWR] action convention check failed: {_awr_act_exc}")
+                    awr_bridge.record_action_convention_unavailable(
+                        f"exception:{type(_awr_act_exc).__name__}"
+                    )
 
         # FloorCritic: build the per-rollout (T,N) target cache NOW (after the
         # aux copy, before PPO's minibatch loop / get_aux_loss). Reset the
@@ -4193,9 +4210,12 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
             sidecar_path = ckpt_path.parent.parent / ref
             if not sidecar_path.is_file():
                 sidecar_path = ckpt_path.parent / ref
-            loaded = load_awr_sidecar(awr_bridge.buffer, sidecar_path)
+            loaded = load_awr_sidecar(
+                awr_bridge.buffer, sidecar_path, source_type="inherited"
+            )
             if loaded > 0:
-                print(f"[AWR] restore: loaded sidecar {sidecar_path} ({loaded} steps)")
+                awr_bridge.stats["awr/buffer_inherit_loaded_steps"] = float(loaded)
+                print(f"[AWR] restore: inherited sidecar {sidecar_path} ({loaded} steps)")
             else:
                 print(f"[AWR] restore: sidecar missing or empty at {sidecar_path}")
 
@@ -5105,10 +5125,6 @@ class _WmEnabledRunner(Runner):
                     agent.model, eir_bridge.capture
                 )
                 _patch_model_get_aux_loss_for_eir(agent.model, eir_bridge)
-                if self.awr_bridge is not None:
-                    self.awr_bridge.agent_ref = agent
-                    _patch_model_get_aux_loss_for_awr(agent.model, self.awr_bridge)
-                    agent._awr_bridge = self.awr_bridge
                 if res_cfg.enabled and res_cfg.apply_to_rollout:
                     _install_eir_rollout_apply(agent, eir_bridge)
                 self.seq_wm_trainer._eir_bridge = eir_bridge
@@ -5124,6 +5140,15 @@ class _WmEnabledRunner(Runner):
                     f"min_margin={eir_cfg.min_score_margin} "
                     f"mu_base_detach={res_cfg.mu_base_detach} "
                     f"(ERD raw-mu distill DISABLED)"
+                )
+
+            if self.awr_bridge is not None:
+                self.awr_bridge.agent_ref = agent
+                _patch_model_get_aux_loss_for_awr(agent.model, self.awr_bridge)
+                agent._awr_bridge = self.awr_bridge
+                print(
+                    f"[AWR] aux loss patch installed (loss_weight={self.awr_bridge.cfg.loss_weight}, "
+                    f"kl_gate={'on' if self.awr_bridge.cfg.kl_gate_enable else 'off'})"
                 )
 
             _patch_actor_train_for_seq_wm(
@@ -6136,7 +6161,7 @@ def main():
                 / "awr_buffers"
                 / f"policy_{int(args_cli.policy_idx):02d}_awr_topk.pt"
             )
-            loaded_steps = load_awr_sidecar(awr_buffer, sidecar_path)
+            loaded_steps = load_awr_sidecar(awr_buffer, sidecar_path, source_type="local")
             if loaded_steps > 0:
                 print(
                     f"[AWR] Loaded sidecar {sidecar_path} "

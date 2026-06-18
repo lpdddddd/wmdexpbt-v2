@@ -6649,11 +6649,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     print(f"[EIR] checkpoint bank export failed: {_eir_bank_exc}")
         awr_bridge = getattr(self.algo, "_awr_bridge", None)
         if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
-            from dexpbt_isaaclab.awr.elite_awr import save_awr_sidecar
+            from dexpbt_isaaclab.awr.elite_awr import save_awr_sidecar_topk
 
             sidecar_rel = f"awr_buffers/policy_{self.policy_idx:02d}_awr_topk.pt"
             sidecar_path = self.workspace / sidecar_rel
-            ok, awr_meta = save_awr_sidecar(awr_bridge.buffer, sidecar_path)
+            ok, awr_meta = save_awr_sidecar_topk(
+                awr_bridge.buffer,
+                sidecar_path,
+                step_budget=int(getattr(awr_bridge.cfg, "copy_top_k_steps", 50_000)),
+                broadcast_step_budget=0,
+            )
             if ok:
                 algo_state["awr_buffer_ref"] = sidecar_rel
             else:

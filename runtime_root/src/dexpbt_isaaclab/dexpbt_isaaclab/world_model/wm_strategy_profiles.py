@@ -108,6 +108,10 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "rssm_mppi_actor_distill": 0.5,
     "conservative_rssm_planner_distill": 0.5,
     "wm_curriculum_controller": 0.9,
+    "elite_bank_actor_distill_fast_awr": 1.2,
+    "elite_bank_actor_distill_awr": 1.3,
+    "elite_bank_actor_distill_strong_awr": 1.3,
+    "wm_pbt_source_selector_awr": 1.1,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -134,6 +138,8 @@ _PPO_ONLY: dict[str, Any] = {
     "wm_curriculum_controller_enable": False,
     # Soft Activation Gate v1: anchor never activates any WM soft gate.
     "wm_activation_enable": False,
+    "awr_enable": False,
+    "awr_loss_weight": 0.0,
 }
 
 _RSSM_MPPI_ACTOR_DISTILL: dict[str, Any] = {
@@ -488,6 +494,8 @@ _WM_PBT_SOURCE_SELECTOR_V2: dict[str, Any] = {
     "wm_imagined_min_logit_abs_mean": 0.10,
     "wm_imagined_min_head_signal_std": 0.05,
     "wm_imagined_soft_validity_weight": 0.10,
+    "awr_enable": False,
+    "awr_loss_weight": 0.0,
 }
 
 _LIGHT_CONSERVATIVE_RSSM_PLANNER: dict[str, Any] = {
