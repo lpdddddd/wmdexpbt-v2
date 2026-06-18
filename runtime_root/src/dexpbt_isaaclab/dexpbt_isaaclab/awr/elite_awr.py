@@ -1,0 +1,822 @@
+"""Online Elite-AWR buffer, loss, and sidecar checkpoint helpers (v17).
+
+Uses sequence-aware recurrent recomputation. When a stored sequence starts at
+episode reset, logprob follows the same rl_games recurrent convention with
+zero initial RNN state. Otherwise the prefix inside the stored segment is
+burn-in approximation, not exact PPO hidden reconstruction.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+import torch
+import torch.nn.functional as F
+
+
+class DoneReason(str, Enum):
+    SUCCESS = "done_by_success"
+    TIMEOUT = "done_by_timeout"
+    FAILURE = "done_by_failure_or_drop"
+    UNKNOWN = "done_reason_unknown"
+
+
+@dataclass
+class EliteAWRConfig:
+    enable: bool = False
+    loss_weight: float = 0.0
+    start_after_frames: int = 800_000_000
+    ramp_frames: int = 300_000_000
+    min_buffer_size: int = 50_000
+    buffer_capacity: int = 400_000
+    batch_steps: int = 4096
+    minibatch_max_sequences: int = 128
+    update_every: int = 4
+    max_episode_len: int = 200
+    min_burnin_steps: int = 32
+    min_loss_steps_per_entry: int = 16
+    weight_mode: str = "exp_quality"
+    beta: float = 1.0
+    weight_max: float = 5.0
+    quality_min: float = 1.5
+    delta_soft: float = 0.35
+    delta_mid: float = 0.8
+    delta_hard: float = 1.2
+    delta_mid_weight: float = 0.3
+    delta_far_weight: float = 0.1
+    loss_cap: float = 0.03
+    kl_soft: float = 0.05
+    kl_hard: float = 0.10
+    ref_update_interval_frames: int = 200_000_000
+    local_sample_frac: float = 0.7
+    inherited_sample_frac: float = 0.2
+    broadcast_sample_frac: float = 0.1
+    copy_top_k_steps: int = 50_000
+    broadcast_top_k_steps: int = 10_000
+    broadcast_min_source_nsucc: float = 35.0
+    pause_on_regression: bool = True
+    regression_drop_threshold: float = 4.0
+    regression_pause_frames: int = 100_000_000
+    sidecar_format_version: int = 1
+
+
+@dataclass
+class EliteAWREntry:
+    obs: torch.Tensor
+    action: torch.Tensor
+    valid_mask: torch.Tensor
+    loss_mask: torch.Tensor
+    quality_per_step: torch.Tensor
+    tolerance_per_step: torch.Tensor
+    episode_quality: float
+    episode_tolerance_min: float
+    future_success: bool
+    future_success_within_100: bool
+    lifted_frac: float
+    no_drop: bool
+    future_improvement: float
+    had_drop: bool
+    starts_at_episode_reset: bool
+    truncated_prefix: bool
+    original_episode_len: int
+    stored_seq_len: int
+    loss_start_idx: int
+    source_policy: int
+    source_profile: str
+    source_nsucc: Optional[float]
+    source_retention: Optional[float]
+    source_type: str
+    env_frames: int
+    done_reason: str
+    info_missing: dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def num_valid_steps(self) -> int:
+        return int(self.valid_mask.sum().item())
+
+    @property
+    def num_loss_steps(self) -> int:
+        return int(self.loss_mask.sum().item())
+
+
+def awr_active_from_args(args_cli) -> bool:
+    return bool(getattr(args_cli, "awr_enable", False)) and float(
+        getattr(args_cli, "awr_loss_weight", 0.0) or 0.0
+    ) > 0.0
+
+
+def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
+    batch_steps = getattr(args_cli, "awr_batch_steps", None)
+    if batch_steps is None:
+        batch_steps = getattr(args_cli, "awr_batch_size", 4096)
+    copy_steps = getattr(args_cli, "awr_copy_top_k_steps", None)
+    if copy_steps is None:
+        copy_steps = getattr(args_cli, "awr_copy_top_k", 50_000)
+    broadcast_steps = getattr(args_cli, "awr_broadcast_top_k_steps", None)
+    if broadcast_steps is None:
+        broadcast_steps = getattr(args_cli, "awr_broadcast_top_k", 10_000)
+    return EliteAWRConfig(
+        enable=bool(getattr(args_cli, "awr_enable", False)),
+        loss_weight=float(getattr(args_cli, "awr_loss_weight", 0.0) or 0.0),
+        start_after_frames=int(getattr(args_cli, "awr_start_after_frames", 800_000_000)),
+        ramp_frames=int(getattr(args_cli, "awr_ramp_frames", 300_000_000)),
+        min_buffer_size=int(getattr(args_cli, "awr_min_buffer_size", 50_000)),
+        buffer_capacity=int(getattr(args_cli, "awr_buffer_capacity", 400_000)),
+        batch_steps=int(batch_steps),
+        minibatch_max_sequences=int(
+            getattr(args_cli, "awr_minibatch_max_sequences", 128)
+        ),
+        update_every=int(getattr(args_cli, "awr_update_every", 4)),
+        max_episode_len=int(getattr(args_cli, "awr_max_episode_len", 200)),
+        min_burnin_steps=int(getattr(args_cli, "awr_min_burnin_steps", 32)),
+        min_loss_steps_per_entry=int(
+            getattr(args_cli, "awr_min_loss_steps_per_entry", 16)
+        ),
+        weight_mode=str(getattr(args_cli, "awr_weight_mode", "exp_quality")),
+        beta=float(getattr(args_cli, "awr_beta", 1.0)),
+        weight_max=float(getattr(args_cli, "awr_weight_max", 5.0)),
+        quality_min=float(getattr(args_cli, "awr_quality_min", 1.5)),
+        delta_soft=float(getattr(args_cli, "awr_delta_soft", 0.35)),
+        delta_mid=float(getattr(args_cli, "awr_delta_mid", 0.8)),
+        delta_hard=float(getattr(args_cli, "awr_delta_hard", 1.2)),
+        delta_mid_weight=float(getattr(args_cli, "awr_delta_mid_weight", 0.3)),
+        delta_far_weight=float(getattr(args_cli, "awr_delta_far_weight", 0.1)),
+        loss_cap=float(getattr(args_cli, "awr_loss_cap", 0.03)),
+        kl_soft=float(getattr(args_cli, "awr_kl_soft", 0.05)),
+        kl_hard=float(getattr(args_cli, "awr_kl_hard", 0.10)),
+        ref_update_interval_frames=int(
+            getattr(args_cli, "awr_ref_update_interval_frames", 200_000_000)
+        ),
+        local_sample_frac=float(getattr(args_cli, "awr_local_sample_frac", 0.7)),
+        inherited_sample_frac=float(
+            getattr(args_cli, "awr_inherited_sample_frac", 0.2)
+        ),
+        broadcast_sample_frac=float(
+            getattr(args_cli, "awr_broadcast_sample_frac", 0.1)
+        ),
+        copy_top_k_steps=int(copy_steps),
+        broadcast_top_k_steps=int(broadcast_steps),
+        broadcast_min_source_nsucc=float(
+            getattr(args_cli, "awr_broadcast_min_source_nsucc", 35.0)
+        ),
+        pause_on_regression=bool(getattr(args_cli, "awr_pause_on_regression", True)),
+        regression_drop_threshold=float(
+            getattr(args_cli, "awr_regression_drop_threshold", 4.0)
+        ),
+        regression_pause_frames=int(
+            getattr(args_cli, "awr_regression_pause_frames", 100_000_000)
+        ),
+    )
+
+
+def compute_elite_awr_quality(
+    *,
+    future_success_within_100: bool,
+    lifted_frac: float,
+    no_drop: bool,
+    future_improvement: float,
+    tolerance_min: float,
+    source_nsucc: Optional[float],
+    had_drop: bool,
+) -> float:
+    quality = 1.0
+    quality += 2.0 * float(future_success_within_100)
+    quality += 1.0 * float(lifted_frac >= 0.5)
+    quality += 1.0 * float(no_drop)
+    quality += 1.0 * float(future_improvement > 0.0)
+    quality += 0.5 * float(tolerance_min <= 0.06)
+    quality += 1.0 * float(tolerance_min <= 0.04)
+    if source_nsucc is not None:
+        quality += 0.5 * float(source_nsucc >= 30.0)
+        quality += 1.0 * float(source_nsucc >= 35.0)
+    quality -= 2.0 * float(had_drop)
+    return float(max(0.0, min(6.0, quality)))
+
+
+def _quality_sample_weight(quality: torch.Tensor, cfg: EliteAWRConfig) -> torch.Tensor:
+    if cfg.weight_mode == "quality":
+        return quality.clamp(0.0, cfg.weight_max)
+    if cfg.weight_mode == "exp_quality":
+        return torch.exp((quality - 2.0) / max(cfg.beta, 1e-6)).clamp(
+            0.0, cfg.weight_max
+        )
+    return quality.clamp(0.0, cfg.weight_max)
+
+
+def _delta_gate(delta: torch.Tensor, cfg: EliteAWRConfig) -> torch.Tensor:
+    w = torch.ones_like(delta)
+    w = torch.where(delta <= cfg.delta_soft, w, torch.full_like(w, cfg.delta_mid_weight))
+    w = torch.where(delta <= cfg.delta_mid, w, torch.full_like(w, cfg.delta_far_weight))
+    w = torch.where(delta <= cfg.delta_hard, w, torch.zeros_like(w))
+    return w
+
+
+def _zero_rnn_states(agent, num_seqs: int, device: torch.device):
+    template = agent.model.get_default_rnn_state()
+    if template is None:
+        return None
+    out = []
+    for state in template:
+        z = torch.zeros(
+            (state.shape[0], num_seqs, state.shape[2]),
+            device=device,
+            dtype=state.dtype,
+        )
+        out.append(z)
+    return out if len(out) == 1 else tuple(out)
+
+
+def eval_policy_log_prob_sequence(
+    agent,
+    obs_tb: torch.Tensor,
+    action_tb: torch.Tensor,
+    *,
+    seq_length: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Recurrent logprob recompute for (T, B, *) sequences.
+
+    Uses same rl_games recurrent logprob convention when sequence starts at
+    reset; burn-in approximation otherwise (caller controls loss_mask).
+    """
+    t_steps, batch = obs_tb.shape[:2]
+    device = obs_tb.device
+    obs_flat = agent._preproc_obs(obs_tb.reshape(t_steps * batch, -1))
+    act_flat = action_tb.reshape(t_steps * batch, -1)
+    batch_dict: dict[str, Any] = {
+        "is_train": True,
+        "prev_actions": act_flat,
+        "obs": obs_flat,
+        "seq_length": int(seq_length),
+    }
+    if getattr(agent, "is_rnn", False):
+        batch_dict["rnn_states"] = _zero_rnn_states(agent, batch, device)
+    with torch.amp.autocast(
+        "cuda",
+        enabled=getattr(agent, "mixed_precision", False),
+        dtype=torch.bfloat16,
+    ):
+        res = agent.model(batch_dict)
+    neglogp = res["prev_neglogp"].reshape(t_steps, batch)
+    logp = -neglogp
+    mu = res["mus"].reshape(t_steps, batch, -1)
+    return logp, mu
+
+
+def _effective_lambda(cfg: EliteAWRConfig, frames: int) -> float:
+    if frames < cfg.start_after_frames:
+        return 0.0
+    if cfg.ramp_frames <= 0:
+        return cfg.loss_weight
+    ramp = min(1.0, (frames - cfg.start_after_frames) / float(cfg.ramp_frames))
+    return cfg.loss_weight * ramp
+
+
+def build_sequence_entry_from_episode(
+    pending: list[dict[str, Any]],
+    *,
+    cfg: EliteAWRConfig,
+    source_policy: int,
+    source_profile: str,
+    source_nsucc: Optional[float],
+    source_retention: Optional[float],
+    source_type: str,
+    env_frames: int,
+    done_reason: str,
+) -> Optional[EliteAWREntry]:
+    if not pending:
+        return None
+    episode_len = len(pending)
+    if episode_len <= cfg.max_episode_len:
+        segment = pending
+        starts_at_reset = True
+        truncated_prefix = False
+        loss_start_idx = 0
+        for i, step in enumerate(segment):
+            if step.get("quality_step_pass", False):
+                loss_start_idx = i
+                break
+    else:
+        segment = pending[-cfg.max_episode_len :]
+        starts_at_reset = False
+        truncated_prefix = True
+        loss_start_idx = min(cfg.min_burnin_steps, len(segment) - 1)
+        for i in range(loss_start_idx, len(segment)):
+            if segment[i].get("quality_step_pass", False):
+                loss_start_idx = i
+                break
+
+    obs = torch.stack([s["obs"] for s in segment], dim=0)
+    action = torch.stack([s["action"] for s in segment], dim=0)
+    if not torch.isfinite(obs).all() or not torch.isfinite(action).all():
+        return None
+
+    stored_seq_len = len(segment)
+    valid_mask = torch.ones(stored_seq_len, dtype=torch.bool)
+    loss_mask = torch.zeros(stored_seq_len, dtype=torch.bool)
+    if truncated_prefix:
+        burn_end = min(cfg.min_burnin_steps, stored_seq_len)
+        loss_mask[burn_end:] = True
+    else:
+        loss_mask[loss_start_idx:] = True
+    for i, step in enumerate(segment):
+        if not step.get("quality_step_pass", True):
+            loss_mask[i] = False
+
+    num_loss = int(loss_mask.sum().item())
+    if num_loss < cfg.min_loss_steps_per_entry:
+        return None
+
+    tol_vals = [float(s.get("tolerance", 0.075)) for s in segment]
+    tolerance_per_step = torch.tensor(tol_vals, dtype=torch.float32)
+    tolerance_min = float(min(tol_vals)) if tol_vals else 0.075
+
+    future_success_within_100 = any(s.get("future_success_within_100", False) for s in segment)
+    future_success = any(s.get("future_success", False) for s in segment)
+    lifted_frac = sum(1 for s in segment if s.get("lifted", False)) / max(stored_seq_len, 1)
+    no_drop = all(not s.get("drop", False) for s in segment)
+    had_drop = any(s.get("drop", False) for s in segment)
+    future_improvement = max(float(s.get("future_improvement", 0.0)) for s in segment)
+
+    episode_quality = compute_elite_awr_quality(
+        future_success_within_100=future_success_within_100,
+        lifted_frac=lifted_frac,
+        no_drop=no_drop,
+        future_improvement=future_improvement,
+        tolerance_min=tolerance_min,
+        source_nsucc=source_nsucc,
+        had_drop=had_drop,
+    )
+    if episode_quality < cfg.quality_min:
+        return None
+
+    quality_per_step = torch.full((stored_seq_len,), episode_quality, dtype=torch.float32)
+    info_missing = pending[0].get("info_missing", {})
+
+    return EliteAWREntry(
+        obs=obs.cpu(),
+        action=action.cpu(),
+        valid_mask=valid_mask,
+        loss_mask=loss_mask,
+        quality_per_step=quality_per_step,
+        tolerance_per_step=tolerance_per_step,
+        episode_quality=episode_quality,
+        episode_tolerance_min=tolerance_min,
+        future_success=future_success,
+        future_success_within_100=future_success_within_100,
+        lifted_frac=lifted_frac,
+        no_drop=no_drop,
+        future_improvement=future_improvement,
+        had_drop=had_drop,
+        starts_at_episode_reset=starts_at_reset,
+        truncated_prefix=truncated_prefix,
+        original_episode_len=episode_len,
+        stored_seq_len=stored_seq_len,
+        loss_start_idx=int(loss_start_idx),
+        source_policy=source_policy,
+        source_profile=source_profile,
+        source_nsucc=source_nsucc,
+        source_retention=source_retention,
+        source_type=source_type,
+        env_frames=env_frames,
+        done_reason=done_reason,
+        info_missing=dict(info_missing),
+    )
+
+
+class EliteAWRBuffer:
+    SIDECAR_FORMAT_VERSION = 1
+
+    def __init__(self, cfg: EliteAWRConfig, *, policy_idx: int = 0) -> None:
+        self.cfg = cfg
+        self.policy_idx = int(policy_idx)
+        self.local: list[EliteAWREntry] = []
+        self.inherited: list[EliteAWREntry] = []
+        self.broadcast: list[EliteAWREntry] = []
+        self._total_steps = 0
+        self.telemetry: dict[str, float] = {}
+
+    def _pool(self, source_type: str) -> list[EliteAWREntry]:
+        if source_type == "inherited":
+            return self.inherited
+        if source_type == "broadcast":
+            return self.broadcast
+        return self.local
+
+    def total_steps(self) -> int:
+        return self._total_steps
+
+    def num_sequences(self) -> int:
+        return len(self.local) + len(self.inherited) + len(self.broadcast)
+
+    def insert(self, entry: EliteAWREntry) -> bool:
+        pool = self._pool(entry.source_type)
+        steps = entry.num_valid_steps
+        if self._total_steps + steps > self.cfg.buffer_capacity:
+            self._evict_steps(steps)
+        pool.append(entry)
+        self._total_steps += steps
+        return True
+
+    def _evict_steps(self, incoming_steps: int) -> None:
+        while self._total_steps + incoming_steps > self.cfg.buffer_capacity:
+            removed = self._pop_lowest_quality()
+            if removed is None:
+                break
+            self._total_steps -= removed.num_valid_steps
+
+    def _pop_lowest_quality(self) -> Optional[EliteAWREntry]:
+        best_pool: list[EliteAWREntry] | None = None
+        best_idx = -1
+        best_q = float("inf")
+        for pool in (self.local, self.inherited, self.broadcast):
+            for i, e in enumerate(pool):
+                if e.episode_quality < best_q:
+                    best_q = e.episode_quality
+                    best_pool = pool
+                    best_idx = i
+        if best_pool is None or best_idx < 0:
+            return None
+        return best_pool.pop(best_idx)
+
+    def sample_batch(self, device: torch.device) -> Optional[dict[str, Any]]:
+        cfg = self.cfg
+        if self._total_steps < cfg.min_buffer_size:
+            return None
+        pools = {
+            "local": list(self.local),
+            "inherited": list(self.inherited),
+            "broadcast": list(self.broadcast),
+        }
+        available = {k: v for k, v in pools.items() if v}
+        if not available:
+            return None
+
+        t_pad = min(cfg.max_episode_len, max(e.stored_seq_len for e in self.all_entries()))
+        k_ep = max(1, cfg.batch_steps // max(t_pad, 1))
+        if cfg.minibatch_max_sequences > 0:
+            k_ep = min(k_ep, cfg.minibatch_max_sequences)
+
+        targets = {
+            "local": int(round(k_ep * cfg.local_sample_frac)),
+            "inherited": int(round(k_ep * cfg.inherited_sample_frac)),
+            "broadcast": int(round(k_ep * cfg.broadcast_sample_frac)),
+        }
+        total_target = sum(targets.values())
+        if total_target < k_ep:
+            targets["local"] += k_ep - total_target
+        elif total_target > k_ep:
+            targets["local"] = max(0, targets["local"] - (total_target - k_ep))
+
+        picked: list[EliteAWREntry] = []
+        for name, count in targets.items():
+            pool = available.get(name) or []
+            if not pool and available:
+                pool = max(available.values(), key=len)
+            if not pool:
+                continue
+            ranked = sorted(pool, key=lambda e: e.episode_quality, reverse=True)
+            picked.extend(ranked[: max(count, 0)])
+
+        if not picked:
+            return None
+        if len(picked) > k_ep:
+            picked = sorted(picked, key=lambda e: e.episode_quality, reverse=True)[:k_ep]
+
+        t_pad = min(cfg.max_episode_len, max(e.stored_seq_len for e in picked))
+        b = len(picked)
+        obs = torch.zeros(t_pad, b, picked[0].obs.shape[-1], device=device)
+        action = torch.zeros(t_pad, b, picked[0].action.shape[-1], device=device)
+        valid_mask = torch.zeros(t_pad, b, dtype=torch.bool, device=device)
+        loss_mask = torch.zeros(t_pad, b, dtype=torch.bool, device=device)
+        quality = torch.zeros(t_pad, b, device=device)
+        meta = {
+            "starts_at_reset_frac": 0.0,
+            "truncated_prefix_frac": 0.0,
+            "original_episode_len_mean": 0.0,
+            "stored_seq_len_mean": 0.0,
+            "loss_steps_mean": 0.0,
+            "burnin_steps_mean": 0.0,
+        }
+        starts = truncated = orig_lens = stored_lens = loss_steps = burnin = 0.0
+        for j, entry in enumerate(picked):
+            slen = entry.stored_seq_len
+            obs[:slen, j] = entry.obs.to(device)
+            action[:slen, j] = entry.action.to(device)
+            valid_mask[:slen, j] = entry.valid_mask.to(device)
+            loss_mask[:slen, j] = entry.loss_mask.to(device)
+            quality[:slen, j] = entry.quality_per_step.to(device)
+            starts += float(entry.starts_at_episode_reset)
+            truncated += float(entry.truncated_prefix)
+            orig_lens += float(entry.original_episode_len)
+            stored_lens += float(entry.stored_seq_len)
+            loss_steps += float(entry.num_loss_steps)
+            if entry.truncated_prefix:
+                burnin += float(min(cfg.min_burnin_steps, entry.stored_seq_len))
+        inv = 1.0 / max(b, 1)
+        meta.update(
+            {
+                "starts_at_reset_frac": starts * inv,
+                "truncated_prefix_frac": truncated * inv,
+                "original_episode_len_mean": orig_lens * inv,
+                "stored_seq_len_mean": stored_lens * inv,
+                "loss_steps_mean": loss_steps * inv,
+                "burnin_steps_mean": burnin * inv,
+            }
+        )
+        valid_count = int(valid_mask.sum().item())
+        padded_count = t_pad * b
+        return {
+            "obs": obs,
+            "action": action,
+            "valid_mask": valid_mask,
+            "loss_mask": loss_mask,
+            "quality": quality,
+            "seq_length": t_pad,
+            "batch_sequences": b,
+            "batch_valid_steps": valid_count,
+            "batch_padded_steps": padded_count,
+            "batch_pad_frac": 1.0 - (valid_count / max(padded_count, 1)),
+            **meta,
+        }
+
+    def all_entries(self) -> list[EliteAWREntry]:
+        return self.local + self.inherited + self.broadcast
+
+    def top_entries_by_steps(self, step_budget: int, *, source_type: str | None = None) -> list[EliteAWREntry]:
+        pools: list[EliteAWREntry] = []
+        if source_type is None:
+            pools = self.all_entries()
+        else:
+            pools = list(self._pool(source_type))
+        ranked = sorted(pools, key=lambda e: e.episode_quality, reverse=True)
+        out: list[EliteAWREntry] = []
+        steps = 0
+        for entry in ranked:
+            if steps + entry.num_valid_steps > step_budget:
+                continue
+            out.append(entry)
+            steps += entry.num_valid_steps
+            if steps >= step_budget:
+                break
+        return out
+
+    def merge_entries(self, entries: list[EliteAWREntry], *, source_type: str) -> int:
+        loaded = 0
+        for entry in entries:
+            e = copy.deepcopy(entry)
+            e.source_type = source_type
+            self.insert(e)
+            loaded += e.num_valid_steps
+        return loaded
+
+    def sidecar_payload(self) -> dict[str, Any]:
+        return {
+            "format_version": self.SIDECAR_FORMAT_VERSION,
+            "policy_idx": self.policy_idx,
+            "local": self.local,
+            "inherited": self.inherited,
+            "broadcast": self.broadcast,
+            "total_steps": self._total_steps,
+        }
+
+    def load_sidecar_payload(self, payload: Mapping[str, Any]) -> int:
+        self.local = list(payload.get("local") or [])
+        self.inherited = list(payload.get("inherited") or [])
+        self.broadcast = list(payload.get("broadcast") or [])
+        self._total_steps = int(payload.get("total_steps") or 0)
+        if self._total_steps <= 0:
+            self._total_steps = sum(e.num_valid_steps for e in self.all_entries())
+        return self._total_steps
+
+
+def save_awr_sidecar(buffer: EliteAWRBuffer, path: Path) -> tuple[bool, dict[str, Any]]:
+    meta = {
+        "num_sequences": buffer.num_sequences(),
+        "num_steps": buffer.total_steps(),
+        "source_policy": buffer.policy_idx,
+        "format_version": EliteAWRBuffer.SIDECAR_FORMAT_VERSION,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        torch.save(buffer.sidecar_payload(), tmp)
+        tmp.replace(path)
+        meta["size_mb"] = path.stat().st_size / (1024 * 1024)
+        meta["save_failed"] = 0.0
+        return True, meta
+    except Exception:
+        meta["size_mb"] = 0.0
+        meta["save_failed"] = 1.0
+        return False, meta
+
+
+def load_awr_sidecar(buffer: EliteAWRBuffer, path: Path) -> int:
+    if not path.is_file():
+        return 0
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        return 0
+    return buffer.load_sidecar_payload(payload)
+
+
+class EliteAWRBridge:
+    def __init__(
+        self,
+        *,
+        buffer: EliteAWRBuffer,
+        cfg: EliteAWRConfig,
+        agent_ref: Any = None,
+    ) -> None:
+        self.buffer = buffer
+        self.cfg = cfg
+        self.agent_ref = agent_ref
+        self.stats: dict[str, float] = {}
+        self._update_counter = 0
+        self._disabled = False
+        self._disable_reason = ""
+        self._ref_snapshot: dict[str, torch.Tensor] | None = None
+        self._ref_update_frame = 0
+        self._pause_until_frame = 0
+        self._loss_cap_hits = 0
+        self._loss_cap_total = 0
+        self._action_checked = False
+        self._pending_action_check: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
+
+    def disable(self, reason: str) -> None:
+        self._disabled = True
+        self._disable_reason = reason
+        self.stats["awr/enabled"] = 0.0
+
+    def maybe_check_action_convention(self, captured: torch.Tensor, ppo_actions: torch.Tensor) -> None:
+        if self._action_checked or self._disabled:
+            return
+        captured = captured.to(device=ppo_actions.device, dtype=ppo_actions.dtype)
+        if captured.shape != ppo_actions.shape:
+            self.disable("action_convention_mismatch")
+            self.stats["awr/action_convention_checked"] = 1.0
+            self.stats["awr/action_match_error_mean"] = float("inf")
+            return
+        err = (captured - ppo_actions).abs()
+        mean_err = float(err.mean().item())
+        max_err = float(err.max().item())
+        self.stats["awr/action_capture_min"] = float(captured.min().item())
+        self.stats["awr/action_capture_max"] = float(captured.max().item())
+        self.stats["awr/action_capture_mean_abs"] = float(captured.abs().mean().item())
+        self.stats["awr/ppo_buffer_action_min"] = float(ppo_actions.min().item())
+        self.stats["awr/ppo_buffer_action_max"] = float(ppo_actions.max().item())
+        self.stats["awr/action_match_error_mean"] = mean_err
+        self.stats["awr/action_match_error_max"] = max_err
+        self.stats["awr/action_convention_checked"] = 1.0
+        self._action_checked = True
+        tol = 1e-4
+        if not torch.isfinite(err).all() or mean_err > tol or max_err > tol * 10:
+            self.disable("action_convention_mismatch")
+
+    def _maybe_update_ref(self, frames: int, agent) -> None:
+        if self._ref_snapshot is None or (
+            frames - self._ref_update_frame >= self.cfg.ref_update_interval_frames
+        ):
+            self._ref_snapshot = {
+                k: v.detach().cpu().clone()
+                for k, v in agent.model.state_dict().items()
+            }
+            self._ref_update_frame = frames
+
+    def compute_aux_loss(self) -> dict[str, torch.Tensor]:
+        if self._disabled:
+            return {}
+        agent = self.agent_ref
+        if agent is None:
+            return {}
+        frames = int(getattr(agent, "frame", 0) or 0)
+        self.stats["awr/enabled"] = 1.0
+        self.stats["awr/config_enable_flag"] = float(self.cfg.enable)
+        self.stats["awr/loss_weight"] = float(self.cfg.loss_weight)
+        if frames < self.cfg.start_after_frames:
+            self.stats["awr/skipped_not_started"] = 1.0
+            return {}
+        if frames < self._pause_until_frame:
+            self.stats["awr/skipped_regression_pause"] = 1.0
+            return {}
+        self._update_counter += 1
+        if self._update_counter % max(self.cfg.update_every, 1) != 0:
+            self.stats["awr/skipped_update_every"] = 1.0
+            return {}
+        if self.buffer.total_steps() < self.cfg.min_buffer_size:
+            self.stats["awr/skipped_min_buffer"] = 1.0
+            return {}
+
+        device = agent.ppo_device
+        batch = self.buffer.sample_batch(device)
+        if batch is None:
+            self.stats["awr/sample_count"] = 0.0
+            return {}
+
+        loss, stats = compute_elite_awr_loss(agent, batch, self.cfg, frames=frames, bridge=self)
+        self.stats.update(stats)
+        if loss is None:
+            return {}
+        return {"awr_total": loss}
+
+
+def compute_elite_awr_loss(
+    agent,
+    batch: dict[str, Any],
+    cfg: EliteAWRConfig,
+    *,
+    frames: int,
+    bridge: EliteAWRBridge | None = None,
+) -> tuple[Optional[torch.Tensor], dict[str, float]]:
+    stats: dict[str, float] = {}
+    eff_lambda = _effective_lambda(cfg, frames)
+    stats["awr/effective_lambda"] = float(eff_lambda)
+    if eff_lambda <= 0.0:
+        return None, stats
+
+    obs = batch["obs"]
+    action = batch["action"]
+    loss_mask = batch["loss_mask"]
+    quality = batch["quality"]
+    seq_length = int(batch["seq_length"])
+
+    logp, mu = eval_policy_log_prob_sequence(
+        agent, obs, action, seq_length=seq_length
+    )
+    delta = (action - mu).abs().amax(dim=-1)
+    delta_w = _delta_gate(delta, cfg)
+    quality_w = _quality_sample_weight(quality, cfg)
+    w = quality_w * delta_w * loss_mask.float()
+    w_sum = w.sum().clamp(min=1e-6)
+    awr_loss = -(w * logp).sum() / w_sum
+
+    kl_scale = 1.0
+    if bridge is not None:
+        bridge._maybe_update_ref(frames, agent)
+        if bridge._ref_snapshot is not None:
+            stats["awr/kl_telemetry_only"] = 1.0
+        if bridge.cfg.kl_hard > 0:
+            pass
+    weighted = eff_lambda * kl_scale * awr_loss
+    capped = weighted.clamp(max=cfg.loss_cap)
+    if bridge is not None:
+        bridge._loss_cap_total += 1
+        if float(capped.item()) >= cfg.loss_cap - 1e-8:
+            bridge._loss_cap_hits += 1
+        stats["awr/loss_cap_hit"] = float(
+            bridge._loss_cap_hits == bridge._loss_cap_total
+        )
+        stats["awr/loss_cap_hit_frac"] = bridge._loss_cap_hits / max(
+            bridge._loss_cap_total, 1
+        )
+
+    stats["awr/loss_raw"] = float(awr_loss.detach().item())
+    stats["awr/loss_weighted"] = float(capped.detach().item())
+    stats["awr/batch_sequences"] = float(batch.get("batch_sequences", 0))
+    stats["awr/batch_valid_steps"] = float(batch.get("batch_valid_steps", 0))
+    stats["awr/batch_padded_steps"] = float(batch.get("batch_padded_steps", 0))
+    stats["awr/batch_pad_frac"] = float(batch.get("batch_pad_frac", 0.0))
+    stats["awr/starts_at_reset_frac"] = float(batch.get("starts_at_reset_frac", 0.0))
+    stats["awr/truncated_prefix_frac"] = float(batch.get("truncated_prefix_frac", 0.0))
+    stats["awr/original_episode_len_mean"] = float(
+        batch.get("original_episode_len_mean", 0.0)
+    )
+    stats["awr/stored_seq_len_mean"] = float(batch.get("stored_seq_len_mean", 0.0))
+    stats["awr/loss_steps_mean"] = float(batch.get("loss_steps_mean", 0.0))
+    stats["awr/burnin_steps_mean"] = float(batch.get("burnin_steps_mean", 0.0))
+    valid = loss_mask.float()
+    stats["awr/loss_mask_frac"] = float(valid.mean().item())
+    return capped, stats
+
+
+def patch_model_get_aux_loss_for_awr(model, awr_bridge):
+    """Chain Online Elite-AWR aux loss after any existing get_aux_loss hook."""
+    old_get_aux_loss = getattr(model, "get_aux_loss", None)
+
+    def patched_get_aux_loss(*args, **kwargs):
+        out: dict = {}
+        if old_get_aux_loss is not None:
+            old = old_get_aux_loss(*args, **kwargs)
+            if isinstance(old, dict):
+                out.update(old)
+            elif old is not None:
+                out["prev_aux"] = old
+        if awr_bridge is None or awr_bridge.disabled:
+            return out if out else None
+        awr_out = awr_bridge.compute_aux_loss()
+        if isinstance(awr_out, dict):
+            out.update(awr_out)
+        elif awr_out is not None:
+            out["awr_total"] = awr_out
+        return out if out else None
+
+    model.get_aux_loss = patched_get_aux_loss

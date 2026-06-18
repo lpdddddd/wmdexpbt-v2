@@ -186,14 +186,17 @@ LAUNCH_PBT_BOOLEAN_FLAGS: frozenset[str] = frozenset(
         # PBT-WM Strategy Zoo v1.0 toggles.
         "--pbt_wm_profile_copy_enable",
         "--no-pbt_wm_profile_copy_enable",
-        "--pbt_wm_profile_copy_top1_override_enable",
-        "--no-pbt_wm_profile_copy_top1_override_enable",
         "--wm_curriculum_controller_enable",
         "--no-wm_curriculum_controller_enable",
         "--wm_curriculum_controller_hard_block_shrink",
         "--no-wm_curriculum_controller_hard_block_shrink",
         "--wm_curriculum_controller_use_recovery_prob",
         "--no-wm_curriculum_controller_use_recovery_prob",
+        # Strategy Zoo v1.7 Online Elite-AWR toggles.
+        "--awr_enable",
+        "--no-awr_enable",
+        "--awr_pause_on_regression",
+        "--no-awr_pause_on_regression",
     }
 )
 

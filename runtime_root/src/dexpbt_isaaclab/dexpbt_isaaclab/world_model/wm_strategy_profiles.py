@@ -28,9 +28,11 @@ PROFILE_IDS: dict[str, int] = {
     # Strategy Zoo v1.3 elite-centered performance profiles.
     "elite_bank_actor_distill_fast": 10,
     "elite_bank_actor_distill_strong": 11,
-    # Strategy Zoo v1.4 elite distill rescue profiles.
-    "elite_bank_actor_distill_fast_v2": 12,
-    "elite_bank_actor_distill_strong_v2": 13,
+    # Strategy Zoo v1.7 Online Elite-AWR profiles.
+    "elite_bank_actor_distill_fast_awr": 14,
+    "wm_pbt_source_selector_awr": 15,
+    "elite_bank_actor_distill_awr": 16,
+    "elite_bank_actor_distill_strong_awr": 17,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -60,11 +62,17 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "elite_bank_actor_distill_strong": (
         "Strong elite/archive actor distill for v1.3 performance runs (no MPPI)."
     ),
-    "elite_bank_actor_distill_fast_v2": (
-        "v1.4 elite distill rescue: clip large delta, permissive margin (no MPPI)."
+    "elite_bank_actor_distill_fast_awr": (
+        "v1.3 fast elite distill + Online Elite-AWR (conservative lambda)."
     ),
-    "elite_bank_actor_distill_strong_v2": (
-        "v1.4 strong elite distill rescue: clip large delta, higher weight (no MPPI)."
+    "wm_pbt_source_selector_awr": (
+        "v1.3 WM PBT source selector + Online Elite-AWR (conservative lambda)."
+    ),
+    "elite_bank_actor_distill_awr": (
+        "v1.3 elite distill + Online Elite-AWR."
+    ),
+    "elite_bank_actor_distill_strong_awr": (
+        "v1.3 strong elite distill + Online Elite-AWR."
     ),
 }
 
@@ -81,25 +89,25 @@ PROFILE_FAMILY: dict[str, str] = {
     "light_conservative_rssm_planner_distill": "planner",
     "elite_bank_actor_distill_fast": "elite_imitation",
     "elite_bank_actor_distill_strong": "elite_imitation",
-    "elite_bank_actor_distill_fast_v2": "elite_imitation",
-    "elite_bank_actor_distill_strong_v2": "elite_imitation",
+    "elite_bank_actor_distill_fast_awr": "elite_imitation",
+    "wm_pbt_source_selector_awr": "pbt_selector",
+    "elite_bank_actor_distill_awr": "elite_imitation",
+    "elite_bank_actor_distill_strong_awr": "elite_imitation",
 }
 
-# Profile-copy source bonus weights (v1.4 selector-preserving).
+# Profile-copy source bonus weights (v1.3 elite-centered).
 PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
-    "elite_bank_actor_distill_fast_v2": 1.0,
-    "elite_bank_actor_distill": 1.1,
-    "elite_bank_actor_distill_strong_v2": 1.1,
-    "elite_bank_actor_distill_fast": 1.0,
-    "elite_bank_actor_distill_strong": 1.0,
-    "wm_pbt_source_selector": 1.3,
-    "wm_pbt_source_selector_v2": 1.1,
+    "elite_bank_actor_distill_fast": 1.2,
+    "elite_bank_actor_distill": 1.3,
+    "elite_bank_actor_distill_strong": 1.3,
+    "wm_pbt_source_selector": 1.1,
+    "wm_pbt_source_selector_v2": 1.0,
     "ppo_only": 0.6,
     "light_rssm_mppi_actor_distill": 0.5,
     "light_conservative_rssm_planner_distill": 0.5,
     "rssm_mppi_actor_distill": 0.5,
     "conservative_rssm_planner_distill": 0.5,
-    "wm_curriculum_controller": 0.8,
+    "wm_curriculum_controller": 0.9,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -559,36 +567,29 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG: dict[str, Any] = {
     "eir_residual_apply_to_rollout": False,
 }
 
-_ELITE_BANK_ACTOR_DISTILL_FAST_V2: dict[str, Any] = {
+# Strategy Zoo v1.7 — v13 exact + Online Elite-AWR (conservative first-run lambdas).
+_ELITE_BANK_ACTOR_DISTILL_FAST_AWR: dict[str, Any] = {
     **_ELITE_BANK_ACTOR_DISTILL_FAST,
-    "eir_actor_distill_large_delta_mode": "clip",
-    "eir_actor_distill_max_delta": 1.0,
-    "eir_actor_distill_target_delta_clip": 0.35,
-    "eir_actor_distill_min_margin": 0.0,
-    "eir_actor_distill_weight": 0.002,
-    "eir_actor_distill_loss_cap": 0.03,
-    "eir_residual_apply_to_rollout": False,
-    # Strategy Zoo v1.5 clip-validation: temporarily widen the guidance/bank band
-    # to 0.06 so the elite bank can fill (and teachers/soft-gate engage) before
-    # tol reaches the 0.04 floor. Diagnostic only; residual rollout stays OFF.
-    "eir_guidance_start_tol": 0.06,
-    "eir_guidance_bank_tol": 0.06,
-    "eir_guidance_apply_tol": 0.06,
+    "awr_enable": True,
+    "awr_loss_weight": 0.0005,
 }
 
-_ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
+_WM_PBT_SOURCE_SELECTOR_AWR: dict[str, Any] = {
+    **_WM_PBT_SOURCE_SELECTOR,
+    "awr_enable": True,
+    "awr_loss_weight": 0.0003,
+}
+
+_ELITE_BANK_ACTOR_DISTILL_AWR: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL,
+    "awr_enable": True,
+    "awr_loss_weight": 0.0007,
+}
+
+_ELITE_BANK_ACTOR_DISTILL_STRONG_AWR: dict[str, Any] = {
     **_ELITE_BANK_ACTOR_DISTILL_STRONG,
-    "eir_actor_distill_large_delta_mode": "clip",
-    "eir_actor_distill_max_delta": 1.0,
-    "eir_actor_distill_target_delta_clip": 0.50,
-    "eir_actor_distill_min_margin": 0.0,
-    "eir_actor_distill_weight": 0.003,
-    "eir_actor_distill_loss_cap": 0.03,
-    "eir_residual_apply_to_rollout": False,
-    # Strategy Zoo v1.5 clip-validation: same diagnostic widening as fast_v2.
-    "eir_guidance_start_tol": 0.06,
-    "eir_guidance_bank_tol": 0.06,
-    "eir_guidance_apply_tol": 0.06,
+    "awr_enable": True,
+    "awr_loss_weight": 0.0010,
 }
 
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
@@ -604,8 +605,10 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
     "elite_bank_actor_distill_fast": _ELITE_BANK_ACTOR_DISTILL_FAST,
     "elite_bank_actor_distill_strong": _ELITE_BANK_ACTOR_DISTILL_STRONG,
-    "elite_bank_actor_distill_fast_v2": _ELITE_BANK_ACTOR_DISTILL_FAST_V2,
-    "elite_bank_actor_distill_strong_v2": _ELITE_BANK_ACTOR_DISTILL_STRONG_V2,
+    "elite_bank_actor_distill_fast_awr": _ELITE_BANK_ACTOR_DISTILL_FAST_AWR,
+    "wm_pbt_source_selector_awr": _WM_PBT_SOURCE_SELECTOR_AWR,
+    "elite_bank_actor_distill_awr": _ELITE_BANK_ACTOR_DISTILL_AWR,
+    "elite_bank_actor_distill_strong_awr": _ELITE_BANK_ACTOR_DISTILL_STRONG_AWR,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.
@@ -747,15 +750,6 @@ def profile_controlled_restart_skip_flags() -> frozenset[str]:
         "--pbt_wm_profile_copy_cooldown_frames",
         "--pbt_wm_profile_copy_bottom_k",
         "--pbt_wm_profile_copy_top_k",
-        "--pbt_wm_profile_copy_source_min_nsucc_mean",
-        "--pbt_wm_profile_copy_source_min_frames",
-        "--pbt_wm_profile_copy_top1_override_enable",
-        "--no-pbt_wm_profile_copy_top1_override_enable",
-        "--pbt_wm_profile_copy_top1_override_after_frames",
-        "--pbt_wm_profile_copy_top1_override_min_nsucc_gap",
-        "--pbt_wm_profile_copy_top1_override_min_diversity",
-        "--pbt_wm_profile_copy_top1_override_allow_target_protected",
-        "--no-pbt_wm_profile_copy_top1_override_allow_target_protected",
     }
     for dest in _all_profile_controlled_dests():
         skip.add(f"--{dest}")
@@ -776,13 +770,6 @@ def profile_copy_restart_train_args(
     cooldown_frames: int = 0,
     bottom_k: int = 0,
     top_k: int = 0,
-    source_min_nsucc_mean: float = 0.0,
-    source_min_frames: int = 0,
-    top1_override_enable: bool = False,
-    top1_override_after_frames: int = 0,
-    top1_override_min_nsucc_gap: float = 5.0,
-    top1_override_min_diversity: int = 2,
-    top1_override_allow_target_protected: bool = False,
 ) -> list[str]:
     """Re-inject profile-copy CLI after restart argv stripping."""
     return [
@@ -802,30 +789,6 @@ def profile_copy_restart_train_args(
         f"--pbt_wm_profile_copy_cooldown_frames={int(cooldown_frames)}",
         f"--pbt_wm_profile_copy_bottom_k={int(bottom_k)}",
         f"--pbt_wm_profile_copy_top_k={int(top_k)}",
-        f"--pbt_wm_profile_copy_source_min_nsucc_mean={float(source_min_nsucc_mean)}",
-        f"--pbt_wm_profile_copy_source_min_frames={int(source_min_frames)}",
-        (
-            "--pbt_wm_profile_copy_top1_override_enable"
-            if top1_override_enable
-            else "--no-pbt_wm_profile_copy_top1_override_enable"
-        ),
-        (
-            "--pbt_wm_profile_copy_top1_override_after_frames="
-            f"{int(top1_override_after_frames)}"
-        ),
-        (
-            "--pbt_wm_profile_copy_top1_override_min_nsucc_gap="
-            f"{float(top1_override_min_nsucc_gap)}"
-        ),
-        (
-            "--pbt_wm_profile_copy_top1_override_min_diversity="
-            f"{int(top1_override_min_diversity)}"
-        ),
-        (
-            "--pbt_wm_profile_copy_top1_override_allow_target_protected"
-            if top1_override_allow_target_protected
-            else "--no-pbt_wm_profile_copy_top1_override_allow_target_protected"
-        ),
     ]
 
 
@@ -1067,6 +1030,8 @@ def profile_capability_flags(args_cli) -> dict[str, bool]:
             getattr(args_cli, "eir_enable", False)
             and getattr(args_cli, "eir_use_elite_bank", False)
         ),
+        "profile_awr_enabled": bool(getattr(args_cli, "awr_enable", False))
+        and float(getattr(args_cli, "awr_loss_weight", 0.0) or 0.0) > 0.0,
         "profile_conservative_planner_enabled": PROFILE_FAMILY.get(profile, profile)
         in ("planner",),
         "wm_strategy_profile_name": profile,

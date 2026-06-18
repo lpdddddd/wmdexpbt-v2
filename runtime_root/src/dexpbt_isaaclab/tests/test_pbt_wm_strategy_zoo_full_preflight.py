@@ -34,6 +34,19 @@ V13_LAUNCHER = (
     REPO_ROOT
     / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v13_elite_2b_debug.sh"
 )
+V17_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v17_online_elite_awr_2b_debug.sh"
+)
+
+ZOO_PROFILES_V17 = [
+    "ppo_only",
+    "elite_bank_actor_distill_fast_awr",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector_awr",
+    "elite_bank_actor_distill_awr",
+    "elite_bank_actor_distill_strong_awr",
+]
 
 ZOO_PROFILES_V13 = [
     "ppo_only",
@@ -131,6 +144,20 @@ class TestStrategyZooLauncher(unittest.TestCase):
         self.assertIn("strategy_zoo_v1.3_elite_centered_performance_debug", text)
         self.assertNotIn("light_rssm_mppi_actor_distill", text)
         self.assertIn("pbt_wm_profile_copy_min_source_retention=0.50", text)
+
+    def test_v17_launcher_has_six_v13_plus_awr_profiles(self):
+        self.assertTrue(V17_LAUNCHER.is_file(), f"missing launcher {V17_LAUNCHER}")
+        text = V17_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V17:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(profiles, ZOO_PROFILES_V17)
+        self.assertIn("awr_batch_steps=4096", text)
+        self.assertIn("awr_copy_top_k_steps=50000", text)
+        self.assertNotIn("fast_v2", text)
+        self.assertNotIn("large_delta_mode=clip", text)
 
     def test_v13_elite_profiles_capability_flags(self):
         for profile in (

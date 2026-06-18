@@ -650,38 +650,6 @@ parser.add_argument(
     "--pbt_wm_profile_copy_top_k", type=int, default=0,
     help="Source must be in top-k by ranking (unless archive source).",
 )
-parser.add_argument(
-    "--pbt_wm_profile_copy_source_min_nsucc_mean", type=float, default=0.0,
-    help="Minimum source nsucc mean required for profile copy.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_source_min_frames", type=int, default=0,
-    help="Minimum source env frames required for profile copy.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_top1_override_enable",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Allow top1 source to override target_protected and relax diversity min.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_top1_override_after_frames", type=int, default=0,
-    help="Earliest env frame for top1 profile-copy override.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_top1_override_min_nsucc_gap", type=float, default=5.0,
-    help="Minimum nsucc gap for top1 profile-copy override.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_top1_override_min_diversity", type=int, default=2,
-    help="Relaxed diversity minimum when top1 override applies.",
-)
-parser.add_argument(
-    "--pbt_wm_profile_copy_top1_override_allow_target_protected",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Top1 override may waive target_protected guard.",
-)
 # WM curriculum controller (Strategy Zoo profile: wm_curriculum_controller).
 parser.add_argument(
     "--wm_curriculum_controller_enable",
@@ -1352,8 +1320,10 @@ parser.add_argument(
         "light_conservative_rssm_planner_distill",
         "elite_bank_actor_distill_fast",
         "elite_bank_actor_distill_strong",
-        "elite_bank_actor_distill_fast_v2",
-        "elite_bank_actor_distill_strong_v2",
+        "elite_bank_actor_distill_fast_awr",
+        "wm_pbt_source_selector_awr",
+        "elite_bank_actor_distill_awr",
+        "elite_bank_actor_distill_strong_awr",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -1886,17 +1856,6 @@ parser.add_argument("--eir_actor_distill_tol", type=float, default=0.04)
 parser.add_argument("--eir_actor_distill_min_margin", type=float, default=0.02)
 parser.add_argument("--eir_actor_distill_margin_norm", type=float, default=0.05)
 parser.add_argument("--eir_actor_distill_max_delta", type=float, default=0.35)
-parser.add_argument(
-    "--eir_actor_distill_large_delta_mode",
-    type=str,
-    default="reject",
-    choices=["reject", "clip"],
-    help="How to handle teacher-mu delta above max_delta in actor distill mask.",
-)
-parser.add_argument(
-    "--eir_actor_distill_target_delta_clip", type=float, default=0.35,
-    help="Per-dim clip for teacher target when large_delta_mode=clip.",
-)
 parser.add_argument("--eir_actor_distill_allowed_sources", type=str, default="rssm,elite,archive")
 parser.add_argument("--eir_actor_distill_uncertainty_threshold", type=float, default=2.0)
 parser.add_argument("--eir_actor_distill_loss_cap", type=float, default=0.05)
@@ -2020,6 +1979,57 @@ parser.add_argument("--eir_pbt_freeze_elite_curriculum_frames", type=int, defaul
 parser.add_argument("--eir_pbt_max_bank_merge_entries", type=int, default=50000)
 parser.add_argument("--eir_pbt_min_frames_between_broadcasts_per_source", type=int, default=100000000)
 parser.add_argument("--eir_pbt_min_frames_between_broadcasts_per_target", type=int, default=100000000)
+# Strategy Zoo v1.7 — Online Elite-AWR (default off; profiles enable per-worker).
+parser.add_argument("--awr_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--awr_loss_weight", type=float, default=0.0)
+parser.add_argument("--awr_start_after_frames", type=int, default=800_000_000)
+parser.add_argument("--awr_ramp_frames", type=int, default=300_000_000)
+parser.add_argument("--awr_min_buffer_size", type=int, default=50_000)
+parser.add_argument("--awr_buffer_capacity", type=int, default=400_000)
+parser.add_argument(
+    "--awr_batch_steps",
+    type=int,
+    default=4096,
+    help="Number of transition steps per AWR update, not number of episode entries.",
+)
+parser.add_argument(
+    "--awr_batch_size",
+    type=int,
+    default=None,
+    help="Deprecated alias for --awr_batch_steps.",
+)
+parser.add_argument("--awr_minibatch_max_sequences", type=int, default=128)
+parser.add_argument("--awr_update_every", type=int, default=4)
+parser.add_argument("--awr_max_episode_len", type=int, default=200)
+parser.add_argument("--awr_min_burnin_steps", type=int, default=32)
+parser.add_argument("--awr_min_loss_steps_per_entry", type=int, default=16)
+parser.add_argument("--awr_weight_mode", type=str, default="exp_quality",
+                    choices=["quality", "exp_quality", "advantage"])
+parser.add_argument("--awr_beta", type=float, default=1.0)
+parser.add_argument("--awr_weight_max", type=float, default=5.0)
+parser.add_argument("--awr_quality_min", type=float, default=1.5)
+parser.add_argument("--awr_delta_soft", type=float, default=0.35)
+parser.add_argument("--awr_delta_mid", type=float, default=0.8)
+parser.add_argument("--awr_delta_hard", type=float, default=1.2)
+parser.add_argument("--awr_delta_mid_weight", type=float, default=0.3)
+parser.add_argument("--awr_delta_far_weight", type=float, default=0.1)
+parser.add_argument("--awr_loss_cap", type=float, default=0.03)
+parser.add_argument("--awr_kl_soft", type=float, default=0.05)
+parser.add_argument("--awr_kl_hard", type=float, default=0.10)
+parser.add_argument("--awr_ref_update_interval_frames", type=int, default=200_000_000)
+parser.add_argument("--awr_local_sample_frac", type=float, default=0.7)
+parser.add_argument("--awr_inherited_sample_frac", type=float, default=0.2)
+parser.add_argument("--awr_broadcast_sample_frac", type=float, default=0.1)
+parser.add_argument("--awr_copy_top_k_steps", type=int, default=50_000)
+parser.add_argument("--awr_copy_top_k", type=int, default=None,
+                    help="Deprecated alias for --awr_copy_top_k_steps.")
+parser.add_argument("--awr_broadcast_top_k_steps", type=int, default=10_000)
+parser.add_argument("--awr_broadcast_top_k", type=int, default=None,
+                    help="Deprecated alias for --awr_broadcast_top_k_steps.")
+parser.add_argument("--awr_broadcast_min_source_nsucc", type=float, default=35.0)
+parser.add_argument("--awr_pause_on_regression", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--awr_regression_drop_threshold", type=float, default=4.0)
+parser.add_argument("--awr_regression_pause_frames", type=int, default=100_000_000)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -2858,6 +2868,8 @@ def _patch_actor_train_for_seq_wm(
     save_every_epochs: int = 50,
     seq_aux_env_wrap: "SeqAuxInterceptorEnv | None" = None,
     seq_distill_bridge: "SeqDistillBridge | None" = None,
+    awr_bridge=None,
+    awr_env_wrap=None,
 ):
     """Wire SeqWMTrainer into the rl_games agent.
 
@@ -2974,6 +2986,8 @@ def _patch_actor_train_for_seq_wm(
 
     def patched_play_steps_rnn(*args, **kwargs):
         seq_aux_collector.reset_window()
+        if awr_env_wrap is not None:
+            awr_env_wrap.reset_rollout_window()
         bd = original_play_steps_rnn(*args, **kwargs)
         # Phase A4 P0 Task C — terminal aux alignment + aux copy.
         # Without this, collector._last == storage[H-1] (off-by-one) and
@@ -2986,6 +3000,15 @@ def _patch_actor_train_for_seq_wm(
         capture["last_d_hat"] = last_d_hat_t
         capture["last_success_count"] = last_success_t
         rollout_state["generation"] += 1
+
+        if awr_bridge is not None and awr_env_wrap is not None:
+            try:
+                rollout_actions = awr_env_wrap.consume_rollout_actions()
+                ppo_actions = actor.experience_buffer.tensor_dict["actions"]
+                if rollout_actions is not None and rollout_actions.shape == ppo_actions.shape:
+                    awr_bridge.maybe_check_action_convention(rollout_actions, ppo_actions)
+            except Exception as _awr_act_exc:
+                print(f"[AWR] action convention check failed: {_awr_act_exc}")
 
         # FloorCritic: build the per-rollout (T,N) target cache NOW (after the
         # aux copy, before PPO's minibatch loop / get_aux_loss). Reset the
@@ -3562,12 +3585,6 @@ def _patch_actor_train_for_seq_wm(
                         "actor_distill_reject_low_margin": xb.last_actor_distill_reject_low_margin,
                         "actor_distill_reject_bad_source": xb.last_actor_distill_reject_bad_source,
                         "actor_distill_reject_large_delta": xb.last_actor_distill_reject_large_delta,
-                        "actor_distill_clip_large_delta": xb.last_actor_distill_clip_large_delta,
-                        "actor_distill_large_delta_mode": xb.last_actor_distill_large_delta_mode,
-                        "actor_distill_target_delta_clip": xb.last_actor_distill_target_delta_clip,
-                        "actor_distill_delta_linf_mean_all": xb.last_actor_distill_delta_linf_mean_all,
-                        "actor_distill_delta_linf_p50_all": xb.last_actor_distill_delta_linf_p50_all,
-                        "actor_distill_delta_linf_p90_all": xb.last_actor_distill_delta_linf_p90_all,
                         "actor_distill_reject_high_uncertainty": xb.last_actor_distill_reject_high_uncertainty,
                         "actor_distill_reject_tol": xb.last_actor_distill_reject_tol,
                         "actor_distill_reject_uncertainty_missing": xb.last_actor_distill_reject_uncertainty_missing,
@@ -3746,6 +3763,25 @@ def _patch_actor_train_for_seq_wm(
                                 tb_writer.add_scalar(f"eir_mppi/{k}", float(v), frames)
                             except Exception:
                                 pass
+
+                if awr_bridge is not None:
+                    awr_stats = dict(getattr(awr_bridge, "stats", {}) or {})
+                    if awr_env_wrap is not None:
+                        awr_stats.update(getattr(awr_env_wrap, "telemetry", {}) or {})
+                    awr_stats.setdefault(
+                        "awr/buffer_steps", float(awr_bridge.buffer.total_steps())
+                    )
+                    awr_stats.setdefault(
+                        "awr/buffer_sequences", float(awr_bridge.buffer.num_sequences())
+                    )
+                    for k, v in awr_stats.items():
+                        if not isinstance(v, (int, float)):
+                            continue
+                        tag = k if k.startswith("awr/") else f"awr/{k}"
+                        try:
+                            tb_writer.add_scalar(tag, float(v), frames)
+                        except Exception:
+                            pass
 
                 if seq_distill_bridge is not None:
                     cfg = seq_distill_bridge.cfg
@@ -4145,6 +4181,24 @@ def _wm_safe_restore(agent, checkpoint_path: str) -> None:
                 except Exception as _eir_b_exc:
                     print(f"[EIR] restore: elite bank load failed: {_eir_b_exc}")
 
+    awr_bridge = getattr(agent, "_awr_bridge", None)
+    if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
+        from pathlib import Path
+
+        from dexpbt_isaaclab.awr.elite_awr import load_awr_sidecar
+
+        ref = ckpt.get("awr_buffer_ref")
+        if isinstance(ref, str) and ref:
+            ckpt_path = Path(checkpoint_path)
+            sidecar_path = ckpt_path.parent.parent / ref
+            if not sidecar_path.is_file():
+                sidecar_path = ckpt_path.parent / ref
+            loaded = load_awr_sidecar(awr_bridge.buffer, sidecar_path)
+            if loaded > 0:
+                print(f"[AWR] restore: loaded sidecar {sidecar_path} ({loaded} steps)")
+            else:
+                print(f"[AWR] restore: sidecar missing or empty at {sidecar_path}")
+
     if "epoch" in ckpt:
         agent.epoch_num = ckpt["epoch"]
     if "frame" in ckpt:
@@ -4505,6 +4559,12 @@ def _patch_model_get_aux_loss_for_erd(model, erd_bridge):
     model.get_aux_loss = patched_get_aux_loss
 
 
+def _patch_model_get_aux_loss_for_awr(model, awr_bridge):
+    from dexpbt_isaaclab.awr.elite_awr import patch_model_get_aux_loss_for_awr
+
+    patch_model_get_aux_loss_for_awr(model, awr_bridge)
+
+
 def _is_wm_strategy_compatible(src_strategy: str | None, dst_strategy: str) -> tuple[bool, str]:
     src = str(src_strategy or "unknown")
     dst = str(dst_strategy)
@@ -4721,7 +4781,8 @@ class _WmEnabledRunner(Runner):
                  cf_reset_epoch_counter: bool = False,
                  seq_wm_trainer=None, seq_aux_collector=None,
                  seq_wm_save_dir=None, seq_aux_env_wrap=None,
-                 seq_policy_coupling_cfg: "SeqPolicyCouplingConfig | None" = None):
+                 seq_policy_coupling_cfg: "SeqPolicyCouplingConfig | None" = None,
+                 awr_bridge=None, awr_env_wrap=None):
         super().__init__(observer)
         self.wm_trainer = wm_trainer
         self.wm_ckpt_manager = wm_ckpt_manager
@@ -4737,6 +4798,8 @@ class _WmEnabledRunner(Runner):
         self.seq_aux_collector = seq_aux_collector
         self.seq_wm_save_dir = seq_wm_save_dir
         self.seq_aux_env_wrap = seq_aux_env_wrap
+        self.awr_bridge = awr_bridge
+        self.awr_env_wrap = awr_env_wrap
         self.seq_policy_coupling_cfg = (
             seq_policy_coupling_cfg or SeqPolicyCouplingConfig()
         )
@@ -5042,6 +5105,10 @@ class _WmEnabledRunner(Runner):
                     agent.model, eir_bridge.capture
                 )
                 _patch_model_get_aux_loss_for_eir(agent.model, eir_bridge)
+                if self.awr_bridge is not None:
+                    self.awr_bridge.agent_ref = agent
+                    _patch_model_get_aux_loss_for_awr(agent.model, self.awr_bridge)
+                    agent._awr_bridge = self.awr_bridge
                 if res_cfg.enabled and res_cfg.apply_to_rollout:
                     _install_eir_rollout_apply(agent, eir_bridge)
                 self.seq_wm_trainer._eir_bridge = eir_bridge
@@ -5066,6 +5133,8 @@ class _WmEnabledRunner(Runner):
                 self.seq_wm_save_dir,
                 seq_aux_env_wrap=self.seq_aux_env_wrap,
                 seq_distill_bridge=seq_distill_bridge,
+                awr_bridge=self.awr_bridge,
+                awr_env_wrap=self.awr_env_wrap,
             )
             print(
                 f"[SeqWM] Connected to A2CAgent: strategy={self.wm_strategy}, "
@@ -5346,6 +5415,8 @@ def main():
     seq_aux_collector = None
     seq_wm_save_dir = None
     seq_aux_env_wrap = None
+    awr_bridge = None
+    awr_env_wrap = None
     seq_policy_coupling_cfg = SeqPolicyCouplingConfig(
         mode=args_cli.seq_wm_policy_coupling,
         weight=float(args_cli.seq_wm_policy_coupling_weight),
@@ -5745,12 +5816,6 @@ def main():
             actor_distill_min_margin=float(args_cli.eir_actor_distill_min_margin),
             actor_distill_margin_norm=float(args_cli.eir_actor_distill_margin_norm),
             actor_distill_max_delta=float(args_cli.eir_actor_distill_max_delta),
-            actor_distill_large_delta_mode=str(
-                args_cli.eir_actor_distill_large_delta_mode
-            ),
-            actor_distill_target_delta_clip=float(
-                args_cli.eir_actor_distill_target_delta_clip
-            ),
             actor_distill_uncertainty_threshold=float(
                 args_cli.eir_actor_distill_uncertainty_threshold
             ),
@@ -6051,6 +6116,62 @@ def main():
         # Phase A4 P0: keep a direct reference to the wrap so the runner
         # can read its last_infos / last_env_attrs after play_steps_rnn.
         seq_aux_env_wrap = env
+
+        from dexpbt_isaaclab.awr.elite_awr import (
+            EliteAWRBridge,
+            EliteAWRBuffer,
+            awr_active_from_args,
+            build_elite_awr_config_from_args,
+            load_awr_sidecar,
+        )
+        from dexpbt_isaaclab.awr.elite_awr_interceptor import EliteAWRInterceptorEnv
+
+        if awr_active_from_args(args_cli):
+            awr_cfg = build_elite_awr_config_from_args(args_cli)
+            awr_buffer = EliteAWRBuffer(
+                awr_cfg, policy_idx=int(args_cli.policy_idx)
+            )
+            sidecar_path = (
+                Path(args_cli.workspace)
+                / "awr_buffers"
+                / f"policy_{int(args_cli.policy_idx):02d}_awr_topk.pt"
+            )
+            loaded_steps = load_awr_sidecar(awr_buffer, sidecar_path)
+            if loaded_steps > 0:
+                print(
+                    f"[AWR] Loaded sidecar {sidecar_path} "
+                    f"({loaded_steps} steps, {awr_buffer.num_sequences()} seqs)"
+                )
+
+            def _awr_source_meta():
+                return {
+                    "source_nsucc": getattr(
+                        observer, "curr_nsucc_mean", None
+                    ),
+                    "source_retention": getattr(
+                        observer, "curr_source_retention", None
+                    ),
+                    "source_type": "local",
+                    "env_frames": int(getattr(observer, "algo", None) and getattr(getattr(observer, "algo", None), "frame", 0) or 0),
+                }
+
+            env = EliteAWRInterceptorEnv(
+                env,
+                awr_buffer,
+                awr_cfg,
+                num_envs=env.unwrapped.num_envs,
+                policy_idx=int(args_cli.policy_idx),
+                profile_name=str(args_cli.wm_strategy_profile),
+                env_attrs_provider=_seq_env_attrs,
+                source_meta_provider=_awr_source_meta,
+                device=rl_device,
+            )
+            awr_env_wrap = env
+            awr_bridge = EliteAWRBridge(buffer=awr_buffer, cfg=awr_cfg)
+            print(
+                f"[AWR] enabled: loss_weight={awr_cfg.loss_weight} "
+                f"batch_steps={awr_cfg.batch_steps} update_every={awr_cfg.update_every}"
+            )
 
         # Path used by patched_train_epoch to dump wm_seq_latest.pt.
         seq_wm_save_dir = Path(args_cli.workspace) / f"{args_cli.policy_idx:03d}" / "wm_seq_checkpoints"
@@ -6652,27 +6773,6 @@ def main():
             ),
             pbt_wm_profile_copy_bottom_k=args_cli.pbt_wm_profile_copy_bottom_k,
             pbt_wm_profile_copy_top_k=args_cli.pbt_wm_profile_copy_top_k,
-            pbt_wm_profile_copy_source_min_nsucc_mean=(
-                args_cli.pbt_wm_profile_copy_source_min_nsucc_mean
-            ),
-            pbt_wm_profile_copy_source_min_frames=(
-                args_cli.pbt_wm_profile_copy_source_min_frames
-            ),
-            pbt_wm_profile_copy_top1_override_enable=(
-                args_cli.pbt_wm_profile_copy_top1_override_enable
-            ),
-            pbt_wm_profile_copy_top1_override_after_frames=(
-                args_cli.pbt_wm_profile_copy_top1_override_after_frames
-            ),
-            pbt_wm_profile_copy_top1_override_min_nsucc_gap=(
-                args_cli.pbt_wm_profile_copy_top1_override_min_nsucc_gap
-            ),
-            pbt_wm_profile_copy_top1_override_min_diversity=(
-                args_cli.pbt_wm_profile_copy_top1_override_min_diversity
-            ),
-            pbt_wm_profile_copy_top1_override_allow_target_protected=(
-                args_cli.pbt_wm_profile_copy_top1_override_allow_target_protected
-            ),
             profile_actor_distill_enabled=_wm_profile_caps.get(
                 "profile_actor_distill_enabled", False
             ),
@@ -6734,6 +6834,8 @@ def main():
             seq_wm_save_dir=seq_wm_save_dir,
             seq_aux_env_wrap=seq_aux_env_wrap,
             seq_policy_coupling_cfg=seq_policy_coupling_cfg,
+            awr_bridge=awr_bridge,
+            awr_env_wrap=awr_env_wrap,
         )
     elif args_cli.checkpoint is not None:
         # ppo_only and other non-WM profiles still receive cross-copy checkpoints

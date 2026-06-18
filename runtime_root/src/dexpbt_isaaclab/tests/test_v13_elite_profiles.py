@@ -117,6 +117,17 @@ class TestV13EliteProfiles(unittest.TestCase):
                 msg=f"{profile} capability flag must keep residual apply OFF",
             )
 
+    def test_v17_awr_profiles_not_in_v13_set(self):
+        v17_only = {
+            "elite_bank_actor_distill_fast_awr",
+            "wm_pbt_source_selector_awr",
+            "elite_bank_actor_distill_awr",
+            "elite_bank_actor_distill_strong_awr",
+        }
+        for name in v17_only:
+            self.assertNotIn(name, ZOO_PROFILES_V13)
+            self.assertIn(name, PROFILE_TABLES)
+
 
 if __name__ == "__main__":
     unittest.main()

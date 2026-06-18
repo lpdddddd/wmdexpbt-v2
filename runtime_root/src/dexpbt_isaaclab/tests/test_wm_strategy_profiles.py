@@ -46,6 +46,10 @@ class TestWMStrategyProfiles(unittest.TestCase):
         self.assertEqual(PROFILE_IDS["light_conservative_rssm_planner_distill"], 9)
         self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_fast"], 10)
         self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_strong"], 11)
+        self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_fast_awr"], 14)
+        self.assertEqual(PROFILE_IDS["wm_pbt_source_selector_awr"], 15)
+        self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_awr"], 16)
+        self.assertEqual(PROFILE_IDS["elite_bank_actor_distill_strong_awr"], 17)
 
     def test_ppo_only_description_is_not_original_dexpbt(self):
         desc = PROFILE_DESCRIPTIONS["ppo_only"]
@@ -391,13 +395,6 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
                 "--pbt_wm_profile_copy_cooldown_frames=0",
                 "--pbt_wm_profile_copy_bottom_k=0",
                 "--pbt_wm_profile_copy_top_k=0",
-                "--pbt_wm_profile_copy_source_min_nsucc_mean=0.0",
-                "--pbt_wm_profile_copy_source_min_frames=0",
-                "--no-pbt_wm_profile_copy_top1_override_enable",
-                "--pbt_wm_profile_copy_top1_override_after_frames=0",
-                "--pbt_wm_profile_copy_top1_override_min_nsucc_gap=5.0",
-                "--pbt_wm_profile_copy_top1_override_min_diversity=2",
-                "--no-pbt_wm_profile_copy_top1_override_allow_target_protected",
             ],
         )
 
