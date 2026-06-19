@@ -1,6 +1,6 @@
 """Build Online Elite-AWR entries from PPO experience_buffer rollout tensors (v17.1/v17.2).
 
-v17.2 vectorization hotfix: default builder uses batched torch ops; reference path retained.
+v17.2 full batched builder: enumerate + feature precompute on GPU; reference path retained.
 """
 
 from __future__ import annotations
@@ -527,7 +527,7 @@ def build_awr_entries_from_experience_buffer_reference(
 
 
 def _enumerate_fragments(dones_bool: torch.Tensor, *, all_fragments: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return (frag_n, frag_t0, frag_t1) inclusive fragment bounds."""
+    """Return (frag_n, frag_t0, frag_t1) inclusive fragment bounds (reference loop)."""
     T, N = int(dones_bool.shape[0]), int(dones_bool.shape[1])
     device = dones_bool.device
     end_mask = dones_bool.clone()
@@ -564,6 +564,45 @@ def _enumerate_fragments(dones_bool: torch.Tensor, *, all_fragments: bool) -> tu
         torch.tensor(frag_t0, device=device, dtype=torch.long),
         torch.tensor(frag_t1, device=device, dtype=torch.long),
     )
+
+
+def _enumerate_fragments_batched(
+    dones_bool: torch.Tensor,
+    *,
+    all_fragments: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """v17.2 batched fragment enumeration without per-env Python loops."""
+    T, N = int(dones_bool.shape[0]), int(dones_bool.shape[1])
+    device = dones_bool.device
+    if N == 0 or T == 0:
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        return empty, empty, empty
+
+    if not all_fragments:
+        frag_n = torch.arange(N, device=device, dtype=torch.long)
+        frag_t0 = torch.zeros(N, device=device, dtype=torch.long)
+        frag_t1 = torch.full((N,), T - 1, device=device, dtype=torch.long)
+        return frag_n, frag_t0, frag_t1
+
+    end_mask = dones_bool.clone()
+    end_mask[T - 1, :] = True
+    ends_n, ends_t = torch.nonzero(end_mask.T, as_tuple=True)
+    if ends_n.numel() == 0:
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        return empty, empty, empty
+
+    sort_key = ends_n.to(torch.long) * (T + 1) + ends_t.to(torch.long)
+    order = torch.argsort(sort_key)
+    ends_n = ends_n[order]
+    ends_t = ends_t[order]
+
+    frag_t0 = torch.zeros_like(ends_t)
+    if ends_t.numel() > 1:
+        same_env = ends_n[1:] == ends_n[:-1]
+        frag_t0[1:] = torch.where(same_env, ends_t[:-1] + 1, torch.zeros_like(ends_t[:-1]))
+
+    valid = ends_t >= frag_t0
+    return ends_n[valid], frag_t0[valid], ends_t[valid]
 
 
 def _batched_future_improvement(d_hat_ft: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -645,6 +684,275 @@ def _batch_accept_mask(
     return accept
 
 
+@dataclass
+class _FragmentFeatures:
+    """Batched per-candidate fragment tensors (v17.2 full vectorization)."""
+
+    frag_n: torch.Tensor
+    frag_t0: torch.Tensor
+    frag_t1: torch.Tensor
+    mask: torch.Tensor
+    frag_len: torch.Tensor
+    stored_seq_len: torch.Tensor
+    seg_t0: torch.Tensor
+    truncated: torch.Tensor
+    tolerance_min: torch.Tensor
+    lifted_frac: torch.Tensor
+    had_drop: torch.Tensor
+    no_drop: torch.Tensor
+    future_improvement: torch.Tensor
+    future_success: torch.Tensor
+    future_success_within_100: torch.Tensor
+    success_from_cnt: torch.Tensor
+    episode_success: torch.Tensor
+    episode_quality: torch.Tensor
+    accept_mask: torch.Tensor
+    final_accept: torch.Tensor
+    loss_mask_ft: torch.Tensor
+    valid_mask_ft: torch.Tensor
+    num_loss_steps: torch.Tensor
+    quality_per_step_ft: torch.Tensor
+    tolerance_ft: torch.Tensor
+    is_partial: torch.Tensor
+    done_unknown: torch.Tensor
+
+
+def _precompute_fragment_features(
+    rt: _RolloutTensors,
+    frag_n: torch.Tensor,
+    frag_t0: torch.Tensor,
+    frag_t1: torch.Tensor,
+    *,
+    cfg: EliteAWRConfig,
+    source_nsucc: Optional[float],
+) -> _FragmentFeatures:
+    """Batch all candidate fragment metrics; no per-fragment .item() in precompute."""
+    F = int(frag_n.numel())
+    T = rt.T
+    device = rt.dones_bool.device
+    t_grid = torch.arange(T, device=device, dtype=torch.long).unsqueeze(0).expand(F, T)
+    mask = (t_grid >= frag_t0.unsqueeze(1)) & (t_grid <= frag_t1.unsqueeze(1))
+    frag_len = (frag_t1 - frag_t0 + 1).to(torch.float32)
+    orig_len = frag_t1 - frag_t0 + 1
+    max_len = int(cfg.max_episode_len)
+    stored_seq_len = torch.minimum(orig_len, torch.full_like(orig_len, max_len))
+    seg_t0 = frag_t1 - stored_seq_len + 1
+    seg_mask = (t_grid >= seg_t0.unsqueeze(1)) & (t_grid <= frag_t1.unsqueeze(1))
+    # Reference rollout builder always passes truncated_prefix=True to entry builder.
+    truncated = torch.ones(F, device=device, dtype=torch.bool)
+    burn_start = torch.where(
+        stored_seq_len > int(cfg.min_burnin_steps),
+        torch.full_like(stored_seq_len, int(cfg.min_burnin_steps)),
+        torch.zeros_like(stored_seq_len),
+    )
+
+    if rt.tol is not None:
+        tolerance_ft = rt.tol[:, frag_n].T.to(torch.float32)
+        tolerance_ft = tolerance_ft.masked_fill(~mask, DEFAULT_TOLERANCE)
+        tol_masked = tolerance_ft.masked_fill(~mask, float("inf"))
+        tolerance_min = tol_masked.min(dim=1).values
+        tolerance_min = torch.where(
+            torch.isfinite(tolerance_min),
+            tolerance_min,
+            torch.full((F,), DEFAULT_TOLERANCE, device=device, dtype=torch.float32),
+        )
+    else:
+        tolerance_ft = torch.full((F, T), DEFAULT_TOLERANCE, device=device, dtype=torch.float32)
+        tolerance_min = torch.full((F,), DEFAULT_TOLERANCE, device=device, dtype=torch.float32)
+
+    if rt.lifted is not None:
+        lifted_ft = rt.lifted[:, frag_n].T
+        lifted_bool = lifted_ft.bool() if lifted_ft.dtype == torch.bool else (lifted_ft != 0)
+        lifted_sum = (lifted_bool & mask).float().sum(dim=1)
+        lifted_frac = lifted_sum / frag_len.clamp(min=1.0)
+    else:
+        lifted_bool = torch.zeros((F, T), device=device, dtype=torch.bool)
+        lifted_frac = torch.zeros(F, device=device, dtype=torch.float32)
+
+    if rt.failure is not None:
+        fail_ft = rt.failure[:, frag_n].T
+        fail_bool = fail_ft.bool() if fail_ft.dtype == torch.bool else (fail_ft != 0)
+        had_drop = (fail_bool & mask).any(dim=1)
+        no_drop = ~had_drop
+    else:
+        fail_bool = torch.zeros((F, T), device=device, dtype=torch.bool)
+        had_drop = torch.zeros(F, device=device, dtype=torch.bool)
+        no_drop = torch.ones(F, device=device, dtype=torch.bool)
+
+    if rt.d_hat is not None:
+        d_hat_ft = rt.d_hat[:, frag_n].T
+        future_improvement = _batched_future_improvement(d_hat_ft, mask)
+    else:
+        future_improvement = torch.zeros(F, device=device, dtype=torch.float32)
+
+    if rt.success_cnt is not None:
+        sc_start = rt.success_cnt[frag_t0, frag_n].to(torch.float32)
+        sc_end = rt.success_cnt[frag_t1, frag_n].to(torch.float32)
+        success_from_cnt = sc_end > sc_start
+        future_success = success_from_cnt
+        future_success_within_100 = success_from_cnt & (frag_len <= 100.0)
+        episode_success = torch.zeros(F, device=device, dtype=torch.bool)
+    else:
+        success_from_cnt = torch.zeros(F, device=device, dtype=torch.bool)
+        future_success = torch.zeros(F, device=device, dtype=torch.bool)
+        future_success_within_100 = torch.zeros(F, device=device, dtype=torch.bool)
+        episode_success = torch.zeros(F, device=device, dtype=torch.bool)
+
+    episode_quality = _batched_elite_awr_quality(
+        future_success_within_100=future_success_within_100,
+        lifted_frac=lifted_frac,
+        no_drop=no_drop,
+        future_improvement=future_improvement,
+        tolerance_min=tolerance_min,
+        had_drop=had_drop,
+        source_nsucc=source_nsucc,
+    )
+
+    accept_mask = _batch_accept_mask(
+        future_success_within_100=future_success_within_100,
+        future_success=future_success,
+        lifted_frac=lifted_frac,
+        no_drop=no_drop,
+        future_improvement=future_improvement,
+        tolerance_min=tolerance_min,
+        had_drop=had_drop,
+        episode_success=episode_success,
+        frag_len=frag_len,
+        source_nsucc=source_nsucc,
+        quality_min=cfg.quality_min,
+    )
+
+    burn_start = torch.where(
+        stored_seq_len > int(cfg.min_burnin_steps),
+        torch.full_like(stored_seq_len, int(cfg.min_burnin_steps)),
+        torch.zeros_like(stored_seq_len),
+    )
+    rel_pos = t_grid - seg_t0.unsqueeze(1)
+    step_pass = (~fail_bool) & (lifted_bool | (tolerance_ft <= 0.06))
+    base_loss = seg_mask & (rel_pos >= burn_start.unsqueeze(1))
+    loss_mask_ft = base_loss & step_pass
+    num_loss_steps = loss_mask_ft.sum(dim=1)
+    valid_mask_ft = seg_mask
+
+    obs_finite = torch.isfinite(rt.obs).all(dim=-1)
+    act_finite = torch.isfinite(rt.actions).all(dim=-1)
+    finite_seg = obs_finite[:, frag_n].T & act_finite[:, frag_n].T
+    finite_ok = (~seg_mask | finite_seg).all(dim=1)
+
+    final_accept = (
+        accept_mask
+        & (num_loss_steps >= float(cfg.min_loss_steps_per_entry))
+        & finite_ok
+        & (episode_quality >= float(cfg.quality_min))
+    )
+
+    quality_per_step_ft = torch.where(
+        seg_mask,
+        episode_quality.unsqueeze(1),
+        torch.zeros(F, T, device=device, dtype=torch.float32),
+    )
+
+    is_partial = ~rt.dones_bool[frag_t1, frag_n]
+    episode_done = ~is_partial
+    done_unknown = episode_done
+
+    return _FragmentFeatures(
+        frag_n=frag_n,
+        frag_t0=frag_t0,
+        frag_t1=frag_t1,
+        mask=mask,
+        frag_len=frag_len,
+        stored_seq_len=stored_seq_len,
+        seg_t0=seg_t0,
+        truncated=truncated,
+        tolerance_min=tolerance_min,
+        lifted_frac=lifted_frac,
+        had_drop=had_drop,
+        no_drop=no_drop,
+        future_improvement=future_improvement,
+        future_success=future_success,
+        future_success_within_100=future_success_within_100,
+        success_from_cnt=success_from_cnt,
+        episode_success=episode_success,
+        episode_quality=episode_quality,
+        accept_mask=accept_mask,
+        final_accept=final_accept,
+        loss_mask_ft=loss_mask_ft,
+        valid_mask_ft=valid_mask_ft,
+        num_loss_steps=num_loss_steps,
+        quality_per_step_ft=quality_per_step_ft,
+        tolerance_ft=tolerance_ft,
+        is_partial=is_partial,
+        done_unknown=done_unknown,
+    )
+
+
+def _materialize_elite_awr_entry(
+    idx: int,
+    features: _FragmentFeatures,
+    rt: _RolloutTensors,
+    *,
+    cfg: EliteAWRConfig,
+    source_policy: int,
+    source_profile: str,
+    source_nsucc: Optional[float],
+    source_retention: Optional[float],
+    source_type: str,
+    env_frames: int,
+) -> EliteAWREntry:
+    """Materialize one selected fragment from batched precompute (selected loop only)."""
+    n = int(features.frag_n[idx].item())
+    t1 = int(features.frag_t1[idx].item())
+    seg_t0 = int(features.seg_t0[idx].item())
+    stored_seq_len = int(features.stored_seq_len[idx].item())
+    original_episode_len = int(features.frag_len[idx].item())
+
+    obs_seg = rt.obs[seg_t0 : t1 + 1, n].detach().cpu()
+    act_seg = rt.actions[seg_t0 : t1 + 1, n].detach().cpu()
+    valid_mask = torch.ones(stored_seq_len, dtype=torch.bool)
+    loss_mask = features.loss_mask_ft[idx, seg_t0 : t1 + 1].detach().cpu()
+    quality_per_step = features.quality_per_step_ft[idx, seg_t0 : t1 + 1].detach().cpu()
+    tolerance_per_step = features.tolerance_ft[idx, seg_t0 : t1 + 1].detach().cpu()
+
+    trunc = True
+    if stored_seq_len > int(cfg.max_episode_len):
+        loss_start_idx = min(int(cfg.min_burnin_steps), stored_seq_len - 1)
+    elif stored_seq_len > int(cfg.min_burnin_steps):
+        loss_start_idx = 0
+    else:
+        loss_start_idx = 0
+
+    return EliteAWREntry(
+        obs=obs_seg,
+        action=act_seg,
+        valid_mask=valid_mask,
+        loss_mask=loss_mask,
+        quality_per_step=quality_per_step,
+        tolerance_per_step=tolerance_per_step,
+        episode_quality=float(features.episode_quality[idx].item()),
+        episode_tolerance_min=float(features.tolerance_min[idx].item()),
+        future_success=bool(features.future_success[idx].item()),
+        future_success_within_100=bool(features.future_success_within_100[idx].item()),
+        lifted_frac=float(features.lifted_frac[idx].item()),
+        no_drop=bool(features.no_drop[idx].item()),
+        future_improvement=float(features.future_improvement[idx].item()),
+        had_drop=bool(features.had_drop[idx].item()),
+        starts_at_episode_reset=False,
+        truncated_prefix=trunc,
+        original_episode_len=original_episode_len,
+        stored_seq_len=stored_seq_len,
+        loss_start_idx=loss_start_idx,
+        source_policy=int(source_policy),
+        source_profile=str(source_profile),
+        source_nsucc=source_nsucc,
+        source_retention=source_retention,
+        source_type=str(source_type),
+        env_frames=int(env_frames),
+        done_reason=DoneReason.UNKNOWN.value,
+        info_missing=dict(rt.info_missing),
+    )
+
+
 def build_awr_entries_from_experience_buffer_vectorized(
     *,
     experience_buffer,
@@ -656,7 +964,7 @@ def build_awr_entries_from_experience_buffer_vectorized(
     env_frames: int,
     source_type: str = "local",
 ) -> tuple[list[EliteAWREntry], dict[str, float]]:
-    """v17.2 vectorized builder: batched torch precompute + small selected materialize loop."""
+    """v17.2 full batched builder: enumerate + precompute on GPU, materialize selected only."""
     t0_wall = time.perf_counter()
     rt = _load_rollout_tensors(experience_buffer.tensor_dict)
     stats = _init_builder_stats(rt.info_missing, source_nsucc)
@@ -664,7 +972,7 @@ def build_awr_entries_from_experience_buffer_vectorized(
     stats["awr/rollout_builder_vectorized_speed_path"] = 1.0
 
     pre_t0 = time.perf_counter()
-    frag_n, frag_t0, frag_t1 = _enumerate_fragments(
+    frag_n, frag_t0, frag_t1 = _enumerate_fragments_batched(
         rt.dones_bool, all_fragments=_vectorize_all_fragments()
     )
     F = int(frag_n.numel())
@@ -674,130 +982,28 @@ def build_awr_entries_from_experience_buffer_vectorized(
         stats["awr/rollout_builder_time_ms"] = (time.perf_counter() - t0_wall) * 1000.0
         stats["awr/rollout_builder_precompute_ms"] = 0.0
         stats["awr/rollout_builder_selected_materialize_ms"] = 0.0
+        stats["awr/success_cleared_by_unknown_done"] = 0.0
         return [], stats
 
-    T = rt.T
-    device = rt.dones_bool.device
-    t_grid = torch.arange(T, device=device).unsqueeze(0).expand(F, T)
-    mask = (t_grid >= frag_t0.unsqueeze(1)) & (t_grid <= frag_t1.unsqueeze(1))
-    frag_len = (frag_t1 - frag_t0 + 1).float()
-
-    if rt.tol is not None:
-        tol_ft = rt.tol[:, frag_n].T
-        tol_masked = tol_ft.masked_fill(~mask, float("inf"))
-        tolerance_min = tol_masked.min(dim=1).values
-        tolerance_min = torch.where(torch.isfinite(tolerance_min), tolerance_min, torch.full((F,), DEFAULT_TOLERANCE, device=device))
-    else:
-        tolerance_min = torch.full((F,), DEFAULT_TOLERANCE, device=device, dtype=torch.float32)
-
-    if rt.lifted is not None:
-        lifted_ft = rt.lifted[:, frag_n].T.float()
-        lifted_sum = (lifted_ft * mask.float()).sum(dim=1)
-        lifted_frac = lifted_sum / frag_len.clamp(min=1.0)
-    else:
-        lifted_frac = torch.zeros(F, device=device, dtype=torch.float32)
-
-    if rt.failure is not None:
-        fail_ft = rt.failure[:, frag_n].T
-        fail_bool = fail_ft.bool() if fail_ft.dtype == torch.bool else (fail_ft != 0)
-        had_drop = (fail_bool & mask).any(dim=1)
-        no_drop = ~had_drop
-    else:
-        had_drop = torch.zeros(F, device=device, dtype=torch.bool)
-        no_drop = torch.ones(F, device=device, dtype=torch.bool)
-
-    if rt.d_hat is not None:
-        d_hat_ft = rt.d_hat[:, frag_n].T
-        future_improvement = _batched_future_improvement(d_hat_ft, mask)
-    else:
-        future_improvement = torch.zeros(F, device=device, dtype=torch.float32)
-
-    episode_done = rt.dones_bool[frag_t1, frag_n]
-    is_partial = ~episode_done
-    dones = experience_buffer.tensor_dict["dones"]
-
-    if rt.success_cnt is not None:
-        sc_start = rt.success_cnt[frag_t0, frag_n].float()
-        sc_end = rt.success_cnt[frag_t1, frag_n].float()
-        success_from_cnt = sc_end > sc_start
-    else:
-        success_from_cnt = torch.zeros(F, device=device, dtype=torch.bool)
-
-    future_success = success_from_cnt.clone()
-    future_success_within_100 = success_from_cnt & (frag_len <= 100.0)
-
-    terminal_success = torch.zeros(F, device=device, dtype=torch.bool)
-    done_reasons = [DoneReason.UNKNOWN.value] * F
-    done_unknown = torch.zeros(F, device=device, dtype=torch.bool)
-
-    episode_done_idx = torch.nonzero(episode_done, as_tuple=False).view(-1)
-    for idx in episode_done_idx.tolist():
-        n = int(frag_n[idx].item())
-        t1 = int(frag_t1[idx].item())
-        term_slice = dones[t1, n]
-        trunc_slice = torch.zeros_like(term_slice)
-        dr = classify_done_reason(
-            terminated=term_slice,
-            truncated=trunc_slice,
-            env_idx=0,
-            infos=None,
-            env_attrs=None,
-        )
-        done_reasons[idx] = dr
-        if dr == DoneReason.UNKNOWN.value:
-            done_unknown[idx] = True
-        if dr == DoneReason.SUCCESS.value:
-            terminal_success[idx] = True
-            if not bool(future_success[idx].item()):
-                future_success[idx] = True
-                if float(frag_len[idx].item()) <= 100.0:
-                    future_success_within_100[idx] = True
-
-    success_from_cnt_count = int((success_from_cnt & future_success).sum().item())
-    done_unknown_count = int(done_unknown.sum().item())
-
-    keep_unknown = done_unknown & future_success & success_from_cnt
-    clear_no_fs = done_unknown & (~future_success)
-    clear_other = done_unknown & future_success & (~success_from_cnt)
-    success_cleared_by_unknown = float(clear_other.sum().item())
-    clear_mask = clear_no_fs | clear_other
-    future_success = future_success & ~clear_mask
-    future_success_within_100 = future_success_within_100 & ~clear_mask
-
-    accept = _batch_accept_mask(
-        future_success_within_100=future_success_within_100,
-        future_success=future_success,
-        lifted_frac=lifted_frac,
-        no_drop=no_drop,
-        future_improvement=future_improvement,
-        tolerance_min=tolerance_min,
-        had_drop=had_drop,
-        episode_success=terminal_success,
-        frag_len=frag_len,
+    features = _precompute_fragment_features(
+        rt,
+        frag_n,
+        frag_t0,
+        frag_t1,
+        cfg=cfg,
         source_nsucc=source_nsucc,
-        quality_min=cfg.quality_min,
     )
-
     stats["awr/rollout_builder_precompute_ms"] = (time.perf_counter() - pre_t0) * 1000.0
     mat_t0 = time.perf_counter()
 
     entries: list[EliteAWREntry] = []
     selected_count = 0
-    obs = rt.obs
-    actions = rt.actions
-
-    selected_idx = torch.nonzero(accept, as_tuple=False).view(-1)
+    selected_idx = torch.nonzero(features.final_accept, as_tuple=False).view(-1)
     for idx in selected_idx.tolist():
-        n = int(frag_n[idx].item())
-        t0 = int(frag_t0[idx].item())
-        t1 = int(frag_t1[idx].item())
-
-        entry = _build_entry_from_fragment(
-            obs_frag=obs[t0 : t1 + 1, n],
-            action_frag=actions[t0 : t1 + 1, n],
-            lifted_frag=rt.lifted[t0 : t1 + 1, n] if rt.lifted is not None else None,
-            tol_frag=rt.tol[t0 : t1 + 1, n] if rt.tol is not None else None,
-            failure_frag=rt.failure[t0 : t1 + 1, n] if rt.failure is not None else None,
+        entry = _materialize_elite_awr_entry(
+            idx,
+            features,
+            rt,
             cfg=cfg,
             source_policy=source_policy,
             source_profile=source_profile,
@@ -805,28 +1011,24 @@ def build_awr_entries_from_experience_buffer_vectorized(
             source_retention=source_retention,
             source_type=source_type,
             env_frames=env_frames,
-            done_reason=done_reasons[idx],
-            future_success=bool(future_success[idx].item()),
-            future_success_within_100=bool(future_success_within_100[idx].item()),
-            future_improvement=float(future_improvement[idx].item()),
-            starts_at_episode_reset=False,
-            truncated_prefix=True,
-            original_episode_len=int(t1 - t0 + 1),
-            info_missing=rt.info_missing,
         )
-        if entry is not None:
-            entries.append(entry)
-            selected_count += 1
-            stats["awr/rollout_builder_selected_steps"] += float(entry.num_valid_steps)
+        entries.append(entry)
+        selected_count += 1
+        stats["awr/rollout_builder_selected_steps"] += float(entry.num_valid_steps)
 
-    partial_count = int(is_partial.sum().item())
+    partial_count = int(features.is_partial.sum().item())
+    done_unknown_count = int(features.done_unknown.sum().item())
+    success_from_cnt_count = int(features.success_from_cnt.sum().item())
+
     stats["awr/rollout_builder_selected_fragments"] = float(selected_count)
     stats["awr/rollout_builder_entries"] = float(len(entries))
     stats["awr/rollout_builder_partial_frac"] = float(partial_count) / max(F, 1)
     stats["awr/done_reason_unknown_frac"] = float(done_unknown_count) / max(F, 1)
     stats["awr/success_from_success_cnt"] = float(success_from_cnt_count)
-    stats["awr/success_cleared_by_unknown_done"] = float(success_cleared_by_unknown)
-    stats["awr/rollout_builder_selected_materialize_ms"] = (time.perf_counter() - mat_t0) * 1000.0
+    stats["awr/success_cleared_by_unknown_done"] = 0.0
+    stats["awr/rollout_builder_selected_materialize_ms"] = (
+        time.perf_counter() - mat_t0
+    ) * 1000.0
     stats["awr/rollout_builder_time_ms"] = (time.perf_counter() - t0_wall) * 1000.0
     return entries, stats
 

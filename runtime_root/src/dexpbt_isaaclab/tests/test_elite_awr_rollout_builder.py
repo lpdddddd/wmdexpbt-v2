@@ -26,6 +26,8 @@ from dexpbt_isaaclab.awr.elite_awr import (
 )
 from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
     PPO_BUFFER_ACTIONS,
+    _enumerate_fragments,
+    _enumerate_fragments_batched,
     _fragment_success_signal,
     build_awr_entries_from_experience_buffer,
     build_awr_entries_from_experience_buffer_reference,
@@ -450,6 +452,61 @@ class TestEliteAWRRolloutBuilder(unittest.TestCase):
         self.assertEqual(cfg.collect_after_frames, 123)
 
 
+def _fragment_triplets_equal(
+    a: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    b: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+) -> bool:
+    def _sort(n, t0, t1):
+        if n.numel() == 0:
+            return n, t0, t1
+        key = n.to(torch.long) * 1_000_000 + t0.to(torch.long) * 1_000 + t1.to(torch.long)
+        order = torch.argsort(key)
+        return n[order], t0[order], t1[order]
+
+    an, at0, at1 = _sort(*a)
+    bn, bt0, bt1 = _sort(*b)
+    return (
+        torch.equal(an, bn)
+        and torch.equal(at0, bt0)
+        and torch.equal(at1, bt1)
+    )
+
+
+class TestBatchedFragmentEnumeration(unittest.TestCase):
+    def _assert_enum_match(self, dones_bool: torch.Tensor, *, all_fragments: bool = True) -> None:
+        ref = _enumerate_fragments(dones_bool, all_fragments=all_fragments)
+        bat = _enumerate_fragments_batched(dones_bool, all_fragments=all_fragments)
+        self.assertTrue(
+            _fragment_triplets_equal(ref, bat),
+            msg=f"ref={tuple(x.tolist() for x in ref)} bat={tuple(x.tolist() for x in bat)}",
+        )
+
+    def test_batched_matches_reference_random_multi_done(self):
+        torch.manual_seed(17)
+        T, N = 16, 32
+        dones = torch.rand(T, N) < 0.12
+        dones[-1, :] = True
+        self._assert_enum_match(dones)
+
+    def test_batched_matches_reference_no_done(self):
+        T, N = 16, 32
+        dones = torch.zeros(T, N, dtype=torch.bool)
+        self._assert_enum_match(dones)
+
+    def test_batched_matches_reference_done_at_final_step(self):
+        T, N = 16, 32
+        dones = torch.zeros(T, N, dtype=torch.bool)
+        dones[-1, :] = True
+        self._assert_enum_match(dones)
+
+    def test_batched_matches_reference_final_fragment_only(self):
+        torch.manual_seed(23)
+        T, N = 16, 32
+        dones = torch.rand(T, N) < 0.15
+        dones[-1, :] = True
+        self._assert_enum_match(dones, all_fragments=False)
+
+
 class TestVectorizedRolloutBuilder(unittest.TestCase):
     def _cfg(self, **kwargs) -> EliteAWRConfig:
         base = dict(
@@ -514,6 +571,7 @@ class TestVectorizedRolloutBuilder(unittest.TestCase):
             vec_stats["awr/rollout_builder_selected_steps"],
             delta=float(cfg.min_loss_steps_per_entry * 4),
         )
+        self.assertEqual(vec_stats.get("awr/success_cleared_by_unknown_done", -1.0), 0.0)
         if ref_entries and vec_entries:
             re = ref_entries[0]
             ve = vec_entries[0]
@@ -524,6 +582,13 @@ class TestVectorizedRolloutBuilder(unittest.TestCase):
             self.assertEqual(re.no_drop, ve.no_drop)
             self.assertAlmostEqual(re.episode_quality, ve.episode_quality, places=4)
             self.assertTrue(torch.allclose(re.action, ve.action))
+            t_end = int(exp.tensor_dict["dones"].squeeze(-1).to(torch.bool).nonzero(as_tuple=True)[0][0].item())
+            self.assertTrue(
+                torch.allclose(
+                    ve.action,
+                    exp.tensor_dict["actions"][: t_end + 1, 0].cpu(),
+                )
+            )
 
     def test_vectorized_success_cnt_delta_preserved(self):
         T, N = 16, 1
@@ -645,6 +710,30 @@ class TestVectorizedRolloutBuilder(unittest.TestCase):
         vec_ms = (time.perf_counter() - t1) * 1000.0
         print(f"[benchmark] reference={ref_ms:.2f}ms vectorized={vec_ms:.2f}ms ratio={ref_ms/max(vec_ms,1e-6):.1f}x")
         self.assertLess(vec_ms, ref_ms)
+
+    def test_vectorized_benchmark_n8192_print_only(self):
+        cfg = self._cfg(min_loss_steps_per_entry=4, quality_min=99.0)
+        exp = self._rich_rollout(T=16, N=8192)
+        kwargs = dict(
+            experience_buffer=exp,
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=30.0,
+            source_retention=0.8,
+            env_frames=600_000_000,
+        )
+        t0 = time.perf_counter()
+        build_awr_entries_from_experience_buffer_reference(**kwargs)
+        ref_ms = (time.perf_counter() - t0) * 1000.0
+        t1 = time.perf_counter()
+        _, vec_stats = build_awr_entries_from_experience_buffer_vectorized(**kwargs)
+        vec_ms = (time.perf_counter() - t1) * 1000.0
+        print(
+            f"[benchmark N=8192] reference={ref_ms:.2f}ms vectorized={vec_ms:.2f}ms "
+            f"pre={vec_stats.get('awr/rollout_builder_precompute_ms', 0):.2f}ms "
+            f"ratio={ref_ms/max(vec_ms,1e-6):.1f}x"
+        )
 
 
 class TestAwrBuilderFuseImports(unittest.TestCase):
