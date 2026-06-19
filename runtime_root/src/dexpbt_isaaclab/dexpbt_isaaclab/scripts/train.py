@@ -2002,7 +2002,12 @@ parser.add_argument("--awr_minibatch_max_sequences", type=int, default=128)
 parser.add_argument("--awr_update_every", type=int, default=4)
 parser.add_argument("--awr_max_episode_len", type=int, default=200)
 parser.add_argument("--awr_min_burnin_steps", type=int, default=32)
-parser.add_argument("--awr_min_loss_steps_per_entry", type=int, default=16)
+parser.add_argument(
+    "--awr_min_loss_steps_per_entry",
+    type=int,
+    default=None,
+    help="Min loss-masked steps per AWR entry; default 4 (rollout_buffer) or 16 (interceptor).",
+)
 parser.add_argument("--awr_weight_mode", type=str, default="exp_quality",
                     choices=["quality", "exp_quality", "advantage"])
 parser.add_argument("--awr_beta", type=float, default=1.0)
@@ -4200,7 +4205,7 @@ def _wm_safe_restore(
     checkpoint_path: str,
     *,
     workspace: str | None = None,
-    reset_progress_counters: bool = False,
+    enable_frame_gap_progress_reset: bool = True,
     target_frame_before_restore: int | None = None,
     frame_gap_reset_threshold: int = 500_000_000,
 ) -> None:
@@ -4302,23 +4307,25 @@ def _wm_safe_restore(
         )
         from dexpbt_isaaclab.awr.elite_awr import pbt_should_keep_local_progress_counters
 
-        should_reset_progress, frame_gap = pbt_should_keep_local_progress_counters(
+        should_keep_local_progress, frame_gap = pbt_should_keep_local_progress_counters(
             source_frame=int(source_frame) if source_frame is not None else None,
             target_frame=target_frame,
-            reset_progress_counters=bool(reset_progress_counters),
+            enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
             frame_gap_reset_threshold=int(frame_gap_reset_threshold),
         )
-        if should_reset_progress:
+        agent._pbt_copy_source_frame = float(source_frame or 0)
+        agent._pbt_copy_target_frame_before_restore = float(target_frame)
+        agent._pbt_copy_frame_gap = float(frame_gap)
+        agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
+        if should_keep_local_progress:
             agent._pbt_copy_reset_progress_due_to_frame_gap = 1.0
-            agent._pbt_copy_source_frame = float(source_frame or 0)
-            agent._pbt_copy_target_frame_before_restore = float(target_frame)
-            agent._pbt_copy_frame_gap = float(frame_gap)
             print(
                 "[PBT] restore: keeping local progress counters "
                 f"(source_frame={source_frame}, target_frame={target_frame}, "
                 f"gap={frame_gap}, threshold={frame_gap_reset_threshold})"
             )
         else:
+            agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
             if "epoch" in ckpt:
                 agent.epoch_num = ckpt["epoch"]
             if "frame" in ckpt:
@@ -4851,7 +4858,7 @@ class _CheckpointSafeRunner(Runner):
                 agent,
                 ckpt_path,
                 workspace=getattr(self, "workspace", None),
-                reset_progress_counters=bool(
+                enable_frame_gap_progress_reset=bool(
                     args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
                 ),
                 target_frame_before_restore=int(
@@ -5301,7 +5308,7 @@ class _WmEnabledRunner(Runner):
                 agent,
                 ckpt_path,
                 workspace=getattr(self, "workspace", None),
-                reset_progress_counters=bool(
+                enable_frame_gap_progress_reset=bool(
                     args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
                 ),
                 target_frame_before_restore=int(

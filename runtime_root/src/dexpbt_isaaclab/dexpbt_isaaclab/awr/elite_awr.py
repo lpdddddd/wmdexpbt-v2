@@ -118,14 +118,18 @@ def pbt_should_keep_local_progress_counters(
     *,
     source_frame: int | None,
     target_frame: int,
-    reset_progress_counters: bool,
+    enable_frame_gap_reset: bool,
     frame_gap_reset_threshold: int,
 ) -> tuple[bool, int]:
+    """Return whether to keep local epoch/frame instead of inheriting checkpoint progress.
+
+    ``enable_frame_gap_reset`` enables the large-gap mechanism; it does not force reset
+    on every restore. Progress is kept locally only when the frame gap exceeds threshold.
+    """
     gap = abs(int(source_frame) - int(target_frame)) if source_frame is not None else 0
-    should_reset = bool(reset_progress_counters)
-    if not should_reset and source_frame is not None:
-        should_reset = gap > int(frame_gap_reset_threshold)
-    return should_reset, gap
+    if not enable_frame_gap_reset or source_frame is None:
+        return False, gap
+    return gap > int(frame_gap_reset_threshold), gap
 
 
 def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
@@ -138,6 +142,14 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
     broadcast_steps = getattr(args_cli, "awr_broadcast_top_k_steps", None)
     if broadcast_steps is None:
         broadcast_steps = getattr(args_cli, "awr_broadcast_top_k", 10_000)
+    collection_mode = str(
+        getattr(args_cli, "awr_collection_mode", "rollout_buffer") or "rollout_buffer"
+    )
+    min_loss_raw = getattr(args_cli, "awr_min_loss_steps_per_entry", None)
+    if min_loss_raw is None:
+        min_loss_steps = 4 if collection_mode == "rollout_buffer" else 16
+    else:
+        min_loss_steps = int(min_loss_raw)
     return EliteAWRConfig(
         enable=bool(getattr(args_cli, "awr_enable", False)),
         loss_weight=float(getattr(args_cli, "awr_loss_weight", 0.0) or 0.0),
@@ -152,9 +164,7 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
         update_every=int(getattr(args_cli, "awr_update_every", 4)),
         max_episode_len=int(getattr(args_cli, "awr_max_episode_len", 200)),
         min_burnin_steps=int(getattr(args_cli, "awr_min_burnin_steps", 32)),
-        min_loss_steps_per_entry=int(
-            getattr(args_cli, "awr_min_loss_steps_per_entry", 16)
-        ),
+        min_loss_steps_per_entry=min_loss_steps,
         weight_mode=str(getattr(args_cli, "awr_weight_mode", "exp_quality")),
         beta=float(getattr(args_cli, "awr_beta", 1.0)),
         weight_max=float(getattr(args_cli, "awr_weight_max", 5.0)),

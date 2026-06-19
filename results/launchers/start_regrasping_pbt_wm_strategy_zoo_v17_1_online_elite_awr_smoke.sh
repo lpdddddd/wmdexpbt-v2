@@ -43,6 +43,7 @@ not_for_performance_comparison=true
 target_frames=50000000
 max_iterations=${MAX_ITER}
 awr_collection_mode=rollout_buffer
+awr_min_loss_steps_per_entry=4
 awr_collect_after_frames=0
 awr_start_after_frames=0
 awr_min_buffer_size=1000
@@ -81,7 +82,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --awr_batch_steps 4096 \
   --awr_max_episode_len 200 \
   --awr_min_burnin_steps 32 \
-  --awr_min_loss_steps_per_entry 16 \
+  --awr_min_loss_steps_per_entry 4 \
   --awr_copy_top_k_steps 50000 \
   --awr_broadcast_top_k_steps 10000 \
   --awr_ramp_frames 300000000 \

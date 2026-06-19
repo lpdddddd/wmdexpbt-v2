@@ -22,6 +22,7 @@ from dexpbt_isaaclab.awr.elite_awr import (
 )
 from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
     PPO_BUFFER_ACTIONS,
+    _fragment_success_signal,
     build_awr_entries_from_experience_buffer,
     check_rollout_buffer_action_sanity,
     should_collect_awr,
@@ -266,25 +267,170 @@ class TestEliteAWRRolloutBuilder(unittest.TestCase):
         self.assertGreater(bridge.stats["awr/action_out_of_bounds_frac_1"], 0.0)
         self.assertEqual(bridge.stats["awr/action_source_code"], float(PPO_BUFFER_ACTIONS))
 
-    def test_pbt_restore_large_frame_gap_keeps_target_progress(self):
-        should_reset, gap = pbt_should_keep_local_progress_counters(
+    def test_pbt_progress_reset_only_when_frame_gap_exceeds_threshold(self):
+        keep, gap = pbt_should_keep_local_progress_counters(
             source_frame=1_980_000_000,
             target_frame=200_000_000,
-            reset_progress_counters=True,
+            enable_frame_gap_reset=True,
             frame_gap_reset_threshold=500_000_000,
         )
-        self.assertTrue(should_reset)
+        self.assertTrue(keep)
         self.assertGreater(gap, 500_000_000)
-        agent_frame = 200_000_000
-        agent_epoch = 500
-        if should_reset:
-            restored_frame = agent_frame
-            restored_epoch = agent_epoch
-        else:
-            restored_frame = 1_980_000_000
-            restored_epoch = 12000
-        self.assertEqual(restored_frame, 200_000_000)
-        self.assertEqual(restored_epoch, 500)
+
+        keep_small, gap_small = pbt_should_keep_local_progress_counters(
+            source_frame=220_000_000,
+            target_frame=200_000_000,
+            enable_frame_gap_reset=True,
+            frame_gap_reset_threshold=500_000_000,
+        )
+        self.assertFalse(keep_small)
+        self.assertLess(gap_small, 500_000_000)
+
+    def test_pbt_progress_reset_disabled_flag_inherits_progress(self):
+        keep, _ = pbt_should_keep_local_progress_counters(
+            source_frame=1_980_000_000,
+            target_frame=200_000_000,
+            enable_frame_gap_reset=False,
+            frame_gap_reset_threshold=500_000_000,
+        )
+        self.assertFalse(keep)
+
+    def test_pbt_progress_reset_missing_source_frame_inherits_progress(self):
+        keep, gap = pbt_should_keep_local_progress_counters(
+            source_frame=None,
+            target_frame=200_000_000,
+            enable_frame_gap_reset=True,
+            frame_gap_reset_threshold=500_000_000,
+        )
+        self.assertFalse(keep)
+        self.assertEqual(gap, 0)
+
+    def test_rollout_buffer_default_min_loss_steps_is_4(self):
+        ns = argparse.Namespace(
+            awr_enable=True,
+            awr_loss_weight=0.001,
+            awr_collection_mode="rollout_buffer",
+            awr_min_loss_steps_per_entry=None,
+        )
+        cfg = build_elite_awr_config_from_args(ns)
+        self.assertEqual(cfg.min_loss_steps_per_entry, 4)
+
+    def test_interceptor_default_min_loss_steps_remains_16(self):
+        ns = argparse.Namespace(
+            awr_enable=True,
+            awr_loss_weight=0.001,
+            awr_collection_mode="interceptor",
+            awr_min_loss_steps_per_entry=None,
+        )
+        cfg = build_elite_awr_config_from_args(ns)
+        self.assertEqual(cfg.min_loss_steps_per_entry, 16)
+
+    def test_rollout_builder_accepts_short_fragment_with_4_loss_steps(self):
+        T, N = 16, 1
+        cfg = EliteAWRConfig(
+            quality_min=0.0,
+            min_loss_steps_per_entry=4,
+            min_burnin_steps=32,
+            collect_after_frames=0,
+        )
+        lifted = torch.zeros(T, N, 1, dtype=torch.bool)
+        lifted[-4:, 0, 0] = True
+        success_cnt = torch.zeros(T, N, 1)
+        success_cnt[-1, 0, 0] = 1.0
+        td = {
+            "obses": torch.randn(T, N, 3),
+            "actions": torch.randn(T, N, 2),
+            "dones": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_tolerance": torch.full((T, N, 1), 0.05),
+            "aux_lifted": lifted,
+            "aux_failure": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_cnt": success_cnt,
+        }
+        td["dones"][-1, 0, 0] = True
+        entries, stats = build_awr_entries_from_experience_buffer(
+            experience_buffer=_FakeBuffer(td),
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=None,
+            source_retention=None,
+            env_frames=0,
+        )
+        self.assertGreater(len(entries), 0)
+        self.assertGreaterEqual(stats["awr/rollout_builder_selected_fragments"], 1.0)
+        self.assertGreaterEqual(int(entries[0].loss_mask.sum()), 4)
+
+    def test_v17_1_launchers_use_min_loss_steps_4(self):
+        repo = Path(__file__).resolve().parents[4]
+        for name in (
+            "start_regrasping_pbt_wm_strategy_zoo_v17_1_online_elite_awr_smoke.sh",
+            "start_regrasping_pbt_wm_strategy_zoo_v17_1_online_elite_awr_2b.sh",
+        ):
+            text = (repo / "results/launchers" / name).read_text()
+            self.assertIn("awr_min_loss_steps_per_entry=4", text)
+            self.assertIn("--awr_min_loss_steps_per_entry 4", text)
+
+    def test_success_cnt_success_not_cleared_by_unknown_done(self):
+        T, N = 8, 1
+        success_cnt = torch.zeros(T, N, 1)
+        success_cnt[-1, 0, 0] = 1.0
+        td = {
+            "obses": torch.randn(T, N, 3),
+            "actions": torch.randn(T, N, 2),
+            "dones": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_tolerance": torch.full((T, N, 1), 0.05),
+            "aux_lifted": torch.ones(T, N, 1, dtype=torch.bool),
+            "aux_failure": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_cnt": success_cnt,
+        }
+        td["dones"][-1, 0, 0] = True
+        cfg = EliteAWRConfig(quality_min=0.0, min_loss_steps_per_entry=4, collect_after_frames=0)
+        _, stats = build_awr_entries_from_experience_buffer(
+            experience_buffer=_FakeBuffer(td),
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=None,
+            source_retention=None,
+            env_frames=0,
+        )
+        self.assertGreaterEqual(stats.get("awr/success_from_success_cnt", 0.0), 1.0)
+        self.assertEqual(stats.get("awr/success_cleared_by_unknown_done", -1.0), 0.0)
+
+    def test_unknown_done_without_success_remains_non_success(self):
+        future_success, future_within_100 = _fragment_success_signal(
+            torch.zeros(4, 1),
+            0,
+            3,
+            0,
+            terminal_success=False,
+        )
+        self.assertFalse(future_success)
+        self.assertFalse(future_within_100)
+
+    def test_fragment_success_signal_uses_success_count_delta(self):
+        success_cnt = torch.zeros(4, 1)
+        success_cnt[3, 0] = 1.0
+        future_success, future_within_100 = _fragment_success_signal(
+            success_cnt,
+            0,
+            3,
+            0,
+            terminal_success=False,
+        )
+        self.assertTrue(future_success)
+        self.assertTrue(future_within_100)
+
+        flat_cnt = torch.ones(4, 1)
+        fs2, fw2 = _fragment_success_signal(
+            flat_cnt,
+            0,
+            3,
+            0,
+            terminal_success=False,
+        )
+        self.assertFalse(fs2)
+        self.assertFalse(fw2)
 
     def test_build_config_includes_collection_fields(self):
         ns = argparse.Namespace(

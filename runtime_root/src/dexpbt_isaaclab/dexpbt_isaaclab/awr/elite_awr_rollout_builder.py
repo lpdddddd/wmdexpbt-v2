@@ -69,9 +69,6 @@ def _fragment_success_signal(
     if success_cnt is not None:
         sc0 = float(success_cnt[t0, n].item())
         sc1 = float(success_cnt[t1, n].item())
-        delta = sc1 - sc0
-        if delta > 0.0:
-            return True, True
         if sc1 > sc0:
             return True, True
 
@@ -332,6 +329,9 @@ def build_awr_entries_from_experience_buffer(
     candidate_count = 0
     selected_count = 0
     partial_count = 0
+    done_unknown_count = 0
+    success_from_cnt_count = 0
+    success_cleared_by_unknown = 0.0
 
     for n in range(N):
         frag_start = 0
@@ -390,9 +390,24 @@ def build_awr_entries_from_experience_buffer(
                 n,
                 terminal_success=terminal_success,
             )
+            success_from_cnt = False
+            if success_cnt is not None:
+                sc0 = float(success_cnt[frag_start, n].item())
+                sc1 = float(success_cnt[t_end, n].item())
+                success_from_cnt = sc1 > sc0
+            if success_from_cnt and future_success:
+                success_from_cnt_count += 1
             if done_reason == DoneReason.UNKNOWN.value:
-                future_within_100 = False
-                future_success = False
+                done_unknown_count += 1
+                if future_success and success_from_cnt:
+                    pass
+                elif not future_success:
+                    future_within_100 = False
+                    future_success = False
+                else:
+                    success_cleared_by_unknown += 1.0
+                    future_within_100 = False
+                    future_success = False
 
             if not done:
                 partial_count += 1
@@ -448,6 +463,11 @@ def build_awr_entries_from_experience_buffer(
     stats["awr/rollout_builder_partial_frac"] = float(partial_count) / max(
         candidate_count, 1
     )
+    stats["awr/done_reason_unknown_frac"] = float(done_unknown_count) / max(
+        candidate_count, 1
+    )
+    stats["awr/success_from_success_cnt"] = float(success_from_cnt_count)
+    stats["awr/success_cleared_by_unknown_done"] = float(success_cleared_by_unknown)
     stats["awr/rollout_builder_time_ms"] = (time.perf_counter() - t0_wall) * 1000.0
     return entries, stats
 

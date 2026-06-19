@@ -4771,6 +4771,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     ("pbt_copy_source_frame", "_pbt_copy_source_frame"),
                     ("pbt_copy_target_frame_before_restore", "_pbt_copy_target_frame_before_restore"),
                     ("pbt_copy_frame_gap", "_pbt_copy_frame_gap"),
+                    ("pbt_copy_frame_gap_threshold", "_pbt_copy_frame_gap_threshold"),
                 ):
                     val = getattr(self.algo, attr, None)
                     if val is not None:

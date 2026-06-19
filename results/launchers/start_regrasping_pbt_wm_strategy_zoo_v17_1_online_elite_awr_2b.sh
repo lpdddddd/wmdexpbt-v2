@@ -80,7 +80,7 @@ awr_collect_after_frames=600000000
 awr_batch_steps=4096
 awr_max_episode_len=200
 awr_min_burnin_steps=32
-awr_min_loss_steps_per_entry=16
+awr_min_loss_steps_per_entry=4
 awr_copy_top_k_steps=50000
 awr_broadcast_top_k_steps=10000
 awr_start_after_frames=800000000
@@ -122,7 +122,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --awr_batch_steps 4096 \
   --awr_max_episode_len 200 \
   --awr_min_burnin_steps 32 \
-  --awr_min_loss_steps_per_entry 16 \
+  --awr_min_loss_steps_per_entry 4 \
   --awr_copy_top_k_steps 50000 \
   --awr_broadcast_top_k_steps 10000 \
   --awr_start_after_frames 800000000 \
