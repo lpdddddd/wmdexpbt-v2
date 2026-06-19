@@ -2065,6 +2065,18 @@ parser.add_argument(
     default=500_000_000,
     help="Frame gap above which PBT restore keeps local progress counters.",
 )
+parser.add_argument(
+    "--pbt_copy_target_frame_before_restore",
+    type=int,
+    default=None,
+    help="Target slot population_frame at PBT cross-copy restore (snapshot-driven).",
+)
+parser.add_argument(
+    "--pbt_lineage_id_resume",
+    type=str,
+    default=None,
+    help="Lineage id carried across supervisor restarts for causal skill_delta windows.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -4200,6 +4212,32 @@ def _align_optimizer_state_to_agent(
     return aligned
 
 
+def _pbt_restore_runner_args(
+    args_cli,
+    *,
+    train: bool = True,
+    checkpoint: str | None = None,
+    sigma=None,
+) -> dict:
+    """Build rl_games runner args including PBT restore control-plane fields."""
+    out: dict = {"train": train, "play": False, "sigma": sigma}
+    if checkpoint is not None:
+        out["checkpoint"] = checkpoint
+    if getattr(args_cli, "pbt_copy_target_frame_before_restore", None) is not None:
+        out["pbt_copy_target_frame_before_restore"] = int(
+            args_cli.pbt_copy_target_frame_before_restore
+        )
+    out["pbt_copy_reset_progress_on_large_frame_gap"] = bool(
+        getattr(args_cli, "pbt_copy_reset_progress_on_large_frame_gap", True)
+    )
+    out["pbt_copy_frame_gap_reset_threshold"] = int(
+        getattr(args_cli, "pbt_copy_frame_gap_reset_threshold", 500_000_000)
+    )
+    if getattr(args_cli, "restart_source_policy", None) is not None:
+        out["restart_source_policy"] = int(args_cli.restart_source_policy)
+    return out
+
+
 def _wm_safe_restore(
     agent,
     checkpoint_path: str,
@@ -4300,36 +4338,62 @@ def _wm_safe_restore(
 
     if "epoch" in ckpt or "frame" in ckpt:
         source_frame = ckpt.get("frame")
-        target_frame = (
-            int(target_frame_before_restore)
-            if target_frame_before_restore is not None
-            else int(getattr(agent, "frame", 0) or 0)
-        )
         from dexpbt_isaaclab.awr.elite_awr import pbt_should_keep_local_progress_counters
 
-        should_keep_local_progress, frame_gap = pbt_should_keep_local_progress_counters(
-            source_frame=int(source_frame) if source_frame is not None else None,
-            target_frame=target_frame,
-            enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
-            frame_gap_reset_threshold=int(frame_gap_reset_threshold),
-        )
-        agent._pbt_copy_source_frame = float(source_frame or 0)
-        agent._pbt_copy_target_frame_before_restore = float(target_frame)
-        agent._pbt_copy_frame_gap = float(frame_gap)
-        agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
-        if should_keep_local_progress:
-            agent._pbt_copy_reset_progress_due_to_frame_gap = 1.0
+        if target_frame_before_restore is not None:
+            target_frame = int(target_frame_before_restore)
+            agent._pbt_restored_from_pbt_copy = True
+            agent._pbt_frame_snapshot_driven = True
+            agent._pbt_copy_source_frame = float(source_frame or 0)
+            agent._pbt_weight_age_frame = float(source_frame or 0)
+            agent._pbt_copy_target_frame_before_restore = float(target_frame)
+            _, frame_gap = pbt_should_keep_local_progress_counters(
+                source_frame=int(source_frame) if source_frame is not None else None,
+                target_frame=target_frame,
+                enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
+                frame_gap_reset_threshold=int(frame_gap_reset_threshold),
+            )
+            agent._pbt_copy_frame_gap = float(frame_gap)
+            agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
+            agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
+            agent.frame = target_frame
+            hor_len = int(getattr(agent, "horizon_length", 0) or 0)
+            num_actors = int(getattr(agent, "num_actors", 0) or 0)
+            frames_per_epoch = hor_len * num_actors
+            if frames_per_epoch > 0:
+                agent.epoch_num = int(target_frame) // int(frames_per_epoch)
+            elif "epoch" in ckpt:
+                agent.epoch_num = int(ckpt["epoch"])
             print(
-                "[PBT] restore: keeping local progress counters "
-                f"(source_frame={source_frame}, target_frame={target_frame}, "
-                f"gap={frame_gap}, threshold={frame_gap_reset_threshold})"
+                "[PBT] restore: snapshot-driven target_frame="
+                f"{target_frame} source_frame={source_frame} weight_age="
+                f"{agent._pbt_weight_age_frame}"
             )
         else:
-            agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
-            if "epoch" in ckpt:
-                agent.epoch_num = ckpt["epoch"]
-            if "frame" in ckpt:
-                agent.frame = ckpt["frame"]
+            target_frame = int(getattr(agent, "frame", 0) or 0)
+            should_keep_local_progress, frame_gap = pbt_should_keep_local_progress_counters(
+                source_frame=int(source_frame) if source_frame is not None else None,
+                target_frame=target_frame,
+                enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
+                frame_gap_reset_threshold=int(frame_gap_reset_threshold),
+            )
+            agent._pbt_copy_source_frame = float(source_frame or 0)
+            agent._pbt_copy_target_frame_before_restore = float(target_frame)
+            agent._pbt_copy_frame_gap = float(frame_gap)
+            agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
+            if should_keep_local_progress:
+                agent._pbt_copy_reset_progress_due_to_frame_gap = 1.0
+                print(
+                    "[PBT] restore: keeping local progress counters "
+                    f"(source_frame={source_frame}, target_frame={target_frame}, "
+                    f"gap={frame_gap}, threshold={frame_gap_reset_threshold})"
+                )
+            else:
+                agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
+                if "epoch" in ckpt:
+                    agent.epoch_num = ckpt["epoch"]
+                if "frame" in ckpt:
+                    agent.frame = ckpt["frame"]
     agent.last_mean_rewards = ckpt.get("last_mean_rewards", getattr(agent, "last_mean_rewards", -1e9))
 
     opt_sd = ckpt.get("optimizer")
@@ -4854,6 +4918,10 @@ class _CheckpointSafeRunner(Runner):
 
         ckpt_path = args.get("checkpoint")
         if ckpt_path:
+            if args.get("restart_source_policy") is not None and args.get(
+                "pbt_copy_target_frame_before_restore"
+            ) is None:
+                raise RuntimeError("PBT_FRAME_MUST_BE_SNAPSHOT_DRIVEN")
             _wm_safe_restore(
                 agent,
                 ckpt_path,
@@ -4861,10 +4929,11 @@ class _CheckpointSafeRunner(Runner):
                 enable_frame_gap_progress_reset=bool(
                     args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
                 ),
-                target_frame_before_restore=int(
-                    args.get("pbt_copy_target_frame_before_restore", 0) or 0
-                )
-                or None,
+                target_frame_before_restore=(
+                    int(args["pbt_copy_target_frame_before_restore"])
+                    if args.get("pbt_copy_target_frame_before_restore") is not None
+                    else None
+                ),
                 frame_gap_reset_threshold=int(
                     args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
                 ),
@@ -5300,6 +5369,10 @@ class _WmEnabledRunner(Runner):
         # Restore weights if checkpoint specified — AFTER aux_value_head is registered
         ckpt_path = args.get("checkpoint")
         if ckpt_path:
+            if args.get("restart_source_policy") is not None and args.get(
+                "pbt_copy_target_frame_before_restore"
+            ) is None:
+                raise RuntimeError("PBT_FRAME_MUST_BE_SNAPSHOT_DRIVEN")
             # Always use the tolerant restore path on PBT restart / warm-start.
             # seq_wm-only profiles (wm_curriculum_controller, wm_pbt_source_selector)
             # previously fell through to rl_games _restore and crashed when a donor
@@ -5311,10 +5384,11 @@ class _WmEnabledRunner(Runner):
                 enable_frame_gap_progress_reset=bool(
                     args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
                 ),
-                target_frame_before_restore=int(
-                    args.get("pbt_copy_target_frame_before_restore", 0) or 0
-                )
-                or None,
+                target_frame_before_restore=(
+                    int(args["pbt_copy_target_frame_before_restore"])
+                    if args.get("pbt_copy_target_frame_before_restore") is not None
+                    else None
+                ),
                 frame_gap_reset_threshold=int(
                     args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
                 ),
@@ -6628,6 +6702,7 @@ def main():
             restart_count_resume=args_cli.restart_count_resume,
             frames_at_restart_resume=args_cli.frames_at_restart_resume,
             last_mutation_frame_resume=args_cli.last_mutation_frame_resume,
+            pbt_lineage_id_resume=args_cli.pbt_lineage_id_resume,
             # Patch G (2026-05-31): tiered source selection + recovery.
             pbt_source_selection_mode=args_cli.pbt_source_selection_mode,
             pbt_relaxed_nsucc_mean_as_source=(
@@ -7081,7 +7156,14 @@ def main():
     if args_cli.test:
         runner.run({"train": False, "play": True, "sigma": train_sigma})
     elif args_cli.checkpoint is not None:
-        runner.run({"train": True, "play": False, "sigma": train_sigma, "checkpoint": args_cli.checkpoint})
+        runner.run(
+            _pbt_restore_runner_args(
+                args_cli,
+                train=True,
+                checkpoint=args_cli.checkpoint,
+                sigma=train_sigma,
+            )
+        )
     else:
         runner.run({"train": True, "play": False, "sigma": train_sigma})
 

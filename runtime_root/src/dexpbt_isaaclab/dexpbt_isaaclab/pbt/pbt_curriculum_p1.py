@@ -11,6 +11,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+
+SKILL_DELTA_WINDOW = 6
+SKILL_DELTA_REF = 5.0
+SKILL_DELTA_IMPROVE_EPS = 0.05
+SKILL_DELTA_STABLE_POS_EPS = 0.02
+
 
 @dataclass
 class WindowSample:
@@ -19,6 +27,7 @@ class WindowSample:
     nsucc_max: float
     success_tolerance: float
     pbt_iteration: int = 0
+    lineage_id: str | None = None
 
 
 @dataclass
@@ -60,6 +69,47 @@ class RollingNsuccWindow:
         tail = xs[-(n + 1) :]
         ref = tail[0].success_tolerance
         return all(abs(s.success_tolerance - ref) < 1e-9 for s in tail)
+
+
+def compute_skill_delta(
+    window: RollingNsuccWindow | None,
+    *,
+    window_len: int = SKILL_DELTA_WINDOW,
+    interval_steps: int,
+    delta_ref: float = SKILL_DELTA_REF,
+) -> float | None:
+    """Return bounded skill_delta in [-1, 1], or None when causally invalid.
+
+    INVALID (None) when the window spans a lineage change or curriculum shift.
+    Computed only from PBT tick buffer samples, never from live rollout noise.
+    """
+    if window is None or not window.samples:
+        return None
+    samples = window.last_n(int(window_len))
+    if len(samples) < int(window_len):
+        return None
+    lineage_ids = {s.lineage_id for s in samples}
+    if None in lineage_ids or len(lineage_ids) != 1:
+        return None
+    tol_bins = {round(float(s.success_tolerance), 6) for s in samples}
+    if len(tol_bins) != 1:
+        return None
+    tick = max(int(interval_steps), 1)
+    ref = max(float(delta_ref), 1e-6)
+    pf = np.array([float(s.env_frames) for s in samples], dtype=np.float64)
+    y = np.array([float(s.nsucc_mean) for s in samples], dtype=np.float64)
+    alpha = 2.0 / (len(samples) + 1.0)
+    ema = np.empty_like(y)
+    ema[0] = y[0]
+    for i in range(1, len(y)):
+        ema[i] = alpha * y[i] + (1.0 - alpha) * ema[i - 1]
+    pf_var = float(np.var(pf))
+    if pf_var <= 1e-12:
+        return None
+    slope = float(np.cov(pf, ema, bias=True)[0, 1] / pf_var)
+    raw_delta = slope * float(tick)
+    norm_delta = raw_delta / ref
+    return float(max(-1.0, min(1.0, norm_delta)))
 
 
 @dataclass

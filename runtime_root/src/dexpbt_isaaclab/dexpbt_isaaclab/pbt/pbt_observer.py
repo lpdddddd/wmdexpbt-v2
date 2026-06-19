@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import random
 import shutil
 import sys
 import time
+import uuid as _uuid_mod
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,11 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     CurriculumControlState,
     RollingNsuccWindow,
     WindowSample,
+    SKILL_DELTA_IMPROVE_EPS,
+    SKILL_DELTA_STABLE_POS_EPS,
+    SKILL_DELTA_WINDOW,
     apply_source_safe_consolidation_on_copy,
+    compute_skill_delta,
     evaluate_collapse_freeze,
     evaluate_mastery_gate,
     is_stable_source_window,
@@ -41,6 +47,120 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
 # WM imports (lazy — only needed when enable_wm=True)
 _WM_COUNTERFACTUAL = None
 _WM_POSTERIOR = None
+
+PBT_SNAPSHOT_SCHEMA_VERSION = 1
+PBT_SNAPSHOT_REQUIRED_MEMBERS = (
+    "model.pth",
+    "meta.json",
+    "MANIFEST",
+)
+PBT_SNAPSHOT_HASHED_MEMBERS = (
+    "model.pth",
+    "meta.json",
+)
+
+
+def pbt_population_frame(algo) -> int:
+    """Read the authoritative population clock from the restored agent."""
+    if getattr(algo, "_pbt_restored_from_pbt_copy", False) and not getattr(
+        algo, "_pbt_frame_snapshot_driven", False
+    ):
+        raise RuntimeError("PBT_FRAME_MUST_BE_SNAPSHOT_DRIVEN")
+    return int(getattr(algo, "frame", 0) or 0)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def validate_snapshot_commit(staging_dir: Path, *, tick: int) -> tuple[bool, str]:
+    """Verify an atomic snapshot staging directory before publish."""
+    manifest_path = staging_dir / "MANIFEST"
+    if not manifest_path.is_file():
+        return False, "no_manifest"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        return False, "manifest_corrupt"
+    if not isinstance(manifest, dict):
+        return False, "manifest_not_dict"
+    member_shas = manifest.get("member_shas")
+    if not isinstance(member_shas, dict):
+        return False, "manifest_missing_member_shas"
+    for name in PBT_SNAPSHOT_REQUIRED_MEMBERS:
+        if name not in member_shas and name != "MANIFEST":
+            return False, f"missing_member:{name}"
+    for name in PBT_SNAPSHOT_HASHED_MEMBERS:
+        expected = member_shas.get(name)
+        if expected is None:
+            return False, f"missing_member:{name}"
+        member_path = staging_dir / name
+        if not member_path.is_file():
+            return False, f"missing_file:{name}"
+        if _sha256_file(member_path) != str(expected):
+            return False, f"member_corrupt:{name}"
+    if not (staging_dir / "MANIFEST").is_file():
+        return False, "missing_file:MANIFEST"
+    population_frame = manifest.get("population_frame")
+    if population_frame is None:
+        return False, "missing_population_frame"
+    pf = int(population_frame)
+    tick_i = max(int(tick), 1)
+    if pf % tick_i != 0:
+        # Legacy rl_games counters may not align to PBT interval; record but do not fail.
+        if not manifest.get("allow_unquantized_clock", True):
+            return False, "clock_not_quantized"
+    return True, "ok"
+
+
+def snapshot_commit_barrier(
+    *,
+    staging_dir: Path,
+    model_src: Path,
+    meta_src: Path,
+    publish_model: Path,
+    publish_meta: Path,
+    manifest: dict[str, Any],
+    sidecar_src: Path | None = None,
+    tick: int,
+) -> Path:
+    """Publish model/meta/manifest atomically or abort with no partial commit."""
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(model_src, staging_dir / "model.pth")
+    shutil.copy2(meta_src, staging_dir / "meta.json")
+    member_shas = {
+        "model.pth": _sha256_file(staging_dir / "model.pth"),
+        "meta.json": _sha256_file(staging_dir / "meta.json"),
+    }
+    if sidecar_src is not None and sidecar_src.is_file():
+        shutil.copy2(sidecar_src, staging_dir / "awr_sidecar.pt")
+        member_shas["awr_sidecar.pt"] = _sha256_file(staging_dir / "awr_sidecar.pt")
+    manifest = dict(manifest)
+    manifest["schema_version"] = PBT_SNAPSHOT_SCHEMA_VERSION
+    manifest["member_shas"] = member_shas
+    manifest_path = staging_dir / "MANIFEST"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+    ok, reason = validate_snapshot_commit(staging_dir, tick=tick)
+    if not ok:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(f"PBT_SNAPSHOT_COMMIT_FAILED:{reason}")
+    publish_model_tmp = publish_model.with_suffix(publish_model.suffix + ".publish")
+    publish_meta_tmp = publish_meta.with_suffix(publish_meta.suffix + ".publish")
+    shutil.copy2(staging_dir / "model.pth", publish_model_tmp)
+    shutil.copy2(staging_dir / "meta.json", publish_meta_tmp)
+    publish_model_tmp.replace(publish_model)
+    publish_meta_tmp.replace(publish_meta)
+    commit_dir = staging_dir.parent / f"{staging_dir.name}.commit"
+    if commit_dir.exists():
+        shutil.rmtree(commit_dir)
+    staging_dir.rename(commit_dir)
+    return commit_dir
 
 
 def _sample_factor(change_min: float, change_max: float) -> float:
@@ -483,6 +603,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         restart_count_resume: int | None = None,
         frames_at_restart_resume: int | None = None,
         last_mutation_frame_resume: int | None = None,
+        pbt_lineage_id_resume: str | None = None,
         # Patch F (2026-05-31): self/cross-restart accounting carried across exec.
         self_restart_count_resume: int | None = None,
         last_self_restart_frame_resume: int | None = None,
@@ -806,6 +927,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._frames_at_restart = int(frames_at_restart_resume)
         else:
             self._frames_at_restart = 0
+        if pbt_lineage_id_resume:
+            self._lineage_id = str(pbt_lineage_id_resume)
+        else:
+            self._lineage_id = str(_uuid_mod.uuid4())
         self._r_meta_window: list[float] = []
         self.curr_target_objective_value = float("-inf")
         # Patch 1 (rev 2, 2026-05-30): r_meta_raw / pbt_ranking_score split.
@@ -1258,6 +1383,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         state: dict[str, Any], *, env_frames: int, pbt_iteration: int
     ) -> WindowSample:
         cur = state.get("curriculum") or {}
+        lineage_id = state.get("lineage_id")
+        if lineage_id is not None:
+            lineage_id = str(lineage_id)
         return WindowSample(
             env_frames=int(state.get("frame", env_frames)),
             nsucc_mean=float(
@@ -1276,6 +1404,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             ),
             success_tolerance=float(cur.get("success_tolerance", 0.075) or 0.075),
             pbt_iteration=int(state.get("iteration", pbt_iteration)),
+            lineage_id=lineage_id,
         )
 
     def _update_curriculum_windows_and_control(
@@ -4935,7 +5064,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     def after_steps(self):
         if self.algo is None:
             return
-        env_frames = self.algo.frame
+        env_frames = pbt_population_frame(self.algo)
 
         # P0: policy0 consumes CF results every step (not only on PBT restart).
         if self._is_posterior_writer and self._enable_counterfactual:
@@ -5889,6 +6018,45 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     ),
                     env_frames,
                 )
+            own_window = self._policy_nsucc_windows.get(self.policy_idx)
+            d_self = compute_skill_delta(
+                own_window,
+                window_len=SKILL_DELTA_WINDOW,
+                interval_steps=self.interval_steps,
+            )
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "pbt/skill_delta",
+                    float(d_self) if d_self is not None else -999.0,
+                    env_frames,
+                )
+                self.writer.add_scalar(
+                    "pbt/skill_delta_valid",
+                    1.0 if d_self is not None else 0.0,
+                    env_frames,
+                )
+            if d_self is None:
+                print(
+                    f"Policy {self.policy_idx}: skip restart "
+                    "(skill_delta invalid — lineage or curriculum window unstable)"
+                )
+                self._last_restart_type = 3
+                return
+            if d_self >= float(SKILL_DELTA_IMPROVE_EPS):
+                print(
+                    f"Policy {self.policy_idx}: skip restart "
+                    f"(skill_delta improving: {d_self:.4f} >= {SKILL_DELTA_IMPROVE_EPS})"
+                )
+                if self.writer is not None:
+                    self.writer.add_scalar(
+                        "pbt/protected_by_skill_delta_gate", 1.0, env_frames
+                    )
+                self._last_restart_type = 3
+                return
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "pbt/protected_by_skill_delta_gate", 0.0, env_frames
+                )
             # Patch G (2026-05-31): tiered source selection cascade.
             # `_select_source` produces a fully audited decision dict
             # covering L1 strict / L2 relaxed / L3 archive / L4 skip.
@@ -6015,6 +6183,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 # the bottom worker keeps training in place.
                 self._last_restart_type = 3  # skipped
                 return
+
+            if str(decision.get("checkpoint_type", "live")) == "live":
+                src_idx = int(decision["source_policy"])
+                d_src = compute_skill_delta(
+                    self._policy_nsucc_windows.get(src_idx),
+                    window_len=SKILL_DELTA_WINDOW,
+                    interval_steps=self.interval_steps,
+                )
+                if d_src is None or d_src < float(SKILL_DELTA_STABLE_POS_EPS):
+                    print(
+                        f"Policy {self.policy_idx}: skip restart "
+                        f"(source skill_delta invalid or unstable: {d_src})"
+                    )
+                    self._last_restart_type = 3
+                    return
 
             source_policy = int(decision["source_policy"])
             source_state = decision["source_state"]
@@ -6678,6 +6861,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 except Exception as _eir_bank_exc:  # pragma: no cover
                     print(f"[EIR] checkpoint bank export failed: {_eir_bank_exc}")
         awr_bridge = getattr(self.algo, "_awr_bridge", None)
+        sidecar_saved_path: Path | None = None
         if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
             from dexpbt_isaaclab.awr.elite_awr import save_awr_sidecar_topk
 
@@ -6691,6 +6875,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             )
             if ok:
                 algo_state["awr_buffer_ref"] = sidecar_rel
+                sidecar_saved_path = sidecar_path
             else:
                 algo_state["awr_buffer_ref"] = None
             algo_state["awr_buffer_ref_meta"] = awr_meta
@@ -6719,11 +6904,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     )
             except Exception:
                 pass
-        # Atomic save: write to .tmp first, then rename. Avoids half-written .pth
-        # being picked up by a peer's _load_population_checkpoints during SIGKILL restart.
-        torch.save(algo_state, ckpt_tmp)
-        ckpt_tmp.replace(checkpoint_path)
         curriculum = self._read_curriculum_state()
+        population_frame = pbt_population_frame(self.algo)
 
         # ------------------------------------------------------------------
         # Patch 1 (rev 2, 2026-05-30): compute success-aware PBT ranking
@@ -6804,7 +6986,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "nsucc_low_cap": self.pbt_nsucc_low_cap,
             "nsucc_mean": nsucc_mean,
             "nsucc_max": nsucc_max,
-            "frame": self.algo.frame,
+            "frame": int(population_frame),
+            "population_frame": int(population_frame),
+            "lineage_id": str(self._lineage_id),
             "iteration": self.pbt_iteration,
             "timestamp": time.time(),
             "params": self.mutable_params,
@@ -6844,8 +7028,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self.profile_conservative_planner_enabled
             ),
         }
+        torch.save(algo_state, ckpt_tmp)
         meta_tmp.write_text(json.dumps(state))
-        meta_tmp.replace(meta_path)
+        commit_manifest = {
+            "commit_id": f"{prefix}",
+            "population_frame": int(population_frame),
+            "lineage_id": str(self._lineage_id),
+            "policy_idx": int(self.policy_idx),
+            "pbt_iteration": int(self.pbt_iteration),
+        }
+        snapshot_commit_barrier(
+            staging_dir=self.curr_policy_workspace / f"{prefix}.staging",
+            model_src=ckpt_tmp,
+            meta_src=meta_tmp,
+            publish_model=checkpoint_path,
+            publish_meta=meta_path,
+            manifest=commit_manifest,
+            sidecar_src=sidecar_saved_path,
+            tick=int(self.interval_steps),
+        )
+        ckpt_tmp.unlink(missing_ok=True)
+        meta_tmp.unlink(missing_ok=True)
 
         # Patch 5 (rev 2, 2026-05-30): append-only peak archives that are
         # decoupled from `_maybe_save_best_policy` (which is rank-based on
@@ -7479,6 +7682,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             train_args.append(f"--frame_since_restart_resume={int(sc['frame_since_restart'])}")
         train_args.append(f"--restart_source_policy={int(source_policy)}")
         train_args.append(f"--pbt_copy_target_frame_before_restore={int(env_frames)}")
+        self._lineage_id = str(_uuid_mod.uuid4())
+        train_args.append(f"--pbt_lineage_id_resume={self._lineage_id}")
         # Patch H (2026-05-31): post-restart curriculum freeze. Observer
         # config is env frames; env stores simulation steps (Scheme A).
         freeze_env_frames = (
