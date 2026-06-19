@@ -67,6 +67,12 @@ class EliteAWRConfig:
     sidecar_format_version: int = 1
     collection_mode: str = "rollout_buffer"
     collect_after_frames: int = 600_000_000
+    score_temperature: float = 1.0
+    entropy_floor_eps: float = 0.5
+    score_beta_quality: float = 1.0
+    score_beta_similarity: float = 0.5
+    score_beta_skill_delta: float = 0.25
+    delta_gate_gamma: float = 0.05
 
 
 @dataclass
@@ -851,6 +857,67 @@ def consume_awr_sidecar_from_checkpoint(
     return loaded
 
 
+def _standardize(x: torch.Tensor) -> torch.Tensor:
+    flat = x.detach().reshape(-1)
+    if flat.numel() <= 1:
+        return torch.zeros_like(x)
+    mean = flat.mean()
+    std = flat.std(unbiased=False).clamp(min=1e-6)
+    return (x - mean) / std
+
+
+def _apply_entropy_floor(
+    weights: torch.Tensor,
+    *,
+    eps: float,
+) -> tuple[torch.Tensor, float]:
+    """INV-9: enforce minimum normalized entropy or fall back to uniform."""
+    flat = weights.reshape(-1)
+    active = flat > 0
+    if not bool(active.any()):
+        return weights, 0.0
+    w = flat[active]
+    w = w / w.sum().clamp(min=1e-8)
+    entropy = -(w * torch.log(w.clamp(min=1e-12))).sum()
+    h_max = math.log(max(int(active.sum().item()), 1))
+    h_norm = float((entropy / max(h_max, 1e-8)).item()) if h_max > 0 else 1.0
+    if h_norm < float(eps):
+        uniform = torch.zeros_like(flat)
+        uniform[active] = 1.0 / max(int(active.sum().item()), 1)
+        out = uniform.reshape_as(weights)
+        return out, 1.0
+    return weights, 0.0
+
+
+def _compute_awr_sample_weights(
+    *,
+    quality: torch.Tensor,
+    delta_w: torch.Tensor,
+    loss_mask: torch.Tensor,
+    cfg: EliteAWRConfig,
+    skill_delta: float = 0.0,
+) -> tuple[torch.Tensor, float]:
+    region = loss_mask.bool()
+    if not bool(region.any()):
+        return torch.zeros_like(quality), 0.0
+    q = quality[region]
+    d = delta_w[region]
+    score = (
+        cfg.score_beta_quality * _standardize(q)
+        + cfg.score_beta_similarity * _standardize(q)
+        + cfg.score_beta_skill_delta * float(skill_delta)
+        + torch.log(d.clamp(min=0.0) + cfg.delta_gate_gamma)
+    )
+    temp = max(float(cfg.score_temperature), 1e-6)
+    w_active = torch.softmax(score / temp, dim=0)
+    w = torch.zeros_like(quality)
+    w[region] = w_active
+    w, uniform_applied = _apply_entropy_floor(
+        w * loss_mask.float(), eps=cfg.entropy_floor_eps
+    )
+    return w, uniform_applied
+
+
 def _finite_float(x: float, default: float = 0.0) -> float:
     try:
         v = float(x)
@@ -1160,8 +1227,17 @@ def compute_elite_awr_loss(
     )
     delta = (action - mu).abs().amax(dim=-1)
     delta_w = _delta_gate(delta, cfg)
-    quality_w = _quality_sample_weight(quality, cfg)
-    w = quality_w * delta_w * loss_mask.float()
+    skill_delta = float(getattr(agent, "_pbt_skill_delta", 0.0) or 0.0)
+    skill_delta = max(-1.0, min(1.0, skill_delta))
+    w, uniform_applied = _compute_awr_sample_weights(
+        quality=quality,
+        delta_w=delta_w,
+        loss_mask=loss_mask,
+        cfg=cfg,
+        skill_delta=skill_delta,
+    )
+    stats["awr/skill_delta_coupling"] = float(skill_delta)
+    stats["awr/entropy_floor_uniform"] = float(uniform_applied)
     stats.update(
         _compute_awr_loss_health_stats(
             logp=logp,

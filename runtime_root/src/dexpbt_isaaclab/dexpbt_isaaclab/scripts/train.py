@@ -2077,6 +2077,18 @@ parser.add_argument(
     default=None,
     help="Lineage id carried across supervisor restarts for causal skill_delta windows.",
 )
+parser.add_argument(
+    "--pbt_lineage_start_pf_resume",
+    type=int,
+    default=None,
+    help="Population frame at which the current lineage began (snapshot-driven).",
+)
+parser.add_argument(
+    "--pbt_weight_age_frame_resume",
+    type=int,
+    default=None,
+    help="Weight age at lineage start, carried across supervisor restarts.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -4235,6 +4247,12 @@ def _pbt_restore_runner_args(
     )
     if getattr(args_cli, "restart_source_policy", None) is not None:
         out["restart_source_policy"] = int(args_cli.restart_source_policy)
+    if getattr(args_cli, "pbt_lineage_id_resume", None) is not None:
+        out["pbt_lineage_id_resume"] = str(args_cli.pbt_lineage_id_resume)
+    if getattr(args_cli, "pbt_lineage_start_pf_resume", None) is not None:
+        out["pbt_lineage_start_pf_resume"] = int(args_cli.pbt_lineage_start_pf_resume)
+    if getattr(args_cli, "pbt_weight_age_frame_resume", None) is not None:
+        out["pbt_weight_age_frame_resume"] = int(args_cli.pbt_weight_age_frame_resume)
     return out
 
 
@@ -4243,14 +4261,25 @@ def _wm_safe_restore(
     checkpoint_path: str,
     *,
     workspace: str | None = None,
-    enable_frame_gap_progress_reset: bool = True,
     target_frame_before_restore: int | None = None,
-    frame_gap_reset_threshold: int = 500_000_000,
+    restart_source_policy: int | None = None,
+    pbt_lineage_id_resume: str | None = None,
 ) -> None:
     """Restore rl_games agent tolerating aux_value_head / optimizer group mismatches."""
     import copy
     import torch
-    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+    from dexpbt_isaaclab.pbt.pbt_control_plane import (
+        load_meta_for_checkpoint,
+        pbt_pure_restore_clocks,
+        validate_published_meta,
+    )
+
+    from pathlib import Path as _Path
+
+    if restart_source_policy is not None and target_frame_before_restore is None:
+        raise RuntimeError("PBT_FRAME_MUST_BE_SNAPSHOT_DRIVEN")
+    if pbt_lineage_id_resume:
+        agent._pbt_lineage_id_resume = str(pbt_lineage_id_resume)
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(ckpt, dict):
@@ -4336,65 +4365,25 @@ def _wm_safe_restore(
         else:
             print("[AWR] restore: checkpoint sidecar missing or empty")
 
-    if "epoch" in ckpt or "frame" in ckpt:
-        source_frame = ckpt.get("frame")
-        from dexpbt_isaaclab.awr.elite_awr import pbt_should_keep_local_progress_counters
+    meta_path = _Path(checkpoint_path).with_suffix(".json")
+    if meta_path.is_file():
+        tick = int(getattr(agent, "_pbt_interval_steps", 20_000_000) or 20_000_000)
+        try:
+            validate_published_meta(meta_path, tick=tick)
+        except RuntimeError as exc:
+            print(f"[PBT] restore: published meta validation warning: {exc}")
 
-        if target_frame_before_restore is not None:
-            target_frame = int(target_frame_before_restore)
-            agent._pbt_restored_from_pbt_copy = True
-            agent._pbt_frame_snapshot_driven = True
-            agent._pbt_copy_source_frame = float(source_frame or 0)
-            agent._pbt_weight_age_frame = float(source_frame or 0)
-            agent._pbt_copy_target_frame_before_restore = float(target_frame)
-            _, frame_gap = pbt_should_keep_local_progress_counters(
-                source_frame=int(source_frame) if source_frame is not None else None,
-                target_frame=target_frame,
-                enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
-                frame_gap_reset_threshold=int(frame_gap_reset_threshold),
-            )
-            agent._pbt_copy_frame_gap = float(frame_gap)
-            agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
-            agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
-            agent.frame = target_frame
-            hor_len = int(getattr(agent, "horizon_length", 0) or 0)
-            num_actors = int(getattr(agent, "num_actors", 0) or 0)
-            frames_per_epoch = hor_len * num_actors
-            if frames_per_epoch > 0:
-                agent.epoch_num = int(target_frame) // int(frames_per_epoch)
-            elif "epoch" in ckpt:
-                agent.epoch_num = int(ckpt["epoch"])
-            print(
-                "[PBT] restore: snapshot-driven target_frame="
-                f"{target_frame} source_frame={source_frame} weight_age="
-                f"{agent._pbt_weight_age_frame}"
-            )
-        else:
-            target_frame = int(getattr(agent, "frame", 0) or 0)
-            should_keep_local_progress, frame_gap = pbt_should_keep_local_progress_counters(
-                source_frame=int(source_frame) if source_frame is not None else None,
-                target_frame=target_frame,
-                enable_frame_gap_reset=bool(enable_frame_gap_progress_reset),
-                frame_gap_reset_threshold=int(frame_gap_reset_threshold),
-            )
-            agent._pbt_copy_source_frame = float(source_frame or 0)
-            agent._pbt_copy_target_frame_before_restore = float(target_frame)
-            agent._pbt_copy_frame_gap = float(frame_gap)
-            agent._pbt_copy_frame_gap_threshold = float(frame_gap_reset_threshold)
-            if should_keep_local_progress:
-                agent._pbt_copy_reset_progress_due_to_frame_gap = 1.0
-                print(
-                    "[PBT] restore: keeping local progress counters "
-                    f"(source_frame={source_frame}, target_frame={target_frame}, "
-                    f"gap={frame_gap}, threshold={frame_gap_reset_threshold})"
-                )
-            else:
-                agent._pbt_copy_reset_progress_due_to_frame_gap = 0.0
-                if "epoch" in ckpt:
-                    agent.epoch_num = ckpt["epoch"]
-                if "frame" in ckpt:
-                    agent.frame = ckpt["frame"]
-    agent.last_mean_rewards = ckpt.get("last_mean_rewards", getattr(agent, "last_mean_rewards", -1e9))
+    meta = load_meta_for_checkpoint(checkpoint_path)
+    pbt_pure_restore_clocks(
+        agent,
+        ckpt,
+        meta=meta,
+        target_frame_before_restore=target_frame_before_restore,
+        restart_source_policy=restart_source_policy,
+    )
+    agent.last_mean_rewards = ckpt.get(
+        "last_mean_rewards", getattr(agent, "last_mean_rewards", -1e9)
+    )
 
     opt_sd = ckpt.get("optimizer")
     if not isinstance(opt_sd, dict):
@@ -4414,6 +4403,8 @@ def _wm_safe_restore(
         if _try_load_opt(opt_sd):
             return
     # Strip aux group from checkpoint when target model has fewer groups.
+    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
     patched = {"optimizer": copy.deepcopy(opt_sd)}
     DexPBTPbtAlgoObserver._strip_aux_optimizer_state(patched)
     if _try_load_opt(patched["optimizer"]):
@@ -4926,17 +4917,17 @@ class _CheckpointSafeRunner(Runner):
                 agent,
                 ckpt_path,
                 workspace=getattr(self, "workspace", None),
-                enable_frame_gap_progress_reset=bool(
-                    args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
-                ),
                 target_frame_before_restore=(
                     int(args["pbt_copy_target_frame_before_restore"])
                     if args.get("pbt_copy_target_frame_before_restore") is not None
                     else None
                 ),
-                frame_gap_reset_threshold=int(
-                    args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
+                restart_source_policy=(
+                    int(args["restart_source_policy"])
+                    if args.get("restart_source_policy") is not None
+                    else None
                 ),
+                pbt_lineage_id_resume=args.get("pbt_lineage_id_resume"),
             )
         else:
             torch_runner._restore(agent, args)
@@ -5381,17 +5372,17 @@ class _WmEnabledRunner(Runner):
                 agent,
                 ckpt_path,
                 workspace=getattr(self, "workspace", None),
-                enable_frame_gap_progress_reset=bool(
-                    args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
-                ),
                 target_frame_before_restore=(
                     int(args["pbt_copy_target_frame_before_restore"])
                     if args.get("pbt_copy_target_frame_before_restore") is not None
                     else None
                 ),
-                frame_gap_reset_threshold=int(
-                    args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
+                restart_source_policy=(
+                    int(args["restart_source_policy"])
+                    if args.get("restart_source_policy") is not None
+                    else None
                 ),
+                pbt_lineage_id_resume=args.get("pbt_lineage_id_resume"),
             )
         else:
             torch_runner._restore(agent, args)
@@ -6703,6 +6694,8 @@ def main():
             frames_at_restart_resume=args_cli.frames_at_restart_resume,
             last_mutation_frame_resume=args_cli.last_mutation_frame_resume,
             pbt_lineage_id_resume=args_cli.pbt_lineage_id_resume,
+            pbt_lineage_start_pf_resume=args_cli.pbt_lineage_start_pf_resume,
+            pbt_weight_age_frame_resume=args_cli.pbt_weight_age_frame_resume,
             # Patch G (2026-05-31): tiered source selection + recovery.
             pbt_source_selection_mode=args_cli.pbt_source_selection_mode,
             pbt_relaxed_nsucc_mean_as_source=(

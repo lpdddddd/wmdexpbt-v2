@@ -33,7 +33,6 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     SKILL_DELTA_STABLE_POS_EPS,
     SKILL_DELTA_WINDOW,
     apply_source_safe_consolidation_on_copy,
-    compute_skill_delta,
     evaluate_collapse_freeze,
     evaluate_mastery_gate,
     is_stable_source_window,
@@ -48,119 +47,20 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
 _WM_COUNTERFACTUAL = None
 _WM_POSTERIOR = None
 
-PBT_SNAPSHOT_SCHEMA_VERSION = 1
-PBT_SNAPSHOT_REQUIRED_MEMBERS = (
-    "model.pth",
-    "meta.json",
-    "MANIFEST",
+from dexpbt_isaaclab.pbt.pbt_control_plane import (
+    PBT_SNAPSHOT_SCHEMA_VERSION,
+    PbtStateSnapshot,
+    apply_pbt_state_snapshot,
+    assert_pbt_clock_invariants,
+    derive_lineage_frame,
+    derive_pbt_iteration,
+    pbt_copy_allowed_for_live_source,
+    pbt_copy_allowed_for_target,
+    pbt_population_frame,
+    pbt_scheduler_sync_clock,
+    snapshot_commit_barrier,
+    validate_snapshot_commit,
 )
-PBT_SNAPSHOT_HASHED_MEMBERS = (
-    "model.pth",
-    "meta.json",
-)
-
-
-def pbt_population_frame(algo) -> int:
-    """Read the authoritative population clock from the restored agent."""
-    if getattr(algo, "_pbt_restored_from_pbt_copy", False) and not getattr(
-        algo, "_pbt_frame_snapshot_driven", False
-    ):
-        raise RuntimeError("PBT_FRAME_MUST_BE_SNAPSHOT_DRIVEN")
-    return int(getattr(algo, "frame", 0) or 0)
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def validate_snapshot_commit(staging_dir: Path, *, tick: int) -> tuple[bool, str]:
-    """Verify an atomic snapshot staging directory before publish."""
-    manifest_path = staging_dir / "MANIFEST"
-    if not manifest_path.is_file():
-        return False, "no_manifest"
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except Exception:
-        return False, "manifest_corrupt"
-    if not isinstance(manifest, dict):
-        return False, "manifest_not_dict"
-    member_shas = manifest.get("member_shas")
-    if not isinstance(member_shas, dict):
-        return False, "manifest_missing_member_shas"
-    for name in PBT_SNAPSHOT_REQUIRED_MEMBERS:
-        if name not in member_shas and name != "MANIFEST":
-            return False, f"missing_member:{name}"
-    for name in PBT_SNAPSHOT_HASHED_MEMBERS:
-        expected = member_shas.get(name)
-        if expected is None:
-            return False, f"missing_member:{name}"
-        member_path = staging_dir / name
-        if not member_path.is_file():
-            return False, f"missing_file:{name}"
-        if _sha256_file(member_path) != str(expected):
-            return False, f"member_corrupt:{name}"
-    if not (staging_dir / "MANIFEST").is_file():
-        return False, "missing_file:MANIFEST"
-    population_frame = manifest.get("population_frame")
-    if population_frame is None:
-        return False, "missing_population_frame"
-    pf = int(population_frame)
-    tick_i = max(int(tick), 1)
-    if pf % tick_i != 0:
-        # Legacy rl_games counters may not align to PBT interval; record but do not fail.
-        if not manifest.get("allow_unquantized_clock", True):
-            return False, "clock_not_quantized"
-    return True, "ok"
-
-
-def snapshot_commit_barrier(
-    *,
-    staging_dir: Path,
-    model_src: Path,
-    meta_src: Path,
-    publish_model: Path,
-    publish_meta: Path,
-    manifest: dict[str, Any],
-    sidecar_src: Path | None = None,
-    tick: int,
-) -> Path:
-    """Publish model/meta/manifest atomically or abort with no partial commit."""
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(model_src, staging_dir / "model.pth")
-    shutil.copy2(meta_src, staging_dir / "meta.json")
-    member_shas = {
-        "model.pth": _sha256_file(staging_dir / "model.pth"),
-        "meta.json": _sha256_file(staging_dir / "meta.json"),
-    }
-    if sidecar_src is not None and sidecar_src.is_file():
-        shutil.copy2(sidecar_src, staging_dir / "awr_sidecar.pt")
-        member_shas["awr_sidecar.pt"] = _sha256_file(staging_dir / "awr_sidecar.pt")
-    manifest = dict(manifest)
-    manifest["schema_version"] = PBT_SNAPSHOT_SCHEMA_VERSION
-    manifest["member_shas"] = member_shas
-    manifest_path = staging_dir / "MANIFEST"
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
-    ok, reason = validate_snapshot_commit(staging_dir, tick=tick)
-    if not ok:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise RuntimeError(f"PBT_SNAPSHOT_COMMIT_FAILED:{reason}")
-    publish_model_tmp = publish_model.with_suffix(publish_model.suffix + ".publish")
-    publish_meta_tmp = publish_meta.with_suffix(publish_meta.suffix + ".publish")
-    shutil.copy2(staging_dir / "model.pth", publish_model_tmp)
-    shutil.copy2(staging_dir / "meta.json", publish_meta_tmp)
-    publish_model_tmp.replace(publish_model)
-    publish_meta_tmp.replace(publish_meta)
-    commit_dir = staging_dir.parent / f"{staging_dir.name}.commit"
-    if commit_dir.exists():
-        shutil.rmtree(commit_dir)
-    staging_dir.rename(commit_dir)
-    return commit_dir
 
 
 def _sample_factor(change_min: float, change_max: float) -> float:
@@ -604,6 +504,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         frames_at_restart_resume: int | None = None,
         last_mutation_frame_resume: int | None = None,
         pbt_lineage_id_resume: str | None = None,
+        pbt_lineage_start_pf_resume: int | None = None,
+        pbt_weight_age_frame_resume: int | None = None,
         # Patch F (2026-05-31): self/cross-restart accounting carried across exec.
         self_restart_count_resume: int | None = None,
         last_self_restart_frame_resume: int | None = None,
@@ -931,6 +833,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._lineage_id = str(pbt_lineage_id_resume)
         else:
             self._lineage_id = str(_uuid_mod.uuid4())
+        if pbt_lineage_start_pf_resume is not None:
+            self._lineage_start_pf = int(pbt_lineage_start_pf_resume)
+        else:
+            self._lineage_start_pf = 0
+        if pbt_weight_age_frame_resume is not None:
+            self._weight_age_frame = int(pbt_weight_age_frame_resume)
+        else:
+            self._weight_age_frame = 0
+        if pbt_lineage_id_resume is None:
+            latest = self._load_latest_policy_meta()
+            snap = PbtStateSnapshot.from_meta(latest)
+            if snap is not None:
+                self._lineage_id = snap.clocks.lineage_id
+                self._lineage_start_pf = snap.clocks.lineage_start_pf
+                self._weight_age_frame = snap.clocks.weight_age_frame
         self._r_meta_window: list[float] = []
         self.curr_target_objective_value = float("-inf")
         # Patch 1 (rev 2, 2026-05-30): r_meta_raw / pbt_ranking_score split.
@@ -1377,6 +1294,33 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if policy_idx not in self._policy_nsucc_windows:
             self._policy_nsucc_windows[policy_idx] = RollingNsuccWindow()
         return self._policy_nsucc_windows[policy_idx]
+
+    def _load_latest_policy_meta(self) -> dict[str, Any] | None:
+        if not self.curr_policy_workspace.exists():
+            return None
+        for candidate in sorted(self.curr_policy_workspace.glob("*.json"), reverse=True):
+            if candidate.name.endswith(".tmp") or candidate.name == "LATEST.commit":
+                continue
+            try:
+                data = json.loads(candidate.read_text())
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("lineage_id"):
+                return data
+        return None
+
+    def _read_prev_commit_id(self) -> str | None:
+        latest = self.curr_policy_workspace / "LATEST.commit"
+        if not latest.is_file():
+            return None
+        try:
+            data = json.loads(latest.read_text())
+        except Exception:
+            return None
+        if isinstance(data, dict):
+            cid = data.get("commit_id")
+            return str(cid) if cid else None
+        return None
 
     @staticmethod
     def _window_sample_from_state(
@@ -5073,8 +5017,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if self.pbt_iteration == -1:
             self.initial_env_frames = env_frames
             self.last_mutation_frame = env_frames
-            self.pbt_iteration = env_frames // self.interval_steps
-        iteration = env_frames // self.interval_steps
+            self.pbt_iteration = derive_pbt_iteration(env_frames, self.interval_steps)
+        iteration = derive_pbt_iteration(env_frames, self.interval_steps)
 
         if env_frames < self.start_after:
             return
@@ -5104,6 +5048,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         self.pbt_iteration = iteration
         self.target_objective_known = False
+
+        population_frame = pbt_scheduler_sync_clock(
+            self.algo,
+            tick=self.interval_steps,
+            lineage_id=self._lineage_id,
+            lineage_start_pf=self._lineage_start_pf,
+            weight_age_frame=self._weight_age_frame,
+        )
+        env_frames = population_frame
+        self._lineage_start_pf = int(self._lineage_start_pf or population_frame)
+        self.algo._pbt_derived_iteration = derive_pbt_iteration(
+            population_frame, self.interval_steps
+        )
+        assert_pbt_clock_invariants(self.algo, tick=self.interval_steps)
 
         own_state = self._save_workspace_checkpoint()
         population = self._load_population_checkpoints()
@@ -6018,12 +5976,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     ),
                     env_frames,
                 )
-            own_window = self._policy_nsucc_windows.get(self.policy_idx)
-            d_self = compute_skill_delta(
+            own_window = self._policy_window(self.policy_idx)
+            allowed, reason, d_self = pbt_copy_allowed_for_target(
                 own_window,
-                window_len=SKILL_DELTA_WINDOW,
                 interval_steps=self.interval_steps,
             )
+            if self.algo is not None:
+                self.algo._pbt_skill_delta = (
+                    float(d_self) if d_self is not None else 0.0
+                )
             if self.writer is not None:
                 self.writer.add_scalar(
                     "pbt/skill_delta",
@@ -6035,22 +5996,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     1.0 if d_self is not None else 0.0,
                     env_frames,
                 )
-            if d_self is None:
+                self.writer.add_scalar(
+                    "pbt/skill_delta_copy_allowed",
+                    1.0 if allowed else 0.0,
+                    env_frames,
+                )
+            if not allowed:
                 print(
                     f"Policy {self.policy_idx}: skip restart "
-                    "(skill_delta invalid — lineage or curriculum window unstable)"
+                    f"(skill_delta gate: {reason})"
                 )
-                self._last_restart_type = 3
-                return
-            if d_self >= float(SKILL_DELTA_IMPROVE_EPS):
-                print(
-                    f"Policy {self.policy_idx}: skip restart "
-                    f"(skill_delta improving: {d_self:.4f} >= {SKILL_DELTA_IMPROVE_EPS})"
-                )
-                if self.writer is not None:
-                    self.writer.add_scalar(
-                        "pbt/protected_by_skill_delta_gate", 1.0, env_frames
-                    )
                 self._last_restart_type = 3
                 return
             if self.writer is not None:
@@ -6186,15 +6141,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
             if str(decision.get("checkpoint_type", "live")) == "live":
                 src_idx = int(decision["source_policy"])
-                d_src = compute_skill_delta(
+                src_ok, src_reason = pbt_copy_allowed_for_live_source(
                     self._policy_nsucc_windows.get(src_idx),
-                    window_len=SKILL_DELTA_WINDOW,
                     interval_steps=self.interval_steps,
                 )
-                if d_src is None or d_src < float(SKILL_DELTA_STABLE_POS_EPS):
+                if not src_ok:
                     print(
                         f"Policy {self.policy_idx}: skip restart "
-                        f"(source skill_delta invalid or unstable: {d_src})"
+                        f"({src_reason})"
                     )
                     self._last_restart_type = 3
                     return
@@ -6563,6 +6517,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # inherited from an already-diverged source policy.
         for k in list(new_params.keys()):
             new_params[k] = _clamp_param(k, new_params[k])
+        src_state = population.get(source_policy) or {}
+        source_weight_age = int(
+            src_state.get(
+                "weight_age_frame",
+                src_state.get("frame", env_frames),
+            )
+            or 0
+        )
         self._restart_process_with_new_params(
             new_params,
             checkpoint_to_load,
@@ -6570,6 +6532,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             env_frames,
             tier,
             source_curriculum=source_curriculum,
+            source_weight_age_frame=source_weight_age,
         )
 
     def _policy_checkpoint_prefix(self, iteration: int) -> str:
@@ -6906,6 +6869,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 pass
         curriculum = self._read_curriculum_state()
         population_frame = pbt_population_frame(self.algo)
+        lineage_start_pf = int(self._lineage_start_pf or population_frame)
+        weight_age_frame = int(self._weight_age_frame) + derive_lineage_frame(
+            population_frame, lineage_start_pf
+        )
+        self.algo._pbt_weight_age_frame = int(weight_age_frame)
+        self.algo._pbt_lineage_start_pf = int(lineage_start_pf)
 
         # ------------------------------------------------------------------
         # Patch 1 (rev 2, 2026-05-30): compute success-aware PBT ranking
@@ -6989,6 +6958,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "frame": int(population_frame),
             "population_frame": int(population_frame),
             "lineage_id": str(self._lineage_id),
+            "lineage_start_pf": int(lineage_start_pf),
+            "weight_age_frame": int(weight_age_frame),
+            "schema_version": int(PBT_SNAPSHOT_SCHEMA_VERSION),
             "iteration": self.pbt_iteration,
             "timestamp": time.time(),
             "params": self.mutable_params,
@@ -7030,13 +7002,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         }
         torch.save(algo_state, ckpt_tmp)
         meta_tmp.write_text(json.dumps(state))
+        prev_commit_id = self._read_prev_commit_id()
         commit_manifest = {
             "commit_id": f"{prefix}",
+            "schema_version": int(PBT_SNAPSHOT_SCHEMA_VERSION),
             "population_frame": int(population_frame),
             "lineage_id": str(self._lineage_id),
+            "lineage_start_pf": int(lineage_start_pf),
+            "weight_age_frame": int(weight_age_frame),
             "policy_idx": int(self.policy_idx),
             "pbt_iteration": int(self.pbt_iteration),
+            "optimizer_step": int(getattr(self.algo, "_pbt_optimizer_step", 0) or 0),
         }
+        if prev_commit_id:
+            commit_manifest["prev_commit_id"] = str(prev_commit_id)
         snapshot_commit_barrier(
             staging_dir=self.curr_policy_workspace / f"{prefix}.staging",
             model_src=ckpt_tmp,
@@ -7412,6 +7391,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         env_frames: int,
         tier: str,
         source_curriculum: dict[str, float | int] | None = None,
+        source_weight_age_frame: int = 0,
     ) -> None:
         src = Path(checkpoint_path).resolve()
         tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
@@ -7560,6 +7540,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "--frames_at_restart_resume",
             "--last_mutation_frame_resume",
             "--last_profile_copy_frame_resume",
+            "--pbt_lineage_id_resume",
+            "--pbt_lineage_start_pf_resume",
+            "--pbt_weight_age_frame_resume",
+            "--pbt_copy_target_frame_before_restore",
             # The supervisor re-injects DEXPBT_KIT_ARGS at attempt start; if we
             # keep --kit_args from _original_sys_argv it would be duplicated.
             "--kit_args",
@@ -7683,7 +7667,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         train_args.append(f"--restart_source_policy={int(source_policy)}")
         train_args.append(f"--pbt_copy_target_frame_before_restore={int(env_frames)}")
         self._lineage_id = str(_uuid_mod.uuid4())
+        self._lineage_start_pf = int(env_frames)
+        self._weight_age_frame = int(source_weight_age_frame)
         train_args.append(f"--pbt_lineage_id_resume={self._lineage_id}")
+        train_args.append(
+            f"--pbt_lineage_start_pf_resume={int(self._lineage_start_pf)}"
+        )
+        train_args.append(
+            f"--pbt_weight_age_frame_resume={int(self._weight_age_frame)}"
+        )
         # Patch H (2026-05-31): post-restart curriculum freeze. Observer
         # config is env frames; env stores simulation steps (Scheme A).
         freeze_env_frames = (
