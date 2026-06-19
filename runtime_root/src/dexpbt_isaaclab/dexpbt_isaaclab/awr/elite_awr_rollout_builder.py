@@ -22,6 +22,12 @@ from dexpbt_isaaclab.awr.elite_awr_interceptor import classify_done_reason
 
 PPO_BUFFER_ACTIONS = 1
 DEFAULT_TOLERANCE = 0.075
+AWR_BUILDER_MAX_ENTRIES_PER_ROLLOUT = 2048
+AWR_BUILDER_MAX_SELECTED_STEPS_PER_ROLLOUT = 50000
+AWR_BUILDER_SELECTED_CAP_REASON_NONE = 0.0
+AWR_BUILDER_SELECTED_CAP_REASON_ENTRIES = 7301.0
+AWR_BUILDER_SELECTED_CAP_REASON_STEPS = 7302.0
+AWR_SUCCESS_SIGNAL_SOURCE_SUCCESS_CNT_DELTA = 1.0
 
 
 def should_collect_awr(
@@ -580,8 +586,14 @@ def _enumerate_fragments_batched(
 
     if not all_fragments:
         frag_n = torch.arange(N, device=device, dtype=torch.long)
-        frag_t0 = torch.zeros(N, device=device, dtype=torch.long)
         frag_t1 = torch.full((N,), T - 1, device=device, dtype=torch.long)
+        t_grid = torch.arange(T, device=device).unsqueeze(1).expand(T, N)
+        done_times = torch.where(dones_bool, t_grid, torch.full_like(t_grid, -1))
+        last_done = done_times.max(dim=0).values
+        frag_t0 = last_done + 1
+        frag_t0 = torch.where(last_done < 0, torch.zeros_like(frag_t0), frag_t0)
+        frag_t0 = torch.where(last_done == T - 1, frag_t1, frag_t0)
+        frag_t0 = torch.clamp(frag_t0, max=T - 1)
         return frag_n, frag_t0, frag_t1
 
     end_mask = dones_bool.clone()
@@ -738,10 +750,9 @@ def _precompute_fragment_features(
     stored_seq_len = torch.minimum(orig_len, torch.full_like(orig_len, max_len))
     seg_t0 = frag_t1 - stored_seq_len + 1
     seg_mask = (t_grid >= seg_t0.unsqueeze(1)) & (t_grid <= frag_t1.unsqueeze(1))
-    # Reference rollout builder always passes truncated_prefix=True to entry builder.
-    truncated = torch.ones(F, device=device, dtype=torch.bool)
+    truncated = orig_len > max_len
     burn_start = torch.where(
-        stored_seq_len > int(cfg.min_burnin_steps),
+        truncated & (stored_seq_len > int(cfg.min_burnin_steps)),
         torch.full_like(stored_seq_len, int(cfg.min_burnin_steps)),
         torch.zeros_like(stored_seq_len),
     )
@@ -822,11 +833,6 @@ def _precompute_fragment_features(
         quality_min=cfg.quality_min,
     )
 
-    burn_start = torch.where(
-        stored_seq_len > int(cfg.min_burnin_steps),
-        torch.full_like(stored_seq_len, int(cfg.min_burnin_steps)),
-        torch.zeros_like(stored_seq_len),
-    )
     rel_pos = t_grid - seg_t0.unsqueeze(1)
     step_pass = (~fail_bool) & (lifted_bool | (tolerance_ft <= 0.06))
     base_loss = seg_mask & (rel_pos >= burn_start.unsqueeze(1))
@@ -887,6 +893,48 @@ def _precompute_fragment_features(
     )
 
 
+def _cap_selected_indices(
+    features: _FragmentFeatures,
+) -> tuple[torch.Tensor, int, int, bool, float]:
+    """Cap materialized selected fragments by priority without changing precompute stats."""
+    selected_idx = torch.nonzero(features.final_accept, as_tuple=False).view(-1)
+    before = int(selected_idx.numel())
+    if before == 0:
+        return selected_idx, 0, 0, False, AWR_BUILDER_SELECTED_CAP_REASON_NONE
+
+    priority = (
+        features.future_success_within_100[selected_idx].float() * 1_000_000.0
+        + features.episode_quality[selected_idx] * 10_000.0
+        + features.future_improvement[selected_idx] * 100.0
+        - features.tolerance_min[selected_idx]
+    )
+    order = torch.argsort(priority, descending=True)
+    selected_idx = selected_idx[order]
+
+    cap_applied = False
+    reason = AWR_BUILDER_SELECTED_CAP_REASON_NONE
+
+    step_budget = float(AWR_BUILDER_MAX_SELECTED_STEPS_PER_ROLLOUT)
+    steps = features.stored_seq_len[selected_idx].to(torch.float32)
+    cum_steps = torch.cumsum(steps, dim=0)
+    if float(cum_steps[-1].item()) > step_budget:
+        keep = int(torch.searchsorted(cum_steps, torch.tensor(step_budget, device=cum_steps.device), right=True).item())
+        keep = max(keep, 0)
+        if keep < selected_idx.numel():
+            selected_idx = selected_idx[:keep]
+            cap_applied = True
+            reason = AWR_BUILDER_SELECTED_CAP_REASON_STEPS
+
+    if selected_idx.numel() > AWR_BUILDER_MAX_ENTRIES_PER_ROLLOUT:
+        selected_idx = selected_idx[: AWR_BUILDER_MAX_ENTRIES_PER_ROLLOUT]
+        cap_applied = True
+        if reason == AWR_BUILDER_SELECTED_CAP_REASON_NONE:
+            reason = AWR_BUILDER_SELECTED_CAP_REASON_ENTRIES
+
+    after = int(selected_idx.numel())
+    return selected_idx, before, after, cap_applied, reason
+
+
 def _materialize_elite_awr_entry(
     idx: int,
     features: _FragmentFeatures,
@@ -914,13 +962,8 @@ def _materialize_elite_awr_entry(
     quality_per_step = features.quality_per_step_ft[idx, seg_t0 : t1 + 1].detach().cpu()
     tolerance_per_step = features.tolerance_ft[idx, seg_t0 : t1 + 1].detach().cpu()
 
-    trunc = True
-    if stored_seq_len > int(cfg.max_episode_len):
-        loss_start_idx = min(int(cfg.min_burnin_steps), stored_seq_len - 1)
-    elif stored_seq_len > int(cfg.min_burnin_steps):
-        loss_start_idx = 0
-    else:
-        loss_start_idx = 0
+    trunc = bool(features.truncated[idx].item())
+    loss_start_idx = min(int(cfg.min_burnin_steps), stored_seq_len - 1) if trunc else 0
 
     return EliteAWREntry(
         obs=obs_seg,
@@ -996,9 +1039,10 @@ def build_awr_entries_from_experience_buffer_vectorized(
     stats["awr/rollout_builder_precompute_ms"] = (time.perf_counter() - pre_t0) * 1000.0
     mat_t0 = time.perf_counter()
 
+    selected_idx, before_cap, after_cap, cap_applied, cap_reason = _cap_selected_indices(features)
+
     entries: list[EliteAWREntry] = []
     selected_count = 0
-    selected_idx = torch.nonzero(features.final_accept, as_tuple=False).view(-1)
     for idx in selected_idx.tolist():
         entry = _materialize_elite_awr_entry(
             idx,
@@ -1017,15 +1061,26 @@ def build_awr_entries_from_experience_buffer_vectorized(
         stats["awr/rollout_builder_selected_steps"] += float(entry.num_valid_steps)
 
     partial_count = int(features.is_partial.sum().item())
+    done_fragment_count = int((~features.is_partial).sum().item())
     done_unknown_count = int(features.done_unknown.sum().item())
     success_from_cnt_count = int(features.success_from_cnt.sum().item())
 
+    stats["awr/rollout_builder_selected_fragments_before_cap"] = float(before_cap)
+    stats["awr/rollout_builder_selected_fragments_after_cap"] = float(after_cap)
+    stats["awr/rollout_builder_selected_cap_applied"] = float(cap_applied)
+    stats["awr/rollout_builder_selected_cap_reason_code"] = float(cap_reason)
     stats["awr/rollout_builder_selected_fragments"] = float(selected_count)
     stats["awr/rollout_builder_entries"] = float(len(entries))
     stats["awr/rollout_builder_partial_frac"] = float(partial_count) / max(F, 1)
     stats["awr/done_reason_unknown_frac"] = float(done_unknown_count) / max(F, 1)
+    stats["awr/done_fragment_frac"] = float(done_fragment_count) / max(F, 1)
+    stats["awr/done_reason_classification_disabled"] = 1.0
+    stats["awr/success_signal_source_code"] = AWR_SUCCESS_SIGNAL_SOURCE_SUCCESS_CNT_DELTA
     stats["awr/success_from_success_cnt"] = float(success_from_cnt_count)
     stats["awr/success_cleared_by_unknown_done"] = 0.0
+    if rt.success_cnt is None:
+        stats["awr/success_signal_missing"] = 1.0
+        stats["awr/info_missing_success"] = 1.0
     stats["awr/rollout_builder_selected_materialize_ms"] = (
         time.perf_counter() - mat_t0
     ) * 1000.0
