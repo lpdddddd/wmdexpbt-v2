@@ -65,6 +65,8 @@ class EliteAWRConfig:
     regression_drop_threshold: float = 4.0
     regression_pause_frames: int = 100_000_000
     sidecar_format_version: int = 1
+    collection_mode: str = "rollout_buffer"
+    collect_after_frames: int = 600_000_000
 
 
 @dataclass
@@ -110,6 +112,20 @@ def awr_active_from_args(args_cli) -> bool:
     return bool(getattr(args_cli, "awr_enable", False)) and float(
         getattr(args_cli, "awr_loss_weight", 0.0) or 0.0
     ) > 0.0
+
+
+def pbt_should_keep_local_progress_counters(
+    *,
+    source_frame: int | None,
+    target_frame: int,
+    reset_progress_counters: bool,
+    frame_gap_reset_threshold: int,
+) -> tuple[bool, int]:
+    gap = abs(int(source_frame) - int(target_frame)) if source_frame is not None else 0
+    should_reset = bool(reset_progress_counters)
+    if not should_reset and source_frame is not None:
+        should_reset = gap > int(frame_gap_reset_threshold)
+    return should_reset, gap
 
 
 def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
@@ -173,6 +189,12 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
         ),
         regression_pause_frames=int(
             getattr(args_cli, "awr_regression_pause_frames", 100_000_000)
+        ),
+        collection_mode=str(
+            getattr(args_cli, "awr_collection_mode", "rollout_buffer") or "rollout_buffer"
+        ),
+        collect_after_frames=int(
+            getattr(args_cli, "awr_collect_after_frames", 600_000_000)
         ),
     )
 

@@ -17,6 +17,12 @@ from dexpbt_isaaclab.awr.elite_awr import (
     resolve_awr_sidecar_path,
 )
 from dexpbt_isaaclab.awr.elite_awr_interceptor import EliteAWRInterceptorEnv
+from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
+    PPO_BUFFER_ACTIONS,
+    build_awr_entries_from_experience_buffer,
+    check_rollout_buffer_action_sanity,
+    should_collect_awr,
+)
 
 __all__ = [
     "EliteAWRBridge",
@@ -24,8 +30,11 @@ __all__ = [
     "EliteAWRConfig",
     "EliteAWREntry",
     "EliteAWRInterceptorEnv",
+    "PPO_BUFFER_ACTIONS",
     "awr_active_from_args",
+    "build_awr_entries_from_experience_buffer",
     "build_elite_awr_config_from_args",
+    "check_rollout_buffer_action_sanity",
     "compute_elite_awr_loss",
     "compute_elite_awr_quality",
     "load_awr_sidecar",
@@ -33,4 +42,5 @@ __all__ = [
     "save_awr_sidecar_topk",
     "consume_awr_sidecar_from_checkpoint",
     "resolve_awr_sidecar_path",
+    "should_collect_awr",
 ]

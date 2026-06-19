@@ -11,6 +11,15 @@ from pathlib import Path
 from typing import Any
 
 
+PPO_BUFFER_ACTIONS = 1
+V13_REFERENCE_FPS = {
+    0: 95000.0,
+    1: 90000.0,
+    2: 95000.0,
+    3: 90000.0,
+    4: 90000.0,
+    5: 90000.0,
+}
 FRAME_MARKS = (
     ("0.5B", 500_000_000),
     ("1.0B", 1_000_000_000),
@@ -195,6 +204,39 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
                 last, "awr_buffer_broadcast_loaded_steps", "awr/buffer_broadcast_loaded_steps", default=0.0
             ),
             "broadcast_enabled": _get(last, "awr_broadcast_enabled", "awr/broadcast_enabled", default=0.0),
+            "collection_mode": str(
+                last.get("awr_collection_mode")
+                or last.get("hyperparam_awr_collection_mode")
+                or "unknown"
+            ),
+            "rollout_builder_entries": _get(
+                last, "awr_rollout_builder_entries", "awr/rollout_builder_entries", default=0.0
+            ),
+            "rollout_builder_selected_steps": _get(
+                last,
+                "awr_rollout_builder_selected_steps",
+                "awr/rollout_builder_selected_steps",
+                default=0.0,
+            ),
+            "rollout_builder_time_ms": _get(
+                last, "awr_rollout_builder_time_ms", "awr/rollout_builder_time_ms", default=0.0
+            ),
+            "skipped_collect_not_started": _get(
+                last, "awr_skipped_collect_not_started", "awr/skipped_collect_not_started", default=0.0
+            ),
+            "action_source_code": _get(
+                last, "awr_action_source_code", "awr/action_source_code", default=0.0
+            ),
+            "action_out_of_bounds_frac_1": _get(
+                last, "awr_action_out_of_bounds_frac_1", "awr/action_out_of_bounds_frac_1", default=0.0
+            ),
+            "ppo_buffer_action_min": _get(
+                last, "awr_ppo_buffer_action_min", "awr/ppo_buffer_action_min"
+            ),
+            "ppo_buffer_action_max": _get(
+                last, "awr_ppo_buffer_action_max", "awr/ppo_buffer_action_max"
+            ),
+            "fps_last": _get(last, "fps", "train/fps", default=float("nan")),
         }
 
     v13_health: dict[str, Any] = {
@@ -284,11 +326,54 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
         "separation_vs_eir_actor_distill": separation,
     }
 
+    v17_1_health: dict[str, Any] = {"checks": {}, "per_policy": {}}
+    for pid_key, row in awr_table.items():
+        pid = int(pid_key.lstrip("p"))
+        fps = float(row.get("fps_last", float("nan")))
+        ref_fps = V13_REFERENCE_FPS.get(pid, float("nan"))
+        awr_on = bool(row.get("awr_active"))
+        perf_ok = (not awr_on) or (not math.isfinite(fps)) or (not math.isfinite(ref_fps)) or fps >= 0.7 * ref_fps
+        mismatch = float(row.get("action_convention_result", {}).get("mismatch", 0.0))
+        conv_ok = mismatch < 0.5
+        source_code = float(row.get("action_source_code", 0.0))
+        source_ok = (not awr_on) or source_code == float(PPO_BUFFER_ACTIONS)
+        v17_1_health["per_policy"][pid_key] = {
+            "awr_collection_mode": row.get("collection_mode"),
+            "rollout_builder_entries": row.get("rollout_builder_entries"),
+            "rollout_builder_selected_steps": row.get("rollout_builder_selected_steps"),
+            "rollout_builder_time_ms": row.get("rollout_builder_time_ms"),
+            "skipped_collect_not_started": row.get("skipped_collect_not_started"),
+            "action_source_code": source_code,
+            "action_out_of_bounds_frac_1": row.get("action_out_of_bounds_frac_1"),
+            "ppo_buffer_action_min": row.get("ppo_buffer_action_min"),
+            "ppo_buffer_action_max": row.get("ppo_buffer_action_max"),
+            "fps_by_policy": fps,
+            "v13_reference_fps": ref_fps,
+            "collection_performance_ok": perf_ok,
+            "action_convention_ok": conv_ok,
+            "action_source_ok": source_ok,
+        }
+    v17_1_health["checks"] = {
+        "collection_performance_failed": any(
+            not block.get("collection_performance_ok", True)
+            for block in v17_1_health["per_policy"].values()
+        ),
+        "action_convention_failed": any(
+            not block.get("action_convention_ok", True)
+            for block in v17_1_health["per_policy"].values()
+        ),
+        "action_source_failed": any(
+            not block.get("action_source_ok", True)
+            for block in v17_1_health["per_policy"].values()
+        ),
+    }
+
     return {
         "run_dir": str(run_dir),
         "same_frame_nsucc": same_frame,
         "awr_active_table": awr_table,
         "awr_health_summary": awr_health_summary,
+        "v17_1_rollout_buffer_health": v17_1_health,
         "v13_mechanism_health": v13_health,
         "separation_block": separation,
         "run_config_notes": {
@@ -296,6 +381,7 @@ def analyze_run(run_dir: Path) -> dict[str, Any]:
             "awr_kl_telemetry_only": True,
             "awr_broadcast_enabled": False,
             "awr_inherit_enabled": True,
+            "awr_collection_mode": "rollout_buffer",
         },
     }
 
@@ -328,6 +414,15 @@ def _render_markdown(report: dict[str, Any]) -> str:
     lines.append(str(summary.get("delta_gate", {})))
     lines.append("### Weighted loss health")
     lines.append(str(summary.get("weighted_loss", {})))
+    lines.append("")
+    lines.append("## B3. v17.1 rollout-buffer health")
+    v171 = report.get("v17_1_rollout_buffer_health", {})
+    lines.append(f"- checks: {v171.get('checks', {})}")
+    for pid, block in sorted(v171.get("per_policy", {}).items()):
+        lines.append(f"### {pid}")
+        for key, val in block.items():
+            lines.append(f"- {key}: {val}")
+        lines.append("")
     lines.append("")
     lines.append("## C. v13 mechanism health")
     lines.append(f"- profile_copy_events: {report['v13_mechanism_health']['profile_copy_events']}")

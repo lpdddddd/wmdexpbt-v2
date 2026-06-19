@@ -4765,6 +4765,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "awr_effective_lambda",
                     float(awr_bridge.stats.get("awr/effective_lambda", 0.0)),
                 )
+            if self.algo is not None:
+                for key, attr in (
+                    ("pbt_copy_reset_progress_due_to_frame_gap", "_pbt_copy_reset_progress_due_to_frame_gap"),
+                    ("pbt_copy_source_frame", "_pbt_copy_source_frame"),
+                    ("pbt_copy_target_frame_before_restore", "_pbt_copy_target_frame_before_restore"),
+                    ("pbt_copy_frame_gap", "_pbt_copy_frame_gap"),
+                ):
+                    val = getattr(self.algo, attr, None)
+                    if val is not None:
+                        point[key] = float(val)
             with open(out_path, "a") as fh:
                 fh.write(json.dumps(point) + "\n")
                 fh.flush()
@@ -7467,6 +7477,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if "frame_since_restart" in sc:
             train_args.append(f"--frame_since_restart_resume={int(sc['frame_since_restart'])}")
         train_args.append(f"--restart_source_policy={int(source_policy)}")
+        train_args.append(f"--pbt_copy_target_frame_before_restore={int(env_frames)}")
         # Patch H (2026-05-31): post-restart curriculum freeze. Observer
         # config is env frames; env stores simulation steps (Scheme A).
         freeze_env_frames = (

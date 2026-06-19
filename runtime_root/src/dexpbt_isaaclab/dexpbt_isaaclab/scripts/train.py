@@ -2035,6 +2035,31 @@ parser.add_argument("--awr_broadcast_min_source_nsucc", type=float, default=35.0
 parser.add_argument("--awr_pause_on_regression", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--awr_regression_drop_threshold", type=float, default=4.0)
 parser.add_argument("--awr_regression_pause_frames", type=int, default=100_000_000)
+parser.add_argument(
+    "--awr_collection_mode",
+    type=str,
+    default="rollout_buffer",
+    choices=("rollout_buffer", "interceptor"),
+    help="AWR data collection path: rollout_buffer (default) or legacy env interceptor.",
+)
+parser.add_argument(
+    "--awr_collect_after_frames",
+    type=int,
+    default=600_000_000,
+    help="Skip AWR rollout collection until this env-frame count.",
+)
+parser.add_argument(
+    "--pbt_copy_reset_progress_on_large_frame_gap",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="On PBT copy restore, do not inherit donor epoch/frame when gap exceeds threshold.",
+)
+parser.add_argument(
+    "--pbt_copy_frame_gap_reset_threshold",
+    type=int,
+    default=500_000_000,
+    help="Frame gap above which PBT restore keeps local progress counters.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -3006,24 +3031,71 @@ def _patch_actor_train_for_seq_wm(
         capture["last_success_count"] = last_success_t
         rollout_state["generation"] += 1
 
-        if awr_bridge is not None and awr_env_wrap is not None:
-            if not getattr(awr_bridge, "_action_checked", False):
-                try:
-                    captured = awr_env_wrap.consume_rollout_actions()
-                    ppo_actions = actor.experience_buffer.tensor_dict.get("actions")
-                    if captured is None or ppo_actions is None:
-                        awr_bridge.record_action_convention_unavailable(
-                            "missing_capture_or_ppo_actions"
-                        )
-                    else:
-                        awr_bridge.maybe_check_action_convention(
-                            captured, ppo_actions
-                        )
-                except Exception as _awr_act_exc:
-                    print(f"[AWR] action convention check failed: {_awr_act_exc}")
-                    awr_bridge.record_action_convention_unavailable(
-                        f"exception:{type(_awr_act_exc).__name__}"
+        if awr_bridge is not None:
+            awr_cfg = awr_bridge.cfg
+            frames = int(getattr(actor, "frame", 0) or 0)
+            awr_bridge.stats["awr/collect_after_frames"] = float(
+                getattr(awr_cfg, "collect_after_frames", 0)
+            )
+            awr_bridge.stats["awr/start_after_frames"] = float(awr_cfg.start_after_frames)
+
+            if awr_bridge.disabled:
+                awr_bridge.stats["awr/skipped_disabled"] = 1.0
+            elif frames < int(getattr(awr_cfg, "collect_after_frames", 0)):
+                awr_bridge.stats["awr/skipped_collect_not_started"] = 1.0
+            elif str(getattr(awr_cfg, "collection_mode", "rollout_buffer")) == "rollout_buffer":
+                from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
+                    build_awr_entries_from_experience_buffer,
+                    check_rollout_buffer_action_sanity,
+                    should_collect_awr,
+                )
+
+                if should_collect_awr(frames, awr_cfg, awr_bridge):
+                    td = actor.experience_buffer.tensor_dict
+                    if not getattr(awr_bridge, "_rollout_action_sanity_checked", False):
+                        check_rollout_buffer_action_sanity(awr_bridge, td)
+                        awr_bridge._rollout_action_sanity_checked = True
+                    meta_provider = getattr(awr_bridge, "source_meta_provider", None)
+                    meta = dict(meta_provider() or {}) if callable(meta_provider) else {}
+                    source_nsucc = meta.get("source_nsucc")
+                    if isinstance(source_nsucc, torch.Tensor):
+                        source_nsucc = float(source_nsucc.mean().item())
+                    entries, builder_stats = build_awr_entries_from_experience_buffer(
+                        experience_buffer=actor.experience_buffer,
+                        cfg=awr_cfg,
+                        source_policy=int(
+                            meta.get("source_policy", getattr(awr_bridge, "policy_idx", 0))
+                        ),
+                        source_profile=str(
+                            meta.get("source_profile")
+                            or getattr(awr_bridge, "profile_name", "")
+                        ),
+                        source_nsucc=source_nsucc,
+                        source_retention=meta.get("source_retention"),
+                        env_frames=frames,
+                        source_type=str(meta.get("source_type") or "local"),
                     )
+                    for entry in entries:
+                        awr_bridge.buffer.insert(entry)
+                    awr_bridge.stats.update(builder_stats)
+            elif awr_env_wrap is not None:
+                if not getattr(awr_bridge, "_action_checked", False):
+                    try:
+                        captured = awr_env_wrap.consume_rollout_actions()
+                        ppo_actions = actor.experience_buffer.tensor_dict.get("actions")
+                        if captured is None or ppo_actions is None:
+                            awr_bridge.record_action_convention_unavailable(
+                                "missing_capture_or_ppo_actions"
+                            )
+                        else:
+                            awr_bridge.maybe_check_action_convention(
+                                captured, ppo_actions
+                            )
+                    except Exception as _awr_act_exc:
+                        print(f"[AWR] action convention check failed: {_awr_act_exc}")
+                        awr_bridge.record_action_convention_unavailable(
+                            f"exception:{type(_awr_act_exc).__name__}"
+                        )
 
         # FloorCritic: build the per-rollout (T,N) target cache NOW (after the
         # aux copy, before PPO's minibatch loop / get_aux_loss). Reset the
@@ -4123,7 +4195,15 @@ def _align_optimizer_state_to_agent(
     return aligned
 
 
-def _wm_safe_restore(agent, checkpoint_path: str, *, workspace: str | None = None) -> None:
+def _wm_safe_restore(
+    agent,
+    checkpoint_path: str,
+    *,
+    workspace: str | None = None,
+    reset_progress_counters: bool = False,
+    target_frame_before_restore: int | None = None,
+    frame_gap_reset_threshold: int = 500_000_000,
+) -> None:
     """Restore rl_games agent tolerating aux_value_head / optimizer group mismatches."""
     import copy
     import torch
@@ -4213,10 +4293,36 @@ def _wm_safe_restore(agent, checkpoint_path: str, *, workspace: str | None = Non
         else:
             print("[AWR] restore: checkpoint sidecar missing or empty")
 
-    if "epoch" in ckpt:
-        agent.epoch_num = ckpt["epoch"]
-    if "frame" in ckpt:
-        agent.frame = ckpt["frame"]
+    if "epoch" in ckpt or "frame" in ckpt:
+        source_frame = ckpt.get("frame")
+        target_frame = (
+            int(target_frame_before_restore)
+            if target_frame_before_restore is not None
+            else int(getattr(agent, "frame", 0) or 0)
+        )
+        from dexpbt_isaaclab.awr.elite_awr import pbt_should_keep_local_progress_counters
+
+        should_reset_progress, frame_gap = pbt_should_keep_local_progress_counters(
+            source_frame=int(source_frame) if source_frame is not None else None,
+            target_frame=target_frame,
+            reset_progress_counters=bool(reset_progress_counters),
+            frame_gap_reset_threshold=int(frame_gap_reset_threshold),
+        )
+        if should_reset_progress:
+            agent._pbt_copy_reset_progress_due_to_frame_gap = 1.0
+            agent._pbt_copy_source_frame = float(source_frame or 0)
+            agent._pbt_copy_target_frame_before_restore = float(target_frame)
+            agent._pbt_copy_frame_gap = float(frame_gap)
+            print(
+                "[PBT] restore: keeping local progress counters "
+                f"(source_frame={source_frame}, target_frame={target_frame}, "
+                f"gap={frame_gap}, threshold={frame_gap_reset_threshold})"
+            )
+        else:
+            if "epoch" in ckpt:
+                agent.epoch_num = ckpt["epoch"]
+            if "frame" in ckpt:
+                agent.frame = ckpt["frame"]
     agent.last_mean_rewards = ckpt.get("last_mean_rewards", getattr(agent, "last_mean_rewards", -1e9))
 
     opt_sd = ckpt.get("optimizer")
@@ -4741,7 +4847,21 @@ class _CheckpointSafeRunner(Runner):
 
         ckpt_path = args.get("checkpoint")
         if ckpt_path:
-            _wm_safe_restore(agent, ckpt_path, workspace=getattr(self, "workspace", None))
+            _wm_safe_restore(
+                agent,
+                ckpt_path,
+                workspace=getattr(self, "workspace", None),
+                reset_progress_counters=bool(
+                    args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
+                ),
+                target_frame_before_restore=int(
+                    args.get("pbt_copy_target_frame_before_restore", 0) or 0
+                )
+                or None,
+                frame_gap_reset_threshold=int(
+                    args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
+                ),
+            )
         else:
             torch_runner._restore(agent, args)
         torch_runner._override_sigma(agent, args)
@@ -5177,7 +5297,21 @@ class _WmEnabledRunner(Runner):
             # seq_wm-only profiles (wm_curriculum_controller, wm_pbt_source_selector)
             # previously fell through to rl_games _restore and crashed when a donor
             # checkpoint carried EIR/elite optimizer param groups.
-            _wm_safe_restore(agent, ckpt_path, workspace=getattr(self, "workspace", None))
+            _wm_safe_restore(
+                agent,
+                ckpt_path,
+                workspace=getattr(self, "workspace", None),
+                reset_progress_counters=bool(
+                    args.get("pbt_copy_reset_progress_on_large_frame_gap", True)
+                ),
+                target_frame_before_restore=int(
+                    args.get("pbt_copy_target_frame_before_restore", 0) or 0
+                )
+                or None,
+                frame_gap_reset_threshold=int(
+                    args.get("pbt_copy_frame_gap_reset_threshold", 500_000_000)
+                ),
+            )
         else:
             torch_runner._restore(agent, args)
         torch_runner._override_sigma(agent, args)
@@ -6172,25 +6306,43 @@ def main():
                         observer, "curr_source_retention", None
                     ),
                     "source_type": "local",
-                    "env_frames": int(getattr(observer, "algo", None) and getattr(getattr(observer, "algo", None), "frame", 0) or 0),
+                    "source_policy": int(args_cli.policy_idx),
+                    "source_profile": str(args_cli.wm_strategy_profile),
+                    "env_frames": int(
+                        getattr(observer, "algo", None)
+                        and getattr(getattr(observer, "algo", None), "frame", 0)
+                        or 0
+                    ),
                 }
 
-            env = EliteAWRInterceptorEnv(
-                env,
-                awr_buffer,
-                awr_cfg,
-                num_envs=env.unwrapped.num_envs,
-                policy_idx=int(args_cli.policy_idx),
-                profile_name=str(args_cli.wm_strategy_profile),
-                env_attrs_provider=_seq_env_attrs,
-                source_meta_provider=_awr_source_meta,
-                device=rl_device,
+            collection_mode = str(
+                getattr(awr_cfg, "collection_mode", "rollout_buffer") or "rollout_buffer"
             )
-            awr_env_wrap = env
+            if collection_mode == "interceptor":
+                env = EliteAWRInterceptorEnv(
+                    env,
+                    awr_buffer,
+                    awr_cfg,
+                    num_envs=env.unwrapped.num_envs,
+                    policy_idx=int(args_cli.policy_idx),
+                    profile_name=str(args_cli.wm_strategy_profile),
+                    env_attrs_provider=_seq_env_attrs,
+                    source_meta_provider=_awr_source_meta,
+                    device=rl_device,
+                )
+                awr_env_wrap = env
             awr_bridge = EliteAWRBridge(buffer=awr_buffer, cfg=awr_cfg)
+            awr_bridge.source_meta_provider = _awr_source_meta
+            awr_bridge.policy_idx = int(args_cli.policy_idx)
+            awr_bridge.profile_name = str(args_cli.wm_strategy_profile)
+            awr_bridge.stats["awr/collection_mode_code"] = float(
+                hash(str(awr_cfg.collection_mode)) % 10_000
+            )
             print(
                 f"[AWR] enabled: loss_weight={awr_cfg.loss_weight} "
-                f"batch_steps={awr_cfg.batch_steps} update_every={awr_cfg.update_every}"
+                f"batch_steps={awr_cfg.batch_steps} update_every={awr_cfg.update_every} "
+                f"collection_mode={collection_mode} "
+                f"collect_after_frames={awr_cfg.collect_after_frames}"
             )
 
         # Path used by patched_train_epoch to dump wm_seq_latest.pt.
