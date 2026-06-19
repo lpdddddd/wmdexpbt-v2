@@ -114,6 +114,71 @@ def derive_pbt_iteration(population_frame: int, tick: int) -> int:
     return int(population_frame) // tick_i
 
 
+def pbt_raw_training_frame(algo) -> int:
+    """v17.2 debug hotfix: use live algo.frame for tick scheduling between commits."""
+    return int(getattr(algo, "frame", 0) or 0)
+
+
+def evaluate_pbt_tick_schedule(
+    *,
+    raw_frame: int,
+    self_pbt_iteration: int,
+    last_mutation_frame: int,
+    start_after: int,
+    initial_delay: int,
+    interval_steps: int,
+) -> tuple[bool, int, str]:
+    """Return (should_tick, derived_iteration, skip_reason).
+
+    Scheduling uses raw training frames so a prior LATEST.commit cannot freeze
+    derived_iteration at the last snapshot population_frame.
+    """
+    derived = derive_pbt_iteration(int(raw_frame), int(interval_steps))
+    if int(raw_frame) < int(start_after):
+        return False, derived, "before_start_after"
+    if int(raw_frame) - int(last_mutation_frame) < int(initial_delay):
+        return False, derived, "initial_delay"
+    if derived <= int(self_pbt_iteration):
+        return False, derived, "iteration_not_advanced"
+    return True, derived, ""
+
+
+def read_latest_commit_info(policy_workspace: Path) -> dict[str, Any]:
+    latest_path = policy_workspace / "LATEST.commit"
+    if not latest_path.is_file():
+        return {
+            "latest_commit_exists": False,
+            "latest_commit_iteration": None,
+            "latest_commit_population_frame": None,
+        }
+    try:
+        latest = json.loads(latest_path.read_text())
+    except Exception:
+        return {
+            "latest_commit_exists": False,
+            "latest_commit_iteration": None,
+            "latest_commit_population_frame": None,
+        }
+    commit_dir_name = str(latest.get("commit_dir") or "")
+    commit_dir = policy_workspace / commit_dir_name if commit_dir_name else None
+    iteration = None
+    population_frame = None
+    if commit_dir is not None and commit_dir.is_dir():
+        manifest_path = commit_dir / "MANIFEST"
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                iteration = manifest.get("pbt_iteration")
+                population_frame = manifest.get("population_frame")
+            except Exception:
+                pass
+    return {
+        "latest_commit_exists": True,
+        "latest_commit_iteration": iteration,
+        "latest_commit_population_frame": population_frame,
+    }
+
+
 def derive_lineage_frame(population_frame: int, lineage_start_pf: int) -> int:
     return max(0, int(population_frame) - int(lineage_start_pf))
 

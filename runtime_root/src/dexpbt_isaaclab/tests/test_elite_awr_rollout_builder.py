@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -24,6 +27,8 @@ from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
     PPO_BUFFER_ACTIONS,
     _fragment_success_signal,
     build_awr_entries_from_experience_buffer,
+    build_awr_entries_from_experience_buffer_reference,
+    build_awr_entries_from_experience_buffer_vectorized,
     check_rollout_buffer_action_sanity,
     should_collect_awr,
 )
@@ -442,6 +447,203 @@ class TestEliteAWRRolloutBuilder(unittest.TestCase):
         cfg = build_elite_awr_config_from_args(ns)
         self.assertEqual(cfg.collection_mode, "rollout_buffer")
         self.assertEqual(cfg.collect_after_frames, 123)
+
+
+class TestVectorizedRolloutBuilder(unittest.TestCase):
+    def _cfg(self, **kwargs) -> EliteAWRConfig:
+        base = dict(
+            quality_min=0.0,
+            min_loss_steps_per_entry=2,
+            min_burnin_steps=1,
+            collect_after_frames=0,
+        )
+        base.update(kwargs)
+        return EliteAWRConfig(**base)
+
+    def _rich_rollout(self, T: int = 16, N: int = 8) -> _FakeBuffer:
+        act_dim = 2
+        obs_dim = 6
+        actions = torch.randn(T, N, act_dim) * 2.5
+        dones = torch.zeros(T, N, 1, dtype=torch.bool)
+        dones[T // 2, 0, 0] = True
+        dones[T - 1, :, 0] = True
+        success_cnt = torch.zeros(T, N, 1)
+        success_cnt[T // 2, 0, 0] = 1.0
+        success_cnt[T - 1, 1, 0] = 2.0
+        success_cnt[0, 1, 0] = 1.0
+        return _FakeBuffer(
+            {
+                "obses": torch.randn(T, N, obs_dim),
+                "actions": actions,
+                "dones": dones,
+                "aux_d_hat": torch.linspace(0.3, 0.05, T).view(T, 1, 1).expand(T, N, 1),
+                "aux_success_tolerance": torch.full((T, N, 1), 0.05),
+                "aux_lifted": torch.ones(T, N, 1, dtype=torch.bool),
+                "aux_failure": torch.zeros(T, N, 1, dtype=torch.bool),
+                "aux_success_cnt": success_cnt,
+            }
+        )
+
+    def test_reference_vs_vectorized_equivalence_smoke(self):
+        cfg = self._cfg(min_loss_steps_per_entry=4)
+        exp = self._rich_rollout(T=16, N=8)
+        kwargs = dict(
+            experience_buffer=exp,
+            cfg=cfg,
+            source_policy=1,
+            source_profile="elite_bank_actor_distill_awr",
+            source_nsucc=30.0,
+            source_retention=0.8,
+            env_frames=600_000_000,
+        )
+        ref_entries, ref_stats = build_awr_entries_from_experience_buffer_reference(**kwargs)
+        vec_entries, vec_stats = build_awr_entries_from_experience_buffer_vectorized(**kwargs)
+
+        self.assertEqual(
+            ref_stats["awr/rollout_builder_candidate_fragments"],
+            vec_stats["awr/rollout_builder_candidate_fragments"],
+        )
+        self.assertAlmostEqual(
+            ref_stats["awr/rollout_builder_selected_fragments"],
+            vec_stats["awr/rollout_builder_selected_fragments"],
+            delta=2.0,
+        )
+        self.assertAlmostEqual(
+            ref_stats["awr/rollout_builder_selected_steps"],
+            vec_stats["awr/rollout_builder_selected_steps"],
+            delta=float(cfg.min_loss_steps_per_entry * 4),
+        )
+        if ref_entries and vec_entries:
+            re = ref_entries[0]
+            ve = vec_entries[0]
+            self.assertEqual(re.stored_seq_len, ve.stored_seq_len)
+            self.assertEqual(int(re.loss_mask.sum()), int(ve.loss_mask.sum()))
+            self.assertEqual(re.future_success_within_100, ve.future_success_within_100)
+            self.assertEqual(re.had_drop, ve.had_drop)
+            self.assertEqual(re.no_drop, ve.no_drop)
+            self.assertAlmostEqual(re.episode_quality, ve.episode_quality, places=4)
+            self.assertTrue(torch.allclose(re.action, ve.action))
+
+    def test_vectorized_success_cnt_delta_preserved(self):
+        T, N = 16, 1
+        success_cnt = torch.zeros(T, N, 1)
+        success_cnt[-1, 0, 0] = 1.0
+        td = {
+            "obses": torch.randn(T, N, 3),
+            "actions": torch.randn(T, N, 2),
+            "dones": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_tolerance": torch.full((T, N, 1), 0.05),
+            "aux_lifted": torch.ones(T, N, 1, dtype=torch.bool),
+            "aux_failure": torch.zeros(T, N, 1, dtype=torch.bool),
+            "aux_success_cnt": success_cnt,
+        }
+        td["dones"][-1, 0, 0] = True
+        cfg = self._cfg(min_loss_steps_per_entry=4)
+        _, stats = build_awr_entries_from_experience_buffer_vectorized(
+            experience_buffer=_FakeBuffer(td),
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=None,
+            source_retention=None,
+            env_frames=0,
+        )
+        self.assertGreaterEqual(stats.get("awr/success_from_success_cnt", 0.0), 1.0)
+        self.assertEqual(stats.get("awr/success_cleared_by_unknown_done", -1.0), 0.0)
+
+    def test_vectorized_missing_aux_neutral(self):
+        cfg = self._cfg()
+        td = {
+            "obses": torch.randn(4, 2, 3),
+            "actions": torch.randn(4, 2, 2) * 2.0,
+            "dones": torch.zeros(4, 2, 1, dtype=torch.bool),
+        }
+        td["dones"][3, 0, 0] = True
+        entries, stats = build_awr_entries_from_experience_buffer_vectorized(
+            experience_buffer=_FakeBuffer(td),
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=None,
+            source_retention=None,
+            env_frames=0,
+        )
+        self.assertIsInstance(entries, list)
+        self.assertGreaterEqual(stats.get("awr/info_missing_lifted", 0.0), 1.0)
+        self.assertEqual(stats.get("awr/rollout_builder_mode_code", 0.0), 1.0)
+
+    def test_builder_mode_env_reference(self):
+        cfg = self._cfg()
+        exp = _make_rollout(T=8, N=2)
+        with mock.patch.dict(os.environ, {"DEXPBT_AWR_BUILDER_MODE": "reference"}):
+            _, stats = build_awr_entries_from_experience_buffer(
+                experience_buffer=exp,
+                cfg=cfg,
+                source_policy=1,
+                source_profile="x",
+                source_nsucc=None,
+                source_retention=None,
+                env_frames=0,
+            )
+        self.assertEqual(stats.get("awr/rollout_builder_mode_code", -1.0), 0.0)
+
+    def test_builder_mode_env_vectorized(self):
+        cfg = self._cfg()
+        exp = _make_rollout(T=8, N=2)
+        with mock.patch.dict(os.environ, {"DEXPBT_AWR_BUILDER_MODE": "vectorized"}):
+            _, stats = build_awr_entries_from_experience_buffer(
+                experience_buffer=exp,
+                cfg=cfg,
+                source_policy=1,
+                source_profile="x",
+                source_nsucc=None,
+                source_retention=None,
+                env_frames=0,
+            )
+        self.assertEqual(stats.get("awr/rollout_builder_mode_code", -1.0), 1.0)
+        self.assertEqual(stats.get("awr/rollout_builder_vectorized_speed_path", 0.0), 1.0)
+
+    def test_vectorized_exception_falls_back_to_reference(self):
+        cfg = self._cfg()
+        exp = _make_rollout(T=8, N=2)
+        with mock.patch.dict(os.environ, {"DEXPBT_AWR_BUILDER_MODE": "vectorized"}):
+            with mock.patch(
+                "dexpbt_isaaclab.awr.elite_awr_rollout_builder.build_awr_entries_from_experience_buffer_vectorized",
+                side_effect=RuntimeError("boom"),
+            ):
+                entries, stats = build_awr_entries_from_experience_buffer(
+                    experience_buffer=exp,
+                    cfg=cfg,
+                    source_policy=1,
+                    source_profile="x",
+                    source_nsucc=None,
+                    source_retention=None,
+                    env_frames=0,
+                )
+        self.assertIsInstance(entries, list)
+        self.assertEqual(stats.get("awr/rollout_builder_vectorized_failed", 0.0), 1.0)
+        self.assertEqual(stats.get("awr/rollout_builder_fallback_reference", 0.0), 1.0)
+
+    def test_vectorized_benchmark_faster_than_reference(self):
+        cfg = self._cfg(min_loss_steps_per_entry=4)
+        exp = self._rich_rollout(T=16, N=1024)
+        kwargs = dict(
+            experience_buffer=exp,
+            cfg=cfg,
+            source_policy=1,
+            source_profile="x",
+            source_nsucc=30.0,
+            source_retention=0.8,
+            env_frames=600_000_000,
+        )
+        t0 = time.perf_counter()
+        build_awr_entries_from_experience_buffer_reference(**kwargs)
+        ref_ms = (time.perf_counter() - t0) * 1000.0
+        t1 = time.perf_counter()
+        build_awr_entries_from_experience_buffer_vectorized(**kwargs)
+        vec_ms = (time.perf_counter() - t1) * 1000.0
+        print(f"[benchmark] reference={ref_ms:.2f}ms vectorized={vec_ms:.2f}ms ratio={ref_ms/max(vec_ms,1e-6):.1f}x")
+        self.assertLess(vec_ms, ref_ms)
 
 
 if __name__ == "__main__":

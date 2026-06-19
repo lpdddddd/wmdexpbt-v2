@@ -1019,6 +1019,56 @@ def _compute_awr_loss_health_stats(
     return stats
 
 
+# v17.2 debug hotfix: runtime fuse for slow rollout-buffer builder (vectorization deferred).
+AWR_BUILDER_FUSE_SLOW_MS = 500.0
+AWR_BUILDER_FUSE_PAUSE_FRAMES = 100_000_000
+AWR_BUILDER_SKIP_REASON_FUSE = 7201.0
+
+
+def awr_builder_collection_paused(bridge: "EliteAWRBridge", frames: int) -> bool:
+    fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
+    return int(frames) < fuse_until
+
+
+def awr_record_builder_fuse_skip(bridge: "EliteAWRBridge", frames: int) -> None:
+    fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
+    bridge.stats["awr/builder_fuse_active"] = 1.0
+    bridge.stats["awr/builder_skipped"] = 1.0
+    bridge.stats["awr/builder_skip_reason_code"] = AWR_BUILDER_SKIP_REASON_FUSE
+    bridge.stats["awr/builder_fuse_until_frame"] = float(fuse_until)
+
+
+def awr_apply_builder_run(
+    bridge: "EliteAWRBridge",
+    frames: int,
+    builder_time_ms: float,
+    builder_stats: Mapping[str, float],
+) -> None:
+    bridge.stats.update(dict(builder_stats))
+    bridge.stats["awr/rollout_builder_time_ms"] = float(builder_time_ms)
+    bridge.stats["awr/rollout_builder_entries"] = float(
+        builder_stats.get("awr/rollout_builder_entries", 0.0)
+    )
+    bridge.stats["awr/rollout_builder_selected_steps"] = float(
+        builder_stats.get("awr/rollout_builder_selected_steps", 0.0)
+    )
+    bridge.stats["awr/builder_fuse_active"] = 0.0
+    bridge.stats["awr/builder_skipped"] = 0.0
+
+    slow_count = int(getattr(bridge, "_awr_builder_slow_count", 0) or 0)
+    if float(builder_time_ms) > AWR_BUILDER_FUSE_SLOW_MS:
+        slow_count += 1
+        bridge._awr_builder_slow_count = slow_count
+        if slow_count >= 2:
+            bridge._awr_builder_fuse_until_frame = int(frames) + AWR_BUILDER_FUSE_PAUSE_FRAMES
+            bridge._awr_builder_slow_count = 0
+            bridge.stats["awr/builder_fuse_until_frame"] = float(
+                bridge._awr_builder_fuse_until_frame
+            )
+    else:
+        bridge._awr_builder_slow_count = 0
+
+
 class EliteAWRBridge:
     def __init__(
         self,
@@ -1041,6 +1091,8 @@ class EliteAWRBridge:
         self._loss_cap_total = 0
         self._action_checked = False
         self._pending_action_check: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self._awr_builder_slow_count = 0
+        self._awr_builder_fuse_until_frame = 0
         self.stats["awr/broadcast_enabled"] = 0.0
         self.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
         self.stats["awr/inherit_enabled"] = 1.0

@@ -3080,33 +3080,46 @@ def _patch_actor_train_for_seq_wm(
                 )
 
                 if should_collect_awr(frames, awr_cfg, awr_bridge):
-                    td = actor.experience_buffer.tensor_dict
-                    if not getattr(awr_bridge, "_rollout_action_sanity_checked", False):
-                        check_rollout_buffer_action_sanity(awr_bridge, td)
-                        awr_bridge._rollout_action_sanity_checked = True
-                    meta_provider = getattr(awr_bridge, "source_meta_provider", None)
-                    meta = dict(meta_provider() or {}) if callable(meta_provider) else {}
-                    source_nsucc = meta.get("source_nsucc")
-                    if isinstance(source_nsucc, torch.Tensor):
-                        source_nsucc = float(source_nsucc.mean().item())
-                    entries, builder_stats = build_awr_entries_from_experience_buffer(
-                        experience_buffer=actor.experience_buffer,
-                        cfg=awr_cfg,
-                        source_policy=int(
-                            meta.get("source_policy", getattr(awr_bridge, "policy_idx", 0))
-                        ),
-                        source_profile=str(
-                            meta.get("source_profile")
-                            or getattr(awr_bridge, "profile_name", "")
-                        ),
-                        source_nsucc=source_nsucc,
-                        source_retention=meta.get("source_retention"),
-                        env_frames=frames,
-                        source_type=str(meta.get("source_type") or "local"),
+                    from dexpbt_isaaclab.awr.elite_awr import (
+                        awr_apply_builder_run,
+                        awr_builder_collection_paused,
+                        awr_record_builder_fuse_skip,
                     )
-                    for entry in entries:
-                        awr_bridge.buffer.insert(entry)
-                    awr_bridge.stats.update(builder_stats)
+
+                    if awr_builder_collection_paused(awr_bridge, frames):
+                        awr_record_builder_fuse_skip(awr_bridge, frames)
+                    else:
+                        td = actor.experience_buffer.tensor_dict
+                        if not getattr(awr_bridge, "_rollout_action_sanity_checked", False):
+                            check_rollout_buffer_action_sanity(awr_bridge, td)
+                            awr_bridge._rollout_action_sanity_checked = True
+                        meta_provider = getattr(awr_bridge, "source_meta_provider", None)
+                        meta = dict(meta_provider() or {}) if callable(meta_provider) else {}
+                        source_nsucc = meta.get("source_nsucc")
+                        if isinstance(source_nsucc, torch.Tensor):
+                            source_nsucc = float(source_nsucc.mean().item())
+                        builder_t0 = time.perf_counter()
+                        entries, builder_stats = build_awr_entries_from_experience_buffer(
+                            experience_buffer=actor.experience_buffer,
+                            cfg=awr_cfg,
+                            source_policy=int(
+                                meta.get("source_policy", getattr(awr_bridge, "policy_idx", 0))
+                            ),
+                            source_profile=str(
+                                meta.get("source_profile")
+                                or getattr(awr_bridge, "profile_name", "")
+                            ),
+                            source_nsucc=source_nsucc,
+                            source_retention=meta.get("source_retention"),
+                            env_frames=frames,
+                            source_type=str(meta.get("source_type") or "local"),
+                        )
+                        builder_time_ms = (time.perf_counter() - builder_t0) * 1000.0
+                        for entry in entries:
+                            awr_bridge.buffer.insert(entry)
+                        awr_apply_builder_run(
+                            awr_bridge, frames, builder_time_ms, builder_stats
+                        )
             elif awr_env_wrap is not None:
                 if not getattr(awr_bridge, "_action_checked", False):
                     try:

@@ -54,10 +54,13 @@ from dexpbt_isaaclab.pbt.pbt_control_plane import (
     assert_pbt_clock_invariants,
     derive_lineage_frame,
     derive_pbt_iteration,
+    evaluate_pbt_tick_schedule,
     pbt_copy_allowed_for_live_source,
     pbt_copy_allowed_for_target,
     pbt_population_frame,
+    pbt_raw_training_frame,
     pbt_scheduler_sync_clock,
+    read_latest_commit_info,
     snapshot_commit_barrier,
     validate_snapshot_commit,
 )
@@ -4134,6 +4137,38 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._effective_seed = int(seed) if seed is not None else None
         self._env_randomization_hash = str(env_randomization_hash or "")
 
+    def _append_pbt_tick_debug(
+        self,
+        *,
+        env_frames: int,
+        population_frame: int,
+        derived_iteration: int,
+        should_tick: bool,
+        skip_reason: str,
+        error_reason: str = "",
+    ) -> None:
+        """v17.2 debug hotfix: append-only audit for tick scheduler decisions."""
+        try:
+            self._metrics_dir.mkdir(parents=True, exist_ok=True)
+            out_path = self._metrics_dir / f"pbt_tick_debug_policy_{self.policy_idx:02d}.jsonl"
+            latest = read_latest_commit_info(self.curr_policy_workspace)
+            row = {
+                "env_frames": int(env_frames),
+                "population_frame": int(population_frame),
+                "derived_iteration": int(derived_iteration),
+                "self_pbt_iteration": int(self.pbt_iteration),
+                "last_mutation_frame": int(self.last_mutation_frame),
+                "interval_steps": int(self.interval_steps),
+                "initial_delay": int(self.initial_delay),
+                "should_tick": bool(should_tick),
+                "skip_reason": str(error_reason or skip_reason or ""),
+                **latest,
+            }
+            with out_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row) + "\n")
+        except Exception as exc:  # pragma: no cover - audit must not crash training
+            print(f"[pbt-tick-debug] append failed: {exc}")
+
     def _write_training_curve_point(
         self,
         own_state: dict[str, Any],
@@ -5008,46 +5043,65 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     def after_steps(self):
         if self.algo is None:
             return
-        env_frames = pbt_population_frame(self.algo)
+        raw_frames = pbt_raw_training_frame(self.algo)
+        population_frame = pbt_population_frame(self.algo)
 
         # P0: policy0 consumes CF results every step (not only on PBT restart).
         if self._is_posterior_writer and self._enable_counterfactual:
-            self._maybe_consume_counterfactual_result(env_frames)
+            self._maybe_consume_counterfactual_result(raw_frames)
 
         if self.pbt_iteration == -1:
-            self.initial_env_frames = env_frames
-            self.last_mutation_frame = env_frames
-            self.pbt_iteration = derive_pbt_iteration(env_frames, self.interval_steps)
-        iteration = derive_pbt_iteration(env_frames, self.interval_steps)
+            self.initial_env_frames = raw_frames
+            self.last_mutation_frame = raw_frames
+            self.pbt_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
 
-        if env_frames < self.start_after:
-            return
-        if env_frames - self.last_mutation_frame < self.initial_delay:
-            return
-        if iteration <= self.pbt_iteration:
+        derived_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
+        should_tick, _, skip_reason = evaluate_pbt_tick_schedule(
+            raw_frame=raw_frames,
+            self_pbt_iteration=self.pbt_iteration,
+            last_mutation_frame=self.last_mutation_frame,
+            start_after=self.start_after,
+            initial_delay=self.initial_delay,
+            interval_steps=self.interval_steps,
+        )
+        self._append_pbt_tick_debug(
+            env_frames=raw_frames,
+            population_frame=population_frame,
+            derived_iteration=derived_iteration,
+            should_tick=should_tick,
+            skip_reason=skip_reason,
+        )
+        if not should_tick:
             return
 
+        skip_pbt_selection = False
         if self.r_meta_window_enabled:
             if not self._r_meta_window:
-                print(f"Policy {self.policy_idx}: r_meta window empty, skip PBT tick")
-                self.pbt_iteration = iteration
-                return
-            r_meta_arr = np.array(self._r_meta_window, dtype=np.float64)
-            self.curr_target_objective_value = float(r_meta_arr.mean())
-            # M5: also accumulate Nsucc window statistics for the curve logger
-            self._last_window_size = int(r_meta_arr.size)
-            self.target_objective_known = True
-            if self.writer is not None:
-                self.writer.add_scalar("pbt/r_meta_agg", self.curr_target_objective_value, env_frames)
-                self.writer.add_scalar("pbt/r_meta_count", len(self._r_meta_window), env_frames)
-            self._r_meta_window.clear()
+                print(
+                    f"Policy {self.policy_idx}: r_meta window empty, "
+                    "observation tick only (curve+snapshot)"
+                )
+                skip_pbt_selection = True
+            else:
+                r_meta_arr = np.array(self._r_meta_window, dtype=np.float64)
+                self.curr_target_objective_value = float(r_meta_arr.mean())
+                # M5: also accumulate Nsucc window statistics for the curve logger
+                self._last_window_size = int(r_meta_arr.size)
+                self.target_objective_known = True
+                if self.writer is not None:
+                    self.writer.add_scalar("pbt/r_meta_agg", self.curr_target_objective_value, raw_frames)
+                    self.writer.add_scalar("pbt/r_meta_count", len(self._r_meta_window), raw_frames)
+                self._r_meta_window.clear()
+        elif not self.target_objective_known:
+            print(
+                f"Policy {self.policy_idx}: not enough data, "
+                "observation tick only (curve+snapshot)"
+            )
+            skip_pbt_selection = True
 
-        if not self.target_objective_known:
-            print(f"Policy {self.policy_idx}: not enough data, skipping PBT tick")
-            return
-
-        self.pbt_iteration = iteration
-        self.target_objective_known = False
+        self.pbt_iteration = derived_iteration
+        if not skip_pbt_selection:
+            self.target_objective_known = False
 
         population_frame = pbt_scheduler_sync_clock(
             self.algo,
@@ -5057,6 +5111,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             weight_age_frame=self._weight_age_frame,
         )
         env_frames = population_frame
+        self.last_mutation_frame = population_frame
         self._lineage_start_pf = int(self._lineage_start_pf or population_frame)
         self.algo._pbt_derived_iteration = derive_pbt_iteration(
             population_frame, self.interval_steps
@@ -5794,6 +5849,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._maybe_broadcast_elite(population, env_frames)
         except Exception as _eir_b_exc:  # pragma: no cover - never crash PBT
             print(f"[EIR-broadcast] broadcast failed: {_eir_b_exc}")
+
+        if skip_pbt_selection:
+            return
 
         if len(objectives) < max(2, self.num_policies // 2):
             print(f"Policy {self.policy_idx}: only {len(objectives)} objectives available, skip")
@@ -7016,16 +7074,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         }
         if prev_commit_id:
             commit_manifest["prev_commit_id"] = str(prev_commit_id)
-        snapshot_commit_barrier(
-            staging_dir=self.curr_policy_workspace / f"{prefix}.staging",
-            model_src=ckpt_tmp,
-            meta_src=meta_tmp,
-            publish_model=checkpoint_path,
-            publish_meta=meta_path,
-            manifest=commit_manifest,
-            sidecar_src=sidecar_saved_path,
-            tick=int(self.interval_steps),
-        )
+        try:
+            snapshot_commit_barrier(
+                staging_dir=self.curr_policy_workspace / f"{prefix}.staging",
+                model_src=ckpt_tmp,
+                meta_src=meta_tmp,
+                publish_model=checkpoint_path,
+                publish_meta=meta_path,
+                manifest=commit_manifest,
+                sidecar_src=sidecar_saved_path,
+                tick=int(self.interval_steps),
+            )
+        except RuntimeError as exc:
+            self._append_pbt_tick_debug(
+                env_frames=int(population_frame),
+                population_frame=int(population_frame),
+                derived_iteration=int(self.pbt_iteration),
+                should_tick=False,
+                skip_reason="",
+                error_reason=f"snapshot_commit_failed:{exc}",
+            )
+            raise
         ckpt_tmp.unlink(missing_ok=True)
         meta_tmp.unlink(missing_ok=True)
 
