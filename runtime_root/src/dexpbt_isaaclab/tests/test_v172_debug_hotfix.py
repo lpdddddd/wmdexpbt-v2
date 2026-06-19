@@ -104,6 +104,23 @@ class TestAwrBuilderFuse(unittest.TestCase):
         )
         self.assertEqual(getattr(bridge, "_awr_builder_slow_count", 0), 0)
 
+    def test_apply_builder_run_never_disables_bridge(self):
+        bridge = self._bridge()
+        awr_apply_builder_run(
+            bridge,
+            600_000_000,
+            AWR_BUILDER_FUSE_SLOW_MS + 100.0,
+            {"awr/rollout_builder_entries": 0.0, "awr/rollout_builder_time_ms": 999.0},
+        )
+        awr_apply_builder_run(
+            bridge,
+            600_000_001,
+            AWR_BUILDER_FUSE_SLOW_MS + 100.0,
+            {"awr/rollout_builder_entries": 0.0, "awr/rollout_builder_time_ms": 999.0},
+        )
+        self.assertFalse(bridge.disabled)
+        self.assertTrue(awr_builder_collection_paused(bridge, 600_000_002))
+
 
 class TestPbtTickScheduler(unittest.TestCase):
     def test_derived_iteration_advances_with_raw_frame_despite_frozen_commit(self):

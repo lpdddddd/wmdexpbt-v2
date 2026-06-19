@@ -1026,16 +1026,28 @@ AWR_BUILDER_SKIP_REASON_FUSE = 7201.0
 
 
 def awr_builder_collection_paused(bridge: "EliteAWRBridge", frames: int) -> bool:
-    fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
-    return int(frames) < fuse_until
+    """Return True while rollout-builder collection is paused by fuse."""
+    try:
+        fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
+        return int(frames) < fuse_until
+    except Exception:
+        return False
 
 
 def awr_record_builder_fuse_skip(bridge: "EliteAWRBridge", frames: int) -> None:
-    fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
-    bridge.stats["awr/builder_fuse_active"] = 1.0
-    bridge.stats["awr/builder_skipped"] = 1.0
-    bridge.stats["awr/builder_skip_reason_code"] = AWR_BUILDER_SKIP_REASON_FUSE
-    bridge.stats["awr/builder_fuse_until_frame"] = float(fuse_until)
+    """Record fuse skip telemetry only; must never interrupt training."""
+    del frames
+    try:
+        stats = getattr(bridge, "stats", None)
+        if not isinstance(stats, dict):
+            return
+        fuse_until = int(getattr(bridge, "_awr_builder_fuse_until_frame", 0) or 0)
+        stats["awr/builder_fuse_active"] = 1.0
+        stats["awr/builder_skipped"] = 1.0
+        stats["awr/builder_skip_reason_code"] = AWR_BUILDER_SKIP_REASON_FUSE
+        stats["awr/builder_fuse_until_frame"] = float(fuse_until)
+    except Exception:
+        return
 
 
 def awr_apply_builder_run(
@@ -1044,29 +1056,39 @@ def awr_apply_builder_run(
     builder_time_ms: float,
     builder_stats: Mapping[str, float],
 ) -> None:
-    bridge.stats.update(dict(builder_stats))
-    bridge.stats["awr/rollout_builder_time_ms"] = float(builder_time_ms)
-    bridge.stats["awr/rollout_builder_entries"] = float(
-        builder_stats.get("awr/rollout_builder_entries", 0.0)
-    )
-    bridge.stats["awr/rollout_builder_selected_steps"] = float(
-        builder_stats.get("awr/rollout_builder_selected_steps", 0.0)
-    )
-    bridge.stats["awr/builder_fuse_active"] = 0.0
-    bridge.stats["awr/builder_skipped"] = 0.0
+    """Merge builder stats and arm fuse after consecutive slow builder runs."""
+    try:
+        stats = getattr(bridge, "stats", None)
+        if not isinstance(stats, dict):
+            stats = {}
+            bridge.stats = stats
+        stats.update(dict(builder_stats))
+        stats["awr/rollout_builder_time_ms"] = float(builder_time_ms)
+        stats["awr/rollout_builder_entries"] = float(
+            builder_stats.get("awr/rollout_builder_entries", 0.0)
+        )
+        stats["awr/rollout_builder_selected_steps"] = float(
+            builder_stats.get("awr/rollout_builder_selected_steps", 0.0)
+        )
+        stats["awr/builder_fuse_active"] = 0.0
+        stats["awr/builder_skipped"] = 0.0
 
-    slow_count = int(getattr(bridge, "_awr_builder_slow_count", 0) or 0)
-    if float(builder_time_ms) > AWR_BUILDER_FUSE_SLOW_MS:
-        slow_count += 1
-        bridge._awr_builder_slow_count = slow_count
-        if slow_count >= 2:
-            bridge._awr_builder_fuse_until_frame = int(frames) + AWR_BUILDER_FUSE_PAUSE_FRAMES
+        slow_count = int(getattr(bridge, "_awr_builder_slow_count", 0) or 0)
+        if float(builder_time_ms) > AWR_BUILDER_FUSE_SLOW_MS:
+            slow_count += 1
+            bridge._awr_builder_slow_count = slow_count
+            if slow_count >= 2:
+                bridge._awr_builder_fuse_until_frame = (
+                    int(frames) + AWR_BUILDER_FUSE_PAUSE_FRAMES
+                )
+                bridge._awr_builder_slow_count = 0
+                stats["awr/builder_fuse_until_frame"] = float(
+                    bridge._awr_builder_fuse_until_frame
+                )
+        else:
             bridge._awr_builder_slow_count = 0
-            bridge.stats["awr/builder_fuse_until_frame"] = float(
-                bridge._awr_builder_fuse_until_frame
-            )
-    else:
-        bridge._awr_builder_slow_count = 0
+    except Exception:
+        return
 
 
 class EliteAWRBridge:

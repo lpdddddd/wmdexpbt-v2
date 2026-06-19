@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -644,6 +645,40 @@ class TestVectorizedRolloutBuilder(unittest.TestCase):
         vec_ms = (time.perf_counter() - t1) * 1000.0
         print(f"[benchmark] reference={ref_ms:.2f}ms vectorized={vec_ms:.2f}ms ratio={ref_ms/max(vec_ms,1e-6):.1f}x")
         self.assertLess(vec_ms, ref_ms)
+
+
+class TestAwrBuilderFuseImports(unittest.TestCase):
+    def test_train_lazy_import_builder_fuse_helpers(self):
+        from dexpbt_isaaclab.awr.elite_awr import (
+            awr_apply_builder_run,
+            awr_builder_collection_paused,
+            awr_record_builder_fuse_skip,
+        )
+
+        self.assertTrue(callable(awr_apply_builder_run))
+        self.assertTrue(callable(awr_builder_collection_paused))
+        self.assertTrue(callable(awr_record_builder_fuse_skip))
+
+    def test_awr_package_exports_builder_fuse_helpers(self):
+        import dexpbt_isaaclab.awr as awr_pkg
+
+        for name in (
+            "awr_apply_builder_run",
+            "awr_builder_collection_paused",
+            "awr_record_builder_fuse_skip",
+            "AWR_BUILDER_FUSE_SLOW_MS",
+            "AWR_BUILDER_FUSE_PAUSE_FRAMES",
+            "AWR_BUILDER_SKIP_REASON_FUSE",
+        ):
+            self.assertTrue(hasattr(awr_pkg, name), msg=name)
+
+    def test_record_builder_fuse_skip_never_raises(self):
+        from dexpbt_isaaclab.awr.elite_awr import awr_record_builder_fuse_skip
+
+        awr_record_builder_fuse_skip(SimpleNamespace(stats=None), 600_000_000)
+        bridge = SimpleNamespace(stats={"awr/builder_fuse_active": 0.0})
+        awr_record_builder_fuse_skip(bridge, 600_000_000)
+        self.assertEqual(bridge.stats["awr/builder_skipped"], 1.0)
 
 
 if __name__ == "__main__":

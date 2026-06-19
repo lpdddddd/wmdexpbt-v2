@@ -1,11 +1,17 @@
 """Online Elite-AWR (Strategy Zoo v17) — independent auxiliary loss module."""
 
 from dexpbt_isaaclab.awr.elite_awr import (
+    AWR_BUILDER_FUSE_PAUSE_FRAMES,
+    AWR_BUILDER_FUSE_SLOW_MS,
+    AWR_BUILDER_SKIP_REASON_FUSE,
     EliteAWRBridge,
     EliteAWRBuffer,
     EliteAWRConfig,
     EliteAWREntry,
     awr_active_from_args,
+    awr_apply_builder_run,
+    awr_builder_collection_paused,
+    awr_record_builder_fuse_skip,
     build_elite_awr_config_from_args,
     compute_elite_awr_loss,
     compute_elite_awr_quality,
@@ -25,6 +31,9 @@ from dexpbt_isaaclab.awr.elite_awr_rollout_builder import (
 )
 
 __all__ = [
+    "AWR_BUILDER_FUSE_PAUSE_FRAMES",
+    "AWR_BUILDER_FUSE_SLOW_MS",
+    "AWR_BUILDER_SKIP_REASON_FUSE",
     "EliteAWRBridge",
     "EliteAWRBuffer",
     "EliteAWRConfig",
@@ -32,6 +41,9 @@ __all__ = [
     "EliteAWRInterceptorEnv",
     "PPO_BUFFER_ACTIONS",
     "awr_active_from_args",
+    "awr_apply_builder_run",
+    "awr_builder_collection_paused",
+    "awr_record_builder_fuse_skip",
     "build_awr_entries_from_experience_buffer",
     "build_elite_awr_config_from_args",
     "check_rollout_buffer_action_sanity",
