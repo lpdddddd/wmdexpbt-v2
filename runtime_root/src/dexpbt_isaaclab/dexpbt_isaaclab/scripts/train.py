@@ -2013,11 +2013,17 @@ parser.add_argument("--awr_weight_mode", type=str, default="exp_quality",
 parser.add_argument("--awr_beta", type=float, default=1.0)
 parser.add_argument("--awr_weight_max", type=float, default=5.0)
 parser.add_argument("--awr_quality_min", type=float, default=1.5)
-parser.add_argument("--awr_delta_soft", type=float, default=0.35)
-parser.add_argument("--awr_delta_mid", type=float, default=0.8)
-parser.add_argument("--awr_delta_hard", type=float, default=1.2)
-parser.add_argument("--awr_delta_mid_weight", type=float, default=0.3)
-parser.add_argument("--awr_delta_far_weight", type=float, default=0.1)
+parser.add_argument(
+    "--awr_delta_metric",
+    type=str,
+    default="mean",
+    choices=("linf", "mean", "rms", "p90"),
+)
+parser.add_argument("--awr_delta_soft", type=float, default=0.20)
+parser.add_argument("--awr_delta_mid", type=float, default=0.45)
+parser.add_argument("--awr_delta_hard", type=float, default=0.80)
+parser.add_argument("--awr_delta_mid_weight", type=float, default=0.5)
+parser.add_argument("--awr_delta_far_weight", type=float, default=0.2)
 parser.add_argument("--awr_loss_cap", type=float, default=0.03)
 parser.add_argument(
     "--awr_kl_gate_enable",
@@ -2052,6 +2058,12 @@ parser.add_argument(
     type=int,
     default=600_000_000,
     help="Skip AWR rollout collection until this env-frame count.",
+)
+parser.add_argument(
+    "--awr_collect_every",
+    type=int,
+    default=4,
+    help="After collect_after_frames, run builder every N PPO rollouts (1=every rollout).",
 )
 parser.add_argument(
     "--pbt_copy_reset_progress_on_large_frame_gap",
@@ -3084,9 +3096,12 @@ def _patch_actor_train_for_seq_wm(
                         awr_apply_builder_run,
                         awr_builder_collection_paused,
                         awr_record_builder_fuse_skip,
+                        awr_should_run_builder_this_rollout,
                     )
 
-                    if awr_builder_collection_paused(awr_bridge, frames):
+                    if not awr_should_run_builder_this_rollout(awr_bridge, awr_cfg):
+                        pass
+                    elif awr_builder_collection_paused(awr_bridge, frames):
                         awr_record_builder_fuse_skip(awr_bridge, frames)
                     else:
                         td = actor.experience_buffer.tensor_dict

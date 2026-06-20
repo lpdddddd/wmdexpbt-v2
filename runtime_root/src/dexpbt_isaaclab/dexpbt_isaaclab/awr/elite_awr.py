@@ -45,11 +45,12 @@ class EliteAWRConfig:
     beta: float = 1.0
     weight_max: float = 5.0
     quality_min: float = 1.5
-    delta_soft: float = 0.35
-    delta_mid: float = 0.8
-    delta_hard: float = 1.2
-    delta_mid_weight: float = 0.3
-    delta_far_weight: float = 0.1
+    delta_metric: str = "mean"
+    delta_soft: float = 0.20
+    delta_mid: float = 0.45
+    delta_hard: float = 0.80
+    delta_mid_weight: float = 0.5
+    delta_far_weight: float = 0.2
     loss_cap: float = 0.03
     kl_gate_enable: bool = False
     kl_soft: float = 0.05
@@ -67,6 +68,7 @@ class EliteAWRConfig:
     sidecar_format_version: int = 1
     collection_mode: str = "rollout_buffer"
     collect_after_frames: int = 600_000_000
+    collect_every: int = 4
     score_temperature: float = 1.0
     entropy_floor_eps: float = 0.5
     score_beta_quality: float = 1.0
@@ -175,11 +177,12 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
         beta=float(getattr(args_cli, "awr_beta", 1.0)),
         weight_max=float(getattr(args_cli, "awr_weight_max", 5.0)),
         quality_min=float(getattr(args_cli, "awr_quality_min", 1.5)),
-        delta_soft=float(getattr(args_cli, "awr_delta_soft", 0.35)),
-        delta_mid=float(getattr(args_cli, "awr_delta_mid", 0.8)),
-        delta_hard=float(getattr(args_cli, "awr_delta_hard", 1.2)),
-        delta_mid_weight=float(getattr(args_cli, "awr_delta_mid_weight", 0.3)),
-        delta_far_weight=float(getattr(args_cli, "awr_delta_far_weight", 0.1)),
+        delta_metric=str(getattr(args_cli, "awr_delta_metric", "mean") or "mean"),
+        delta_soft=float(getattr(args_cli, "awr_delta_soft", 0.20)),
+        delta_mid=float(getattr(args_cli, "awr_delta_mid", 0.45)),
+        delta_hard=float(getattr(args_cli, "awr_delta_hard", 0.80)),
+        delta_mid_weight=float(getattr(args_cli, "awr_delta_mid_weight", 0.5)),
+        delta_far_weight=float(getattr(args_cli, "awr_delta_far_weight", 0.2)),
         loss_cap=float(getattr(args_cli, "awr_loss_cap", 0.03)),
         kl_gate_enable=bool(getattr(args_cli, "awr_kl_gate_enable", False)),
         kl_soft=float(getattr(args_cli, "awr_kl_soft", 0.05)),
@@ -212,6 +215,15 @@ def build_elite_awr_config_from_args(args_cli) -> EliteAWRConfig:
         collect_after_frames=int(
             getattr(args_cli, "awr_collect_after_frames", 600_000_000)
         ),
+        collect_every=int(getattr(args_cli, "awr_collect_every", 4)),
+        score_temperature=float(getattr(args_cli, "awr_score_temperature", 1.0)),
+        entropy_floor_eps=float(getattr(args_cli, "awr_entropy_floor_eps", 0.5)),
+        score_beta_quality=float(getattr(args_cli, "awr_score_beta_quality", 1.0)),
+        score_beta_similarity=float(getattr(args_cli, "awr_score_beta_similarity", 0.5)),
+        score_beta_skill_delta=float(
+            getattr(args_cli, "awr_score_beta_skill_delta", 0.25)
+        ),
+        delta_gate_gamma=float(getattr(args_cli, "awr_delta_gate_gamma", 0.05)),
     )
 
 
@@ -255,6 +267,30 @@ def _delta_gate(delta: torch.Tensor, cfg: EliteAWRConfig) -> torch.Tensor:
     w = torch.where(delta <= cfg.delta_mid, w, torch.full_like(w, cfg.delta_far_weight))
     w = torch.where(delta <= cfg.delta_hard, w, torch.zeros_like(w))
     return w
+
+
+_DELTA_METRIC_CODES = {
+    "linf": 0.0,
+    "mean": 1.0,
+    "rms": 2.0,
+    "p90": 3.0,
+}
+
+
+def _delta_metric_code(metric: str) -> float:
+    return float(_DELTA_METRIC_CODES.get(str(metric or "mean").strip().lower(), 1.0))
+
+
+def _compute_action_delta(action: torch.Tensor, mu: torch.Tensor, metric: str) -> torch.Tensor:
+    diff = (action - mu).abs()
+    m = str(metric or "mean").strip().lower()
+    if m == "linf":
+        return diff.amax(dim=-1)
+    if m == "rms":
+        return torch.sqrt((diff * diff).mean(dim=-1))
+    if m == "p90":
+        return torch.quantile(diff, 0.9, dim=-1)
+    return diff.mean(dim=-1)
 
 
 def _zero_rnn_states(agent, num_seqs: int, device: torch.device):
@@ -896,15 +932,20 @@ def _compute_awr_sample_weights(
     loss_mask: torch.Tensor,
     cfg: EliteAWRConfig,
     skill_delta: float = 0.0,
+    similarity: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, float]:
     region = loss_mask.bool()
     if not bool(region.any()):
         return torch.zeros_like(quality), 0.0
     q = quality[region]
     d = delta_w[region]
+    if similarity is None:
+        sim = torch.zeros_like(q)
+    else:
+        sim = similarity[region]
     score = (
         cfg.score_beta_quality * _standardize(q)
-        + cfg.score_beta_similarity * _standardize(q)
+        + cfg.score_beta_similarity * _standardize(sim)
         + cfg.score_beta_skill_delta * float(skill_delta)
         + torch.log(d.clamp(min=0.0) + cfg.delta_gate_gamma)
     )
@@ -969,7 +1010,9 @@ def _action_match_order_code(captured_name: str, ppo_name: str) -> float:
 def _compute_awr_loss_health_stats(
     *,
     logp: torch.Tensor,
-    delta: torch.Tensor,
+    gate_delta: torch.Tensor,
+    linf_delta: torch.Tensor,
+    delta_mean: torch.Tensor,
     quality: torch.Tensor,
     loss_mask: torch.Tensor,
     delta_w: torch.Tensor,
@@ -979,6 +1022,7 @@ def _compute_awr_loss_health_stats(
     stats: dict[str, float] = {}
     loss_region = loss_mask.bool()
     region_count = float(loss_region.float().sum().item())
+    stats["awr/loss_region_steps"] = _finite_float(region_count)
     if region_count <= 0.0:
         stats["awr/active_frac"] = 0.0
         stats["awr/delta_gate_drop_frac"] = 0.0
@@ -986,6 +1030,13 @@ def _compute_awr_loss_health_stats(
         stats["awr/delta_gate_mid_frac"] = 0.0
         stats["awr/delta_gate_far_frac"] = 0.0
         stats["awr/nonzero_weight_frac"] = 0.0
+        stats["awr/effective_nonzero_weighted_frac"] = 0.0
+        stats["awr/delta_linf_mean"] = 0.0
+        stats["awr/delta_linf_p90"] = 0.0
+        stats["awr/delta_mean_mean"] = 0.0
+        stats["awr/delta_mean_p90"] = 0.0
+        stats["awr/delta_gate_mean"] = 0.0
+        stats["awr/delta_gate_p90"] = 0.0
         return stats
 
     active_frac = float((w > 0).float().sum().item()) / max(region_count, 1.0)
@@ -993,8 +1044,12 @@ def _compute_awr_loss_health_stats(
     stats["awr/logp_mean"] = _finite_float(float(logp[loss_region].mean().item()))
     stats["awr/logp_p10"] = _tensor_quantile(logp[loss_region], 0.10)
     stats["awr/logp_p90"] = _tensor_quantile(logp[loss_region], 0.90)
-    stats["awr/delta_linf_mean"] = _finite_float(float(delta[loss_region].mean().item()))
-    stats["awr/delta_linf_p90"] = _tensor_quantile(delta[loss_region], 0.90)
+    stats["awr/delta_linf_mean"] = _finite_float(float(linf_delta[loss_region].mean().item()))
+    stats["awr/delta_linf_p90"] = _tensor_quantile(linf_delta[loss_region], 0.90)
+    stats["awr/delta_mean_mean"] = _finite_float(float(delta_mean[loss_region].mean().item()))
+    stats["awr/delta_mean_p90"] = _tensor_quantile(delta_mean[loss_region], 0.90)
+    stats["awr/delta_gate_mean"] = _finite_float(float(gate_delta[loss_region].mean().item()))
+    stats["awr/delta_gate_p90"] = _tensor_quantile(gate_delta[loss_region], 0.90)
     stats["awr/quality_mean"] = _finite_float(float(quality[loss_region].mean().item()))
     stats["awr/quality_p90"] = _tensor_quantile(quality[loss_region], 0.90)
     stats["awr/weight_mean"] = _finite_float(float(w[loss_region].mean().item()))
@@ -1002,14 +1057,17 @@ def _compute_awr_loss_health_stats(
     stats["awr/nonzero_weight_frac"] = _finite_float(
         float((w[loss_region] > 0).float().sum().item()) / max(region_count, 1.0)
     )
+    stats["awr/effective_nonzero_weighted_frac"] = _finite_float(
+        float(((delta_w > 0) & (w > 0) & loss_region).float().sum().item())
+        / max(region_count, 1.0)
+    )
 
-    region = loss_region.float()
-    full = ((delta <= cfg.delta_soft) & loss_region).float().sum() / max(region_count, 1.0)
+    full = ((gate_delta <= cfg.delta_soft) & loss_region).float().sum() / max(region_count, 1.0)
     mid = (
-        (delta > cfg.delta_soft) & (delta <= cfg.delta_mid) & loss_region
+        (gate_delta > cfg.delta_soft) & (gate_delta <= cfg.delta_mid) & loss_region
     ).float().sum() / max(region_count, 1.0)
     far = (
-        (delta > cfg.delta_mid) & (delta <= cfg.delta_hard) & loss_region
+        (gate_delta > cfg.delta_mid) & (gate_delta <= cfg.delta_hard) & loss_region
     ).float().sum() / max(region_count, 1.0)
     drop = ((delta_w == 0) & loss_region).float().sum() / max(region_count, 1.0)
     stats["awr/delta_gate_full_frac"] = _finite_float(float(full))
@@ -1017,6 +1075,27 @@ def _compute_awr_loss_health_stats(
     stats["awr/delta_gate_far_frac"] = _finite_float(float(far))
     stats["awr/delta_gate_drop_frac"] = _finite_float(float(drop))
     return stats
+
+
+def awr_should_run_builder_this_rollout(bridge: "EliteAWRBridge", cfg: EliteAWRConfig) -> bool:
+    """Return True when this rollout should run the AWR builder (collect_every gate)."""
+    collect_every = max(int(getattr(cfg, "collect_every", 1) or 1), 1)
+    stats = getattr(bridge, "stats", None)
+    if not isinstance(stats, dict):
+        stats = {}
+        bridge.stats = stats
+    stats["awr/collect_every"] = float(collect_every)
+    counter = int(getattr(bridge, "_awr_collect_counter", 0) or 0) + 1
+    bridge._awr_collect_counter = counter
+    stats["awr/collect_counter"] = float(counter)
+    if collect_every <= 1:
+        stats["awr/collection_skipped_collect_every"] = 0.0
+        return True
+    if counter % collect_every != 0:
+        stats["awr/collection_skipped_collect_every"] = 1.0
+        return False
+    stats["awr/collection_skipped_collect_every"] = 0.0
+    return True
 
 
 # v17.2 debug hotfix: runtime fuse for slow rollout-buffer builder (vectorization deferred).
@@ -1115,6 +1194,7 @@ class EliteAWRBridge:
         self._pending_action_check: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._awr_builder_slow_count = 0
         self._awr_builder_fuse_until_frame = 0
+        self._awr_collect_counter = 0
         self.stats["awr/broadcast_enabled"] = 0.0
         self.stats["awr/buffer_broadcast_loaded_steps"] = 0.0
         self.stats["awr/inherit_enabled"] = 1.0
@@ -1287,7 +1367,9 @@ def compute_elite_awr_loss(
         stats["awr/active_frac"] = 0.0
         stats.update(_compute_awr_loss_health_stats(
             logp=torch.zeros_like(loss_mask, dtype=torch.float32),
-            delta=torch.zeros_like(loss_mask, dtype=torch.float32),
+            gate_delta=torch.zeros_like(loss_mask, dtype=torch.float32),
+            linf_delta=torch.zeros_like(loss_mask, dtype=torch.float32),
+            delta_mean=torch.zeros_like(loss_mask, dtype=torch.float32),
             quality=quality,
             loss_mask=loss_mask,
             delta_w=torch.zeros_like(loss_mask, dtype=torch.float32),
@@ -1299,9 +1381,16 @@ def compute_elite_awr_loss(
     logp, mu = eval_policy_log_prob_sequence(
         agent, obs, action, seq_length=seq_length
     )
-    delta = (action - mu).abs().amax(dim=-1)
-    delta_w = _delta_gate(delta, cfg)
-    skill_delta = float(getattr(agent, "_pbt_skill_delta", 0.0) or 0.0)
+    delta_linf = (action - mu).abs().amax(dim=-1)
+    delta_mean = (action - mu).abs().mean(dim=-1)
+    gate_delta = _compute_action_delta(action, mu, cfg.delta_metric)
+    delta_w = _delta_gate(gate_delta, cfg)
+    similarity = -gate_delta
+    _pbt_raw = getattr(agent, "_pbt_skill_delta", None)
+    if isinstance(_pbt_raw, (int, float)):
+        skill_delta = float(_pbt_raw)
+    else:
+        skill_delta = 0.0
     skill_delta = max(-1.0, min(1.0, skill_delta))
     w, uniform_applied = _compute_awr_sample_weights(
         quality=quality,
@@ -1309,13 +1398,28 @@ def compute_elite_awr_loss(
         loss_mask=loss_mask,
         cfg=cfg,
         skill_delta=skill_delta,
+        similarity=similarity,
     )
     stats["awr/skill_delta_coupling"] = float(skill_delta)
     stats["awr/entropy_floor_uniform"] = float(uniform_applied)
+    stats["awr/delta_metric_code"] = _delta_metric_code(cfg.delta_metric)
+    stats["awr/delta_gate_metric_code"] = stats["awr/delta_metric_code"]
+    stats["awr/sample_weight_quality_beta"] = float(cfg.score_beta_quality)
+    stats["awr/sample_weight_similarity_beta"] = float(cfg.score_beta_similarity)
+    sim_enabled = 1.0
+    stats["awr/sample_weight_similarity_enabled"] = sim_enabled
+    if bool(loss_region.any()):
+        sim_region = similarity[loss_region]
+        stats["awr/sample_weight_similarity_mean"] = _finite_float(
+            float(sim_region.mean().item())
+        )
+        stats["awr/sample_weight_similarity_p90"] = _tensor_quantile(sim_region, 0.90)
     stats.update(
         _compute_awr_loss_health_stats(
             logp=logp,
-            delta=delta,
+            gate_delta=gate_delta,
+            linf_delta=delta_linf,
+            delta_mean=delta_mean,
             quality=quality,
             loss_mask=loss_mask,
             delta_w=delta_w,
