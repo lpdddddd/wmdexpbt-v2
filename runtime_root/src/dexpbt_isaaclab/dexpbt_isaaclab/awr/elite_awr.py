@@ -933,12 +933,22 @@ def _compute_awr_sample_weights(
     cfg: EliteAWRConfig,
     skill_delta: float = 0.0,
     similarity: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, float, dict[str, float]]:
+    weight_stats: dict[str, float] = {
+        "awr/delta_gate_applied_to_weights": 1.0,
+    }
     region = loss_mask.bool()
     if not bool(region.any()):
-        return torch.zeros_like(quality), 0.0
+        weight_stats.update(
+            {
+                "awr/pre_gate_nonzero_weight_frac": 0.0,
+                "awr/post_gate_nonzero_weight_frac": 0.0,
+                "awr/pre_gate_weight_mean": 0.0,
+                "awr/post_gate_weight_mean": 0.0,
+            }
+        )
+        return torch.zeros_like(quality), 0.0, weight_stats
     q = quality[region]
-    d = delta_w[region]
     if similarity is None:
         sim = torch.zeros_like(q)
     else:
@@ -947,16 +957,31 @@ def _compute_awr_sample_weights(
         cfg.score_beta_quality * _standardize(q)
         + cfg.score_beta_similarity * _standardize(sim)
         + cfg.score_beta_skill_delta * float(skill_delta)
-        + torch.log(d.clamp(min=0.0) + cfg.delta_gate_gamma)
     )
     temp = max(float(cfg.score_temperature), 1e-6)
     w_active = torch.softmax(score / temp, dim=0)
     w = torch.zeros_like(quality)
     w[region] = w_active
-    w, uniform_applied = _apply_entropy_floor(
-        w * loss_mask.float(), eps=cfg.entropy_floor_eps
+    pre_gate = w * loss_mask.float()
+    pre_region = pre_gate[region]
+    weight_stats["awr/pre_gate_nonzero_weight_frac"] = _finite_float(
+        float((pre_region > 0).float().mean().item())
     )
-    return w, uniform_applied
+    weight_stats["awr/pre_gate_weight_mean"] = _finite_float(
+        float(pre_region.mean().item())
+    )
+    w = w * delta_w.float() * loss_mask.float()
+    post_region = w[region]
+    weight_stats["awr/post_gate_nonzero_weight_frac"] = _finite_float(
+        float((post_region > 0).float().mean().item())
+    )
+    weight_stats["awr/post_gate_weight_mean"] = _finite_float(
+        float(post_region.mean().item())
+    )
+    w, uniform_applied = _apply_entropy_floor(
+        w, eps=cfg.entropy_floor_eps
+    )
+    return w, uniform_applied, weight_stats
 
 
 def _finite_float(x: float, default: float = 0.0) -> float:
@@ -1392,7 +1417,7 @@ def compute_elite_awr_loss(
     else:
         skill_delta = 0.0
     skill_delta = max(-1.0, min(1.0, skill_delta))
-    w, uniform_applied = _compute_awr_sample_weights(
+    w, uniform_applied, weight_stats = _compute_awr_sample_weights(
         quality=quality,
         delta_w=delta_w,
         loss_mask=loss_mask,
@@ -1400,6 +1425,7 @@ def compute_elite_awr_loss(
         skill_delta=skill_delta,
         similarity=similarity,
     )
+    stats.update(weight_stats)
     stats["awr/skill_delta_coupling"] = float(skill_delta)
     stats["awr/entropy_floor_uniform"] = float(uniform_applied)
     stats["awr/delta_metric_code"] = _delta_metric_code(cfg.delta_metric)

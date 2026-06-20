@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -16,6 +17,7 @@ from dexpbt_isaaclab.awr.elite_awr import (
     _compute_awr_sample_weights,
     _delta_gate,
     awr_should_run_builder_this_rollout,
+    compute_elite_awr_loss,
 )
 
 
@@ -31,7 +33,7 @@ class TestV173AWRRescue(unittest.TestCase):
             score_beta_similarity=1.0,
             score_beta_skill_delta=0.0,
         )
-        w_sim, _ = _compute_awr_sample_weights(
+        w_sim, _, _ = _compute_awr_sample_weights(
             quality=quality,
             delta_w=delta_w,
             loss_mask=loss_mask,
@@ -45,7 +47,7 @@ class TestV173AWRRescue(unittest.TestCase):
             score_beta_similarity=0.0,
             score_beta_skill_delta=0.0,
         )
-        w_q, _ = _compute_awr_sample_weights(
+        w_q, _, _ = _compute_awr_sample_weights(
             quality=quality,
             delta_w=delta_w,
             loss_mask=loss_mask,
@@ -129,6 +131,155 @@ class TestV173AWRRescue(unittest.TestCase):
             "DEXPBT_AWR_BUILDER_MODE=vectorized",
         ):
             self.assertIn(needle, text)
+
+    def test_delta_gate_zero_masks_weight(self):
+        quality = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        similarity = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        loss_mask = torch.ones(4, dtype=torch.bool)
+        delta_w = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        cfg = EliteAWRConfig(
+            score_beta_quality=1.0,
+            score_beta_similarity=0.0,
+            score_beta_skill_delta=0.0,
+        )
+        w, _, stats = _compute_awr_sample_weights(
+            quality=quality,
+            delta_w=delta_w,
+            loss_mask=loss_mask,
+            cfg=cfg,
+            skill_delta=0.0,
+            similarity=similarity,
+        )
+        self.assertGreater(w[0].item(), 0.0)
+        self.assertEqual(w[1].item(), 0.0)
+        self.assertEqual(w[2].item(), 0.0)
+        self.assertEqual(w[3].item(), 0.0)
+        self.assertEqual(stats["awr/delta_gate_applied_to_weights"], 1.0)
+        self.assertEqual(stats["awr/pre_gate_nonzero_weight_frac"], 1.0)
+        self.assertEqual(stats["awr/post_gate_nonzero_weight_frac"], 0.25)
+
+    def test_delta_gate_soft_scales_weight(self):
+        quality = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        similarity = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        loss_mask = torch.ones(4, dtype=torch.bool)
+        delta_w = torch.tensor([1.0, 0.5, 0.2, 0.0])
+        cfg = EliteAWRConfig(
+            score_beta_quality=1.0,
+            score_beta_similarity=0.0,
+            score_beta_skill_delta=0.0,
+            entropy_floor_eps=0.99,
+        )
+        w, _, stats = _compute_awr_sample_weights(
+            quality=quality,
+            delta_w=delta_w,
+            loss_mask=loss_mask,
+            cfg=cfg,
+            skill_delta=0.0,
+            similarity=similarity,
+        )
+        self.assertEqual(w[3].item(), 0.0)
+        self.assertLess(
+            stats["awr/post_gate_nonzero_weight_frac"],
+            stats["awr/pre_gate_nonzero_weight_frac"],
+        )
+        self.assertEqual(stats["awr/post_gate_nonzero_weight_frac"], 0.75)
+
+    def test_entropy_floor_does_not_reactivate_zero_delta_gate(self):
+        quality = torch.tensor([10.0, 1.0, 2.0, 1.0])
+        similarity = torch.tensor([1.0, 1.0, 1.0, 1.0])
+        loss_mask = torch.ones(4, dtype=torch.bool)
+        delta_w = torch.tensor([1.0, 0.0, 1.0, 0.0])
+        cfg = EliteAWRConfig(
+            score_beta_quality=1.0,
+            score_beta_similarity=0.0,
+            score_beta_skill_delta=0.0,
+            entropy_floor_eps=0.99,
+        )
+        w, _, _ = _compute_awr_sample_weights(
+            quality=quality,
+            delta_w=delta_w,
+            loss_mask=loss_mask,
+            cfg=cfg,
+            skill_delta=0.0,
+            similarity=similarity,
+        )
+        self.assertGreater(w[0].item(), 0.0)
+        self.assertGreater(w[2].item(), 0.0)
+        self.assertEqual(w[1].item(), 0.0)
+        self.assertEqual(w[3].item(), 0.0)
+
+    def test_weight_stats_present(self):
+        quality = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        similarity = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        loss_mask = torch.ones(4, dtype=torch.bool)
+        delta_w = torch.tensor([1.0, 0.5, 0.2, 0.0])
+        cfg = EliteAWRConfig(start_after_frames=0, loss_weight=0.001)
+        _, _, weight_stats = _compute_awr_sample_weights(
+            quality=quality,
+            delta_w=delta_w,
+            loss_mask=loss_mask,
+            cfg=cfg,
+            similarity=similarity,
+        )
+        for key in (
+            "awr/delta_gate_applied_to_weights",
+            "awr/pre_gate_nonzero_weight_frac",
+            "awr/post_gate_nonzero_weight_frac",
+        ):
+            self.assertIn(key, weight_stats)
+
+        agent = mock.Mock()
+        agent.ppo_device = torch.device("cpu")
+        agent.frame = 1_000_000_000
+        agent.is_rnn = False
+        agent.mixed_precision = False
+        agent._preproc_obs = lambda x: x
+
+        class _Net(torch.nn.Module):
+            def forward(self, input_dict):
+                t = input_dict["prev_actions"].shape[0]
+                return {
+                    "prev_neglogp": torch.ones(t),
+                    "mus": torch.zeros(t, input_dict["prev_actions"].shape[-1]),
+                }
+
+            def get_default_rnn_state(self):
+                return None
+
+        agent.model = _Net()
+        batch = {
+            "obs": torch.zeros(4, 2, 4),
+            "action": torch.zeros(4, 2, 2),
+            "loss_mask": torch.ones(4, 2, dtype=torch.bool),
+            "quality": torch.full((4, 2), 3.0),
+            "seq_length": 4,
+        }
+        _, stats = compute_elite_awr_loss(agent, batch, cfg, frames=agent.frame)
+        for key in (
+            "awr/delta_gate_applied_to_weights",
+            "awr/pre_gate_nonzero_weight_frac",
+            "awr/post_gate_nonzero_weight_frac",
+        ):
+            self.assertIn(key, stats)
+
+    def test_awr_should_run_builder_exported(self):
+        from dexpbt_isaaclab.awr import awr_should_run_builder_this_rollout as exported
+
+        self.assertIs(exported, awr_should_run_builder_this_rollout)
+
+    def test_v17_3_launcher_monitor_interval_fast(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        launcher = (
+            repo_root
+            / "results"
+            / "launchers"
+            / "start_regrasping_pbt_wm_strategy_zoo_v17_3_awr_rescue_900m_smoke.sh"
+        )
+        text = launcher.read_text()
+        self.assertIn("monitor_interval_s=600", text)
+        self.assertIn("--interval-s 600", text)
+        self.assertNotIn("monitor_interval_s=1800", text)
+        self.assertNotIn("--interval-s 1800", text)
 
 
 if __name__ == "__main__":

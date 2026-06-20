@@ -111,7 +111,7 @@ awr_broadcast_enabled=false
 awr_inherit_enabled=true
 note=v17.3 AWR rescue smoke: similarity fix, mean delta gate, collect_every=4, tighter caps.
 monitor_script=results/monitor_v17_2_control_plane_2b_verify.py
-monitor_interval_s=1800
+monitor_interval_s=600
 EOF
 
 cat > "${RUN_DIR}/LOGGING_HOOKS.txt" <<'EOF'
@@ -274,7 +274,7 @@ echo $! > "$PIDFILE"
 nohup python3 "${RESULTS_ROOT}/monitor_v17_2_control_plane_2b_verify.py" \
   "$RUN_DIR" \
   --loop \
-  --interval-s 1800 \
+  --interval-s 600 \
   --fail-fast \
   >>"$MONITOR_LOG" 2>&1 &
 echo $! > "$MONITOR_PIDFILE"
