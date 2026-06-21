@@ -494,6 +494,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_wm_profile_copy_cooldown_frames: int = 0,
         pbt_wm_profile_copy_bottom_k: int = 0,
         pbt_wm_profile_copy_top_k: int = 0,
+        # Deep-diag fix (2026-06-20): bottom-slot health gates. Defaults are
+        # 0/() so existing v17.x runs are unaffected; v17.4+ launchers set
+        # real values to break the bottom-slot death spiral.
+        pbt_wm_profile_copy_source_min_nsucc_mean: float = 0.0,
+        pbt_wm_profile_copy_source_min_frames: int = 0,
+        pbt_wm_profile_copy_target_min_nsucc_mean: float = 0.0,
+        pbt_wm_profile_copy_target_min_nsucc_max: float = 0.0,
+        pbt_wm_profile_copy_locked_target_slots: (
+            tuple[int, ...] | list[int] | frozenset[int] | str
+        ) = (),
         profile_actor_distill_enabled: bool = False,
         profile_residual_apply_enabled: bool = False,
         profile_rssm_mppi_enabled: bool = False,
@@ -747,6 +757,29 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self.pbt_wm_profile_copy_bottom_k = int(pbt_wm_profile_copy_bottom_k)
         self.pbt_wm_profile_copy_top_k = int(pbt_wm_profile_copy_top_k)
+        # Deep-diag fix (2026-06-20): wire bottom-slot health gates.
+        self.pbt_wm_profile_copy_source_min_nsucc_mean = float(
+            pbt_wm_profile_copy_source_min_nsucc_mean
+        )
+        self.pbt_wm_profile_copy_source_min_frames = int(
+            pbt_wm_profile_copy_source_min_frames
+        )
+        self.pbt_wm_profile_copy_target_min_nsucc_mean = float(
+            pbt_wm_profile_copy_target_min_nsucc_mean
+        )
+        self.pbt_wm_profile_copy_target_min_nsucc_max = float(
+            pbt_wm_profile_copy_target_min_nsucc_max
+        )
+        _locked_raw = pbt_wm_profile_copy_locked_target_slots
+        if isinstance(_locked_raw, str):
+            _locked_iter = (
+                int(x) for x in _locked_raw.split(",") if x.strip()
+            )
+        else:
+            _locked_iter = (int(x) for x in (_locked_raw or ()))
+        self.pbt_wm_profile_copy_locked_target_slots = tuple(
+            sorted({int(x) for x in _locked_iter})
+        )
         self.profile_actor_distill_enabled = bool(profile_actor_distill_enabled)
         self.profile_residual_apply_enabled = bool(profile_residual_apply_enabled)
         self.profile_rssm_mppi_enabled = bool(profile_rssm_mppi_enabled)
@@ -7853,6 +7886,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             copy_cooldown_frames,
             copy_bottom_k,
             copy_top_k,
+            copy_source_min_nsucc_mean,
+            copy_source_min_frames,
+            copy_target_min_nsucc_mean,
+            copy_target_min_nsucc_max,
+            copy_locked_target_slots,
         ) = resolve_profile_copy_restart_config(
             enable=self.pbt_wm_profile_copy_enable,
             after_frames=self.pbt_wm_profile_copy_after_frames,
@@ -7865,6 +7903,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             cooldown_frames=self.pbt_wm_profile_copy_cooldown_frames,
             bottom_k=self.pbt_wm_profile_copy_bottom_k,
             top_k=self.pbt_wm_profile_copy_top_k,
+            source_min_nsucc_mean=self.pbt_wm_profile_copy_source_min_nsucc_mean,
+            source_min_frames=self.pbt_wm_profile_copy_source_min_frames,
+            target_min_nsucc_mean=self.pbt_wm_profile_copy_target_min_nsucc_mean,
+            target_min_nsucc_max=self.pbt_wm_profile_copy_target_min_nsucc_max,
+            locked_target_slots=self.pbt_wm_profile_copy_locked_target_slots,
             metadata_path=self.train_dir.parent / "metadata.txt",
         )
         old_profile_name = str(self.wm_strategy_profile_name or "legacy")
@@ -7910,6 +7953,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             cooldown_frames=int(copy_cooldown_frames),
             bottom_k=int(copy_bottom_k),
             top_k=int(copy_top_k),
+            source_min_nsucc_mean=float(copy_source_min_nsucc_mean),
+            source_min_frames=int(copy_source_min_frames),
+            target_min_nsucc_mean=float(copy_target_min_nsucc_mean),
+            target_min_nsucc_max=float(copy_target_min_nsucc_max),
+            locked_target_slots=frozenset(copy_locked_target_slots),
         )
         copy_result = decide_profile_copy(
             cfg=copy_cfg,
@@ -7984,6 +8032,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 cooldown_frames=copy_cooldown_frames,
                 bottom_k=copy_bottom_k,
                 top_k=copy_top_k,
+                source_min_nsucc_mean=copy_source_min_nsucc_mean,
+                source_min_frames=copy_source_min_frames,
+                target_min_nsucc_mean=copy_target_min_nsucc_mean,
+                target_min_nsucc_max=copy_target_min_nsucc_max,
+                locked_target_slots=copy_locked_target_slots,
             )
         )
         self._last_pbt_wm_profile_copy_decision = str(profile_copy_decision)

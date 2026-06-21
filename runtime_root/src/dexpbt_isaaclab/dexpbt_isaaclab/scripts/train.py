@@ -650,6 +650,52 @@ parser.add_argument(
     "--pbt_wm_profile_copy_top_k", type=int, default=0,
     help="Source must be in top-k by ranking (unless archive source).",
 )
+# Deep-diag fix (2026-06-20): wire bottom-slot health gates that were
+# previously dead code (ProfileCopyConfig fields with no CLI binding).
+parser.add_argument(
+    "--pbt_wm_profile_copy_source_min_nsucc_mean", type=float, default=0.0,
+    help=(
+        "Profile copy is rejected when source nsucc_mean < this floor. "
+        "Set to e.g. 15.0 to block early-window copies from sources that "
+        "haven't yet mastered the basic task (root cause of the v17.3 5B "
+        "p01 churn at 400M)."
+    ),
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_source_min_frames", type=int, default=0,
+    help=(
+        "Profile copy is rejected when source has trained < this many "
+        "env frames. Set to e.g. 200_000_000 so we never copy a profile "
+        "from a worker that hasn't run long enough to be evaluable."
+    ),
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_target_min_nsucc_mean", type=float, default=0.0,
+    help=(
+        "Profile copy is rejected when the target slot's nsucc_mean is "
+        "below this floor (i.e. the slot is broken). Weight copy still "
+        "proceeds; only the profile / zoo role is preserved. Set to e.g. "
+        "5.0 to break the bottom-slot death spiral."
+    ),
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_target_min_nsucc_max", type=float, default=0.0,
+    help=(
+        "Companion to --pbt_wm_profile_copy_target_min_nsucc_mean: when "
+        "the target's nsucc_mean is too low but its nsucc_max has crossed "
+        "this floor (i.e. it has shown bursts of success), allow profile "
+        "swap. Set to 0.0 to disable this escape hatch."
+    ),
+)
+parser.add_argument(
+    "--pbt_wm_profile_copy_locked_target_slots", type=str, default="",
+    help=(
+        "Comma-separated list of policy_idx values that must keep their "
+        "launcher-assigned profile across PBT cross-restarts (e.g. "
+        "'0,1' to lock p00=ppo_only anchor and p01=AWR rescue). Weight "
+        "copy still proceeds for these slots."
+    ),
+)
 # WM curriculum controller (Strategy Zoo profile: wm_curriculum_controller).
 parser.add_argument(
     "--wm_curriculum_controller_enable",
@@ -7048,6 +7094,21 @@ def main():
             ),
             pbt_wm_profile_copy_bottom_k=args_cli.pbt_wm_profile_copy_bottom_k,
             pbt_wm_profile_copy_top_k=args_cli.pbt_wm_profile_copy_top_k,
+            pbt_wm_profile_copy_source_min_nsucc_mean=(
+                args_cli.pbt_wm_profile_copy_source_min_nsucc_mean
+            ),
+            pbt_wm_profile_copy_source_min_frames=(
+                args_cli.pbt_wm_profile_copy_source_min_frames
+            ),
+            pbt_wm_profile_copy_target_min_nsucc_mean=(
+                args_cli.pbt_wm_profile_copy_target_min_nsucc_mean
+            ),
+            pbt_wm_profile_copy_target_min_nsucc_max=(
+                args_cli.pbt_wm_profile_copy_target_min_nsucc_max
+            ),
+            pbt_wm_profile_copy_locked_target_slots=(
+                args_cli.pbt_wm_profile_copy_locked_target_slots
+            ),
             profile_actor_distill_enabled=_wm_profile_caps.get(
                 "profile_actor_distill_enabled", False
             ),

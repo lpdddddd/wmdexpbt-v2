@@ -23,6 +23,17 @@ class ProfileCopyConfig:
     prob_clip_max: float = 0.9
     source_min_nsucc_mean: float = 0.0
     source_min_frames: int = 0
+    # Deep-diag fix (2026-06-20): block profile swap when the target slot has
+    # not yet shown any meaningful learning signal. Weight-only copy still
+    # proceeds; only the profile (zoo role) is preserved. This stops the
+    # death spiral where bottom slots churn through profiles every restart.
+    target_min_nsucc_mean: float = 0.0
+    # When the target's last successful nsucc_max is also < this, fall through
+    # the same gate. Set to 0.0 to disable the secondary check.
+    target_min_nsucc_max: float = 0.0
+    # Per-slot lock: if the target's policy_idx appears in this set, profile
+    # swap is forbidden regardless of other gates (weight copy still ok).
+    locked_target_slots: frozenset[int] = field(default_factory=frozenset)
     top1_override_enable: bool = False
     top1_override_after_frames: int = 0
     top1_override_min_nsucc_gap: float = 5.0
@@ -50,6 +61,9 @@ class ProfileCopyDecision:
     source_min_frames: int = 0
     source_nsucc_mean: float = float("nan")
     source_min_nsucc_mean: float = 0.0
+    target_nsucc_mean: float = float("nan")
+    target_min_nsucc_mean: float = 0.0
+    target_locked: bool = False
 
 
 def _policy_score(state: dict[str, Any] | None) -> float:
@@ -68,6 +82,18 @@ def _policy_nsucc_mean(state: dict[str, Any] | None, window_mean: float | None) 
     if not state:
         return float("nan")
     for key in ("nsucc_mean", "mean_prev_episode_successes"):
+        if key in state:
+            try:
+                return float(state[key])
+            except (TypeError, ValueError):
+                pass
+    return float("nan")
+
+
+def _policy_nsucc_max(state: dict[str, Any] | None) -> float:
+    if not state:
+        return float("nan")
+    for key in ("nsucc_max", "max_prev_episode_successes"):
         if key in state:
             try:
                 return float(state[key])
@@ -190,6 +216,8 @@ def decide_profile_copy(
         diversity_count=int(diversity_count),
         source_min_frames=int(cfg.source_min_frames),
         source_min_nsucc_mean=float(cfg.source_min_nsucc_mean),
+        target_min_nsucc_mean=float(cfg.target_min_nsucc_mean),
+        target_locked=bool(int(target_policy_idx) in cfg.locked_target_slots),
     )
     if not cfg.enable:
         out.decision = "disabled"
@@ -227,6 +255,7 @@ def decide_profile_copy(
         (window_nsucc or {}).get(int(source_policy_idx)),
     )
     out.source_nsucc_mean = float(source_nsucc)
+    out.target_nsucc_mean = float(target_nsucc)
     if source_frames is None:
         source_frames = _policy_frames(source_state)
     out.source_frames = int(source_frames)
@@ -294,6 +323,37 @@ def decide_profile_copy(
             out.decision = "source_frames_too_low"
             out.reject_reason = "source_frames_too_low"
             return out
+
+    # Deep-diag fix (2026-06-20): block profile swap on broken targets.
+    # When the target's nsucc has not crossed `target_min_nsucc_mean`, do
+    # not swap the profile. This prevents the bottom-slot death spiral
+    # observed in v17.3 5B (p00/p01 churned through 4-5 profiles each
+    # while staying at nsucc<1). The bottom worker still inherits the
+    # source's weights via the surrounding restart logic.
+    if not top1_override and float(cfg.target_min_nsucc_mean) > 0.0:
+        target_max = _policy_nsucc_max(target_state)
+        target_max_floor = float(cfg.target_min_nsucc_max)
+        # If the target has at least proven bursts of success
+        # (nsucc_max above floor), allow profile swap; otherwise block.
+        if (
+            math.isnan(target_nsucc)
+            or target_nsucc < float(cfg.target_min_nsucc_mean)
+        ) and (
+            target_max_floor <= 0.0
+            or math.isnan(target_max)
+            or target_max < target_max_floor
+        ):
+            out.decision = "target_nsucc_too_low"
+            out.reject_reason = "target_nsucc_too_low"
+            return out
+
+    # Deep-diag fix (2026-06-20): per-slot lock. Slots with explicit zoo
+    # roles (e.g. p00=ppo_only anchor, p01=AWR rescue) opt out of profile
+    # swap entirely. Weight copy still proceeds.
+    if not top1_override and int(target_policy_idx) in cfg.locked_target_slots:
+        out.decision = "target_slot_locked"
+        out.reject_reason = "target_slot_locked"
+        return out
 
     if source_in_collapse:
         out.decision = "source_unhealthy"

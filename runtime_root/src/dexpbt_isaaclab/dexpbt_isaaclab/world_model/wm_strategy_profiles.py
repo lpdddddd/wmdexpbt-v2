@@ -758,6 +758,13 @@ def profile_controlled_restart_skip_flags() -> frozenset[str]:
         "--pbt_wm_profile_copy_cooldown_frames",
         "--pbt_wm_profile_copy_bottom_k",
         "--pbt_wm_profile_copy_top_k",
+        # Deep-diag fix (2026-06-20): also strip the new health-gate flags
+        # so they're cleanly re-injected by `profile_copy_restart_train_args`.
+        "--pbt_wm_profile_copy_source_min_nsucc_mean",
+        "--pbt_wm_profile_copy_source_min_frames",
+        "--pbt_wm_profile_copy_target_min_nsucc_mean",
+        "--pbt_wm_profile_copy_target_min_nsucc_max",
+        "--pbt_wm_profile_copy_locked_target_slots",
     }
     for dest in _all_profile_controlled_dests():
         skip.add(f"--{dest}")
@@ -778,9 +785,20 @@ def profile_copy_restart_train_args(
     cooldown_frames: int = 0,
     bottom_k: int = 0,
     top_k: int = 0,
+    source_min_nsucc_mean: float = 0.0,
+    source_min_frames: int = 0,
+    target_min_nsucc_mean: float = 0.0,
+    target_min_nsucc_max: float = 0.0,
+    locked_target_slots: tuple[int, ...] | list[int] | frozenset[int] = (),
 ) -> list[str]:
-    """Re-inject profile-copy CLI after restart argv stripping."""
-    return [
+    """Re-inject profile-copy CLI after restart argv stripping.
+
+    Deep-diag fix (2026-06-20): also re-inject `source_min_nsucc_mean`,
+    `source_min_frames`, `target_min_nsucc_mean`, `target_min_nsucc_max`
+    and `locked_target_slots`. These were silently dropped on PBT restart
+    before, which made the bottom-slot health gates dead code.
+    """
+    args = [
         (
             "--pbt_wm_profile_copy_enable"
             if enable
@@ -797,7 +815,18 @@ def profile_copy_restart_train_args(
         f"--pbt_wm_profile_copy_cooldown_frames={int(cooldown_frames)}",
         f"--pbt_wm_profile_copy_bottom_k={int(bottom_k)}",
         f"--pbt_wm_profile_copy_top_k={int(top_k)}",
+        f"--pbt_wm_profile_copy_source_min_nsucc_mean={float(source_min_nsucc_mean)}",
+        f"--pbt_wm_profile_copy_source_min_frames={int(source_min_frames)}",
+        f"--pbt_wm_profile_copy_target_min_nsucc_mean={float(target_min_nsucc_mean)}",
+        f"--pbt_wm_profile_copy_target_min_nsucc_max={float(target_min_nsucc_max)}",
     ]
+    locked_sorted = sorted({int(s) for s in (locked_target_slots or ())})
+    if locked_sorted:
+        args.append(
+            "--pbt_wm_profile_copy_locked_target_slots="
+            + ",".join(str(s) for s in locked_sorted)
+        )
+    return args
 
 
 def _parse_profile_copy_config_from_metadata(
@@ -826,6 +855,11 @@ def _parse_profile_copy_config_from_metadata(
     cooldown_frames: int | None = None
     bottom_k: int | None = None
     top_k: int | None = None
+    source_min_nsucc_mean: float | None = None
+    source_min_frames: int | None = None
+    target_min_nsucc_mean: float | None = None
+    target_min_nsucc_max: float | None = None
+    locked_target_slots: tuple[int, ...] | None = None
     for tok in tokens:
         if tok == "--pbt_wm_profile_copy_enable":
             enable = True
@@ -847,6 +881,22 @@ def _parse_profile_copy_config_from_metadata(
             bottom_k = int(tok.split("=", 1)[1])
         elif tok.startswith("--pbt_wm_profile_copy_top_k="):
             top_k = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_source_min_nsucc_mean="):
+            source_min_nsucc_mean = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_source_min_frames="):
+            source_min_frames = int(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_target_min_nsucc_mean="):
+            target_min_nsucc_mean = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_target_min_nsucc_max="):
+            target_min_nsucc_max = float(tok.split("=", 1)[1])
+        elif tok.startswith("--pbt_wm_profile_copy_locked_target_slots="):
+            raw = tok.split("=", 1)[1].strip()
+            if raw:
+                locked_target_slots = tuple(
+                    int(x) for x in raw.split(",") if x.strip()
+                )
+            else:
+                locked_target_slots = ()
     if enable is None and after_frames is None and prob is None:
         return None
     return {
@@ -865,6 +915,21 @@ def _parse_profile_copy_config_from_metadata(
         "cooldown_frames": int(cooldown_frames if cooldown_frames is not None else 0),
         "bottom_k": int(bottom_k if bottom_k is not None else 0),
         "top_k": int(top_k if top_k is not None else 0),
+        "source_min_nsucc_mean": float(
+            source_min_nsucc_mean if source_min_nsucc_mean is not None else 0.0
+        ),
+        "source_min_frames": int(
+            source_min_frames if source_min_frames is not None else 0
+        ),
+        "target_min_nsucc_mean": float(
+            target_min_nsucc_mean if target_min_nsucc_mean is not None else 0.0
+        ),
+        "target_min_nsucc_max": float(
+            target_min_nsucc_max if target_min_nsucc_max is not None else 0.0
+        ),
+        "locked_target_slots": tuple(
+            locked_target_slots if locked_target_slots is not None else ()
+        ),
     }
 
 
@@ -879,10 +944,32 @@ def resolve_profile_copy_restart_config(
     cooldown_frames: int = 0,
     bottom_k: int = 0,
     top_k: int = 0,
+    source_min_nsucc_mean: float = 0.0,
+    source_min_frames: int = 0,
+    target_min_nsucc_mean: float = 0.0,
+    target_min_nsucc_max: float = 0.0,
+    locked_target_slots: tuple[int, ...] | list[int] | frozenset[int] = (),
     metadata_path: Path | None,
-) -> tuple[bool, int, float, int, float, float, int, int, int]:
-    """Resolve profile-copy settings for PBT restart argv re-injection."""
-    defaults = (False, 1_000_000_000, 0.3, 3, 0.0, 0.0, 0, 0, 0)
+) -> tuple[
+    bool, int, float, int, float, float, int, int, int,
+    float, int, float, float, tuple[int, ...],
+]:
+    """Resolve profile-copy settings for PBT restart argv re-injection.
+
+    Returns a flat 14-tuple: (enable, after_frames, prob,
+    keep_diversity_min_profiles, min_nsucc_gap, min_source_retention,
+    cooldown_frames, bottom_k, top_k, source_min_nsucc_mean,
+    source_min_frames, target_min_nsucc_mean, target_min_nsucc_max,
+    locked_target_slots).
+
+    Deep-diag fix (2026-06-20): the metadata fallback now also restores
+    the new health gates so they survive PBT restart.
+    """
+    locked_tuple = tuple(sorted({int(s) for s in (locked_target_slots or ())}))
+    defaults = (
+        False, 1_000_000_000, 0.3, 3, 0.0, 0.0, 0, 0, 0,
+        0.0, 0, 0.0, 0.0, (),
+    )
     current = (
         bool(enable),
         int(after_frames),
@@ -893,6 +980,11 @@ def resolve_profile_copy_restart_config(
         int(cooldown_frames),
         int(bottom_k),
         int(top_k),
+        float(source_min_nsucc_mean),
+        int(source_min_frames),
+        float(target_min_nsucc_mean),
+        float(target_min_nsucc_max),
+        locked_tuple,
     )
     if current != defaults or metadata_path is None:
         return current
@@ -909,6 +1001,11 @@ def resolve_profile_copy_restart_config(
         int(parsed["cooldown_frames"]),
         int(parsed["bottom_k"]),
         int(parsed["top_k"]),
+        float(parsed.get("source_min_nsucc_mean", 0.0)),
+        int(parsed.get("source_min_frames", 0)),
+        float(parsed.get("target_min_nsucc_mean", 0.0)),
+        float(parsed.get("target_min_nsucc_max", 0.0)),
+        tuple(parsed.get("locked_target_slots", ())),
     )
 
 

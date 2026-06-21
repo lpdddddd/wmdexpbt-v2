@@ -383,6 +383,9 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
             prob=0.5,
             keep_diversity_min_profiles=3,
         )
+        # Deep-diag fix (2026-06-20) appended four health-gate flags to the
+        # always-emitted suffix; locked_target_slots is only emitted when
+        # non-empty (default empty here, so absent).
         self.assertEqual(
             out,
             [
@@ -395,6 +398,10 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
                 "--pbt_wm_profile_copy_cooldown_frames=0",
                 "--pbt_wm_profile_copy_bottom_k=0",
                 "--pbt_wm_profile_copy_top_k=0",
+                "--pbt_wm_profile_copy_source_min_nsucc_mean=0.0",
+                "--pbt_wm_profile_copy_source_min_frames=0",
+                "--pbt_wm_profile_copy_target_min_nsucc_mean=0.0",
+                "--pbt_wm_profile_copy_target_min_nsucc_max=0.0",
             ],
         )
 
@@ -424,9 +431,16 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
                 keep_diversity_min_profiles=3,
                 metadata_path=meta,
             )
+            # Tuple shape extended in 2026-06-20 deep-diag fix to also carry
+            # source_min_nsucc_mean / source_min_frames / target_min_nsucc_mean
+            # / target_min_nsucc_max / locked_target_slots through PBT
+            # restart. Old fields keep the same indices.
             self.assertEqual(
                 resolved,
-                (True, 500_000_000, 0.5, 3, 0.0, 0.0, 0, 0, 0),
+                (
+                    True, 500_000_000, 0.5, 3, 0.0, 0.0, 0, 0, 0,
+                    0.0, 0, 0.0, 0.0, (),
+                ),
             )
 
     def test_resolve_profile_copy_restart_config_keeps_explicit_values(self):
@@ -437,7 +451,13 @@ class TestProfileCopyRestartArgs(unittest.TestCase):
             keep_diversity_min_profiles=2,
             metadata_path=None,
         )
-        self.assertEqual(resolved, (True, 250_000_000, 0.4, 2, 0.0, 0.0, 0, 0, 0))
+        self.assertEqual(
+            resolved,
+            (
+                True, 250_000_000, 0.4, 2, 0.0, 0.0, 0, 0, 0,
+                0.0, 0, 0.0, 0.0, (),
+            ),
+        )
 
 
 class TestProfileCopyDefaults(unittest.TestCase):

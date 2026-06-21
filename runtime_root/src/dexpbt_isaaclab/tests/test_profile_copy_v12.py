@@ -400,9 +400,17 @@ class TestProfileCopyRestartSurvival(unittest.TestCase):
                 keep_diversity_min_profiles=3,
                 metadata_path=meta,
             )
+            # Tuple shape extended in 2026-06-20 deep-diag fix to also
+            # carry source_min_nsucc_mean / source_min_frames /
+            # target_min_nsucc_mean / target_min_nsucc_max /
+            # locked_target_slots through PBT restart. Old fields keep
+            # the same indices.
             self.assertEqual(
                 resolved,
-                (True, 300_000_000, 0.7, 3, 3.0, 0.8, 300_000_000, 2, 2),
+                (
+                    True, 300_000_000, 0.7, 3, 3.0, 0.8, 300_000_000, 2, 2,
+                    0.0, 0, 0.0, 0.0, (),
+                ),
             )
 
 
