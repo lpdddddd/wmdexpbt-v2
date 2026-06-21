@@ -33,6 +33,8 @@ PROFILE_IDS: dict[str, int] = {
     "wm_pbt_source_selector_awr": 15,
     "elite_bank_actor_distill_awr": 16,
     "elite_bank_actor_distill_strong_awr": 17,
+    # Unified Elite-WM DexPBT — shared substrate for all workers.
+    "unified_elite_wm_pbt": 18,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -74,6 +76,11 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "elite_bank_actor_distill_strong_awr": (
         "v1.3 strong elite distill + Online Elite-AWR."
     ),
+    "unified_elite_wm_pbt": (
+        "Unified Elite-WM DexPBT substrate: elite/archive actor distill + WM "
+        "diagnostic/shadow signals for all workers. No AWR, no MPPI, no residual "
+        "rollout apply, no profile copy required."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -93,6 +100,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "wm_pbt_source_selector_awr": "pbt_selector",
     "elite_bank_actor_distill_awr": "elite_imitation",
     "elite_bank_actor_distill_strong_awr": "elite_imitation",
+    "unified_elite_wm_pbt": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -112,6 +120,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "elite_bank_actor_distill_awr": 1.3,
     "elite_bank_actor_distill_strong_awr": 1.3,
     "wm_pbt_source_selector_awr": 1.1,
+    "unified_elite_wm_pbt": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -600,6 +609,37 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG_AWR: dict[str, Any] = {
     "awr_loss_weight": 0.0010,
 }
 
+_UNIFIED_ELITE_WM_PBT: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL,
+    # --- WM diagnostic stack (shared by every worker) ---
+    "seq_wm_use_horizon_heads": True,
+    "seq_wm_horizon_steps": "4,8",
+    "seq_wm_use_recovery_head": True,
+    "seq_wm_enable_iterative_teacher": True,
+    "seq_wm_enable_imagined_evaluator": True,
+    "seq_wm_imagine_horizons": "4,8",
+    "seq_wm_imagine_action_mode": "recorded",
+    "seq_wm_imagine_use_teacher": True,
+    "wm_imagined_valid_mode": "soft_calibrated",
+    "wm_imagined_valid_uncertainty_threshold": 0.5,
+    "wm_imagined_soft_uncertainty_threshold": 0.90,
+    "wm_imagined_min_logit_abs_mean": 0.10,
+    "wm_imagined_min_head_signal_std": 0.05,
+    "wm_imagined_soft_validity_weight": 0.10,
+    # --- WM signal published in shadow mode (does NOT drive ranking) ---
+    "pbt_wm_score_mode": "shadow",
+    "pbt_use_wm_recovery_score": False,
+    "wm_pbt_source_gate_mode": "confidence_only",
+    "wm_activation_enable": True,
+    # --- explicit hard-offs (defense in depth vs restart pollution) ---
+    "awr_enable": False,
+    "awr_loss_weight": 0.0,
+    "eir_residual_apply_to_rollout": False,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+    "wm_curriculum_controller_enable": False,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -617,6 +657,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "wm_pbt_source_selector_awr": _WM_PBT_SOURCE_SELECTOR_AWR,
     "elite_bank_actor_distill_awr": _ELITE_BANK_ACTOR_DISTILL_AWR,
     "elite_bank_actor_distill_strong_awr": _ELITE_BANK_ACTOR_DISTILL_STRONG_AWR,
+    "unified_elite_wm_pbt": _UNIFIED_ELITE_WM_PBT,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.
