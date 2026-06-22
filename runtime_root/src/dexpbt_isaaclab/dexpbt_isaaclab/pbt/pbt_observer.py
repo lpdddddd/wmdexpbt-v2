@@ -41,6 +41,7 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     qualifies_best_stable_save,
     read_curriculum_control,
     write_curriculum_control,
+    write_curriculum_resume_snapshot,
 )
 
 # WM imports (lazy — only needed when enable_wm=True)
@@ -4924,6 +4925,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     os.fsync(fh.fileno())
                 except OSError:
                     pass
+            policy_run_dir = self.workspace.parent / f"policy_{self.policy_idx:02d}"
+            write_curriculum_resume_snapshot(
+                policy_run_dir,
+                curriculum=curriculum,
+                env_frames=int(env_frames),
+                policy_idx=int(self.policy_idx),
+            )
         except Exception as e:
             print(f"[curve] Failed to write training curve for policy {self.policy_idx}: {e}")
 

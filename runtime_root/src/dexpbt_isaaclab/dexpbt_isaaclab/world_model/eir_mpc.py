@@ -1478,14 +1478,15 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
             _elig = rer["eligible"].bool()
             if bool(_elig.any()):
                 _delta_linf_all = (teacher_all - mu_r).abs().max(dim=-1).values[_elig]
+                _delta_linf_f = _delta_linf_all.float()
                 bridge.last_actor_distill_delta_linf_mean_all = float(
-                    _delta_linf_all.mean().item()
+                    _delta_linf_f.mean().item()
                 )
                 bridge.last_actor_distill_delta_linf_p50_all = float(
-                    _delta_linf_all.quantile(0.5).item()
+                    _delta_linf_f.quantile(0.5).item()
                 )
                 bridge.last_actor_distill_delta_linf_p90_all = float(
-                    _delta_linf_all.quantile(0.9).item()
+                    _delta_linf_f.quantile(0.9).item()
                 )
             bridge.last_actor_distill_large_delta_mode = (
                 1.0

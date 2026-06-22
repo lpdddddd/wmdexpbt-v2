@@ -1370,6 +1370,7 @@ parser.add_argument(
         "wm_pbt_source_selector_awr",
         "elite_bank_actor_distill_awr",
         "elite_bank_actor_distill_strong_awr",
+        "unified_elite_wm_pbt",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -5680,9 +5681,52 @@ def main():
     if resume_log:
         src = args_cli.restart_source_policy
         print(
-            f"[RESUME] PBT restart from source_policy={src}: " +
-            ", ".join(f"{k}={v}" for k, v in resume_log.items())
+            f"[RESUME] PBT restart from source_policy={src}: "
+            + ", ".join(f"{k}={v}" for k, v in resume_log.items())
         )
+
+    if (
+        not resume_log
+        and args_cli.checkpoint
+        and str(getattr(args_cli, "observer_mode", "") or "") == "pbt"
+        and args_cli.restart_source_policy is None
+        and args_cli.train_root
+    ):
+        from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+            apply_curriculum_resume_env_state,
+            load_curriculum_resume_snapshot,
+            should_apply_supervisor_curriculum_resume,
+        )
+
+        policy_dir = Path(args_cli.train_root).resolve().parent
+        snap = load_curriculum_resume_snapshot(policy_dir)
+        init_tol = float(
+            getattr(
+                raw_env,
+                "initial_tolerance",
+                getattr(raw_env, "success_tolerance", 0.075),
+            )
+        )
+        if should_apply_supervisor_curriculum_resume(
+            has_checkpoint=True,
+            success_tolerance_resume=args_cli.success_tolerance_resume,
+            restart_source_policy=args_cli.restart_source_policy,
+            env_success_tolerance=float(getattr(raw_env, "success_tolerance", init_tol)),
+            env_initial_tolerance=init_tol,
+            snapshot=snap,
+        ):
+            resume_log = apply_curriculum_resume_env_state(raw_env, snap["curriculum"])
+            resume_log["resume_source"] = "supervisor_snapshot"
+            resume_log["snapshot_env_frames"] = int(snap.get("env_frames", 0))
+            print(
+                "[RESUME] Supervisor checkpoint resume from curriculum snapshot "
+                f"(env_frames={resume_log['snapshot_env_frames']}): "
+                + ", ".join(
+                    f"{k}={v}"
+                    for k, v in resume_log.items()
+                    if k not in ("resume_source", "snapshot_env_frames")
+                )
+            )
 
     # Patch P1 (2026-06-01): env reads mastery control JSON from workspace.
     if hasattr(raw_env, "curriculum_mode"):

@@ -802,6 +802,13 @@ class TestActorDistillLoss(unittest.TestCase):
         self.assertGreater(mu_grad, 0.0)
         self.assertEqual(mlp_grad, 0.0)
 
+    def test_actor_distill_delta_quantile_accepts_low_precision_tensor(self):
+        x = torch.tensor([0.1, 0.2, 0.3], dtype=torch.bfloat16)
+        p50 = float(x.float().quantile(0.5).item())
+        p90 = float(x.float().quantile(0.9).item())
+        self.assertAlmostEqual(p50, 0.2, places=2)
+        self.assertGreaterEqual(p90, p50)
+
     def test_actor_distill_loss_cap_clamps_weighted_loss(self):
         bridge, *_ = self._setup_distill(
             actor_distill_weight=100.0,

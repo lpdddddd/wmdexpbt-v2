@@ -33,12 +33,6 @@ SHARED_WM_HEAD_FLAGS=(
   --seq_wm_lambda_recovery 0.5
   --seq_wm_replay_prioritize_floor_recovery
   --seq_wm_floor_aware_weighting
-  --wm_imagined_valid_mode soft_calibrated
-  --wm_imagined_valid_uncertainty_threshold 0.5
-  --wm_imagined_soft_uncertainty_threshold 0.95
-  --wm_imagined_min_logit_abs_mean 0.05
-  --wm_imagined_min_head_signal_std 0.02
-  --wm_imagined_soft_validity_weight 0.25
   --eir_candidate_gate_mode profile_soft
   --eir_candidate_min_weight_for_retrieval 0.05
 )
@@ -71,8 +65,8 @@ profile_all_workers=unified_elite_wm_pbt
 profile_copy=false
 awr=false
 eir_residual_rollout_apply=false
-wm_pbt_score_mode=shadow
-wm_pbt_score_mode_note=shadow_tiebreak not implemented in current scoring code; "shadow" publishes WM telemetry without driving PBT ranking.
+wm_pbt_score_mode=active
+wm_pbt_score_mode_note=profile uses v13 wm_pbt_source_selector active floor-recovery ranking; base ranking remains success_aware_r_meta outside hard_floor.
 method_note=All workers share EliteBank + WM selector/diagnostic + PBT/curriculum mechanisms. PBT propagates weights/curriculum state, not discrete profile identities.
 pbt_min_frames_between_restarts=100000000
 pbt_promising_protect_frames=250000000

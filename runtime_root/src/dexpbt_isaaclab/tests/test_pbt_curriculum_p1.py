@@ -8,13 +8,17 @@ from pathlib import Path
 from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     RollingNsuccWindow,
     WindowSample,
+    apply_curriculum_resume_env_state,
     evaluate_collapse_freeze,
     evaluate_mastery_gate,
     is_stable_source_window,
     is_usable_live_window,
+    load_curriculum_resume_snapshot,
     qualifies_best_stable_save,
     read_curriculum_control,
+    should_apply_supervisor_curriculum_resume,
     write_curriculum_control,
+    write_curriculum_resume_snapshot,
     CurriculumControlState,
 )
 from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
@@ -253,6 +257,59 @@ class StableSourceTierTest(unittest.TestCase):
         )
         self.assertEqual(d["tier"], "strict_live")
         self.assertEqual(d["checkpoint_type"], "live")
+
+
+class CurriculumResumeSnapshotTest(unittest.TestCase):
+    def test_write_load_and_apply_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_dir = Path(tmp)
+            curriculum = {
+                "success_tolerance": 0.041,
+                "initial_tolerance": 0.075,
+                "target_tolerance": 0.01,
+                "last_curriculum_update": 12345,
+                "frame_since_restart": 67890,
+            }
+            write_curriculum_resume_snapshot(
+                policy_dir,
+                curriculum=curriculum,
+                env_frames=1_560_000_000,
+                policy_idx=1,
+            )
+            loaded = load_curriculum_resume_snapshot(policy_dir)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["policy_idx"], 1)
+            self.assertAlmostEqual(
+                float(loaded["curriculum"]["success_tolerance"]), 0.041
+            )
+
+            env = type("Env", (), {"success_tolerance": 0.075, "initial_tolerance": 0.075})()
+            self.assertTrue(
+                should_apply_supervisor_curriculum_resume(
+                    has_checkpoint=True,
+                    success_tolerance_resume=None,
+                    restart_source_policy=None,
+                    env_success_tolerance=float(env.success_tolerance),
+                    env_initial_tolerance=float(env.initial_tolerance),
+                    snapshot=loaded,
+                )
+            )
+            log = apply_curriculum_resume_env_state(env, loaded["curriculum"])
+            self.assertAlmostEqual(float(env.success_tolerance), 0.041)
+            self.assertAlmostEqual(float(log["success_tolerance"]), 0.041)
+
+    def test_skip_snapshot_when_pbt_resume_flags_present(self):
+        snap = {"curriculum": {"success_tolerance": 0.04}}
+        self.assertFalse(
+            should_apply_supervisor_curriculum_resume(
+                has_checkpoint=True,
+                success_tolerance_resume=0.05,
+                restart_source_policy=None,
+                env_success_tolerance=0.075,
+                env_initial_tolerance=0.075,
+                snapshot=snap,
+            )
+        )
 
 
 if __name__ == "__main__":

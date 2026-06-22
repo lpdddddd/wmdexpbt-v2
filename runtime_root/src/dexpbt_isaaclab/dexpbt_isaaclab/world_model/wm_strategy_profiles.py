@@ -77,9 +77,9 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "v1.3 strong elite distill + Online Elite-AWR."
     ),
     "unified_elite_wm_pbt": (
-        "Unified Elite-WM DexPBT substrate: elite/archive actor distill + WM "
-        "diagnostic/shadow signals for all workers. No AWR, no MPPI, no residual "
-        "rollout apply, no profile copy required."
+        "Unified Elite-WM DexPBT substrate: elite/archive actor distill + active "
+        "WM PBT source selector (v13 wm_pbt_source_selector stack) on every worker. "
+        "No AWR, no MPPI, no residual rollout apply, no profile copy required."
     ),
 }
 
@@ -611,26 +611,45 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG_AWR: dict[str, Any] = {
 
 _UNIFIED_ELITE_WM_PBT: dict[str, Any] = {
     **_ELITE_BANK_ACTOR_DISTILL,
-    # --- WM diagnostic stack (shared by every worker) ---
+    # --- WM PBT source selector substrate (v13 wm_pbt_source_selector stack) ---
+    "seq_wm_use_task_aux_inputs": True,
+    "seq_wm_loss_preset": "task_focused",
+    "seq_wm_floor_aware_weighting": True,
+    "seq_wm_recovery_horizon": 8,
     "seq_wm_use_horizon_heads": True,
     "seq_wm_horizon_steps": "4,8",
     "seq_wm_use_recovery_head": True,
     "seq_wm_enable_iterative_teacher": True,
+    "seq_wm_teacher_eval_interval_frames": 50_000_000,
+    "seq_wm_teacher_promote_min_improvement": 0.02,
+    "seq_wm_teacher_keep_last_k": 6,
+    "seq_wm_teacher_eval_buffer_capacity": 8,
+    "seq_wm_teacher_record_below_tol": 0.04,
+    "seq_wm_teacher_max_uncertainty": 0.5,
     "seq_wm_enable_imagined_evaluator": True,
     "seq_wm_imagine_horizons": "4,8",
     "seq_wm_imagine_action_mode": "recorded",
+    "seq_wm_imagine_num_starts": 256,
     "seq_wm_imagine_use_teacher": True,
+    "pbt_wm_score_mode": "active",
+    "pbt_use_wm_recovery_score": True,
+    "pbt_wm_recovery_weight": 0.3,
+    "pbt_wm_success_weight": 0.2,
+    "pbt_wm_drop_penalty": 0.3,
+    "pbt_wm_uncertainty_penalty": 0.2,
+    "pbt_wm_max_uncertainty": 0.5,
+    "pbt_floor_recovery_aware": True,
+    "pbt_enable_best_floor_recovery_archive": True,
     "wm_imagined_valid_mode": "soft_calibrated",
     "wm_imagined_valid_uncertainty_threshold": 0.5,
-    "wm_imagined_soft_uncertainty_threshold": 0.90,
-    "wm_imagined_min_logit_abs_mean": 0.10,
-    "wm_imagined_min_head_signal_std": 0.05,
-    "wm_imagined_soft_validity_weight": 0.10,
-    # --- WM signal published in shadow mode (does NOT drive ranking) ---
-    "pbt_wm_score_mode": "shadow",
-    "pbt_use_wm_recovery_score": False,
-    "wm_pbt_source_gate_mode": "confidence_only",
+    "wm_imagined_soft_uncertainty_threshold": 0.95,
+    "wm_imagined_min_logit_abs_mean": 0.05,
+    "wm_imagined_min_head_signal_std": 0.02,
+    "wm_imagined_soft_validity_weight": 0.25,
     "wm_activation_enable": True,
+    "wm_pbt_source_gate_mode": "confidence_only",
+    "wm_pbt_source_start_after_frames": 300_000_000,
+    "wm_pbt_source_ramp_frames": 300_000_000,
     # --- explicit hard-offs (defense in depth vs restart pollution) ---
     "awr_enable": False,
     "awr_loss_weight": 0.0,

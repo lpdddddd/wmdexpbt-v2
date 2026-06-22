@@ -649,3 +649,118 @@ def qualifies_best_stable_save(
         if abs(window.samples[-1].success_tolerance - window.samples[-2].success_tolerance) > 1e-9:
             return False, "just_shrank"
     return True, "ok"
+
+
+CURRICULUM_RESUME_SNAPSHOT_NAME = "curriculum_resume_snapshot.json"
+
+
+def curriculum_resume_snapshot_path(policy_run_dir: Path) -> Path:
+    return Path(policy_run_dir) / CURRICULUM_RESUME_SNAPSHOT_NAME
+
+
+def write_curriculum_resume_snapshot(
+    policy_run_dir: Path,
+    *,
+    curriculum: dict[str, Any],
+    env_frames: int,
+    policy_idx: int,
+) -> None:
+    """Persist env-side curriculum for supervisor crash-resume (not PBT exit 42)."""
+    path = curriculum_resume_snapshot_path(policy_run_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "policy_idx": int(policy_idx),
+        "env_frames": int(env_frames),
+        "timestamp": time.time(),
+        "curriculum": {
+            key: curriculum[key]
+            for key in (
+                "success_tolerance",
+                "initial_tolerance",
+                "target_tolerance",
+                "last_curriculum_update",
+                "frame_since_restart",
+                "curriculum_freeze_frames_after_restart",
+            )
+            if key in curriculum
+        },
+    }
+    tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(str(tmp), str(path))
+
+
+def load_curriculum_resume_snapshot(policy_run_dir: Path) -> dict[str, Any] | None:
+    path = curriculum_resume_snapshot_path(policy_run_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    cur = data.get("curriculum")
+    if not isinstance(cur, dict):
+        return None
+    return data
+
+
+def should_apply_supervisor_curriculum_resume(
+    *,
+    has_checkpoint: bool,
+    success_tolerance_resume: float | None,
+    restart_source_policy: int | None,
+    env_success_tolerance: float,
+    env_initial_tolerance: float,
+    snapshot: dict[str, Any] | None,
+) -> bool:
+    """Restore snapshot tolerance after supervisor resume, not PBT cross-copy."""
+    if not has_checkpoint or success_tolerance_resume is not None:
+        return False
+    if restart_source_policy is not None:
+        return False
+    if snapshot is None:
+        return False
+    cur = snapshot.get("curriculum") or {}
+    snap_tol = float(cur.get("success_tolerance", float("nan")))
+    if not math.isfinite(snap_tol):
+        return False
+    initial = float(env_initial_tolerance)
+    if snap_tol >= initial - 1e-6:
+        return False
+    if float(env_success_tolerance) < initial - 1e-6:
+        return False
+    return True
+
+
+def apply_curriculum_resume_env_state(
+    raw_env: Any,
+    curriculum: dict[str, Any],
+) -> dict[str, Any]:
+    resume_log: dict[str, Any] = {}
+    if "success_tolerance" in curriculum and hasattr(raw_env, "success_tolerance"):
+        raw_env.success_tolerance = float(curriculum["success_tolerance"])
+        resume_log["success_tolerance"] = raw_env.success_tolerance
+    if "initial_tolerance" in curriculum and hasattr(raw_env, "initial_tolerance"):
+        raw_env.initial_tolerance = float(curriculum["initial_tolerance"])
+        resume_log["initial_tolerance"] = raw_env.initial_tolerance
+    if "target_tolerance" in curriculum and hasattr(raw_env, "target_tolerance"):
+        raw_env.target_tolerance = float(curriculum["target_tolerance"])
+        resume_log["target_tolerance"] = raw_env.target_tolerance
+    if "last_curriculum_update" in curriculum and hasattr(raw_env, "last_curriculum_update"):
+        raw_env.last_curriculum_update = int(curriculum["last_curriculum_update"])
+        resume_log["last_curriculum_update"] = raw_env.last_curriculum_update
+    if "frame_since_restart" in curriculum and hasattr(raw_env, "frame_since_restart"):
+        raw_env.frame_since_restart = int(curriculum["frame_since_restart"])
+        resume_log["frame_since_restart"] = raw_env.frame_since_restart
+    if (
+        "curriculum_freeze_frames_after_restart" in curriculum
+        and hasattr(raw_env, "curriculum_freeze_frames_after_restart")
+    ):
+        raw_env.curriculum_freeze_frames_after_restart = int(
+            curriculum["curriculum_freeze_frames_after_restart"]
+        )
+        resume_log["curriculum_freeze_frames_after_restart"] = (
+            raw_env.curriculum_freeze_frames_after_restart
+        )
+    return resume_log

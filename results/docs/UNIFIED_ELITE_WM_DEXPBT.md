@@ -15,7 +15,7 @@ death spirals.
 
 **Unified Elite-WM DexPBT** reframes the experiment:
 
-- Treat **EliteBank behavior reuse** and **WM selector / diagnostic** as a
+- Treat **EliteBank behavior reuse** and **WM PBT source selector** as a
   **shared training substrate** for every worker.
 - Let PBT propagate **weights**, **checkpoints**, and **curriculum state** —
   not discrete profile identities.
@@ -28,7 +28,7 @@ death spirals.
 Unified Elite-WM DexPBT
   = PPO/PBT
   + EliteBank behavior reuse (actor distillation from elite/archive)
-  + WM selector / diagnostic (imagined eval, recovery/drop/validity signals)
+  + WM PBT source selector (v13 wm_pbt_source_selector stack; active floor-recovery ranking)
   + curriculum safety (mastery, collapse detection, rollback-to-last-mastered)
 ```
 
@@ -37,9 +37,14 @@ Profile name: `unified_elite_wm_pbt` (id 18).
 Elite base: conservative `elite_bank_actor_distill` settings (distill @300M,
 sources `elite,archive`, soft tolerance gate, no MPPI).
 
-WM mode: `pbt_wm_score_mode=shadow` — WM diagnostics are published for every
-worker; ranking stays on `success_aware_r_meta`. WM scores do **not** drive PBT
-ranking in the first smoke.
+WM mode: `pbt_wm_score_mode=active` with `pbt_use_wm_recovery_score=True` —
+the v13 WM selector stack is **live** on every worker. When a policy enters
+`hard_floor`, imagined recovery / drop / success signals can replace the legacy
+ordering for source selection. Outside hard floor, PBT ranking stays on
+`success_aware_r_meta`.
+
+WM activation gate: `confidence_only` with 300M start + 300M ramp
+(`wm_pbt_source_start_after_frames`, `wm_pbt_source_ramp_frames`).
 
 ## Hard exclusions
 
@@ -65,21 +70,20 @@ With every worker on the same profile:
 There are no mutually exclusive worker roles (no dedicated `ppo_only` anchor vs
 elite-bank vs WM-selector slots).
 
-## WM mode: shadow vs shadow_tiebreak
+## WM selector behavior (active, not shadow)
 
-The requested `shadow_tiebreak` mode (WM as gated tie-break or veto after
-imagined validity passes) is **not implemented** in the current scoring code.
-Supported modes are `off | shadow | active`.
+Unlike the initial unified smoke draft, the profile now merges the **full v13
+`wm_pbt_source_selector` PBT stack** on top of EliteBank:
 
-For the first unified smoke we use **`shadow`**: WM telemetry is published
-(recovery, drop, validity, uncertainty) without affecting PBT ranking.
-`pbt_use_wm_recovery_score=False` prevents the auto-upgrade-to-active path in
-the PBT observer.
+- Task-focused WM training (horizon heads, recovery head, iterative teacher)
+- Imagined evaluator with soft-calibrated validity gates
+- Active floor-recovery-aware PBT ranking when `hard_floor` + validity pass
+- Confidence-only source activation ramp after 300M frames
 
-Future work may add `shadow_tiebreak` once scoring supports gated tie-break /
-veto after validity gates pass.
+Supported `pbt_wm_score_mode` values remain `off | shadow | active`. Unified
+uses **`active`**.
 
-## First experiment
+## 1.2B smoke launcher
 
 Launcher:
 
@@ -94,6 +98,27 @@ Configuration:
 - Same task and core PPO/PBT/curriculum scaffold as stable v13/v17 launchers
 - Pointer: `results/pointers/latest_unified_elite_wm_pbt_1p2b_smoke_run.txt`
 
+## 2B debug launcher
+
+```bash
+bash results/launchers/start_regrasping_unified_elite_wm_pbt_2b_debug.sh
+```
+
+Configuration:
+
+- 6 policies, all `unified_elite_wm_pbt`
+- Target: **2B frames** (`MAX_ITER=15259`)
+- PBT base metric: `success_aware_r_meta`; WM selector active in floor-recovery zone
+- Profile copy, AWR, residual rollout apply, and RSSM-MPPI action intervention
+  are all off
+- Pointer: `results/pointers/latest_unified_elite_wm_pbt_2b_debug_run.txt`
+
+The 1.2B smoke launcher remains available for quick validation; the primary
+unified experiment path is the 2B debug run once tests pass.
+
+**Note:** Runs started before the active-WM profile update were shadow-only.
+Restart from a fresh launcher invocation to pick up `pbt_wm_score_mode=active`.
+
 ## Metrics to monitor
 
 | Metric | Why |
@@ -103,12 +128,15 @@ Configuration:
 | Top-3 mean | Population health vs v13 strong-4 |
 | Bottom-slot recovery | Whether weak slots recover without profile swap |
 | Curriculum shrink / rollback events | Mastery progression and safety-net activity |
-| WM diagnostic validity / uncertainty | Shadow-mode signal quality |
+| `wm_source_activation_weight` / `source_selected_by_wm` | WM selector live participation |
+| `wm_imagined_valid` / uncertainty | Imagined eval quality |
 | FPS | Throughput with unified WM+EliteBank stack on all workers |
 | PBT restart / cross-copy events | Weight propagation without profile churn |
 
 ## Related files
 
 - Profile: `runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_strategy_profiles.py`
-- Launcher: `results/launchers/start_regrasping_unified_elite_wm_pbt_1p2b_smoke.sh`
+- Launchers:
+  - `results/launchers/start_regrasping_unified_elite_wm_pbt_1p2b_smoke.sh`
+  - `results/launchers/start_regrasping_unified_elite_wm_pbt_2b_debug.sh`
 - Tests: `runtime_root/src/dexpbt_isaaclab/tests/test_unified_elite_wm_pbt.py`

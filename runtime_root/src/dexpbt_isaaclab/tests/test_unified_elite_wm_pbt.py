@@ -19,9 +19,28 @@ from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-UNIFIED_LAUNCHER = (
+UNIFIED_LAUNCHER_1P2B = (
     REPO_ROOT
     / "results/launchers/start_regrasping_unified_elite_wm_pbt_1p2b_smoke.sh"
+)
+UNIFIED_LAUNCHER_2B = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_unified_elite_wm_pbt_2b_debug.sh"
+)
+
+# Profile-authoritative WM imagined thresholds (must not be duplicated in launchers).
+PROFILE_WM_IMAGINED_THRESHOLD_FLAGS = (
+    "--wm_imagined_valid_mode soft_calibrated",
+    "--wm_imagined_valid_uncertainty_threshold 0.5",
+    "--wm_imagined_soft_uncertainty_threshold 0.95",
+    "--wm_imagined_min_logit_abs_mean 0.05",
+    "--wm_imagined_min_head_signal_std 0.02",
+    "--wm_imagined_soft_validity_weight 0.25",
+)
+
+_POSITIVE_AWR = re.compile(r"(?<!\-\-no\-)\-\-awr_enable\b")
+_POSITIVE_PROFILE_COPY = re.compile(
+    r"(?<!\-\-no\-)\-\-pbt_wm_profile_copy_enable\b"
 )
 
 
@@ -49,6 +68,12 @@ def _expand_profile(profile: str, *, argv: list[str] | None = None):
     return args
 
 
+def _profile_list(text: str) -> list[str]:
+    match = re.search(r'PROFILE_LIST="([^"]+)"', text)
+    assert match is not None
+    return match.group(1).split(",")
+
+
 class TestUnifiedProfileRegistration(unittest.TestCase):
     def test_unified_profile_registered(self):
         self.assertEqual(PROFILE_IDS["unified_elite_wm_pbt"], 18)
@@ -71,9 +96,27 @@ class TestUnifiedProfileRegistration(unittest.TestCase):
         self.assertFalse(args.eir_residual_apply_to_rollout)
         self.assertFalse(args.eir_use_rssm_mppi)
         self.assertEqual(args.eir_mppi_mode, "off")
-        self.assertEqual(args.pbt_wm_score_mode, "shadow")
-        self.assertFalse(args.pbt_use_wm_recovery_score)
+        self.assertEqual(args.pbt_wm_score_mode, "active")
+        self.assertTrue(args.pbt_use_wm_recovery_score)
+        self.assertTrue(args.pbt_floor_recovery_aware)
+        self.assertEqual(args.wm_pbt_source_start_after_frames, 300_000_000)
+        self.assertEqual(args.wm_pbt_source_ramp_frames, 300_000_000)
         self.assertFalse(args.wm_curriculum_controller_enable)
+        self.assertTrue(args.seq_wm_use_task_aux_inputs)
+        self.assertEqual(args.seq_wm_loss_preset, "task_focused")
+        self.assertTrue(args.seq_wm_floor_aware_weighting)
+        self.assertEqual(args.seq_wm_recovery_horizon, 8)
+        self.assertEqual(args.seq_wm_teacher_eval_interval_frames, 50_000_000)
+        self.assertEqual(args.seq_wm_teacher_promote_min_improvement, 0.02)
+        self.assertEqual(args.seq_wm_teacher_keep_last_k, 6)
+        self.assertEqual(args.seq_wm_teacher_eval_buffer_capacity, 8)
+        self.assertEqual(args.seq_wm_teacher_record_below_tol, 0.04)
+        self.assertEqual(args.seq_wm_teacher_max_uncertainty, 0.5)
+        self.assertEqual(args.seq_wm_imagine_num_starts, 256)
+        self.assertEqual(args.wm_imagined_soft_uncertainty_threshold, 0.95)
+        self.assertEqual(args.wm_imagined_min_logit_abs_mean, 0.05)
+        self.assertEqual(args.wm_imagined_min_head_signal_std, 0.02)
+        self.assertEqual(args.wm_imagined_soft_validity_weight, 0.25)
 
     def test_unified_profile_capability_flags(self):
         args = _expand_profile("unified_elite_wm_pbt")
@@ -83,7 +126,15 @@ class TestUnifiedProfileRegistration(unittest.TestCase):
         self.assertFalse(caps["profile_residual_apply_enabled"])
         self.assertFalse(caps["profile_rssm_mppi_enabled"])
         self.assertFalse(caps["profile_awr_enabled"])
-        self.assertFalse(caps["profile_wm_pbt_score_enabled"])
+        self.assertTrue(caps["profile_wm_pbt_score_enabled"])
+
+    def test_train_py_accepts_unified_profile(self):
+        train_path = (
+            Path(__file__).resolve().parents[1]
+            / "dexpbt_isaaclab/scripts/train.py"
+        )
+        text = train_path.read_text()
+        self.assertIn('"unified_elite_wm_pbt"', text)
 
     def test_unified_profile_blocks_restart_pollution(self):
         argv = [
@@ -116,13 +167,11 @@ class TestUnifiedProfileRegistration(unittest.TestCase):
 
 class TestUnifiedLauncherSanity(unittest.TestCase):
     def setUp(self):
-        self.assertTrue(UNIFIED_LAUNCHER.is_file(), msg=str(UNIFIED_LAUNCHER))
-        self.text = UNIFIED_LAUNCHER.read_text()
+        self.assertTrue(UNIFIED_LAUNCHER_1P2B.is_file(), msg=str(UNIFIED_LAUNCHER_1P2B))
+        self.text = UNIFIED_LAUNCHER_1P2B.read_text()
 
     def test_all_workers_use_unified_profile(self):
-        match = re.search(r'PROFILE_LIST="([^"]+)"', self.text)
-        self.assertIsNotNone(match)
-        profiles = match.group(1).split(",")
+        profiles = _profile_list(self.text)
         self.assertEqual(len(profiles), 6)
         self.assertTrue(all(p == "unified_elite_wm_pbt" for p in profiles))
 
@@ -132,11 +181,8 @@ class TestUnifiedLauncherSanity(unittest.TestCase):
         self.assertIn("--no-eir_residual_apply_to_rollout", self.text)
 
     def test_no_conflicting_enable_flags(self):
-        self.assertNotRegex(self.text, r"(?<!\-\-no\-)\-\-awr_enable\b")
-        self.assertNotRegex(
-            self.text,
-            r"(?<!\-\-no\-)\-\-pbt_wm_profile_copy_enable\b",
-        )
+        self.assertIsNone(_POSITIVE_AWR.search(self.text))
+        self.assertIsNone(_POSITIVE_PROFILE_COPY.search(self.text))
 
     def test_run_config_records_method_and_disables(self):
         self.assertIn("target_frames=1200000000", self.text)
@@ -148,6 +194,50 @@ class TestUnifiedLauncherSanity(unittest.TestCase):
 
     def test_max_iter_default_is_9156(self):
         self.assertIn('MAX_ITER="${MAX_ITER:-9156}"', self.text)
+
+    def test_no_conflicting_wm_imagined_threshold_flags(self):
+        for flag in PROFILE_WM_IMAGINED_THRESHOLD_FLAGS:
+            self.assertNotIn(flag, self.text, msg=f"found duplicated {flag}")
+
+
+class TestUnified2BLauncherSanity(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(UNIFIED_LAUNCHER_2B.is_file(), msg=str(UNIFIED_LAUNCHER_2B))
+        self.text = UNIFIED_LAUNCHER_2B.read_text()
+
+    def test_file_exists(self):
+        self.assertTrue(UNIFIED_LAUNCHER_2B.is_file())
+
+    def test_all_workers_use_unified_profile(self):
+        profiles = _profile_list(self.text)
+        self.assertEqual(len(profiles), 6)
+        self.assertTrue(all(p == "unified_elite_wm_pbt" for p in profiles))
+
+    def test_explicit_disables_present(self):
+        self.assertIn("--no-pbt_wm_profile_copy_enable", self.text)
+        self.assertIn("--no-awr_enable", self.text)
+        self.assertIn("--no-eir_residual_apply_to_rollout", self.text)
+
+    def test_no_conflicting_enable_flags(self):
+        self.assertIsNone(_POSITIVE_AWR.search(self.text))
+        self.assertIsNone(_POSITIVE_PROFILE_COPY.search(self.text))
+
+    def test_max_iter_default_is_15259(self):
+        self.assertIn('MAX_ITER="${MAX_ITER:-15259}"', self.text)
+
+    def test_run_config_records_2b_debug(self):
+        self.assertIn("target_frames=2000000000", self.text)
+        self.assertIn("method=unified_elite_wm_dexpbt", self.text)
+        self.assertIn("config_version=unified_elite_wm_pbt_2b_debug", self.text)
+        self.assertIn("profile_copy=false", self.text)
+        self.assertIn("awr=false", self.text)
+        self.assertIn("eir_residual_rollout_apply=false", self.text)
+        self.assertIn("wm_pbt_score_mode=active", self.text)
+        self.assertIn("profile_all_workers=unified_elite_wm_pbt", self.text)
+
+    def test_no_conflicting_wm_imagined_threshold_flags(self):
+        for flag in PROFILE_WM_IMAGINED_THRESHOLD_FLAGS:
+            self.assertNotIn(flag, self.text, msg=f"found duplicated {flag}")
 
 
 class TestBackwardCompatibility(unittest.TestCase):
