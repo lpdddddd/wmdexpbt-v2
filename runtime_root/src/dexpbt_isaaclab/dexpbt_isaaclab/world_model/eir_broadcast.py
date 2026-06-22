@@ -195,6 +195,11 @@ def build_broadcast_payload(
         top = bank.top_entries_state(int(cfg.max_bank_merge_entries))
         payload["bank_state"] = top
         payload["bank_entries"] = int(top.get("size", 0))
+    snippet_bank = getattr(bridge, "snippet_bank", None)
+    if snippet_bank is not None and getattr(snippet_bank, "size", 0) > 0:
+        snippet_top = snippet_bank.top_entries_state(int(cfg.max_bank_merge_entries))
+        payload["snippet_bank_state"] = snippet_top
+        payload["snippet_bank_entries"] = int(snippet_top.get("size", 0))
     if cfg.copy_residual_head:
         rb = getattr(bridge, "residual_bridge", None)
         head = getattr(rb, "head", None) if rb is not None else None
@@ -234,8 +239,10 @@ def write_broadcast(
         "target_policy": int(target_idx),
         "frame": int(payload.get("frame", 0)),
         "bank_entries": int(payload.get("bank_entries", 0)),
+        "snippet_bank_entries": int(payload.get("snippet_bank_entries", 0)),
         "has_residual": "residual_head" in payload,
         "has_scorer": "scorer" in payload,
+        "has_snippet_bank": "snippet_bank_state" in payload,
         "payload_path": str(payload_path.resolve()),
     }
     tmp_meta.write_text(json.dumps(meta))
@@ -337,7 +344,7 @@ def merge_payload_into_bridge(
     Bank entries are folded in priority-capped (never replacing the target's own
     accumulated memory); the residual head + scorer are copied wholesale.
     """
-    out = {"merged_entries": 0, "residual_copied": False, "scorer_copied": False}
+    out = {"merged_entries": 0, "snippet_merged_entries": 0, "residual_copied": False, "scorer_copied": False}
     bank = getattr(bridge, "bank", None)
     bank_state = payload.get("bank_state")
     if bank is not None and isinstance(bank_state, dict):
@@ -347,6 +354,17 @@ def merge_payload_into_bridge(
             )
         except Exception:
             out["merged_entries"] = 0
+    snippet_bank = getattr(bridge, "snippet_bank", None)
+    snippet_state = payload.get("snippet_bank_state")
+    if snippet_bank is not None and isinstance(snippet_state, dict):
+        try:
+            out["snippet_merged_entries"] = int(
+                snippet_bank.merge(
+                    snippet_state, max_entries=int(cfg.max_bank_merge_entries)
+                )
+            )
+        except Exception:
+            out["snippet_merged_entries"] = 0
     if cfg.copy_residual_head:
         rb = getattr(bridge, "residual_bridge", None)
         head = getattr(rb, "head", None) if rb is not None else None

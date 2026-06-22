@@ -415,3 +415,20 @@ def combine_wm_recovery_score(
         "wm_score_50": float(score),
     }
     return float(score), components
+
+
+# CSER-v0 TensorBoard scalar names (audit / test registry).
+CSER_TB_SCALAR_NAMES: tuple[str, ...] = (
+    "elite_snippet/bank_size",
+    "elite_snippet/inserted_rows",
+    "elite_snippet/retrieval_hit_rate",
+    "snippet_distill/loss",
+    "snippet_distill/active_frac",
+    "snippet_wm_rerank/changed_frac",
+    "snippet_wm_rerank/wm_term_mean",
+    "wm_cal/alpha_wm",
+    "wm_cal/AUC_recovery",
+    "wm_cal/ECE",
+    "pbt_consolidation/stage",
+    "pbt_consolidation/restart_blocked_count",
+)

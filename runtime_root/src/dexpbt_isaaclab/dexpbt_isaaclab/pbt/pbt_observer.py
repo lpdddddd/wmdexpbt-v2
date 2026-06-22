@@ -48,6 +48,15 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
 _WM_COUNTERFACTUAL = None
 _WM_POSTERIOR = None
 
+from dexpbt_isaaclab.pbt.pbt_consolidation_schedule import (
+    BottomRestartContext,
+    PbtConsolidationConfig,
+    evaluate_consolidated_tick,
+    effective_mutation_rate,
+    resolve_pbt_stage,
+    should_allow_bottom_restart,
+    stage_id,
+)
 from dexpbt_isaaclab.pbt.pbt_control_plane import (
     PBT_SNAPSHOT_SCHEMA_VERSION,
     PbtStateSnapshot,
@@ -512,6 +521,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         profile_wm_curriculum_controller_enabled: bool = False,
         profile_elite_bank_enabled: bool = False,
         profile_conservative_planner_enabled: bool = False,
+        # CSER-v0: staged PBT consolidation schedule (defaults inert).
+        pbt_consolidation_enable: bool = False,
+        pbt_consolidation_stage1_end_frames: int = 2_200_000_000,
+        pbt_consolidation_stage2_end_frames: int = 3_500_000_000,
+        pbt_consolidation_stage3_end_frames: int = 5_000_000_000,
+        pbt_consolidation_stage2_interval_mult: float = 2.0,
+        pbt_consolidation_stage3_interval_mult: float = 4.0,
+        pbt_consolidation_stage2_mutation_rate_mult: float = 0.5,
+        pbt_consolidation_stage3_bottom_only: bool = True,
+        pbt_consolidation_stage3_hard_collapse_only: bool = True,
+        pbt_consolidation_stage2_retention_threshold: float = 0.85,
+        pbt_consolidation_collapse_nsucc_mean_threshold: float = 1.0,
+        wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
         restart_count_resume: int | None = None,
@@ -1290,6 +1312,23 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # True` mode this is 1:1 with actual restarts; in disabled mode
         # this stays 0 because we early-return before _mutate_params.
         self._mid_self_mutation_count = 0
+        self._consolidation_restart_blocked_count = 0
+        self.pbt_consolidation_cfg = PbtConsolidationConfig(
+            enabled=bool(pbt_consolidation_enable),
+            stage1_end_frames=int(pbt_consolidation_stage1_end_frames),
+            stage2_end_frames=int(pbt_consolidation_stage2_end_frames),
+            stage3_end_frames=int(pbt_consolidation_stage3_end_frames),
+            stage2_interval_mult=float(pbt_consolidation_stage2_interval_mult),
+            stage3_interval_mult=float(pbt_consolidation_stage3_interval_mult),
+            stage2_mutation_rate_mult=float(pbt_consolidation_stage2_mutation_rate_mult),
+            stage3_bottom_only=bool(pbt_consolidation_stage3_bottom_only),
+            stage3_hard_collapse_only=bool(pbt_consolidation_stage3_hard_collapse_only),
+            stage2_retention_threshold=float(pbt_consolidation_stage2_retention_threshold),
+            collapse_nsucc_mean_threshold=float(
+                pbt_consolidation_collapse_nsucc_mean_threshold
+            ),
+        )
+        self.wm_calibration_enable = bool(wm_calibration_enable)
         # Last decision type the observer emitted at the current PBT tick.
         # 0=none, 1=self, 2=cross, 3=skipped. Used both for TB log and for
         # write_training_curve.
@@ -5097,14 +5136,43 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self.pbt_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
 
         derived_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
-        should_tick, _, skip_reason = evaluate_pbt_tick_schedule(
-            raw_frame=raw_frames,
-            self_pbt_iteration=self.pbt_iteration,
-            last_mutation_frame=self.last_mutation_frame,
-            start_after=self.start_after,
-            initial_delay=self.initial_delay,
-            interval_steps=self.interval_steps,
-        )
+        if self.pbt_consolidation_cfg.enabled:
+            should_tick, derived_iteration, skip_reason, stage, eff_interval = (
+                evaluate_consolidated_tick(
+                    raw_frame=raw_frames,
+                    self_pbt_iteration=self.pbt_iteration,
+                    last_mutation_frame=self.last_mutation_frame,
+                    start_after=self.start_after,
+                    initial_delay=self.initial_delay,
+                    interval_steps=self.interval_steps,
+                    cfg=self.pbt_consolidation_cfg,
+                )
+            )
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "pbt_consolidation/stage",
+                    float(stage_id(stage)),
+                    raw_frames,
+                )
+                self.writer.add_scalar(
+                    "pbt_consolidation/restart_blocked_count",
+                    float(self._consolidation_restart_blocked_count),
+                    raw_frames,
+                )
+                self.writer.add_scalar(
+                    "pbt/effective_tick_interval",
+                    float(eff_interval),
+                    raw_frames,
+                )
+        else:
+            should_tick, derived_iteration, skip_reason = evaluate_pbt_tick_schedule(
+                raw_frame=raw_frames,
+                self_pbt_iteration=self.pbt_iteration,
+                last_mutation_frame=self.last_mutation_frame,
+                start_after=self.start_after,
+                initial_delay=self.initial_delay,
+                interval_steps=self.interval_steps,
+            )
         self._append_pbt_tick_debug(
             env_frames=raw_frames,
             population_frame=population_frame,
@@ -5527,6 +5595,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                 from dexpbt_isaaclab.world_model.wm_activation_gate import (
                                     blend_wm_ranking_score,
                                     compute_wm_pbt_source_activation_weight,
+                                    effective_wm_trust_weight,
                                 )
                                 score_with_wm, _ = combine_wm_recovery_score(
                                     score_real_for_pidx,
@@ -5570,10 +5639,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                         self.wm_imagined_soft_validity_weight
                                     ),
                                 )
-                                score_with_wm = blend_wm_ranking_score(
-                                    score_real_for_pidx, score_with_wm, _src_w
+                                _alpha_wm = 0.0
+                                if self.wm_calibration_enable and self.algo is not None:
+                                    _eb = getattr(self.algo, "_eir_bridge", None)
+                                    _wcs = getattr(_eb, "wm_calibration_state", None) if _eb else None
+                                    if isinstance(_wcs, dict):
+                                        _alpha_wm = float(_wcs.get("alpha_wm", 0.0))
+                                _eff_w = effective_wm_trust_weight(
+                                    _src_w,
+                                    _alpha_wm,
+                                    wm_calibration_enable=bool(self.wm_calibration_enable),
                                 )
-                                used_wm_for_pidx = _src_w > 0.0
+                                score_with_wm = blend_wm_ranking_score(
+                                    score_real_for_pidx, score_with_wm, _eff_w
+                                )
+                                used_wm_for_pidx = _eff_w > 0.0
                                 fallback_reason_pidx = (
                                     "ok" if used_wm_for_pidx else "wm_source_activation_zero"
                                 )
@@ -6075,6 +6155,51 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     ),
                     env_frames,
                 )
+            if self.pbt_consolidation_cfg.enabled:
+                own_window = self._policy_window(self.policy_idx)
+                own_nsucc = float(
+                    own_window.samples[-1].nsucc_mean
+                    if own_window.samples
+                    else 0.0
+                )
+                cons_stage = resolve_pbt_stage(
+                    env_frames, self.pbt_consolidation_cfg
+                )
+                cons_ctx = BottomRestartContext(
+                    promising_protected=bool(protected),
+                    floor_recovery_protected=bool(fr_protected),
+                    hard_collapse=bool(own_hard_collapse_signal),
+                    collapse_override=bool(collapse_override),
+                    nsucc_mean=own_nsucc,
+                    recent_peak_nsucc_mean=float(
+                        self._recent_peak_nsucc_mean.get(self.policy_idx, 0.0)
+                    ),
+                    tier="bottom",
+                )
+                cons_allow, cons_reason = should_allow_bottom_restart(
+                    stage=cons_stage,
+                    ctx=cons_ctx,
+                    cfg=self.pbt_consolidation_cfg,
+                )
+                if not cons_allow:
+                    self._consolidation_restart_blocked_count += 1
+                    print(
+                        f"Policy {self.policy_idx}: skip restart "
+                        f"(consolidation gate: {cons_reason}, stage={cons_stage})"
+                    )
+                    if self.writer is not None:
+                        self.writer.add_scalar(
+                            "pbt_consolidation/restart_blocked_count",
+                            float(self._consolidation_restart_blocked_count),
+                            env_frames,
+                        )
+                        self.writer.add_scalar(
+                            "pbt_consolidation/stage",
+                            float(stage_id(cons_stage)),
+                            env_frames,
+                        )
+                    self._last_restart_type = 3
+                    return
             own_window = self._policy_window(self.policy_idx)
             allowed, reason, d_self = pbt_copy_allowed_for_target(
                 own_window,
@@ -6609,8 +6734,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if mutation_frozen:
             new_params = dict(source_params)
         else:
+            cons_stage = resolve_pbt_stage(env_frames, self.pbt_consolidation_cfg)
+            eff_mut_rate = effective_mutation_rate(
+                self.mutation_rate, cons_stage, self.pbt_consolidation_cfg
+            )
             new_params = _mutate_params(
-                source_params, self.mutation_rate, self.change_min, self.change_max
+                source_params, eff_mut_rate, self.change_min, self.change_max
             )
         # Keep all bounded parameters inside paper-aligned safe ranges even when
         # inherited from an already-diverged source policy.
@@ -6922,6 +7051,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     algo_state["eir_elite_bank"] = _eir_bank.top_entries_state(_cap)
                 except Exception as _eir_bank_exc:  # pragma: no cover
                     print(f"[EIR] checkpoint bank export failed: {_eir_bank_exc}")
+            _eir_snippet_bank = getattr(eir_bridge, "snippet_bank", None)
+            if _eir_snippet_bank is not None and getattr(_eir_snippet_bank, "size", 0) > 0:
+                _bcfg = getattr(eir_bridge, "broadcast_cfg", None)
+                _cap = int(getattr(_bcfg, "max_bank_merge_entries", 50000)) if _bcfg else 50000
+                try:
+                    algo_state["eir_elite_snippet_bank"] = _eir_snippet_bank.top_entries_state(
+                        _cap
+                    )
+                except Exception as _eir_sb_exc:  # pragma: no cover
+                    print(f"[EIR] checkpoint snippet bank export failed: {_eir_sb_exc}")
+            _wm_cal = getattr(eir_bridge, "wm_calibration_state", None)
+            if isinstance(_wm_cal, dict) and _wm_cal:
+                algo_state["wm_calibration_state"] = dict(_wm_cal)
         awr_bridge = getattr(self.algo, "_awr_bridge", None)
         sidecar_saved_path: Path | None = None
         if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:

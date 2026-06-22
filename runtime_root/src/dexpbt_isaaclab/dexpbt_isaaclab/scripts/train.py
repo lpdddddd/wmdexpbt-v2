@@ -512,6 +512,74 @@ parser.add_argument(
     "protected worker bypasses the protection so the supervisor can "
     "still replace it.",
 )
+# CSER-v0: staged PBT consolidation schedule (defaults inert).
+parser.add_argument(
+    "--pbt_consolidation_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable staged PBT consolidation (exploration / consolidation / selection).",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage1_end_frames",
+    type=int,
+    default=2_200_000_000,
+    help="End of exploration stage (env frames). Default 2.2B.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage2_end_frames",
+    type=int,
+    default=3_500_000_000,
+    help="End of consolidation stage (env frames). Default 3.5B.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage3_end_frames",
+    type=int,
+    default=5_000_000_000,
+    help="End of selection stage (env frames). Default 5.0B.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage2_interval_mult",
+    type=float,
+    default=2.0,
+    help="PBT tick interval multiplier during consolidation stage.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage3_interval_mult",
+    type=float,
+    default=4.0,
+    help="PBT tick interval multiplier during selection stage.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage2_mutation_rate_mult",
+    type=float,
+    default=0.5,
+    help="Hyperparam mutation rate multiplier during consolidation stage.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage3_bottom_only",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Selection stage: restrict restart policy to bottom tier rules.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage3_hard_collapse_only",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Selection stage: only replace on hard collapse or low nsucc.",
+)
+parser.add_argument(
+    "--pbt_consolidation_stage2_retention_threshold",
+    type=float,
+    default=0.85,
+    help="Consolidation stage: block bottom restart when nsucc retention "
+    "vs slot peak exceeds this threshold.",
+)
+parser.add_argument(
+    "--pbt_consolidation_collapse_nsucc_mean_threshold",
+    type=float,
+    default=1.0,
+    help="Selection stage: allow bottom restart when nsucc_mean below this.",
+)
 # ----------------------------------------------------------------------
 # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT (Part A) +
 # task-aware RSSM (Part B) + iterative teacher (Part C) + imagined
@@ -1834,6 +1902,39 @@ parser.add_argument("--eir_elite_tol_threshold", type=float, default=0.02)
 parser.add_argument("--eir_elite_hard_tol_threshold", type=float, default=0.012)
 parser.add_argument("--eir_elite_near_success_mult", type=float, default=3.0)
 parser.add_argument("--eir_elite_min_priority", type=float, default=1.0)
+# CSER-v0 elite snippet bank + first-step distillation
+parser.add_argument("--elite_snippet_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--elite_snippet_horizon", type=int, default=4, choices=[4, 8])
+parser.add_argument("--elite_snippet_bank_size", type=int, default=50000)
+parser.add_argument("--elite_snippet_sample_pool", type=int, default=4096)
+parser.add_argument("--elite_snippet_knn_topk", type=int, default=32)
+parser.add_argument("--elite_snippet_min_priority", type=float, default=1.0)
+parser.add_argument("--snippet_distill_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--snippet_distill_weight", type=float, default=0.001)
+parser.add_argument("--snippet_distill_loss_cap", type=float, default=0.05)
+parser.add_argument("--snippet_distill_start_after_frames", type=int, default=300000000)
+parser.add_argument("--snippet_distill_topk", type=int, default=8)
+parser.add_argument("--snippet_distill_gate_mode", type=str, default="soft_tol",
+                    choices=["off", "hard_tol", "soft_tol", "confidence_only"])
+parser.add_argument("--snippet_distill_tol_start", type=float, default=0.070)
+parser.add_argument("--snippet_distill_tol_full", type=float, default=0.045)
+parser.add_argument("--snippet_distill_ramp_frames", type=int, default=200000000)
+parser.add_argument("--snippet_wm_rerank_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--snippet_wm_rerank_w_rec", type=float, default=0.3)
+parser.add_argument("--snippet_wm_rerank_w_success", type=float, default=0.2)
+parser.add_argument("--snippet_wm_rerank_w_drop", type=float, default=0.4)
+parser.add_argument("--snippet_wm_rerank_w_unc", type=float, default=0.1)
+parser.add_argument("--snippet_wm_rerank_w_delta", type=float, default=0.05)
+parser.add_argument("--snippet_wm_rerank_score_cap", type=float, default=0.25)
+parser.add_argument("--wm_calibration_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--wm_calibration_eval_interval_frames", type=int, default=50000000)
+parser.add_argument("--wm_calibration_min_samples", type=int, default=512)
+parser.add_argument("--wm_calibration_heldout_fraction", type=float, default=0.2)
+parser.add_argument("--wm_calibration_alpha_min", type=float, default=0.0)
+parser.add_argument("--wm_calibration_alpha_max", type=float, default=1.0)
+parser.add_argument("--wm_calibration_gate_auc_recovery", type=float, default=0.55)
+parser.add_argument("--wm_calibration_gate_ece_max", type=float, default=0.15)
+parser.add_argument("--wm_calibration_gate_rank_corr_min", type=float, default=0.1)
 # candidates
 parser.add_argument("--eir_local_candidate_k", type=int, default=16)
 parser.add_argument("--eir_elite_candidate_k", type=int, default=32)
@@ -2264,6 +2365,11 @@ from dexpbt_isaaclab.world_model.wm_trainer import (
     SEQUENCE_STRATEGIES, RSSM_FAMILY, TRANS_FAMILY,
 )
 from dexpbt_isaaclab.world_model.seq_wm_trainer import SeqWMConfig, SeqWMTrainer
+from dexpbt_isaaclab.world_model.wm_calibration_evaluator import (
+    WMCalibrationConfig,
+    WMCalibrationEvaluator,
+    WMCalibrationState,
+)
 from dexpbt_isaaclab.world_model.seq_aux_collector import (
     SeqAuxCollector, SeqAuxInterceptorEnv,
 )
@@ -2335,6 +2441,13 @@ from dexpbt_isaaclab.world_model.elite_recovery_bank import (
     EliteRecoveryBank,
     EliteRecoveryBankConfig,
 )
+from dexpbt_isaaclab.world_model.elite_snippet_bank import (
+    EliteSnippetBank,
+    EliteSnippetBankConfig,
+)
+from dexpbt_isaaclab.world_model.elite_snippet_builder import SnippetTargetBuilder
+from dexpbt_isaaclab.world_model.snippet_distill import SnippetDistillConfig
+from dexpbt_isaaclab.world_model.snippet_wm_reranker import SnippetWMRerankConfig
 from dexpbt_isaaclab.world_model.recovery_residual import (
     RecoveryResidualBridge,
     RecoveryResidualConfig,
@@ -3264,27 +3377,36 @@ def _patch_actor_train_for_seq_wm(
                     generation=rollout_state["generation"],
                 )
                 eir_bridge.cache = eir_cache
-                # (19.2) full-rollout features -> elite bank update
-                if eir_bridge.bank is not None:
+                feat_flat, fsrc = None, 0
+                if eir_bridge.bank is not None or eir_bridge.snippet_bank is not None:
                     feat_flat, fsrc = _eir_extract_rollout_features(
                         actor.model, td, eir_bridge.eir_cfg.feature_dim, actor=actor
                     )
-                    if feat_flat is not None:
-                        src_stats = {
-                            "source_policy_idx": float(getattr(args_cli, "policy_idx", -1)),
-                            "source_nsucc_mean": float(
-                                getattr(seq_wm_trainer, "_eir_source_nsucc_mean", 0.0)
-                            ),
-                            "source_nsucc_max": float(
-                                getattr(seq_wm_trainer, "_eir_source_nsucc_max", 0.0)
-                            ),
-                        }
-                        eir_bridge.bank.update_from_cache(
-                            eir_cache, feat_flat, source_stats=src_stats,
+                src_stats = {
+                    "source_policy_idx": float(getattr(args_cli, "policy_idx", -1)),
+                    "source_nsucc_mean": float(
+                        getattr(seq_wm_trainer, "_eir_source_nsucc_mean", 0.0)
+                    ),
+                    "source_nsucc_max": float(
+                        getattr(seq_wm_trainer, "_eir_source_nsucc_max", 0.0)
+                    ),
+                }
+                if eir_bridge.bank is not None and feat_flat is not None:
+                    eir_bridge.bank.update_from_cache(
+                        eir_cache, feat_flat, source_stats=src_stats,
+                        frame=int(getattr(actor, "frame", 0) or 0),
+                    )
+                    eir_bridge.record_bank_feature_source(int(fsrc))
+                    eir_bridge.last_bank_metrics = eir_bridge.bank.metrics()
+                if eir_bridge.snippet_bank is not None and feat_flat is not None:
+                    snippet_builder = getattr(seq_wm_trainer, "_snippet_target_builder", None)
+                    if snippet_builder is not None:
+                        snippet_batch = snippet_builder.build(eir_cache, feat_flat)
+                        eir_bridge.snippet_bank.update_from_builder_batch(
+                            snippet_batch,
+                            source_stats=src_stats,
                             frame=int(getattr(actor, "frame", 0) or 0),
                         )
-                        eir_bridge.record_bank_feature_source(int(fsrc))
-                        eir_bridge.last_bank_metrics = eir_bridge.bank.metrics()
                 # (19.3) refresh per-step aux snapshot for rollout apply: use the
                 # latest window step per env (approx current state at next play).
                 res_bridge = eir_bridge.residual_bridge
@@ -3475,6 +3597,25 @@ def _patch_actor_train_for_seq_wm(
                 last_d_hat=last_d_hat,
                 last_success_count=last_success_count,
             )
+            _eir_bridge_cal = getattr(seq_wm_trainer, "_eir_bridge", None)
+            _wm_cal_ev = getattr(seq_wm_trainer, "_wm_calibration_evaluator", None)
+            if _eir_bridge_cal is not None and _wm_cal_ev is not None:
+                _cal_state = getattr(_eir_bridge_cal, "wm_calibration_state", None)
+                if not isinstance(_cal_state, WMCalibrationState):
+                    _cal_state = WMCalibrationState.from_dict(
+                        _cal_state if isinstance(_cal_state, dict) else {}
+                    )
+                _cal_state = seq_wm_trainer.run_wm_calibration_eval(
+                    experience_buffer=actor.experience_buffer,
+                    frames=frames,
+                    last_obs=last_obs_t,
+                    returns_full=_returns_for_step,
+                    evaluator=_wm_cal_ev,
+                    state=_cal_state,
+                    last_d_hat=last_d_hat,
+                    last_success_count=last_success_count,
+                )
+                _eir_bridge_cal.wm_calibration_state = _cal_state.to_dict()
 
             # ---- ensemble member training (MPPI scoring ensemble only) ----
             # Members 1..E-1 train on the SAME rollout but independently sampled
@@ -3797,6 +3938,40 @@ def _patch_actor_train_for_seq_wm(
                     for k, v in eir_scalars.items():
                         try:
                             tb_writer.add_scalar(f"eir/{k}", float(v), frames)
+                        except Exception:
+                            pass
+                    if getattr(xb, "snippet_bank", None) is not None:
+                        for k, v in (getattr(xb.snippet_bank, "metrics", lambda: {})() or {}).items():
+                            try:
+                                tb_writer.add_scalar(str(k), float(v), frames)
+                            except Exception:
+                                pass
+                    _snippet_scalars = {
+                        "snippet_distill/loss": float(xb.last_snippet_distill_loss),
+                        "snippet_distill/active_frac": float(xb.last_snippet_distill_active_frac),
+                        "snippet_wm_rerank/changed_frac": float(
+                            xb.last_snippet_wm_rerank_changed_frac
+                        ),
+                        "snippet_wm_rerank/wm_term_mean": float(
+                            xb.last_snippet_wm_rerank_wm_term_mean
+                        ),
+                    }
+                    for k, v in _snippet_scalars.items():
+                        try:
+                            tb_writer.add_scalar(k, float(v), frames)
+                        except Exception:
+                            pass
+                    _wcs = getattr(xb, "wm_calibration_state", None)
+                    if isinstance(_wcs, dict):
+                        for k, v in (_wcs.get("last_metrics") or {}).items():
+                            try:
+                                tb_writer.add_scalar(str(k), float(v), frames)
+                            except Exception:
+                                pass
+                        try:
+                            tb_writer.add_scalar(
+                                "wm_cal/alpha_wm", float(_wcs.get("alpha_wm", 0.0)), frames
+                            )
                         except Exception:
                             pass
                     # extra EIR scalars: rssm candidate injection + belief cache
@@ -4422,6 +4597,21 @@ def _wm_safe_restore(
                     print(f"[EIR] restore: loaded elite bank size={eir_bridge.bank.size}")
                 except Exception as _eir_b_exc:
                     print(f"[EIR] restore: elite bank load failed: {_eir_b_exc}")
+        if getattr(eir_bridge, "snippet_bank", None) is not None:
+            ssd = ckpt.get("eir_elite_snippet_bank")
+            if isinstance(ssd, dict):
+                try:
+                    eir_bridge.snippet_bank.load_state_dict(ssd)
+                    print(
+                        f"[EIR] restore: loaded snippet bank size="
+                        f"{eir_bridge.snippet_bank.size}"
+                    )
+                except Exception as _eir_sb_exc:
+                    print(f"[EIR] restore: snippet bank load failed: {_eir_sb_exc}")
+        wcs = ckpt.get("wm_calibration_state")
+        if isinstance(wcs, dict):
+            eir_bridge.wm_calibration_state = wcs
+            print(f"[WM-cal] restore: alpha_wm={wcs.get('alpha_wm', 0.0)}")
 
     awr_bridge = getattr(agent, "_awr_bridge", None)
     if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
@@ -5320,6 +5510,21 @@ class _WmEnabledRunner(Runner):
                 bank_cfg = self.seq_wm_trainer._eir_bank_cfg
                 eir_bridge.bank = EliteRecoveryBank(bank_cfg) if bank_cfg.enabled else None
                 eir_bridge.archive_bank = None  # populated by PBT broadcast (Phase D)
+                snippet_bank_cfg = getattr(self.seq_wm_trainer, "_eir_snippet_bank_cfg", None)
+                eir_bridge.snippet_bank = (
+                    EliteSnippetBank(snippet_bank_cfg)
+                    if snippet_bank_cfg is not None and snippet_bank_cfg.enabled
+                    else None
+                )
+                eir_bridge.snippet_distill_cfg = getattr(
+                    self.seq_wm_trainer, "_snippet_distill_cfg", None
+                )
+                eir_bridge.snippet_wm_rerank_cfg = getattr(
+                    self.seq_wm_trainer, "_snippet_wm_rerank_cfg", None
+                )
+                eir_bridge.wm_calibration_enable = bool(
+                    getattr(self.args_cli, "wm_calibration_enable", False)
+                )
                 # RSSM reranking / full H-step MPPI.
                 rssm_cfg = self.seq_wm_trainer._eir_rssm_cfg
                 mppi_cfg = getattr(self.seq_wm_trainer, "_eir_mppi_cfg", None)
@@ -5361,13 +5566,12 @@ class _WmEnabledRunner(Runner):
                         "[EIR-MPPI] full mode requested but backbone is not RSSM "
                         "(no get_state_from_belief); MPPI disabled, using light/elite fallback."
                     )
-                # heads for the light reranker fallback (fixed-belief rescoring)
-                if eir_bridge.rssm_reranker is not None:
-                    _heads = getattr(_wm_model, "heads", None)
-                    if _heads is not None and hasattr(_heads, "predict_transition"):
-                        eir_bridge.rssm_predict_fn = _heads.predict_transition
-                        if getattr(_heads, "has_value_head", False):
-                            eir_bridge.rssm_value_fn = _heads.predict_value
+                # heads for RSSM reranking / snippet WM rerank (fixed-belief rescoring)
+                _heads = getattr(_wm_model, "heads", None)
+                if _heads is not None and hasattr(_heads, "predict_transition"):
+                    eir_bridge.rssm_predict_fn = _heads.predict_transition
+                    if getattr(_heads, "has_value_head", False):
+                        eir_bridge.rssm_value_fn = _heads.predict_value
                 # per-rollout belief cache is populated in patched_play_steps_rnn
                 eir_bridge.rssm_belief_provider = None
                 eir_bridge.rssm_belief_cache = None
@@ -6010,6 +6214,20 @@ def main():
             device=rl_device,
             strategy=args_cli.wm_strategy,
         )
+        _wm_cal_cfg = WMCalibrationConfig(
+            enabled=bool(args_cli.wm_calibration_enable),
+            eval_interval_frames=int(args_cli.wm_calibration_eval_interval_frames),
+            min_samples=int(args_cli.wm_calibration_min_samples),
+            heldout_fraction=float(args_cli.wm_calibration_heldout_fraction),
+            alpha_min=float(args_cli.wm_calibration_alpha_min),
+            alpha_max=float(args_cli.wm_calibration_alpha_max),
+            gate_auc_recovery=float(args_cli.wm_calibration_gate_auc_recovery),
+            gate_ece_max=float(args_cli.wm_calibration_gate_ece_max),
+            gate_rank_corr_min=float(args_cli.wm_calibration_gate_rank_corr_min),
+        )
+        seq_wm_trainer._wm_calibration_evaluator = (
+            WMCalibrationEvaluator(_wm_cal_cfg) if _wm_cal_cfg.enabled else None
+        )
 
         # ------------------------------------------------------------------
         # Full RSSM ensemble (MPPI scoring only). Member 0 is the primary
@@ -6208,6 +6426,44 @@ def main():
             guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
             guidance_mid_priority_scale=float(args_cli.eir_guidance_mid_priority_scale),
         )
+        eir_snippet_bank_cfg = EliteSnippetBankConfig(
+            enabled=eir_enabled and bool(args_cli.elite_snippet_enable),
+            bank_size=int(args_cli.elite_snippet_bank_size),
+            feature_dim=_eir_feature_dim,
+            action_dim=int(action_dim),
+            horizon=int(args_cli.elite_snippet_horizon),
+            horizons=_eir_horizons,
+            sample_pool=int(args_cli.elite_snippet_sample_pool),
+            knn_topk=int(args_cli.elite_snippet_knn_topk),
+            tol_threshold=float(args_cli.eir_elite_tol_threshold),
+            hard_tol_threshold=float(args_cli.eir_elite_hard_tol_threshold),
+            near_success_mult=float(args_cli.eir_elite_near_success_mult),
+            min_priority=float(args_cli.elite_snippet_min_priority),
+            guidance_enable=bool(args_cli.eir_guidance_enable),
+            guidance_bank_tol=float(args_cli.eir_guidance_bank_tol),
+            guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
+            guidance_mid_priority_scale=float(args_cli.eir_guidance_mid_priority_scale),
+        )
+        snippet_distill_cfg = SnippetDistillConfig(
+            enabled=eir_enabled and bool(args_cli.snippet_distill_enable),
+            weight=float(args_cli.snippet_distill_weight),
+            loss_cap=float(args_cli.snippet_distill_loss_cap),
+            start_after_frames=int(args_cli.snippet_distill_start_after_frames),
+            topk=int(args_cli.snippet_distill_topk),
+            gate_mode=str(args_cli.snippet_distill_gate_mode),
+            tol_start=float(args_cli.snippet_distill_tol_start),
+            tol_full=float(args_cli.snippet_distill_tol_full),
+            ramp_frames=int(args_cli.snippet_distill_ramp_frames),
+        )
+        snippet_wm_rerank_cfg = SnippetWMRerankConfig(
+            enabled=eir_enabled and bool(args_cli.snippet_wm_rerank_enable),
+            w_rec=float(args_cli.snippet_wm_rerank_w_rec),
+            w_success=float(args_cli.snippet_wm_rerank_w_success),
+            w_drop=float(args_cli.snippet_wm_rerank_w_drop),
+            w_unc=float(args_cli.snippet_wm_rerank_w_unc),
+            w_delta=float(args_cli.snippet_wm_rerank_w_delta),
+            score_cap=float(args_cli.snippet_wm_rerank_score_cap),
+        )
         eir_residual_cfg = RecoveryResidualConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_recovery_residual),
             feature_dim=_eir_feature_dim,
@@ -6313,6 +6569,9 @@ def main():
         seq_wm_trainer._eir_cfg = eir_cfg
         seq_wm_trainer._eir_scorer_cfg = eir_scorer_cfg
         seq_wm_trainer._eir_bank_cfg = eir_bank_cfg
+        seq_wm_trainer._eir_snippet_bank_cfg = eir_snippet_bank_cfg
+        seq_wm_trainer._snippet_distill_cfg = snippet_distill_cfg
+        seq_wm_trainer._snippet_wm_rerank_cfg = snippet_wm_rerank_cfg
         seq_wm_trainer._eir_residual_cfg = eir_residual_cfg
         seq_wm_trainer._eir_rssm_cfg = eir_rssm_cfg
         seq_wm_trainer._eir_mppi_cfg = eir_mppi_cfg
@@ -6320,6 +6579,14 @@ def main():
         seq_wm_trainer._eir_bridge = None
         seq_wm_trainer._eir_target_builder = (
             ERDTargetBuilder(eir_scorer_cfg) if eir_enabled else None
+        )
+        seq_wm_trainer._snippet_target_builder = (
+            SnippetTargetBuilder(
+                horizon=int(args_cli.elite_snippet_horizon),
+                horizons=_eir_horizons,
+            )
+            if eir_enabled and bool(args_cli.elite_snippet_enable)
+            else None
         )
 
         # ------------------------------------------------------------------
@@ -7174,6 +7441,38 @@ def main():
             profile_conservative_planner_enabled=_wm_profile_caps.get(
                 "profile_conservative_planner_enabled", False
             ),
+            pbt_consolidation_enable=args_cli.pbt_consolidation_enable,
+            pbt_consolidation_stage1_end_frames=(
+                args_cli.pbt_consolidation_stage1_end_frames
+            ),
+            pbt_consolidation_stage2_end_frames=(
+                args_cli.pbt_consolidation_stage2_end_frames
+            ),
+            pbt_consolidation_stage3_end_frames=(
+                args_cli.pbt_consolidation_stage3_end_frames
+            ),
+            pbt_consolidation_stage2_interval_mult=(
+                args_cli.pbt_consolidation_stage2_interval_mult
+            ),
+            pbt_consolidation_stage3_interval_mult=(
+                args_cli.pbt_consolidation_stage3_interval_mult
+            ),
+            pbt_consolidation_stage2_mutation_rate_mult=(
+                args_cli.pbt_consolidation_stage2_mutation_rate_mult
+            ),
+            pbt_consolidation_stage3_bottom_only=(
+                args_cli.pbt_consolidation_stage3_bottom_only
+            ),
+            pbt_consolidation_stage3_hard_collapse_only=(
+                args_cli.pbt_consolidation_stage3_hard_collapse_only
+            ),
+            pbt_consolidation_stage2_retention_threshold=(
+                args_cli.pbt_consolidation_stage2_retention_threshold
+            ),
+            pbt_consolidation_collapse_nsucc_mean_threshold=(
+                args_cli.pbt_consolidation_collapse_nsucc_mean_threshold
+            ),
+            wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
     else:
         observer = IsaacAlgoObserver()

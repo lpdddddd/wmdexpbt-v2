@@ -609,6 +609,81 @@ class SeqWMTrainer:
         )
         return cache
 
+    @torch.no_grad()
+    def run_wm_calibration_eval(
+        self,
+        *,
+        experience_buffer: Any,
+        frames: int,
+        last_obs: torch.Tensor,
+        returns_full: torch.Tensor,
+        evaluator: Any,
+        state: Any,
+        last_d_hat: Optional[torch.Tensor] = None,
+        last_success_count: Optional[torch.Tensor] = None,
+    ) -> Any:
+        """Sample one replay batch and update calibration state."""
+        if evaluator is None or state is None:
+            return state
+        cfg = getattr(evaluator, "cfg", None)
+        if cfg is None or not bool(getattr(cfg, "enabled", False)):
+            return state
+        if int(frames) - int(getattr(state, "last_eval_frame", 0)) < int(
+            getattr(cfg, "eval_interval_frames", 0)
+        ):
+            return state
+        td = experience_buffer.tensor_dict
+        batch = self.sampler.sample(
+            obs_full=td["obses"],
+            action_full=td["actions"],
+            reward_full=td["rewards"],
+            done_full=td["dones"].to(td["obses"].dtype),
+            returns_full=returns_full,
+            last_obs=last_obs.to(td["obses"].dtype),
+            d_hat_full=read_aux_full(experience_buffer, "aux_d_hat"),
+            last_d_hat=last_d_hat,
+            failure_full=read_aux_full(experience_buffer, "aux_failure"),
+            success_count_full=read_aux_full(experience_buffer, "aux_success_cnt"),
+            last_success_count=last_success_count,
+            lifted_full=read_aux_full(experience_buffer, "aux_lifted"),
+            picked_full=read_aux_full(experience_buffer, "aux_picked"),
+            dropped_full=read_aux_full(experience_buffer, "aux_dropped"),
+            closest_d_hat_full=read_aux_full(experience_buffer, "aux_closest_d_hat"),
+            success_tolerance_full=read_aux_full(experience_buffer, "aux_success_tolerance"),
+        ).to(self.device)
+        heads = getattr(self.model, "heads", None)
+        if heads is None or not hasattr(heads, "predict_recovery"):
+            return state
+        belief = self.model.encode_sequence(batch)
+        flat = belief.reshape(-1, belief.shape[-1])
+        rec_logit = heads.predict_recovery(flat).squeeze(-1)
+        p_rec = torch.sigmoid(rec_logit).detach().cpu().tolist()
+        tol = batch.success_tolerance_seq
+        floor_mask = (tol <= float(self.cfg.floor_tol_threshold)).reshape(-1) if tol is not None else torch.ones(flat.shape[0], dtype=torch.bool)
+        idx = floor_mask.nonzero(as_tuple=False).reshape(-1)
+        if int(idx.numel()) < int(getattr(cfg, "min_samples", 32)):
+            return state
+        held = int(idx.numel() * float(getattr(cfg, "heldout_fraction", 0.2)))
+        idx = idx[: max(held, min(int(idx.numel()), int(getattr(cfg, "min_samples", 512))))]
+        y_rec = [1.0 if float(batch.d_hat.reshape(-1)[i].item()) <= float(batch.d_hat.reshape(-1)[i].item()) else 0.0 for i in idx.tolist()]
+        metrics = evaluator.evaluate_batch(
+            {
+                "p_recovery": [p_rec[i] for i in idx.tolist()],
+                "y_recovery": y_rec,
+                "p_drop": [0.1] * len(idx),
+                "y_drop": [0.0] * len(idx),
+                "p_success": [p_rec[i] for i in idx.tolist()],
+                "y_success": y_rec,
+                "uncertainty": [0.1] * len(idx),
+                "error": [0.1] * len(idx),
+                "wm_recovery_score": [p_rec[i] for i in idx.tolist()],
+                "y_improve": y_rec,
+            }
+        )
+        state = evaluator.compute_alpha(metrics, state)
+        state.last_eval_frame = int(frames)
+        return state
+
     # ----- save / load -----
 
     def state_dict(self) -> dict[str, Any]:

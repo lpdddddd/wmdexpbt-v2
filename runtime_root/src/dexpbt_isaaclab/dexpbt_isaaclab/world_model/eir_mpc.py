@@ -812,6 +812,11 @@ class EIRBridge:
     residual_bridge: Optional[RecoveryResidualBridge] = None
     bank: Any = None
     archive_bank: Any = None
+    snippet_bank: Any = None
+    snippet_distill_cfg: Any = None
+    snippet_wm_rerank_cfg: Any = None
+    wm_calibration_enable: bool = False
+    wm_calibration_state: Any = None
     rssm_reranker: Any = None
     capture: Any = None  # ERDCapture (actor_mlp forward output)
     agent_ref: Any = None
@@ -885,6 +890,11 @@ class EIRBridge:
     last_elite_similarity_mean: float = 0.0
     last_elite_action_delta_norm: float = 0.0
     last_elite_bank_size: float = 0.0
+    last_snippet_bank_size: float = 0.0
+    last_snippet_distill_loss: float = 0.0
+    last_snippet_distill_active_frac: float = 0.0
+    last_snippet_wm_rerank_changed_frac: float = 0.0
+    last_snippet_wm_rerank_wm_term_mean: float = 0.0
     last_bank_metrics: dict = field(default_factory=dict)
     last_bank_update_diagnostics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
@@ -1176,6 +1186,133 @@ def _maybe_rssm_candidate_action(
     return None
 
 
+def _belief_for_risky_rows(
+    bridge: EIRBridge,
+    *,
+    start: int,
+    end: int,
+    risky: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Optional[torch.Tensor]:
+    cache_obj = bridge.rssm_belief_cache
+    if cache_obj is not None and getattr(cache_obj, "valid", False):
+        sl = cache_obj.slice_rows(int(start), int(end))
+        if sl is not None and int(sl.shape[0]) == int(risky.shape[0]):
+            return sl[risky].to(device=device, dtype=dtype)
+    if bridge.rssm_belief_provider is not None:
+        try:
+            return bridge.rssm_belief_provider(
+                bridge.capture.tensor.detach()[risky].to(device=device, dtype=dtype)
+            )
+        except Exception:
+            return None
+    return None
+
+
+def _alpha_wm_from_bridge(bridge: EIRBridge) -> float:
+    st = getattr(bridge, "wm_calibration_state", None)
+    if isinstance(st, dict):
+        return float(st.get("alpha_wm", 0.0))
+    return float(getattr(st, "alpha_wm", 0.0))
+
+
+def _compute_snippet_distill_loss(
+    bridge: EIRBridge,
+    *,
+    eir_cfg: EIRConfig,
+    cache: Any,
+    feat: torch.Tensor,
+    risky: torch.Tensor,
+    frames: int,
+    start: int,
+    end: int,
+) -> torch.Tensor:
+    from .snippet_distill import compute_snippet_distill_loss, compute_snippet_activation_weight
+    from .snippet_wm_reranker import (
+        effective_alpha_wm,
+        score_snippet_candidates,
+        wm_head_probs_for_candidates,
+    )
+
+    sd_cfg = bridge.snippet_distill_cfg
+    bank = bridge.snippet_bank
+    if sd_cfg is None or not bool(getattr(sd_cfg, "enabled", False)):
+        return feat.new_zeros(())
+    if bank is None or int(getattr(bank, "size", 0)) <= 0:
+        return feat.new_zeros(())
+    if not bool(risky.any()):
+        return feat.new_zeros(())
+
+    feat_r = feat.detach()[risky]
+    a2c = _get_a2c_network(bridge.agent_ref)
+    stage = _stage_for_tol(eir_cfg, cache.tol_mean)
+    acts, _sim, pri, valid = bank.retrieve_candidates(
+        feat_r, k=int(getattr(sd_cfg, "topk", 8)), stage=stage
+    )
+    if not valid:
+        return feat.new_zeros(())
+
+    def _mu_fn(f):
+        mu = a2c.mu(f)
+        mu_act = getattr(a2c, "mu_act", None)
+        return mu_act(mu) if mu_act is not None else mu
+
+    mu_r = _mu_fn(feat_r).detach()
+    rerank_cfg = bridge.snippet_wm_rerank_cfg
+    alpha_wm = effective_alpha_wm(
+        wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
+        alpha_wm=_alpha_wm_from_bridge(bridge),
+    )
+    best_idx = pri.argmax(dim=1)
+    rerank_diag = {"snippet_wm_rerank/changed_frac": 0.0, "snippet_wm_rerank/wm_term_mean": 0.0}
+    if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
+        belief_r = _belief_for_risky_rows(
+            bridge, start=start, end=end, risky=risky, device=feat_r.device, dtype=feat_r.dtype
+        )
+        cand_first = acts[:, :, 0, :]
+        p_rec, p_succ, p_drop, unc = wm_head_probs_for_candidates(
+            belief_flat=belief_r if belief_r is not None else feat_r,
+            cand_first_actions=cand_first,
+            predict_fn=bridge.rssm_predict_fn,
+        )
+        action_delta = ((cand_first - mu_r[:, None, :]) ** 2).sum(dim=-1)
+        best_idx, rerank_diag = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=action_delta,
+            alpha_wm=alpha_wm,
+            cfg=rerank_cfg,
+        )
+    teacher_first = acts[torch.arange(acts.shape[0], device=acts.device), best_idx, 0, :]
+
+    act_w = compute_snippet_activation_weight(
+        cfg=sd_cfg, frames=int(frames), tol_mean=float(cache.tol_mean),
+        nsucc_mean=float(getattr(bridge, "last_nsucc_mean", -1.0)),
+    )
+    mask = torch.ones(feat_r.shape[0], device=feat.device, dtype=feat.dtype)
+    loss, metrics = compute_snippet_distill_loss(
+        mu_fn=_mu_fn,
+        feat_start=feat_r,
+        teacher_first_action=teacher_first,
+        mask=mask,
+        cfg=sd_cfg,
+        row_weight=mask * float(act_w),
+    )
+    bridge.last_snippet_distill_loss = float(metrics.get("snippet_distill/loss", 0.0))
+    bridge.last_snippet_distill_active_frac = float(metrics.get("snippet_distill/active_frac", 0.0))
+    bridge.last_snippet_wm_rerank_changed_frac = float(
+        rerank_diag.get("snippet_wm_rerank/changed_frac", 0.0)
+    )
+    bridge.last_snippet_wm_rerank_wm_term_mean = float(
+        rerank_diag.get("snippet_wm_rerank/wm_term_mean", 0.0)
+    )
+    return loss
+
+
 def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tensor]:
     """EIR aux loss: ERD-style scorer BCE + gated recovery residual distill.
 
@@ -1246,6 +1383,7 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
 
     residual_total = feat.new_zeros(())
     actor_distill_total = feat.new_zeros(())
+    snippet_distill_total = feat.new_zeros(())
     if block == EIR_OK:
         d_hat = cache.d_hat_flat[start:end].to(device=device, dtype=dtype)
         tol = cache.success_tol_flat[start:end].to(device=device, dtype=dtype)
@@ -1437,7 +1575,22 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         )
 
         actor_distill_total = feat.new_zeros(())
-        if bool(getattr(eir_cfg, "actor_distill_enable", False)):
+        _use_snippet = bool(
+            getattr(bridge.snippet_distill_cfg, "enabled", False)
+            and bridge.snippet_bank is not None
+        )
+        if _use_snippet:
+            snippet_distill_total = _compute_snippet_distill_loss(
+                bridge,
+                eir_cfg=eir_cfg,
+                cache=cache,
+                feat=feat,
+                risky=risky,
+                frames=int(frames),
+                start=int(start),
+                end=int(end),
+            )
+        elif bool(getattr(eir_cfg, "actor_distill_enable", False)):
             bridge.last_actor_distill_loss_cap = float(eir_cfg.actor_distill_loss_cap)
             best_idx = rer["best_idx"]
             best_source = gather_best_source(cand_out["source_id"], best_idx)
@@ -1653,7 +1806,14 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
         _bank_diag = getattr(bridge.bank, "update_diagnostics", None)
         if callable(_bank_diag):
             bridge.last_bank_update_diagnostics = _bank_diag()
-    total = float(eir_cfg.scorer_loss_weight) * scorer_total + residual_total + actor_distill_total
+    if bridge.snippet_bank is not None:
+        bridge.last_snippet_bank_size = float(getattr(bridge.snippet_bank, "size", 0))
+    total = (
+        float(eir_cfg.scorer_loss_weight) * scorer_total
+        + residual_total
+        + actor_distill_total
+        + snippet_distill_total
+    )
     bridge.last_total_loss = float(total.detach().item())
     bridge.last_active = 1.0 if (
         bridge.last_scorer_active > 0

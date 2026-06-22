@@ -35,6 +35,7 @@ PROFILE_IDS: dict[str, int] = {
     "elite_bank_actor_distill_strong_awr": 17,
     # Unified Elite-WM DexPBT — shared substrate for all workers.
     "unified_elite_wm_pbt": 18,
+    "cser_dexpbt": 19,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -81,6 +82,10 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "WM PBT source selector (v13 wm_pbt_source_selector stack) on every worker. "
         "No AWR, no MPPI, no residual rollout apply, no profile copy required."
     ),
+    "cser_dexpbt": (
+        "CSER-v0: unified substrate + snippet bank + WM calibration rerank + "
+        "staged PBT consolidation. First-step-only snippet distillation."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -101,6 +106,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "elite_bank_actor_distill_awr": "elite_imitation",
     "elite_bank_actor_distill_strong_awr": "elite_imitation",
     "unified_elite_wm_pbt": "unified",
+    "cser_dexpbt": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -121,6 +127,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "elite_bank_actor_distill_strong_awr": 1.3,
     "wm_pbt_source_selector_awr": 1.1,
     "unified_elite_wm_pbt": 1.0,
+    "cser_dexpbt": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -659,6 +666,26 @@ _UNIFIED_ELITE_WM_PBT: dict[str, Any] = {
     "wm_curriculum_controller_enable": False,
 }
 
+_CSER_DEXPBT: dict[str, Any] = {
+    **_UNIFIED_ELITE_WM_PBT,
+    "elite_snippet_enable": True,
+    "elite_snippet_horizon": 4,
+    "elite_snippet_bank_size": 50000,
+    "snippet_distill_enable": True,
+    "snippet_distill_weight": 0.001,
+    "snippet_distill_start_after_frames": 300_000_000,
+    "snippet_distill_topk": 8,
+    "eir_actor_distill_enable": False,
+    "snippet_wm_rerank_enable": True,
+    "wm_calibration_enable": True,
+    "pbt_consolidation_enable": True,
+    "pbt_wm_profile_copy_enable": False,
+    "awr_enable": False,
+    "eir_residual_apply_to_rollout": False,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -677,6 +704,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "elite_bank_actor_distill_awr": _ELITE_BANK_ACTOR_DISTILL_AWR,
     "elite_bank_actor_distill_strong_awr": _ELITE_BANK_ACTOR_DISTILL_STRONG_AWR,
     "unified_elite_wm_pbt": _UNIFIED_ELITE_WM_PBT,
+    "cser_dexpbt": _CSER_DEXPBT,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

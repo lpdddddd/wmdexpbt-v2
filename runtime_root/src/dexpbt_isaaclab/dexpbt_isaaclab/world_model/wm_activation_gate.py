@@ -376,6 +376,19 @@ def blend_wm_ranking_score(
     return float(score_real) + w * (float(score_with_wm) - float(score_real))
 
 
+def effective_wm_trust_weight(
+    activation_weight: float,
+    alpha_wm: float,
+    *,
+    wm_calibration_enable: bool,
+) -> float:
+    """When calibration off, return activation_weight unchanged (basev2)."""
+    w = clamp01(float(activation_weight))
+    if not wm_calibration_enable:
+        return w
+    return w * clamp01(float(alpha_wm))
+
+
 __all__ = [
     "WMActivationConfig",
     "WMActivationAudit",
@@ -388,4 +401,5 @@ __all__ = [
     "resolve_wm_ranking_uncertainty_gate",
     "compute_wm_pbt_source_activation_weight",
     "blend_wm_ranking_score",
+    "effective_wm_trust_weight",
 ]
