@@ -106,27 +106,40 @@ class EliteSnippetBank:
             return self.metrics()
         n = int(batch.feat_start.shape[0])
         dev, f32 = torch.device("cpu"), torch.float32
+        feat_start = batch.feat_start.detach().to(dev, f32)[:n]
+        actions = batch.actions.detach().to(dev, f32)[:n]
         lifted = batch.lifted.detach().to(dev, f32).reshape(-1)[:n]
         tol = batch.success_tol.detach().to(dev, f32).reshape(-1)[:n]
         d_hat = batch.d_hat.detach().to(dev, f32).reshape(-1)[:n]
+        picked = batch.picked.detach().to(dev, f32).reshape(-1)[:n]
+        dropped = batch.dropped.detach().to(dev, f32).reshape(-1)[:n]
+        closest_d_hat = batch.closest_d_hat.detach().to(dev, f32).reshape(-1)[:n]
+        success_h = batch.success_h.detach().to(dev, f32).reshape(-1)[:n]
+        improve_h = batch.improve_h.detach().to(dev, f32).reshape(-1)[:n]
+        drop_h = batch.drop_h.detach().to(dev, f32).reshape(-1)[:n]
+        recovery_label = batch.recovery_label.detach().to(dev, f32).reshape(-1)[:n]
+        s0 = batch.s0.detach().to(dev, f32).reshape(-1)[:n]
+        s1 = batch.s1.detach().to(dev, f32).reshape(-1)[:n]
+        i0 = batch.i0.detach().to(dev, f32).reshape(-1)[:n]
+        d0 = batch.d0.detach().to(dev, f32).reshape(-1)[:n]
+        d1 = batch.d1.detach().to(dev, f32).reshape(-1)[:n]
         elite = self._mask_helper._elite_mask(
             lifted=lifted, tol=tol, d_hat=d_hat,
-            s0=batch.s0[:n].to(dev, f32), s1=batch.s1[:n].to(dev, f32),
-            i0=batch.i0[:n].to(dev, f32), d0=batch.d0[:n].to(dev, f32),
+            s0=s0, s1=s1, i0=i0, d0=d0,
         )
         self.seen_count += n
         if not elite.any():
             self.last_update_diagnostics["update_inserted_rows"] = 0.0
             return self.metrics()
         idx = elite.nonzero(as_tuple=False).reshape(-1)
-        super_elite = self._mask_helper._super_elite_mask(tol=tol, d_hat=d_hat, s0=batch.s0.to(dev, f32), d1=batch.d1.to(dev, f32))[idx]
+        super_elite = self._mask_helper._super_elite_mask(tol=tol, d_hat=d_hat, s0=s0, d1=d1)[idx]
         src = source_stats or {}
         src_mean, src_max, src_idx = float(src.get("source_nsucc_mean", 0)), float(src.get("source_nsucc_max", 0)), float(src.get("source_policy_idx", -1))
         ones = torch.ones(idx.shape[0], device=dev, dtype=f32)
         priority = self._mask_helper.compute_priority(
-            s0=batch.s0[idx].to(dev, f32), s1=batch.s1[idx].to(dev, f32),
-            i0=batch.i0[idx].to(dev, f32), i1=batch.i0[idx].to(dev, f32),
-            d0=batch.d0[idx].to(dev, f32), d1=batch.d1[idx].to(dev, f32),
+            s0=s0[idx], s1=s1[idx],
+            i0=i0[idx], i1=i0[idx],
+            d0=d0[idx], d1=d1[idx],
             source_nsucc_mean=ones * src_mean, source_nsucc_max=ones * src_max, super_elite=super_elite,
         )
         if self.cfg.guidance_enable:
@@ -140,15 +153,15 @@ class EliteSnippetBank:
         idx, priority = idx[keep], priority[keep]
         m = int(idx.shape[0])
         stage = self._mask_helper._row_stage_ids(tol)[idx]
-        bucket_id = stage * 2.0 + ((batch.s0[idx] > 0.5) | (batch.s1[idx] > 0.5)).float()
+        bucket_id = stage * 2.0 + ((s0[idx] > 0.5) | (s1[idx] > 0.5)).float()
         new = {
-            "feature": batch.feat_start[idx].detach().to(dev, f32),
-            "actions": batch.actions[idx].detach().to(dev, f32),
+            "feature": feat_start[idx],
+            "actions": actions[idx],
             "d_hat": d_hat[idx], "success_tol": tol[idx], "lifted": lifted[idx],
-            "picked": batch.picked[idx].to(dev, f32), "dropped": batch.dropped[idx].to(dev, f32),
-            "closest_d_hat": batch.closest_d_hat[idx].to(dev, f32),
-            "success_h": batch.success_h[idx].to(dev, f32), "improve_h": batch.improve_h[idx].to(dev, f32),
-            "drop_h": batch.drop_h[idx].to(dev, f32), "recovery_label": batch.recovery_label[idx].to(dev, f32),
+            "picked": picked[idx], "dropped": dropped[idx],
+            "closest_d_hat": closest_d_hat[idx],
+            "success_h": success_h[idx], "improve_h": improve_h[idx],
+            "drop_h": drop_h[idx], "recovery_label": recovery_label[idx],
             "source_policy_idx": ones[:m] * src_idx, "source_nsucc_mean": ones[:m] * src_mean,
             "source_nsucc_max": ones[:m] * src_max, "frame": ones[:m] * float(frame),
             "priority_score": priority, "bucket_id": bucket_id, "horizon": ones[:m] * float(self.H),

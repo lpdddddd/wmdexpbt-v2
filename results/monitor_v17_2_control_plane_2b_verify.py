@@ -36,7 +36,51 @@ PROFILES = [
 FAIL_FAST_COPY_ZERO_AFTER_FRAMES = 300_000_000
 FAIL_FAST_FRAME_SPREAD = 800_000_000
 FAIL_FAST_FPS_RATIO = 5.0
+FAIL_FAST_AWR_COLLECT_AFTER_FRAMES = 600_000_000
+FAIL_FAST_BUILDER_MS = 500.0
+FAIL_FAST_BUILDER_MS_STREAK = 3
+FAIL_FAST_FUSE_ACTIVE_STREAK = 3
 CURVE_STALE_GAP_FRAMES = 100_000_000
+CURVE_STUCK_MAX_FRAMES = 250_000_000
+AWR_PROFILE_SUFFIX = "_awr"
+TRAIN_LOG_ERROR_PATTERNS = (
+    "CUDA out of memory",
+    "ImportError",
+    "shape mismatch",
+    "nan loss",
+    "NaN loss",
+)
+
+
+def _monitor_state_path(run_dir: Path) -> Path:
+    return run_dir / "verify_monitor_state.json"
+
+
+def _load_monitor_state(run_dir: Path) -> dict[str, Any]:
+    p = _monitor_state_path(run_dir)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _save_monitor_state(run_dir: Path, state: dict[str, Any]) -> None:
+    _monitor_state_path(run_dir).write_text(json.dumps(state, indent=2))
+
+
+def _jsonl_line_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return sum(1 for line in path.read_text(errors="replace").splitlines() if line.strip())
+
+
+def _scan_train_log_errors(log_path: Path, *, tail_chars: int = 20000) -> list[str]:
+    if not log_path.is_file():
+        return []
+    text = log_path.read_text(errors="replace")[-tail_chars:]
+    return [pat for pat in TRAIN_LOG_ERROR_PATTERNS if pat.lower() in text.lower()]
 
 
 def _resolve_population_frames(policies: list[dict[str, Any]]) -> dict[str, Any]:
@@ -202,6 +246,56 @@ def _policy_status(run_dir: Path, pid: int) -> dict[str, Any]:
         "awr_rollout_builder_time_ms": g(
             "awr_rollout_builder_time_ms", g("awr/rollout_builder_time_ms", 0.0)
         ),
+        "awr_rollout_builder_precompute_ms": g(
+            "awr_rollout_builder_precompute_ms", g("awr/rollout_builder_precompute_ms", 0.0)
+        ),
+        "awr_rollout_builder_selected_materialize_ms": g(
+            "awr_rollout_builder_selected_materialize_ms",
+            g("awr/rollout_builder_selected_materialize_ms", 0.0),
+        ),
+        "awr_rollout_builder_selected_fragments_before_cap": g(
+            "awr_rollout_builder_selected_fragments_before_cap",
+            g("awr/rollout_builder_selected_fragments_before_cap", 0.0),
+        ),
+        "awr_rollout_builder_selected_fragments_after_cap": g(
+            "awr_rollout_builder_selected_fragments_after_cap",
+            g("awr/rollout_builder_selected_fragments_after_cap", 0.0),
+        ),
+        "awr_rollout_builder_selected_cap_applied": g(
+            "awr_rollout_builder_selected_cap_applied",
+            g("awr/rollout_builder_selected_cap_applied", 0.0),
+        ),
+        "awr_rollout_builder_selected_cap_reason_code": g(
+            "awr_rollout_builder_selected_cap_reason_code",
+            g("awr/rollout_builder_selected_cap_reason_code", 0.0),
+        ),
+        "awr_rollout_builder_selected_steps": g(
+            "awr_rollout_builder_selected_steps", g("awr/rollout_builder_selected_steps", 0.0)
+        ),
+        "awr_rollout_builder_vectorized_failed": g(
+            "awr_rollout_builder_vectorized_failed", g("awr/rollout_builder_vectorized_failed", 0.0)
+        ),
+        "awr_rollout_builder_fallback_reference": g(
+            "awr_rollout_builder_fallback_reference", g("awr/rollout_builder_fallback_reference", 0.0)
+        ),
+        "awr_builder_fuse_active": g("awr_builder_fuse_active", g("awr/builder_fuse_active", 0.0)),
+        "awr_builder_skipped": g("awr_builder_skipped", g("awr/skipped_disabled", 0.0)),
+        "awr_delta_gate_drop_frac": g("awr_delta_gate_drop_frac", g("awr/delta_gate_drop_frac", 0.0)),
+        "awr_success_from_success_cnt": g(
+            "awr_success_from_success_cnt", g("awr/success_from_success_cnt", 0.0)
+        ),
+        "awr_success_signal_missing": g(
+            "awr_success_signal_missing", g("awr/success_signal_missing", 0.0)
+        ),
+        "awr_done_reason_classification_disabled": g(
+            "awr_done_reason_classification_disabled",
+            g("awr/done_reason_classification_disabled", 0.0),
+        ),
+        "training_curve_lines": _jsonl_line_count(curve_path),
+        "pbt_tick_debug_lines": _jsonl_line_count(
+            metrics / f"pbt_tick_debug_policy_{pid:02d}.jsonl"
+        ),
+        "train_log_errors": _scan_train_log_errors(log),
         "disabled_flags": {
             "awr_disabled": g("awr_enabled", 1.0) < 0.5 and pid in (1, 3, 4, 5),
             "action_convention_mismatch": g("awr_action_convention_mismatch", 0.0) > 0.5,
@@ -267,11 +361,35 @@ def evaluate(run_dir: Path, *, milestone: str = "periodic") -> dict[str, Any]:
 
     fail_reasons: list[str] = []
     max_frame = int(frame_info["max_env_frames"])
+    monitor_state = _load_monitor_state(run_dir)
+    prev_tick_lines = dict(monitor_state.get("pbt_tick_debug_lines", {}))
+    builder_ms_streak = dict(monitor_state.get("builder_ms_streak", {}))
+    fuse_active_streak = dict(monitor_state.get("fuse_active_streak", {}))
+    cap_high_materialize_streak = dict(monitor_state.get("cap_high_materialize_streak", {}))
+    new_tick_lines: dict[str, int] = {}
     for p in policies:
         pid = int(p["policy"])
         fps = float(p["fps_total"])
         base = baselines.get(pid)
-        if base and math.isfinite(fps) and fps > 0 and fps < base / FAIL_FAST_FPS_RATIO:
+        is_awr_worker = str(p["profile"]).endswith(AWR_PROFILE_SUFFIX)
+        if (
+            max_frame >= FAIL_FAST_AWR_COLLECT_AFTER_FRAMES
+            and is_awr_worker
+            and base
+            and math.isfinite(fps)
+            and fps > 0
+            and fps < base / FAIL_FAST_FPS_RATIO
+        ):
+            fail_reasons.append(
+                f"p{pid} AWR FPS collapse after 600M: {fps:.0f} vs baseline {base:.0f}"
+            )
+        elif (
+            max_frame < FAIL_FAST_AWR_COLLECT_AFTER_FRAMES
+            and base
+            and math.isfinite(fps)
+            and fps > 0
+            and fps < base / FAIL_FAST_FPS_RATIO
+        ):
             fail_reasons.append(
                 f"p{pid} FPS collapse: {fps:.0f} vs baseline {base:.0f} (>{FAIL_FAST_FPS_RATIO}x drop)"
             )
@@ -279,10 +397,70 @@ def evaluate(run_dir: Path, *, milestone: str = "periodic") -> dict[str, Any]:
             fail_reasons.append(f"p{pid} AWR disabled_by_convention")
         builder_ms = float(p["awr_rollout_builder_time_ms"])
         fps_val = float(p["fps_total"])
-        if math.isfinite(builder_ms) and builder_ms > 500 and math.isfinite(fps_val) and fps_val < 30000:
+        pid_key = str(pid)
+        if math.isfinite(builder_ms) and builder_ms > FAIL_FAST_BUILDER_MS:
+            builder_ms_streak[pid_key] = int(builder_ms_streak.get(pid_key, 0)) + 1
+            if builder_ms_streak[pid_key] >= FAIL_FAST_BUILDER_MS_STREAK:
+                fail_reasons.append(
+                    f"p{pid} rollout_builder_time_ms>{FAIL_FAST_BUILDER_MS} "
+                    f"for {builder_ms_streak[pid_key]} checks ({builder_ms:.1f}ms)"
+                )
+        else:
+            builder_ms_streak[pid_key] = 0
+        if math.isfinite(builder_ms) and builder_ms > FAIL_FAST_BUILDER_MS and math.isfinite(fps_val) and fps_val < 30000:
             fail_reasons.append(
-                f"p{pid} suspected interceptor CPU bottleneck: builder_ms={builder_ms:.1f}, fps={fps_val:.0f}"
+                f"p{pid} suspected builder CPU bottleneck: builder_ms={builder_ms:.1f}, fps={fps_val:.0f}"
             )
+        if float(p["awr_rollout_builder_vectorized_failed"]) > 0:
+            fail_reasons.append(f"p{pid} awr_rollout_builder_vectorized_failed > 0")
+        if float(p["awr_rollout_builder_fallback_reference"]) > 0:
+            fail_reasons.append(f"p{pid} awr_rollout_builder_fallback_reference > 0")
+        if float(p["awr_builder_fuse_active"]) > 0.5:
+            fuse_active_streak[pid_key] = int(fuse_active_streak.get(pid_key, 0)) + 1
+            if fuse_active_streak[pid_key] >= FAIL_FAST_FUSE_ACTIVE_STREAK:
+                fail_reasons.append(
+                    f"p{pid} awr_builder_fuse_active stuck at 1 for {fuse_active_streak[pid_key]} checks"
+                )
+        else:
+            fuse_active_streak[pid_key] = 0
+        cap_applied = float(p["awr_rollout_builder_selected_cap_applied"]) > 0.5
+        materialize_ms = float(p["awr_rollout_builder_selected_materialize_ms"])
+        if cap_applied and math.isfinite(materialize_ms) and materialize_ms > FAIL_FAST_BUILDER_MS:
+            cap_high_materialize_streak[pid_key] = int(cap_high_materialize_streak.get(pid_key, 0)) + 1
+            if cap_high_materialize_streak[pid_key] >= FAIL_FAST_BUILDER_MS_STREAK:
+                fail_reasons.append(
+                    f"p{pid} selected cap applied but materialize_ms still high "
+                    f"({materialize_ms:.1f}ms, streak={cap_high_materialize_streak[pid_key]})"
+                )
+        else:
+            cap_high_materialize_streak[pid_key] = 0
+        tick_lines = int(p["pbt_tick_debug_lines"])
+        new_tick_lines[pid_key] = tick_lines
+        if (
+            max_frame >= 200_000_000
+            and tick_lines <= int(prev_tick_lines.get(pid_key, 0))
+            and monitor_state.get("eval_count", 0) >= 2
+        ):
+            fail_reasons.append(f"p{pid} pbt_tick_debug not growing (lines={tick_lines})")
+        if frame_info["curve_stale"] and curve_lines <= 1 and max_frame >= 500_000_000:
+            fail_reasons.append(
+                f"p{pid} training_curve stale vs train.log at {curve_frames} "
+                f"(lines={curve_lines}, stale_gap={frame_info['stale_gap_frames']})"
+            )
+        for err in p.get("train_log_errors", []):
+            fail_reasons.append(f"p{pid} train.log error: {err}")
+
+    monitor_state["pbt_tick_debug_lines"] = new_tick_lines
+    monitor_state["builder_ms_streak"] = builder_ms_streak
+    monitor_state["fuse_active_streak"] = fuse_active_streak
+    monitor_state["cap_high_materialize_streak"] = cap_high_materialize_streak
+    monitor_state["eval_count"] = int(monitor_state.get("eval_count", 0)) + 1
+    _save_monitor_state(run_dir, monitor_state)
+
+    if frame_info["curve_stale"] and max_frame >= 200_000_000:
+        fail_reasons.append(
+            f"training_curve stale vs train.log (gap={frame_info['stale_gap_frames']} frames)"
+        )
 
     if max_frame >= FAIL_FAST_COPY_ZERO_AFTER_FRAMES and copy_count == 0:
         fail_reasons.append(
@@ -308,6 +486,8 @@ def evaluate(run_dir: Path, *, milestone: str = "periodic") -> dict[str, Any]:
             "pbt_copy_event_count": copy_count,
             "awr_active_fraction_mean": awr_active_frac_mean,
             "awr_loss_nonzero_policies": awr_loss_nonzero,
+            "training_curve_lines_total": sum(int(p["training_curve_lines"]) for p in policies),
+            "pbt_tick_debug_lines_total": sum(int(p["pbt_tick_debug_lines"]) for p in policies),
             "gpu": gpu,
         },
         "fail_fast": {
@@ -337,12 +517,32 @@ def _format_report(report: dict[str, Any]) -> str:
     for p in report["policies"]:
         lid = f"{str(p['lineage_id'])[:8]}..." if p["lineage_id"] else "n/a"
         lines.append(
-            f"  p{p['policy']} ({p['profile']}): frames={p['env_frames_curve']} "
-            f"pbt_iter={p['pbt_iteration']} fps_total={p['fps_total']} "
-            f"awr_en={p['awr_enabled']:.1f} awr_loss={p['awr_loss_weighted']:.2e} "
-            f"lambda={p['awr_effective_lambda']:.2e} buf={int(p['awr_buffer_steps'])} "
-            f"lineage={lid}"
+            f"  p{p['policy']} ({p['profile']}): frames_curve={p['env_frames_curve']} "
+            f"frames_log={p['fps_frames_log']} pbt_iter={p['pbt_iteration']} "
+            f"fps_total={p['fps_total']} curve_lines={p['training_curve_lines']} "
+            f"tick_lines={p['pbt_tick_debug_lines']} awr_en={p['awr_enabled']:.1f} "
+            f"awr_loss={p['awr_loss_weighted']:.2e} lambda={p['awr_effective_lambda']:.2e} "
+            f"buf={int(p['awr_buffer_steps'])} lineage={lid}"
         )
+        if str(p["profile"]).endswith(AWR_PROFILE_SUFFIX):
+            lines.append(
+                f"    awr_builder: time_ms={p['awr_rollout_builder_time_ms']:.1f} "
+                f"precompute_ms={p['awr_rollout_builder_precompute_ms']:.1f} "
+                f"materialize_ms={p['awr_rollout_builder_selected_materialize_ms']:.1f} "
+                f"frag_before_cap={int(p['awr_rollout_builder_selected_fragments_before_cap'])} "
+                f"frag_after_cap={int(p['awr_rollout_builder_selected_fragments_after_cap'])} "
+                f"cap_applied={int(p['awr_rollout_builder_selected_cap_applied'])} "
+                f"cap_reason={int(p['awr_rollout_builder_selected_cap_reason_code'])} "
+                f"selected_steps={int(p['awr_rollout_builder_selected_steps'])} "
+                f"vec_failed={int(p['awr_rollout_builder_vectorized_failed'])} "
+                f"fallback_ref={int(p['awr_rollout_builder_fallback_reference'])} "
+                f"fuse_active={int(p['awr_builder_fuse_active'])} "
+                f"skipped={int(p['awr_builder_skipped'])} "
+                f"delta_gate_drop={p['awr_delta_gate_drop_frac']:.3f} "
+                f"success_cnt={int(p['awr_success_from_success_cnt'])} "
+                f"success_missing={int(p['awr_success_signal_missing'])} "
+                f"done_cls_disabled={int(p['awr_done_reason_classification_disabled'])}"
+            )
     if report["aggregate"]["gpu"]:
         lines.append("")
         lines.append("GPU:")

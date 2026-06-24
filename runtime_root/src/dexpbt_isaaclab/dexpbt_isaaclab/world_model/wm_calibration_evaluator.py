@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .wm_calibration_metrics import auc_binary, clamp01, ece, spearman_rank, uncertainty_error_corr
+from .wm_calibration_metrics import (
+    auc_binary,
+    clamp01,
+    ece,
+    pos_rate,
+    spearman_rank,
+    uncertainty_error_corr,
+)
 
 
 @dataclass
@@ -21,6 +28,12 @@ class WMCalibrationConfig:
     gate_rank_corr_min: float = 0.1
     ema_beta: float = 0.9
     pass_threshold: float = 0.5
+    eval_tol_mode: str = "hybrid"
+    eval_tol_threshold: float = 0.05
+    eval_tol_quantile: float = 0.5
+    eval_tol_margin: float = 1.1
+    eval_tol_cap: float = 0.06
+    eval_tol_min_samples_for_stats: int = 32
 
 
 @dataclass
@@ -67,22 +80,36 @@ class WMCalibrationEvaluator:
         err = batch.get("error", [])
         wm_score = batch.get("wm_recovery_score", [])
         improve = batch.get("y_improve", [])
-        return {
-            "wm_cal/AUC_recovery": auc_binary(p_rec, y_rec),
-            "wm_cal/AUC_drop": auc_binary(p_drop, y_drop),
-            "wm_cal/AUC_success": auc_binary(p_succ, y_succ),
-            "wm_cal/ECE": ece(p_rec, y_rec),
+        metrics = {
+            "wm_cal/auc_recovery": auc_binary(p_rec, y_rec),
+            "wm_cal/auc_drop": auc_binary(p_drop, y_drop),
+            "wm_cal/auc_success": auc_binary(p_succ, y_succ),
+            "wm_cal/ece_recovery": ece(p_rec, y_rec),
             "wm_cal/uncertainty_error_corr": uncertainty_error_corr(unc, err),
             "wm_cal/rank_corr": spearman_rank(wm_score, improve),
+            "wm_cal/n_samples": float(len(p_rec)),
+            "wm_cal/recovery_pos_rate": pos_rate(y_rec),
+            "wm_cal/drop_pos_rate": pos_rate(y_drop),
+            "wm_cal/success_pos_rate": pos_rate(y_succ),
+            "wm_cal/insufficient_samples": float(batch.get("insufficient_samples", 0.0)),
+            "wm_cal/missing_head": float(batch.get("missing_head", 0.0)),
+            # Legacy aliases consumed by existing dashboards.
+            "wm_cal/AUC_recovery": auc_binary(p_rec, y_rec),
+            "wm_cal/ECE": ece(p_rec, y_rec),
             "wm_cal/eval_samples": float(len(p_rec)),
         }
+        return metrics
 
     def compute_alpha(
         self, metrics: dict[str, float], state: WMCalibrationState
     ) -> WMCalibrationState:
         cfg = self.cfg
-        auc_r = float(metrics.get("wm_cal/AUC_recovery", 0.0))
-        ece_v = float(metrics.get("wm_cal/ECE", 1.0))
+        auc_r = float(
+            metrics.get("wm_cal/auc_recovery", metrics.get("wm_cal/AUC_recovery", 0.0))
+        )
+        ece_v = float(
+            metrics.get("wm_cal/ece_recovery", metrics.get("wm_cal/ECE", 1.0))
+        )
         rank_c = float(metrics.get("wm_cal/rank_corr", 0.0))
         gate_rec = clamp01((auc_r - cfg.gate_auc_recovery) / max(1e-6, 1.0 - cfg.gate_auc_recovery))
         gate_ece = clamp01((cfg.gate_ece_max - ece_v) / max(1e-6, cfg.gate_ece_max))

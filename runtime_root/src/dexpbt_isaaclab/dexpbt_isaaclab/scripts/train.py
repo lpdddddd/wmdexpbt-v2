@@ -1439,6 +1439,8 @@ parser.add_argument(
         "elite_bank_actor_distill_awr",
         "elite_bank_actor_distill_strong_awr",
         "unified_elite_wm_pbt",
+        "cser_dexpbt",
+        "cser_dexpbt_conservative",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -1935,6 +1937,25 @@ parser.add_argument("--wm_calibration_alpha_max", type=float, default=1.0)
 parser.add_argument("--wm_calibration_gate_auc_recovery", type=float, default=0.55)
 parser.add_argument("--wm_calibration_gate_ece_max", type=float, default=0.15)
 parser.add_argument("--wm_calibration_gate_rank_corr_min", type=float, default=0.1)
+parser.add_argument(
+    "--wm_calibration_eval_tol_mode",
+    type=str,
+    default="hybrid",
+    choices=["fixed", "adaptive_quantile", "hybrid"],
+    help="How to set calibration eval_mask tol cutoff: fixed (A), "
+    "adaptive_quantile (B), or hybrid max(fixed, adaptive) capped.",
+)
+parser.add_argument(
+    "--wm_calibration_eval_tol_threshold",
+    type=float,
+    default=0.05,
+    help="Fixed/hybrid eval tol upper bound for calibration samples "
+    "(default 0.05; strict PBT floor stays at seq_wm_floor_tol_threshold).",
+)
+parser.add_argument("--wm_calibration_eval_tol_quantile", type=float, default=0.5)
+parser.add_argument("--wm_calibration_eval_tol_margin", type=float, default=1.1)
+parser.add_argument("--wm_calibration_eval_tol_cap", type=float, default=0.06)
+parser.add_argument("--wm_calibration_eval_tol_min_samples_for_stats", type=int, default=32)
 # candidates
 parser.add_argument("--eir_local_candidate_k", type=int, default=16)
 parser.add_argument("--eir_elite_candidate_k", type=int, default=32)
@@ -5522,8 +5543,9 @@ class _WmEnabledRunner(Runner):
                 eir_bridge.snippet_wm_rerank_cfg = getattr(
                     self.seq_wm_trainer, "_snippet_wm_rerank_cfg", None
                 )
-                eir_bridge.wm_calibration_enable = bool(
-                    getattr(self.args_cli, "wm_calibration_enable", False)
+                eir_bridge.wm_calibration_enable = (
+                    getattr(self.seq_wm_trainer, "_wm_calibration_evaluator", None)
+                    is not None
                 )
                 # RSSM reranking / full H-step MPPI.
                 rssm_cfg = self.seq_wm_trainer._eir_rssm_cfg
@@ -6224,6 +6246,14 @@ def main():
             gate_auc_recovery=float(args_cli.wm_calibration_gate_auc_recovery),
             gate_ece_max=float(args_cli.wm_calibration_gate_ece_max),
             gate_rank_corr_min=float(args_cli.wm_calibration_gate_rank_corr_min),
+            eval_tol_mode=str(args_cli.wm_calibration_eval_tol_mode),
+            eval_tol_threshold=float(args_cli.wm_calibration_eval_tol_threshold),
+            eval_tol_quantile=float(args_cli.wm_calibration_eval_tol_quantile),
+            eval_tol_margin=float(args_cli.wm_calibration_eval_tol_margin),
+            eval_tol_cap=float(args_cli.wm_calibration_eval_tol_cap),
+            eval_tol_min_samples_for_stats=int(
+                args_cli.wm_calibration_eval_tol_min_samples_for_stats
+            ),
         )
         seq_wm_trainer._wm_calibration_evaluator = (
             WMCalibrationEvaluator(_wm_cal_cfg) if _wm_cal_cfg.enabled else None

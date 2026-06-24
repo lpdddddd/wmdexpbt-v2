@@ -5665,7 +5665,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                                     self._last_wm_source_unc_weight = float(_w_unc_p)
                                     self._last_wm_source_time_weight = float(_w_time_p)
                                     self._last_wm_validity_weight = float(_v_w_p)
-                                    self._last_wm_score_effective_weight = float(_src_w)
+                                    self._last_wm_score_effective_weight = float(_eff_w)
                                     self._last_wm_score_used_strict = (
                                         1.0 if _used_strict_p else 0.0
                                     )
@@ -5794,6 +5794,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     # PBT-WM Soft Activation Gate v1 diagnostics (local policy).
                     from dexpbt_isaaclab.world_model.wm_activation_gate import (
                         compute_wm_pbt_source_activation_weight,
+                        effective_wm_trust_weight,
                         resolve_wm_ranking_uncertainty_gate,
                     )
                     _le_diag = self._wm_imagined_eval_per_policy.get(self.policy_idx) or {}
@@ -5860,7 +5861,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._last_wm_source_unc_weight = float(_w_unc)
                     self._last_wm_source_time_weight = float(_w_time)
                     self._last_wm_validity_weight = float(_v_w)
-                    self._last_wm_score_effective_weight = float(_src_w)
+                    _alpha_wm_diag = 0.0
+                    if self.wm_calibration_enable and self.algo is not None:
+                        _eb_diag = getattr(self.algo, "_eir_bridge", None)
+                        _wcs_diag = getattr(_eb_diag, "wm_calibration_state", None) if _eb_diag else None
+                        if isinstance(_wcs_diag, dict):
+                            _alpha_wm_diag = float(_wcs_diag.get("alpha_wm", 0.0))
+                    _eff_w_diag = effective_wm_trust_weight(
+                        _src_w,
+                        _alpha_wm_diag,
+                        wm_calibration_enable=bool(self.wm_calibration_enable),
+                    )
+                    self._last_wm_score_effective_weight = float(_eff_w_diag)
                     self._last_wm_score_used_strict = 1.0 if _used_strict else 0.0
                     self._last_wm_score_used_soft = 1.0 if _used_soft else 0.0
                     self.writer.add_scalar(
@@ -5876,6 +5888,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     )
                     self.writer.add_scalar(
                         "pbt/wm_source_time_weight", float(_w_time), env_frames
+                    )
+                    self.writer.add_scalar(
+                        "pbt/wm_score_effective_weight",
+                        float(_eff_w_diag),
+                        env_frames,
                     )
         except Exception as exc:  # pragma: no cover - guard against mis-init
             print(f"[floor-recovery-ranking] guarded fallback: {exc}")

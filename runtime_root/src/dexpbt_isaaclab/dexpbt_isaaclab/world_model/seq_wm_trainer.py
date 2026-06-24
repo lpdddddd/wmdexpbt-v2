@@ -652,34 +652,87 @@ class SeqWMTrainer:
             success_tolerance_full=read_aux_full(experience_buffer, "aux_success_tolerance"),
         ).to(self.device)
         heads = getattr(self.model, "heads", None)
-        if heads is None or not hasattr(heads, "predict_recovery"):
+        from .wm_calibration_metrics import (
+            build_wm_calibration_targets,
+            extract_wm_calibration_predictions,
+            resolve_calibration_horizon,
+        )
+
+        horizon = resolve_calibration_horizon(
+            getattr(self.cfg, "horizon_steps", (4, 8)), default=4
+        )
+        improve_margin = float(getattr(self.cfg, "recovery_d_hat_margin", 0.005))
+        floor_tol = float(getattr(self.cfg, "floor_tol_threshold", 0.02))
+
+        targets, tol_diag = build_wm_calibration_targets(
+            batch,
+            horizon=horizon,
+            improve_margin=improve_margin,
+            floor_tol_threshold=floor_tol,
+            eval_tol_mode=str(getattr(cfg, "eval_tol_mode", "hybrid")),
+            eval_tol_threshold=float(getattr(cfg, "eval_tol_threshold", 0.05)),
+            eval_tol_quantile=float(getattr(cfg, "eval_tol_quantile", 0.5)),
+            eval_tol_margin=float(getattr(cfg, "eval_tol_margin", 1.1)),
+            eval_tol_cap=float(getattr(cfg, "eval_tol_cap", 0.06)),
+            eval_tol_min_samples_for_stats=int(
+                getattr(cfg, "eval_tol_min_samples_for_stats", 32)
+            ),
+        )
+        eval_mask = targets["eval_mask"]
+        idx = eval_mask.nonzero(as_tuple=False).reshape(-1)
+        min_samples = int(getattr(cfg, "min_samples", 32))
+        if int(idx.numel()) < min_samples:
+            metrics = {
+                "wm_cal/insufficient_samples": 1.0,
+                "wm_cal/missing_head": 0.0,
+                "wm_cal/n_samples": float(int(idx.numel())),
+            }
+            metrics.update(tol_diag)
+            state.last_metrics = metrics
             return state
+
         belief = self.model.encode_sequence(batch)
         flat = belief.reshape(-1, belief.shape[-1])
-        rec_logit = heads.predict_recovery(flat).squeeze(-1)
-        p_rec = torch.sigmoid(rec_logit).detach().cpu().tolist()
-        tol = batch.success_tolerance_seq
-        floor_mask = (tol <= float(self.cfg.floor_tol_threshold)).reshape(-1) if tol is not None else torch.ones(flat.shape[0], dtype=torch.bool)
-        idx = floor_mask.nonzero(as_tuple=False).reshape(-1)
-        if int(idx.numel()) < int(getattr(cfg, "min_samples", 32)):
+        action_flat = batch.action.reshape(-1, batch.action_dim)
+        preds, pred_diag = extract_wm_calibration_predictions(
+            heads,
+            belief_flat=flat,
+            action_flat=action_flat,
+            horizon=horizon,
+        )
+        if preds is None:
+            metrics = dict(pred_diag)
+            metrics["wm_cal/n_samples"] = float(int(idx.numel()))
+            metrics.update(tol_diag)
+            state.last_metrics = metrics
             return state
-        held = int(idx.numel() * float(getattr(cfg, "heldout_fraction", 0.2)))
-        idx = idx[: max(held, min(int(idx.numel()), int(getattr(cfg, "min_samples", 512))))]
-        y_rec = [1.0 if float(batch.d_hat.reshape(-1)[i].item()) <= float(batch.d_hat.reshape(-1)[i].item()) else 0.0 for i in idx.tolist()]
+
+        idx_list = idx.tolist()
+        y_rec = [float(targets["y_recovery"][i].item()) for i in idx_list]
+        y_succ = [float(targets["y_success"][i].item()) for i in idx_list]
+        y_drop = [float(targets["y_drop"][i].item()) for i in idx_list]
+        y_improve = [float(targets["y_improve"][i].item()) for i in idx_list]
+        p_rec = [float(preds["p_recovery"][i].item()) for i in idx_list]
+        p_succ = [float(preds["p_success"][i].item()) for i in idx_list]
+        p_drop = [float(preds["p_drop"][i].item()) for i in idx_list]
+        unc = [float(preds["uncertainty"][i].item()) for i in idx_list]
+        err = [abs(p_rec[j] - y_rec[j]) for j in range(len(idx_list))]
         metrics = evaluator.evaluate_batch(
             {
-                "p_recovery": [p_rec[i] for i in idx.tolist()],
+                "p_recovery": p_rec,
                 "y_recovery": y_rec,
-                "p_drop": [0.1] * len(idx),
-                "y_drop": [0.0] * len(idx),
-                "p_success": [p_rec[i] for i in idx.tolist()],
-                "y_success": y_rec,
-                "uncertainty": [0.1] * len(idx),
-                "error": [0.1] * len(idx),
-                "wm_recovery_score": [p_rec[i] for i in idx.tolist()],
-                "y_improve": y_rec,
+                "p_drop": p_drop,
+                "y_drop": y_drop,
+                "p_success": p_succ,
+                "y_success": y_succ,
+                "uncertainty": unc,
+                "error": err,
+                "wm_recovery_score": p_rec,
+                "y_improve": y_improve,
+                "missing_head": pred_diag.get("wm_cal/missing_head", 0.0),
             }
         )
+        metrics.update(tol_diag)
         state = evaluator.compute_alpha(metrics, state)
         state.last_eval_frame = int(frames)
         return state

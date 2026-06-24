@@ -64,4 +64,12 @@ def compute_snippet_distill_loss(
 
 
 def compute_snippet_activation_weight(*, cfg: SnippetDistillConfig, frames: int, tol_mean: float, nsucc_mean: float = -1.0) -> float:
-    return float(compute_wm_activation(cfg.activation_config(), frames=int(frames), tol=float(tol_mean), nsucc_mean=float(nsucc_mean), eval_valid=True).weight)
+    return float(
+        compute_wm_activation(
+            cfg=cfg.activation_config(),
+            frames=int(frames),
+            tol=float(tol_mean),
+            nsucc_mean=float(nsucc_mean),
+            eval_valid=True,
+        ).weight
+    )

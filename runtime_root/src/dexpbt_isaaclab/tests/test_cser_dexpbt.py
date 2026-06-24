@@ -24,6 +24,9 @@ CSER_LAUNCHER_1P2B = (
     REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_1p2b_smoke.sh"
 )
 CSER_LAUNCHER_5B = REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_5b.sh"
+CSER_LAUNCHER_CONSERVATIVE_5B = (
+    REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_conservative_5b.sh"
+)
 CSER_DOC = REPO_ROOT / "results/docs/CSER_DEXPBT.md"
 
 _POSITIVE_AWR = re.compile(r"(?<!\-\-no\-)\-\-awr_enable\b")
@@ -116,6 +119,34 @@ class TestCserProfileRegistration(unittest.TestCase):
         self.assertFalse(args.pbt_wm_profile_copy_enable)
 
 
+class TestCserConservativeProfile(unittest.TestCase):
+    def test_conservative_profile_registered(self):
+        self.assertEqual(PROFILE_IDS["cser_dexpbt_conservative"], 20)
+
+    def test_pure_cser_keeps_actor_distill_off(self):
+        args = _expand_profile("cser_dexpbt")
+        self.assertTrue(args.snippet_distill_enable)
+        self.assertFalse(args.eir_actor_distill_enable)
+
+    def test_conservative_enables_actor_distill_fallback(self):
+        args = _expand_profile("cser_dexpbt_conservative")
+        self.assertTrue(args.snippet_distill_enable)
+        self.assertTrue(args.eir_actor_distill_enable)
+        self.assertEqual(args.eir_actor_distill_allowed_sources, "elite,archive")
+        self.assertAlmostEqual(float(args.eir_actor_distill_weight), 0.0005)
+        self.assertEqual(args.wm_calibration_eval_tol_mode, "hybrid")
+        self.assertAlmostEqual(float(args.wm_calibration_eval_tol_threshold), 0.05)
+        self.assertEqual(int(args.wm_calibration_min_samples), 128)
+
+    def test_conservative_hard_safety(self):
+        args = _expand_profile("cser_dexpbt_conservative")
+        self.assertFalse(args.awr_enable)
+        self.assertFalse(args.eir_residual_apply_to_rollout)
+        self.assertFalse(args.eir_use_rssm_mppi)
+        self.assertEqual(args.eir_mppi_mode, "off")
+        self.assertFalse(args.pbt_wm_profile_copy_enable)
+
+
 class TestCserLauncherSanity(unittest.TestCase):
     def setUp(self):
         self.assertTrue(CSER_LAUNCHER_1P2B.is_file(), msg=str(CSER_LAUNCHER_1P2B))
@@ -147,3 +178,16 @@ class TestCserLauncherSanity(unittest.TestCase):
         self.assertTrue(CSER_DOC.is_file(), msg=str(CSER_DOC))
         self.assertTrue(CSER_LAUNCHER_5B.is_file(), msg=str(CSER_LAUNCHER_5B))
         self.assertIn("pbt_consolidation_enable", CSER_LAUNCHER_5B.read_text())
+
+    def test_conservative_5b_launcher(self):
+        self.assertTrue(
+            CSER_LAUNCHER_CONSERVATIVE_5B.is_file(),
+            msg=str(CSER_LAUNCHER_CONSERVATIVE_5B),
+        )
+        text = CSER_LAUNCHER_CONSERVATIVE_5B.read_text()
+        self.assertIn("cser_dexpbt_conservative", text)
+        self.assertIn("--eir_actor_distill_enable", text)
+        self.assertIn("--no-eir_residual_apply_to_rollout", text)
+        self.assertIn("--no-awr_enable", text)
+        self.assertIn("--no-pbt_wm_profile_copy_enable", text)
+        self.assertIn("pbt_consolidation_stage1_end_frames=2200000000", text)

@@ -47,18 +47,34 @@ class SnippetTargetBuilder:
         if T <= 0 or N <= 0:
             return self._empty(feature_flat)
         n_flat = T * N
-        actions = cache.actions_flat.reshape(n_flat, -1)
+        # Rollout cache tensors usually live on GPU; bank features are CPU-resident
+        # (_eir_extract_rollout_features returns .cpu()). Index everything on the
+        # feature device to avoid mixed-device advanced indexing errors.
+        dev = feature_flat.device
+        actions = cache.actions_flat.reshape(n_flat, -1).to(device=dev)
         A = int(actions.shape[-1])
-        d_hat = cache.d_hat_flat.reshape(n_flat)
-        tol = cache.success_tol_flat.reshape(n_flat)
-        lifted = cache.lifted_flat.reshape(n_flat) if cache.lifted_flat is not None else torch.ones(n_flat, device=actions.device)
-        picked = picked_flat.reshape(n_flat) if picked_flat is not None else torch.zeros(n_flat, device=actions.device)
-        dropped = dropped_flat.reshape(n_flat) if dropped_flat is not None else torch.zeros(n_flat, device=actions.device)
+        d_hat = cache.d_hat_flat.reshape(n_flat).to(device=dev)
+        tol = cache.success_tol_flat.reshape(n_flat).to(device=dev)
+        lifted = (
+            cache.lifted_flat.reshape(n_flat).to(device=dev)
+            if cache.lifted_flat is not None
+            else torch.ones(n_flat, device=dev)
+        )
+        picked = (
+            picked_flat.reshape(n_flat).to(device=dev)
+            if picked_flat is not None
+            else torch.zeros(n_flat, device=dev)
+        )
+        dropped = (
+            dropped_flat.reshape(n_flat).to(device=dev)
+            if dropped_flat is not None
+            else torch.zeros(n_flat, device=dev)
+        )
         targets = getattr(cache, "targets_flat", {}) or {}
 
         def tgt(key: str) -> torch.Tensor:
             t = targets.get(key)
-            return torch.zeros(n_flat, device=actions.device) if t is None else t.reshape(n_flat)
+            return torch.zeros(n_flat, device=dev) if t is None else t.reshape(n_flat).to(device=dev)
 
         h0, h1 = int(self.horizons[0]), int(self.horizons[-1])
         s0, i0, d0 = tgt(f"success_h{h0}"), tgt(f"improve_h{h0}"), tgt(f"drop_h{h0}")
@@ -66,7 +82,7 @@ class SnippetTargetBuilder:
         starts = [n * T + t for n in range(N) for t in range(T) if t + H <= T]
         if not starts:
             return self._empty(feature_flat)
-        idx = torch.tensor(starts, dtype=torch.long, device=actions.device)
+        idx = torch.tensor(starts, dtype=torch.long, device=dev)
         m = int(idx.shape[0])
         act_snip = torch.stack([actions[idx + h] for h in range(H)], dim=1)
         closest = torch.stack([d_hat[idx + h] for h in range(H)], dim=1).min(dim=1).values
