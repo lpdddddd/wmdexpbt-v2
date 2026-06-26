@@ -512,6 +512,95 @@ parser.add_argument(
     "protected worker bypasses the protection so the supervisor can "
     "still replace it.",
 )
+parser.add_argument(
+    "--pbt_strong_live_inherit_exact_enable",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="source_safe: on live cross-copy, exact-inherit source tolerance "
+    "when source is strong (tol<=max_tol, mean/max above thresholds).",
+)
+parser.add_argument(
+    "--pbt_strong_live_inherit_max_tol",
+    type=float,
+    default=0.035,
+    help="Strong live exact inherit: max source tolerance eligible.",
+)
+parser.add_argument(
+    "--pbt_strong_live_inherit_min_mean",
+    type=float,
+    default=30.0,
+    help="Strong live exact inherit: min source nsucc_mean.",
+)
+parser.add_argument(
+    "--pbt_strong_live_inherit_min_max",
+    type=float,
+    default=35.0,
+    help="Strong live exact inherit: min source nsucc_max.",
+)
+parser.add_argument(
+    "--late_floor_retention_gate_enable",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Block shrink / freeze mutation when strict tol + strong peak + "
+    "low retention in late floor region.",
+)
+parser.add_argument(
+    "--late_floor_retention_tol_threshold",
+    type=float,
+    default=0.025,
+    help="Late-floor retention gate: success_tolerance must be <= this.",
+)
+parser.add_argument(
+    "--late_floor_retention_peak_threshold",
+    type=float,
+    default=35.0,
+    help="Late-floor retention gate: recent peak nsucc_mean must be >= this.",
+)
+parser.add_argument(
+    "--late_floor_retention_min_retention",
+    type=float,
+    default=0.85,
+    help="Late-floor retention gate: block shrink when retention below this.",
+)
+parser.add_argument(
+    "--late_floor_retention_hard_min_retention",
+    type=float,
+    default=0.75,
+    help="Late-floor retention gate: hard retention threshold for rollback "
+    "patience (rollback off by default).",
+)
+parser.add_argument(
+    "--late_floor_retention_patience",
+    type=int,
+    default=2,
+    help="Late-floor retention gate: consecutive hard-low ticks before "
+    "optional rollback.",
+)
+parser.add_argument(
+    "--late_floor_retention_freeze_frames",
+    type=int,
+    default=200_000_000,
+    help="Late-floor retention gate: curriculum/mutation freeze length.",
+)
+parser.add_argument(
+    "--late_floor_retention_block_shrink",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Late-floor retention gate: block shrink_token when triggered.",
+)
+parser.add_argument(
+    "--late_floor_retention_freeze_mutation",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Late-floor retention gate: freeze hyperparam mutation when triggered.",
+)
+parser.add_argument(
+    "--late_floor_retention_rollback_enable",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Late-floor retention gate: rollback to last mastered safe tol "
+    "after patience (default off).",
+)
 # CSER-v0: staged PBT consolidation schedule (defaults inert).
 parser.add_argument(
     "--pbt_consolidation_enable",
@@ -7204,6 +7293,42 @@ def main():
             ),
             pbt_promising_allow_hard_collapse_override=(
                 args_cli.pbt_promising_allow_hard_collapse_override
+            ),
+            pbt_strong_live_inherit_exact_enable=(
+                args_cli.pbt_strong_live_inherit_exact_enable
+            ),
+            pbt_strong_live_inherit_max_tol=args_cli.pbt_strong_live_inherit_max_tol,
+            pbt_strong_live_inherit_min_mean=(
+                args_cli.pbt_strong_live_inherit_min_mean
+            ),
+            pbt_strong_live_inherit_min_max=args_cli.pbt_strong_live_inherit_min_max,
+            late_floor_retention_gate_enable=(
+                args_cli.late_floor_retention_gate_enable
+            ),
+            late_floor_retention_tol_threshold=(
+                args_cli.late_floor_retention_tol_threshold
+            ),
+            late_floor_retention_peak_threshold=(
+                args_cli.late_floor_retention_peak_threshold
+            ),
+            late_floor_retention_min_retention=(
+                args_cli.late_floor_retention_min_retention
+            ),
+            late_floor_retention_hard_min_retention=(
+                args_cli.late_floor_retention_hard_min_retention
+            ),
+            late_floor_retention_patience=args_cli.late_floor_retention_patience,
+            late_floor_retention_freeze_frames=(
+                args_cli.late_floor_retention_freeze_frames
+            ),
+            late_floor_retention_block_shrink=(
+                args_cli.late_floor_retention_block_shrink
+            ),
+            late_floor_retention_freeze_mutation=(
+                args_cli.late_floor_retention_freeze_mutation
+            ),
+            late_floor_retention_rollback_enable=(
+                args_cli.late_floor_retention_rollback_enable
             ),
             # Phase A4 P4 (2026-06-09): floor-recovery + WM-guided ranking.
             pbt_floor_recovery_aware=args_cli.pbt_floor_recovery_aware,

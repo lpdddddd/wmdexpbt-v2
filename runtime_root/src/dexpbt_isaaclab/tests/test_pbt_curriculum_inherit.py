@@ -77,6 +77,10 @@ def _make_observer(
     crosscopy_mode: str = "checkpoint",
     recovery_mode: str = "last_mastered",
     speed_mode: str = "normal",
+    strong_live_enable: bool = True,
+    strong_live_max_tol: float = 0.035,
+    strong_live_min_mean: float = 30.0,
+    strong_live_min_max: float = 35.0,
 ) -> DexPBTPbtAlgoObserver:
     obs = DexPBTPbtAlgoObserver(
         policy_idx=0,
@@ -119,6 +123,10 @@ def _make_observer(
         pbt_promising_min_retention=promising_min_retention,
         pbt_promising_protect_frames=promising_protect_frames,
         pbt_promising_allow_hard_collapse_override=promising_allow_collapse_override,
+        pbt_strong_live_inherit_exact_enable=strong_live_enable,
+        pbt_strong_live_inherit_max_tol=strong_live_max_tol,
+        pbt_strong_live_inherit_min_mean=strong_live_min_mean,
+        pbt_strong_live_inherit_min_max=strong_live_min_max,
     )
     obs.writer = None
     return obs
@@ -641,6 +649,105 @@ class CountersTest(_TmpWs):
         # event.
         obs._curriculum_reset_count += 1
         self.assertEqual(obs._curriculum_reset_count, 1)
+
+
+class StrongLiveExactInheritTest(_TmpWs):
+    """CSER patch: strong live source exact tolerance inheritance."""
+
+    def test_live_strong_source_exact_inherit(self):
+        obs = _make_observer(self.ws, inherit_mode="source_safe")
+        source_state = {
+            "policy_idx": 1,
+            "nsucc_mean": 35.0,
+            "nsucc_max": 40.0,
+            "source_retention_at_save": 0.4,
+            "curriculum": {
+                "success_tolerance": 0.023,
+                "target_tolerance": 0.01,
+            },
+        }
+        out = obs._resolve_curriculum_inheritance(
+            source_policy=1,
+            source_state=source_state,
+            source_curriculum=source_state["curriculum"],
+            checkpoint_type="live",
+            target_current_tolerance=0.075,
+        )
+        self.assertTrue(out["strong_live_inherit_exact"])
+        self.assertEqual(out["inheritance_reason"], "source_strong_live_inherit_exact")
+        self.assertAlmostEqual(out["tol_after"], 0.023, places=10)
+        self.assertTrue(out["source_safe_for_curriculum"])
+
+    def test_live_strong_respects_tighter_target_before(self):
+        obs = _make_observer(self.ws, inherit_mode="source_safe")
+        source_state = {
+            "policy_idx": 1,
+            "nsucc_mean": 35.0,
+            "nsucc_max": 40.0,
+            "curriculum": {"success_tolerance": 0.023, "target_tolerance": 0.01},
+        }
+        out = obs._resolve_curriculum_inheritance(
+            source_policy=1,
+            source_state=source_state,
+            source_curriculum=source_state["curriculum"],
+            checkpoint_type="live",
+            target_current_tolerance=0.020,
+        )
+        self.assertAlmostEqual(out["tol_after"], 0.020, places=10)
+
+    def test_archive_strong_does_not_use_exact_live_branch(self):
+        obs = _make_observer(self.ws, inherit_mode="source_safe")
+        source_state = {
+            "policy_idx": 1,
+            "nsucc_mean": 35.0,
+            "nsucc_max": 40.0,
+            "source_retention_at_save": 0.95,
+            "curriculum": {"success_tolerance": 0.023, "target_tolerance": 0.01},
+        }
+        out = obs._resolve_curriculum_inheritance(
+            source_policy=1,
+            source_state=source_state,
+            source_curriculum=source_state["curriculum"],
+            checkpoint_type="archive",
+            target_current_tolerance=0.075,
+        )
+        self.assertNotEqual(out["inheritance_reason"], "source_strong_live_inherit_exact")
+        self.assertFalse(out.get("strong_live_inherit_exact", False))
+
+    def test_weak_mean_falls_back_to_legacy(self):
+        obs = _make_observer(self.ws, inherit_mode="source_safe", crosscopy_mode="checkpoint")
+        source_state = {
+            "policy_idx": 2,
+            "nsucc_mean": 15.0,
+            "nsucc_max": 40.0,
+            "source_retention_at_save": 0.95,
+            "curriculum": {"success_tolerance": 0.023, "target_tolerance": 0.01},
+        }
+        out = obs._resolve_curriculum_inheritance(
+            source_policy=2,
+            source_state=source_state,
+            source_curriculum=source_state["curriculum"],
+            checkpoint_type="live",
+            target_current_tolerance=0.075,
+        )
+        self.assertEqual(out["inheritance_reason"], "source_unstable_legacy")
+
+    def test_missing_tolerance_falls_back_without_crash(self):
+        obs = _make_observer(self.ws, inherit_mode="source_safe")
+        source_state = {
+            "policy_idx": 3,
+            "nsucc_mean": 35.0,
+            "nsucc_max": 40.0,
+            "curriculum": {"target_tolerance": 0.01},
+        }
+        out = obs._resolve_curriculum_inheritance(
+            source_policy=3,
+            source_state=source_state,
+            source_curriculum=source_state["curriculum"],
+            checkpoint_type="live",
+            target_current_tolerance=0.075,
+        )
+        self.assertEqual(out["inheritance_reason"], "missing_source_tolerance")
 
 
 class LauncherFlagsTest(unittest.TestCase):

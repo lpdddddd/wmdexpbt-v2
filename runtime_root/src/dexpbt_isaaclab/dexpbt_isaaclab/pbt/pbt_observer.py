@@ -375,6 +375,22 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_promising_min_retention: float = 0.5,
         pbt_promising_protect_frames: int = 150_000_000,
         pbt_promising_allow_hard_collapse_override: bool = True,
+        # CSER patch: strong live cross-copy exact tolerance inheritance.
+        pbt_strong_live_inherit_exact_enable: bool = True,
+        pbt_strong_live_inherit_max_tol: float = 0.035,
+        pbt_strong_live_inherit_min_mean: float = 30.0,
+        pbt_strong_live_inherit_min_max: float = 35.0,
+        # CSER patch: late-floor retention gate.
+        late_floor_retention_gate_enable: bool = True,
+        late_floor_retention_tol_threshold: float = 0.025,
+        late_floor_retention_peak_threshold: float = 35.0,
+        late_floor_retention_min_retention: float = 0.85,
+        late_floor_retention_hard_min_retention: float = 0.75,
+        late_floor_retention_patience: int = 2,
+        late_floor_retention_freeze_frames: int = 200_000_000,
+        late_floor_retention_block_shrink: bool = True,
+        late_floor_retention_freeze_mutation: bool = True,
+        late_floor_retention_rollback_enable: bool = False,
         # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
         pbt_early_collapse_detect: bool = True,
         early_collapse_drop_ratio: float = 0.3,
@@ -1095,6 +1111,36 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.pbt_promising_allow_hard_collapse_override = bool(
             pbt_promising_allow_hard_collapse_override
         )
+        self.pbt_strong_live_inherit_exact_enable = bool(
+            pbt_strong_live_inherit_exact_enable
+        )
+        self.pbt_strong_live_inherit_max_tol = float(pbt_strong_live_inherit_max_tol)
+        self.pbt_strong_live_inherit_min_mean = float(pbt_strong_live_inherit_min_mean)
+        self.pbt_strong_live_inherit_min_max = float(pbt_strong_live_inherit_min_max)
+        self.late_floor_retention_gate_enable = bool(late_floor_retention_gate_enable)
+        self.late_floor_retention_tol_threshold = float(
+            late_floor_retention_tol_threshold
+        )
+        self.late_floor_retention_peak_threshold = float(
+            late_floor_retention_peak_threshold
+        )
+        self.late_floor_retention_min_retention = float(
+            late_floor_retention_min_retention
+        )
+        self.late_floor_retention_hard_min_retention = float(
+            late_floor_retention_hard_min_retention
+        )
+        self.late_floor_retention_patience = int(late_floor_retention_patience)
+        self.late_floor_retention_freeze_frames = int(
+            late_floor_retention_freeze_frames
+        )
+        self.late_floor_retention_block_shrink = bool(late_floor_retention_block_shrink)
+        self.late_floor_retention_freeze_mutation = bool(
+            late_floor_retention_freeze_mutation
+        )
+        self.late_floor_retention_rollback_enable = bool(
+            late_floor_retention_rollback_enable
+        )
         if self.pbt_curriculum_inherit_mode == "source_safe":
             if self.pbt_source_safe_recovery_consolidation_frames <= 0:
                 raise RuntimeError(
@@ -1275,6 +1321,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             pbt_freeze_mutation_after_stable_frames
         )
         self._mutation_frozen_until: dict[int, int] = {}
+        self._late_floor_retention_patience_count: dict[int, int] = {}
         self._best_stable_recovery_selected_count = 0
         self._best_stable_recovery_executed_count = 0
         self._best_stable_recovery_skipped_count = 0
@@ -2224,6 +2271,43 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 }
             )
 
+        late_floor_retention, forced_tolerance = self._evaluate_late_floor_retention_gate(
+            policy_idx,
+            window,
+            env_frames,
+            cur_tol=cur_tol,
+            shrink_token=shrink_token,
+            recent_peak=recent_peak,
+            forced_tolerance=forced_tolerance,
+        )
+        if late_floor_retention.get("rollback_applied"):
+            collapse_rollback_active = True
+            curriculum_rollback_triggered = True
+            curriculum_rollback_from_tol = float(cur_tol)
+            curriculum_rollback_to_tol = float(forced_tolerance)
+            curriculum_rollback_freeze_until = int(
+                late_floor_retention.get("freeze_until", 0)
+            )
+            rollback_reason = str(late_floor_retention.get("reason", ""))
+        if (
+            late_floor_retention.get("blocked")
+            and shrink_token
+            and self.late_floor_retention_block_shrink
+        ):
+            shrink_token = False
+            allow_shrink = False
+            shrink_blocked_reason = "late_floor_low_retention"
+            shrink_reason = "late_floor_low_retention"
+            if (
+                self.pbt_single_shrink_per_window
+                and self._shrink_issued_this_window.get(policy_idx, False)
+            ):
+                self._shrink_issued_this_window[policy_idx] = False
+                cur = int(self._shrinks_since_rollback.get(policy_idx, 0))
+                if cur > 0:
+                    self._shrinks_since_rollback[policy_idx] = cur - 1
+            shrinks_in_window = 0
+
         wm_payload = self._load_policy_wm_imagined_eval(policy_idx) or {}
         wm_imagined_valid = bool(wm_payload.get("imagined_valid", False))
         wm_imagined_uncertainty = float(wm_payload.get("uncertainty", 1.0))
@@ -2380,6 +2464,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             wm_imagined_invalid_reason=wm_imagined_invalid_reason,
             wm_imagined_shadow_block_decision=wm_imagined_shadow_block_decision,
             wm_imagined_shadow_block_reason=wm_imagined_shadow_block_reason,
+            late_floor_retention_active=bool(late_floor_retention.get("active", False)),
+            late_floor_retention_retention=float(
+                late_floor_retention.get("retention", 0.0)
+            ),
+            late_floor_retention_recent_peak=float(
+                late_floor_retention.get("recent_peak_nsucc_mean", 0.0)
+            ),
+            late_floor_retention_blocked_shrink=bool(
+                late_floor_retention.get("blocked", False)
+            ),
+            late_floor_retention_freeze_until=int(
+                late_floor_retention.get("freeze_until", 0)
+            ),
+            late_floor_retention_reason=str(late_floor_retention.get("reason", "")),
         )
 
     def _log_curriculum_control_scalars(
@@ -2716,6 +2814,31 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.writer.add_scalar(
             "pbt/floor_recovery_aware_enabled",
             1.0 if self.pbt_floor_recovery_aware else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/late_floor_retention_active",
+            1.0 if control.late_floor_retention_active else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/late_floor_retention_ratio",
+            float(control.late_floor_retention_retention),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/late_floor_retention_peak",
+            float(control.late_floor_retention_recent_peak),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/late_floor_retention_blocked",
+            1.0 if control.late_floor_retention_blocked_shrink else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/late_floor_retention_freeze_until",
+            float(control.late_floor_retention_freeze_until),
             env_frames,
         )
 
@@ -3136,6 +3259,125 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             out["danger_block_reason"] = "danger_zone_low_global_retention"
         return out
 
+    def _evaluate_late_floor_retention_gate(
+        self,
+        policy_idx: int,
+        window: RollingNsuccWindow,
+        env_frames: int,
+        *,
+        cur_tol: float,
+        shrink_token: bool,
+        recent_peak: float,
+        forced_tolerance: float,
+    ) -> tuple[dict[str, Any], float]:
+        """Late-floor retention gate: protect peak capability in strict tol band."""
+        out: dict[str, Any] = {
+            "active": False,
+            "blocked": False,
+            "reason": "",
+            "retention": 1.0,
+            "recent_peak_nsucc_mean": float(recent_peak),
+            "current_nsucc_mean": 0.0,
+            "freeze_until": 0,
+            "rollback_applied": False,
+        }
+        new_forced = float(forced_tolerance)
+        if not self.late_floor_retention_gate_enable:
+            return out, new_forced
+        if not window.samples:
+            return out, new_forced
+
+        current_nsucc = float(window.samples[-1].nsucc_mean)
+        peak = float(recent_peak)
+        if peak <= 1e-9:
+            peak = max(float(s.nsucc_mean) for s in window.samples)
+        retention = current_nsucc / peak if peak > 1e-9 else 1.0
+        out["current_nsucc_mean"] = current_nsucc
+        out["recent_peak_nsucc_mean"] = peak
+        out["retention"] = float(retention)
+
+        late_floor = cur_tol <= self.late_floor_retention_tol_threshold + 1e-9
+        strong_peak = peak >= self.late_floor_retention_peak_threshold
+        low_retention = retention < self.late_floor_retention_min_retention
+        hard_low_retention = (
+            retention < self.late_floor_retention_hard_min_retention
+        )
+
+        if not (late_floor and strong_peak):
+            self._late_floor_retention_patience_count[policy_idx] = 0
+            return out, new_forced
+
+        out["active"] = True
+        freeze_until = int(env_frames) + int(self.late_floor_retention_freeze_frames)
+
+        if hard_low_retention:
+            self._late_floor_retention_patience_count[policy_idx] = int(
+                self._late_floor_retention_patience_count.get(policy_idx, 0)
+            ) + 1
+        else:
+            self._late_floor_retention_patience_count[policy_idx] = 0
+
+        if (
+            self.late_floor_retention_rollback_enable
+            and hard_low_retention
+            and self._late_floor_retention_patience_count.get(policy_idx, 0)
+            >= int(self.late_floor_retention_patience)
+        ):
+            safe_tol = float(
+                self._last_mastered_safe_tolerance.get(policy_idx, 0.0)
+            )
+            if safe_tol <= 0.0:
+                safe_tol = float(
+                    self._last_mastered_tolerance.get(policy_idx, 0.075)
+                )
+            if safe_tol > 1e-9 and cur_tol < safe_tol - 1e-9:
+                new_forced = safe_tol
+                out["rollback_applied"] = True
+                out["reason"] = "late_floor_retention_rollback"
+                self._late_floor_retention_patience_count[policy_idx] = 0
+                self._curriculum_safety_freeze_until[policy_idx] = freeze_until
+                self._append_curriculum_safety_event(
+                    {
+                        "event": "late_floor_retention_rollback",
+                        "policy_idx": int(policy_idx),
+                        "env_frames": int(env_frames),
+                        "success_tolerance": float(cur_tol),
+                        "current_nsucc_mean": float(current_nsucc),
+                        "recent_peak_nsucc_mean": float(peak),
+                        "retention": float(retention),
+                        "reason": "late_floor_retention_rollback",
+                        "freeze_until": int(freeze_until),
+                        "shrink_blocked": True,
+                        "rollback_to_tol": float(safe_tol),
+                    }
+                )
+                return out, new_forced
+
+        if low_retention and (
+            self.late_floor_retention_block_shrink or shrink_token
+        ):
+            out["blocked"] = True
+            out["reason"] = "late_floor_low_retention"
+            out["freeze_until"] = freeze_until
+            self._curriculum_safety_freeze_until[policy_idx] = freeze_until
+            if self.late_floor_retention_freeze_mutation:
+                self._mutation_frozen_until[policy_idx] = freeze_until
+            self._append_curriculum_safety_event(
+                {
+                    "event": "late_floor_retention_block",
+                    "policy_idx": int(policy_idx),
+                    "env_frames": int(env_frames),
+                    "success_tolerance": float(cur_tol),
+                    "current_nsucc_mean": float(current_nsucc),
+                    "recent_peak_nsucc_mean": float(peak),
+                    "retention": float(retention),
+                    "reason": "late_floor_low_retention",
+                    "freeze_until": int(freeze_until),
+                    "shrink_blocked": bool(shrink_token),
+                }
+            )
+        return out, new_forced
+
     def _read_last_mastered_tolerance(self, policy_idx: int) -> float:
         path = self._curriculum_control_dir / f"{int(policy_idx):03d}.json"
         ctrl = read_curriculum_control(path)
@@ -3338,6 +3580,39 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         if not bool(meta.get("has_source_success_tolerance")):
             out["inheritance_reason"] = "missing_source_tolerance"
+            return out
+
+        archive_like = checkpoint_type in (
+            "archive",
+            "best_stable_archive",
+            "best_floor_recovery_archive",
+        )
+        is_live_cross_copy = not archive_like
+        src_tol = float(meta.get("source_success_tolerance", float("nan")))
+        src_mean = float(meta.get("source_nsucc_mean", float("nan")))
+        src_max = float(meta.get("source_nsucc_max", float("nan")))
+        strong_live = (
+            self.pbt_strong_live_inherit_exact_enable
+            and is_live_cross_copy
+            and bool(meta.get("has_source_success_tolerance"))
+            and math.isfinite(src_tol)
+            and src_tol <= self.pbt_strong_live_inherit_max_tol
+            and math.isfinite(src_mean)
+            and src_mean >= self.pbt_strong_live_inherit_min_mean
+            and math.isfinite(src_max)
+            and src_max >= self.pbt_strong_live_inherit_min_max
+        )
+        if strong_live:
+            tol_after = src_tol
+            if floor > 0.0:
+                tol_after = max(tol_after, floor)
+            if target_before > 0.0 and math.isfinite(target_before):
+                tol_after = min(tol_after, target_before)
+            out["tol_after"] = float(tol_after)
+            out["inherited_tolerance"] = float(tol_after)
+            out["source_safe_for_curriculum"] = True
+            out["inheritance_reason"] = "source_strong_live_inherit_exact"
+            out["strong_live_inherit_exact"] = True
             return out
 
         is_safe = self._is_source_safe_for_curriculum(
@@ -6655,6 +6930,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "source_safe_for_curriculum": bool(
                     inherit_audit["source_safe_for_curriculum"]
                 ),
+                "strong_live_inherit_exact": bool(
+                    inherit_audit.get("strong_live_inherit_exact", False)
+                ),
             }
             apply_source_safe_consolidation_on_copy(
                 ctrl_path,
@@ -6707,6 +6985,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 ),
                 "inheritance_reason": str(
                     inherit_audit["inheritance_reason"]
+                ),
+                "strong_live_inherit_exact": bool(
+                    inherit_audit.get("strong_live_inherit_exact", False)
                 ),
                 "legacy_tolerance_mode": str(tol_mode),
                 "legacy_tolerance_value": _coerce_finite(

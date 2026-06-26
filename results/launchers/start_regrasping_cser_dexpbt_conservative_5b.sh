@@ -85,6 +85,20 @@ real_signal_fallback=true
 danger_tol=0.030
 strong_shrink_global_retention_gate=true
 rollback_to_last_mastered=true
+pbt_strong_live_inherit_exact_enable=true
+pbt_strong_live_inherit_max_tol=0.035
+pbt_strong_live_inherit_min_mean=30.0
+pbt_strong_live_inherit_min_max=35.0
+late_floor_retention_gate_enable=true
+late_floor_retention_tol_threshold=0.025
+late_floor_retention_peak_threshold=35.0
+late_floor_retention_min_retention=0.85
+late_floor_retention_hard_min_retention=0.75
+late_floor_retention_patience=2
+late_floor_retention_freeze_frames=200000000
+late_floor_retention_block_shrink=true
+late_floor_retention_freeze_mutation=true
+late_floor_retention_rollback_enable=false
 wm_imagined_valid_mode=soft_calibrated
 wm_head_balance=true
 soft_candidate_retrieval=true
@@ -152,6 +166,20 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_promising_min_retention 0.5 \
   --pbt_promising_protect_frames 250000000 \
   --pbt_promising_allow_hard_collapse_override \
+  --pbt_strong_live_inherit_exact_enable \
+  --pbt_strong_live_inherit_max_tol 0.035 \
+  --pbt_strong_live_inherit_min_mean 30.0 \
+  --pbt_strong_live_inherit_min_max 35.0 \
+  --late_floor_retention_gate_enable \
+  --late_floor_retention_tol_threshold 0.025 \
+  --late_floor_retention_peak_threshold 35.0 \
+  --late_floor_retention_min_retention 0.85 \
+  --late_floor_retention_hard_min_retention 0.75 \
+  --late_floor_retention_patience 2 \
+  --late_floor_retention_freeze_frames 200000000 \
+  --late_floor_retention_block_shrink \
+  --late_floor_retention_freeze_mutation \
+  --no-late_floor_retention_rollback_enable \
   --pbt_floor_recovery_aware \
   --pbt_floor_tol_threshold 0.02 \
   --pbt_hard_floor_tol_threshold 0.012 \

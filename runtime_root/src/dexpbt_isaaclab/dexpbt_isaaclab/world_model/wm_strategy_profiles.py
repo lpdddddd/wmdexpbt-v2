@@ -707,6 +707,20 @@ _CSER_DEXPBT_CONSERVATIVE: dict[str, Any] = {
     "eir_actor_distill_loss_cap": 0.01,
     "eir_actor_distill_max_delta": 0.25,
     "eir_actor_distill_gate_mode": "soft_tol",
+    "pbt_strong_live_inherit_exact_enable": True,
+    "pbt_strong_live_inherit_max_tol": 0.035,
+    "pbt_strong_live_inherit_min_mean": 30.0,
+    "pbt_strong_live_inherit_min_max": 35.0,
+    "late_floor_retention_gate_enable": True,
+    "late_floor_retention_tol_threshold": 0.025,
+    "late_floor_retention_peak_threshold": 35.0,
+    "late_floor_retention_min_retention": 0.85,
+    "late_floor_retention_hard_min_retention": 0.75,
+    "late_floor_retention_patience": 2,
+    "late_floor_retention_freeze_frames": 200_000_000,
+    "late_floor_retention_block_shrink": True,
+    "late_floor_retention_freeze_mutation": True,
+    "late_floor_retention_rollback_enable": False,
 }
 
 PROFILE_TABLES: dict[str, dict[str, Any]] = {

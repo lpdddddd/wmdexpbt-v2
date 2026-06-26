@@ -174,6 +174,7 @@ class CurriculumControlState:
     source_nsucc_max_for_copy: float = 0.0
     source_retention_for_copy: float = 0.0
     source_safe_for_curriculum: bool = False
+    strong_live_inherit_exact: bool = False
     recovery_consolidation_frames_selected: int = 0
     recovery_consolidation_source: str = ""
     # Phase A4 P4 (2026-06-09): floor-recovery-aware PBT audit fields.
@@ -251,6 +252,13 @@ class CurriculumControlState:
     wm_imagined_invalid_reason: str = ""
     wm_imagined_shadow_block_decision: bool = False
     wm_imagined_shadow_block_reason: str = ""
+    # Late-floor retention gate audit (CSER patch).
+    late_floor_retention_active: bool = False
+    late_floor_retention_retention: float = 0.0
+    late_floor_retention_recent_peak: float = 0.0
+    late_floor_retention_blocked_shrink: bool = False
+    late_floor_retention_freeze_until: int = 0
+    late_floor_retention_reason: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
