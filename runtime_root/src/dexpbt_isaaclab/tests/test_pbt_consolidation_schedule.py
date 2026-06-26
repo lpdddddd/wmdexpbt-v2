@@ -89,6 +89,25 @@ class TestConsolidatedTick(unittest.TestCase):
         self.assertTrue(should)
         self.assertEqual(derived, raw // eff)
 
+    def test_stage2_interval_widen_resumes_after_prior_ticks(self):
+        """Regression: stage2 doubles interval; ticks must not freeze at iter 108."""
+        cfg = PbtConsolidationConfig(enabled=True)
+        base_interval = 20_000_000
+        should, next_iter, reason, stage, eff = evaluate_consolidated_tick(
+            raw_frame=2_250_000_000,
+            self_pbt_iteration=108,
+            last_mutation_frame=2_160_000_000,
+            start_after=200_000_000,
+            initial_delay=50_000_000,
+            interval_steps=base_interval,
+            cfg=cfg,
+        )
+        self.assertEqual(stage, STAGE_CONSOLIDATION)
+        self.assertEqual(eff, 40_000_000)
+        self.assertTrue(should)
+        self.assertEqual(next_iter, 109)
+        self.assertIn("stage_consolidation", reason)
+
 
 class TestBottomRestart(unittest.TestCase):
     def setUp(self):

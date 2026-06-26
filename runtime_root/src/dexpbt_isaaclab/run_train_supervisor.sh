@@ -73,11 +73,30 @@ PY
     local chosen
     chosen="$(python - "$latest" "$discovered" <<'PY'
 from pathlib import Path
+import re
 import sys
+
+import torch
+
+
+def checkpoint_frame(path: Path) -> int:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(payload, dict):
+            frame = int(payload.get("frame", 0) or 0)
+            if frame > 0:
+                return frame
+    except Exception:
+        pass
+    match = re.search(r"_ep_(\d+)_", path.name)
+    return int(match.group(1)) if match else 0
+
 
 latest = Path(sys.argv[1])
 discovered = Path(sys.argv[2])
-print(discovered if discovered.stat().st_mtime >= latest.stat().st_mtime else latest)
+candidates = [latest, discovered]
+best = max(candidates, key=checkpoint_frame)
+print(best)
 PY
 )"
     echo "$chosen" > "$LATEST_CKPT_FILE"

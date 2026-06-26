@@ -128,19 +128,25 @@ def evaluate_pbt_tick_schedule(
     initial_delay: int,
     interval_steps: int,
 ) -> tuple[bool, int, str]:
-    """Return (should_tick, derived_iteration, skip_reason).
+    """Return (should_tick, next_pbt_iteration, skip_reason).
 
     Scheduling uses raw training frames so a prior LATEST.commit cannot freeze
-    derived_iteration at the last snapshot population_frame.
+    progress at the last snapshot population_frame.
+
+    Tick eligibility is frame-based (``raw_frame - last_mutation_frame``) so
+    consolidation stages can widen ``interval_steps`` without shrinking
+    ``derive_pbt_iteration`` below ``self_pbt_iteration`` and blocking forever.
     """
     derived = derive_pbt_iteration(int(raw_frame), int(interval_steps))
     if int(raw_frame) < int(start_after):
         return False, derived, "before_start_after"
     if int(raw_frame) - int(last_mutation_frame) < int(initial_delay):
         return False, derived, "initial_delay"
-    if derived <= int(self_pbt_iteration):
-        return False, derived, "iteration_not_advanced"
-    return True, derived, ""
+    frames_since_last_tick = int(raw_frame) - int(last_mutation_frame)
+    if frames_since_last_tick < int(interval_steps):
+        return False, derived, "interval_not_elapsed"
+    next_iteration = max(int(self_pbt_iteration) + 1, derived)
+    return True, next_iteration, ""
 
 
 def read_latest_commit_info(policy_workspace: Path) -> dict[str, Any]:
@@ -177,6 +183,37 @@ def read_latest_commit_info(policy_workspace: Path) -> dict[str, Any]:
         "latest_commit_iteration": iteration,
         "latest_commit_population_frame": population_frame,
     }
+
+
+def restore_pbt_tick_state_from_workspace(
+    *,
+    policy_workspace: Path,
+    self_pbt_iteration: int,
+    last_mutation_frame: int,
+    last_mutation_frame_resume: int | None = None,
+) -> tuple[int, int]:
+    """Restore PBT tick counters after a supervisor-driven train.py relaunch.
+
+    PBT restart manifests already forward ``*_resume`` CLI args; this path
+    covers crash/supervisor reloads that only pass ``--checkpoint``.
+    """
+    iteration = int(self_pbt_iteration)
+    last_frame = int(last_mutation_frame)
+    if last_mutation_frame_resume is not None:
+        last_frame = int(last_mutation_frame_resume)
+    else:
+        last_frame = 0
+    latest = read_latest_commit_info(policy_workspace)
+    if latest.get("latest_commit_exists"):
+        commit_iter = latest.get("latest_commit_iteration")
+        commit_frame = latest.get("latest_commit_population_frame")
+        if commit_iter is not None and (
+            iteration < 0 or int(commit_iter) >= iteration
+        ):
+            iteration = int(commit_iter)
+        if commit_frame is not None and int(commit_frame) >= int(last_frame):
+            last_frame = int(commit_frame)
+    return iteration, last_frame
 
 
 def derive_lineage_frame(population_frame: int, lineage_start_pf: int) -> int:

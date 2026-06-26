@@ -71,6 +71,7 @@ from dexpbt_isaaclab.pbt.pbt_control_plane import (
     pbt_raw_training_frame,
     pbt_scheduler_sync_clock,
     read_latest_commit_info,
+    restore_pbt_tick_state_from_workspace,
     snapshot_commit_barrier,
     validate_snapshot_commit,
 )
@@ -880,6 +881,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self.last_mutation_frame = int(last_mutation_frame_resume)
         else:
             self.last_mutation_frame = 0
+        self.pbt_iteration, self.last_mutation_frame = restore_pbt_tick_state_from_workspace(
+            policy_workspace=self.curr_policy_workspace,
+            self_pbt_iteration=self.pbt_iteration,
+            last_mutation_frame=self.last_mutation_frame,
+            last_mutation_frame_resume=last_mutation_frame_resume,
+        )
         if restart_count_resume is not None:
             self._restart_count = int(restart_count_resume)
         else:
@@ -5130,10 +5137,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if self._is_posterior_writer and self._enable_counterfactual:
             self._maybe_consume_counterfactual_result(raw_frames)
 
-        if self.pbt_iteration == -1:
+        if self.initial_env_frames == -1:
             self.initial_env_frames = raw_frames
+        if self.pbt_iteration == -1:
+            self.pbt_iteration, self.last_mutation_frame = restore_pbt_tick_state_from_workspace(
+                policy_workspace=self.curr_policy_workspace,
+                self_pbt_iteration=self.pbt_iteration,
+                last_mutation_frame=self.last_mutation_frame,
+            )
+        if self.pbt_iteration == -1:
             self.last_mutation_frame = raw_frames
             self.pbt_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
+        elif int(self.last_mutation_frame) <= 0:
+            self.last_mutation_frame = raw_frames
 
         derived_iteration = derive_pbt_iteration(raw_frames, self.interval_steps)
         if self.pbt_consolidation_cfg.enabled:

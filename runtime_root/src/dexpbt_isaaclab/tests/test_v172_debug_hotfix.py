@@ -24,6 +24,7 @@ from dexpbt_isaaclab.awr.elite_awr import (
 from dexpbt_isaaclab.pbt.pbt_control_plane import (
     evaluate_pbt_tick_schedule,
     read_latest_commit_info,
+    restore_pbt_tick_state_from_workspace,
 )
 
 
@@ -124,7 +125,7 @@ class TestAwrBuilderFuse(unittest.TestCase):
 
 class TestPbtTickScheduler(unittest.TestCase):
     def test_derived_iteration_advances_with_raw_frame_despite_frozen_commit(self):
-        should_tick, derived, reason = evaluate_pbt_tick_schedule(
+        should_tick, next_iter, reason = evaluate_pbt_tick_schedule(
             raw_frame=250_000_000,
             self_pbt_iteration=10,
             last_mutation_frame=200_000_000,
@@ -133,7 +134,7 @@ class TestPbtTickScheduler(unittest.TestCase):
             interval_steps=20_000_000,
         )
         self.assertTrue(should_tick)
-        self.assertEqual(derived, 12)
+        self.assertEqual(next_iter, 12)
         self.assertEqual(reason, "")
 
     def test_existing_latest_commit_does_not_block_next_interval(self):
@@ -156,7 +157,7 @@ class TestPbtTickScheduler(unittest.TestCase):
             self.assertTrue(latest["latest_commit_exists"])
             self.assertEqual(latest["latest_commit_iteration"], 10)
 
-            should_tick, derived, _ = evaluate_pbt_tick_schedule(
+            should_tick, next_iter, _ = evaluate_pbt_tick_schedule(
                 raw_frame=250_000_000,
                 self_pbt_iteration=10,
                 last_mutation_frame=200_000_000,
@@ -165,7 +166,7 @@ class TestPbtTickScheduler(unittest.TestCase):
                 interval_steps=20_000_000,
             )
             self.assertTrue(should_tick)
-            self.assertEqual(derived, 12)
+            self.assertEqual(next_iter, 12)
 
     def test_initial_delay_blocks_until_enough_frames_since_last_tick(self):
         should_tick, _, reason = evaluate_pbt_tick_schedule(
@@ -179,7 +180,7 @@ class TestPbtTickScheduler(unittest.TestCase):
         self.assertFalse(should_tick)
         self.assertEqual(reason, "initial_delay")
 
-        should_tick, derived, reason = evaluate_pbt_tick_schedule(
+        should_tick, next_iter, reason = evaluate_pbt_tick_schedule(
             raw_frame=250_000_000,
             self_pbt_iteration=10,
             last_mutation_frame=200_000_000,
@@ -188,8 +189,57 @@ class TestPbtTickScheduler(unittest.TestCase):
             interval_steps=20_000_000,
         )
         self.assertTrue(should_tick)
-        self.assertEqual(derived, 12)
+        self.assertEqual(next_iter, 12)
         self.assertEqual(reason, "")
+
+    def test_wider_interval_does_not_block_after_prior_ticks(self):
+        """Stage-2 consolidation doubles interval; derived drops but ticks must continue."""
+        should_tick, next_iter, reason = evaluate_pbt_tick_schedule(
+            raw_frame=2_250_000_000,
+            self_pbt_iteration=108,
+            last_mutation_frame=2_160_000_000,
+            start_after=200_000_000,
+            initial_delay=50_000_000,
+            interval_steps=40_000_000,
+        )
+        self.assertTrue(should_tick)
+        self.assertEqual(next_iter, 109)
+        self.assertEqual(reason, "")
+
+        blocked, _, blocked_reason = evaluate_pbt_tick_schedule(
+            raw_frame=2_195_000_000,
+            self_pbt_iteration=108,
+            last_mutation_frame=2_160_000_000,
+            start_after=200_000_000,
+            initial_delay=30_000_000,
+            interval_steps=40_000_000,
+        )
+        self.assertFalse(blocked)
+        self.assertEqual(blocked_reason, "interval_not_elapsed")
+
+    def test_restore_tick_state_from_latest_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            commit_dir = ws / "000108.staging.commit"
+            commit_dir.mkdir(parents=True)
+            (commit_dir / "MANIFEST").write_text(
+                json.dumps(
+                    {
+                        "pbt_iteration": 108,
+                        "population_frame": 2_160_000_000,
+                    }
+                )
+            )
+            (ws / "LATEST.commit").write_text(
+                json.dumps({"commit_id": "abc", "commit_dir": commit_dir.name})
+            )
+            iteration, last_frame = restore_pbt_tick_state_from_workspace(
+                policy_workspace=ws,
+                self_pbt_iteration=-1,
+                last_mutation_frame=0,
+            )
+            self.assertEqual(iteration, 108)
+            self.assertEqual(last_frame, 2_160_000_000)
 
 
 if __name__ == "__main__":
