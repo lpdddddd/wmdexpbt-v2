@@ -71,7 +71,8 @@ pbt_consolidation_stage1_end_frames=2200000000
 pbt_consolidation_stage2_end_frames=3500000000
 pbt_consolidation_stage3_end_frames=5000000000
 pbt_min_frames_between_restarts=100000000
-pbt_allow_mid_self_mutation=true
+pbt_allow_mid_self_mutation=false
+mid_self_mutation_disabled=true
 pbt_promising_protect_frames=250000000
 pbt_floor_recovery_protect_frames=300000000
 curriculum_fast_shrink_strong=0.925
@@ -90,12 +91,12 @@ pbt_strong_live_inherit_max_tol=0.035
 pbt_strong_live_inherit_min_mean=30.0
 pbt_strong_live_inherit_min_max=35.0
 late_floor_retention_gate_enable=true
-late_floor_retention_tol_threshold=0.025
+late_floor_retention_tol_threshold=0.030
 late_floor_retention_peak_threshold=35.0
-late_floor_retention_min_retention=0.85
+late_floor_retention_min_retention=0.88
 late_floor_retention_hard_min_retention=0.75
 late_floor_retention_patience=2
-late_floor_retention_freeze_frames=200000000
+late_floor_retention_freeze_frames=250000000
 late_floor_retention_block_shrink=true
 late_floor_retention_freeze_mutation=true
 late_floor_retention_rollback_enable=false
@@ -129,7 +130,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_min_frames_as_source_after_restart 50000000 \
   --pbt_min_frames_between_restarts 100000000 \
   --pbt_disable_self_restart \
-  --pbt_allow_mid_self_mutation \
+  --no-pbt_allow_mid_self_mutation \
   --pbt_source_selection_mode tiered \
   --no-pbt_enable_best_nsucc_recovery \
   --pbt_allow_best_nsucc_archive_recovery \
@@ -171,18 +172,18 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_strong_live_inherit_min_mean 30.0 \
   --pbt_strong_live_inherit_min_max 35.0 \
   --late_floor_retention_gate_enable \
-  --late_floor_retention_tol_threshold 0.025 \
+  --late_floor_retention_tol_threshold 0.030 \
   --late_floor_retention_peak_threshold 35.0 \
-  --late_floor_retention_min_retention 0.85 \
+  --late_floor_retention_min_retention 0.88 \
   --late_floor_retention_hard_min_retention 0.75 \
   --late_floor_retention_patience 2 \
-  --late_floor_retention_freeze_frames 200000000 \
+  --late_floor_retention_freeze_frames 250000000 \
   --late_floor_retention_block_shrink \
   --late_floor_retention_freeze_mutation \
   --no-late_floor_retention_rollback_enable \
   --pbt_floor_recovery_aware \
-  --pbt_floor_tol_threshold 0.02 \
-  --pbt_hard_floor_tol_threshold 0.012 \
+  --pbt_floor_tol_threshold 0.030 \
+  --pbt_hard_floor_tol_threshold 0.025 \
   --pbt_floor_recovery_window 4 \
   --pbt_floor_recovery_protect_frames 300000000 \
   --pbt_floor_recovery_min_nsucc_protect 15.0 \

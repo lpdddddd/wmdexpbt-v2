@@ -382,15 +382,23 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_strong_live_inherit_min_max: float = 35.0,
         # CSER patch: late-floor retention gate.
         late_floor_retention_gate_enable: bool = True,
-        late_floor_retention_tol_threshold: float = 0.025,
+        late_floor_retention_tol_threshold: float = 0.030,
         late_floor_retention_peak_threshold: float = 35.0,
-        late_floor_retention_min_retention: float = 0.85,
+        late_floor_retention_min_retention: float = 0.88,
         late_floor_retention_hard_min_retention: float = 0.75,
         late_floor_retention_patience: int = 2,
-        late_floor_retention_freeze_frames: int = 200_000_000,
+        late_floor_retention_freeze_frames: int = 250_000_000,
         late_floor_retention_block_shrink: bool = True,
         late_floor_retention_freeze_mutation: bool = True,
         late_floor_retention_rollback_enable: bool = False,
+        # CSER retention patch: pre-floor peak retention guard.
+        pre_floor_peak_guard_enable: bool = True,
+        pre_floor_peak_guard_tol_threshold: float = 0.030,
+        pre_floor_peak_guard_target_tol: float = 0.025,
+        pre_floor_peak_guard_peak_threshold: float = 35.0,
+        pre_floor_peak_guard_min_retention: float = 0.92,
+        pre_floor_peak_guard_min_stable_ticks: int = 3,
+        pre_floor_peak_guard_freeze_frames: int = 200_000_000,
         # Patch P2-B (2026-06-01): early collapse freeze + tolerance rollback.
         pbt_early_collapse_detect: bool = True,
         early_collapse_drop_ratio: float = 0.3,
@@ -424,8 +432,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # legacy bottom-replacement / archive cascade unchanged bit-for-bit.
         # ------------------------------------------------------------------
         pbt_floor_recovery_aware: bool = False,
-        pbt_floor_tol_threshold: float = 0.02,
-        pbt_hard_floor_tol_threshold: float = 0.012,
+        pbt_floor_tol_threshold: float = 0.030,
+        pbt_hard_floor_tol_threshold: float = 0.025,
         pbt_floor_recovery_window: int = 4,
         pbt_floor_recovery_slope_weight: float = 0.5,
         pbt_floor_recovery_retention_weight: float = 0.3,
@@ -1140,6 +1148,23 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self.late_floor_retention_rollback_enable = bool(
             late_floor_retention_rollback_enable
+        )
+        self.pre_floor_peak_guard_enable = bool(pre_floor_peak_guard_enable)
+        self.pre_floor_peak_guard_tol_threshold = float(
+            pre_floor_peak_guard_tol_threshold
+        )
+        self.pre_floor_peak_guard_target_tol = float(pre_floor_peak_guard_target_tol)
+        self.pre_floor_peak_guard_peak_threshold = float(
+            pre_floor_peak_guard_peak_threshold
+        )
+        self.pre_floor_peak_guard_min_retention = float(
+            pre_floor_peak_guard_min_retention
+        )
+        self.pre_floor_peak_guard_min_stable_ticks = max(
+            1, int(pre_floor_peak_guard_min_stable_ticks)
+        )
+        self.pre_floor_peak_guard_freeze_frames = int(
+            pre_floor_peak_guard_freeze_frames
         )
         if self.pbt_curriculum_inherit_mode == "source_safe":
             if self.pbt_source_safe_recovery_consolidation_frames <= 0:
@@ -2271,6 +2296,31 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 }
             )
 
+        pre_floor_peak = self._evaluate_pre_floor_peak_guard(
+            policy_idx,
+            window,
+            env_frames,
+            cur_tol=cur_tol,
+            shrink_token=shrink_token,
+            recent_peak=recent_peak,
+            adaptive_shrink_factor=adaptive_shrink_factor,
+            stable_ticks=stable_ticks,
+        )
+        if pre_floor_peak.get("blocked") and shrink_token:
+            shrink_token = False
+            allow_shrink = False
+            shrink_blocked_reason = "pre_floor_peak_retention_guard"
+            shrink_reason = "pre_floor_peak_retention_guard"
+            if (
+                self.pbt_single_shrink_per_window
+                and self._shrink_issued_this_window.get(policy_idx, False)
+            ):
+                self._shrink_issued_this_window[policy_idx] = False
+                cur = int(self._shrinks_since_rollback.get(policy_idx, 0))
+                if cur > 0:
+                    self._shrinks_since_rollback[policy_idx] = cur - 1
+            shrinks_in_window = 0
+
         late_floor_retention, forced_tolerance = self._evaluate_late_floor_retention_gate(
             policy_idx,
             window,
@@ -2478,6 +2528,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 late_floor_retention.get("freeze_until", 0)
             ),
             late_floor_retention_reason=str(late_floor_retention.get("reason", "")),
+            pre_floor_peak_guard_active=bool(pre_floor_peak.get("active", False)),
+            pre_floor_peak_guard_blocked=bool(pre_floor_peak.get("blocked", False)),
+            pre_floor_peak_guard_retention=float(pre_floor_peak.get("retention", 0.0)),
+            pre_floor_peak_guard_recent_peak=float(
+                pre_floor_peak.get("recent_peak_nsucc_mean", 0.0)
+            ),
+            pre_floor_peak_guard_stable_ticks=int(
+                pre_floor_peak.get("stable_ticks", 0)
+            ),
+            pre_floor_peak_guard_reason=str(pre_floor_peak.get("reason", "")),
         )
 
     def _log_curriculum_control_scalars(
@@ -2839,6 +2899,31 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.writer.add_scalar(
             "curriculum/late_floor_retention_freeze_until",
             float(control.late_floor_retention_freeze_until),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_floor_peak_guard_active",
+            1.0 if control.pre_floor_peak_guard_active else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_floor_peak_guard_blocked",
+            1.0 if control.pre_floor_peak_guard_blocked else 0.0,
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_floor_peak_guard_retention",
+            float(control.pre_floor_peak_guard_retention),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_floor_peak_guard_peak",
+            float(control.pre_floor_peak_guard_recent_peak),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "curriculum/pre_floor_peak_guard_stable_ticks",
+            float(control.pre_floor_peak_guard_stable_ticks),
             env_frames,
         )
 
@@ -3257,6 +3342,93 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             out["block_reason"] = "danger_zone_low_global_retention"
             out["danger_blocked"] = True
             out["danger_block_reason"] = "danger_zone_low_global_retention"
+        return out
+
+    def _evaluate_pre_floor_peak_guard(
+        self,
+        policy_idx: int,
+        window: RollingNsuccWindow,
+        env_frames: int,
+        *,
+        cur_tol: float,
+        shrink_token: bool,
+        recent_peak: float,
+        adaptive_shrink_factor: float,
+        stable_ticks: int,
+    ) -> dict[str, Any]:
+        """Block shrink before crossing target tol if peak retention is weak."""
+        out: dict[str, Any] = {
+            "active": False,
+            "blocked": False,
+            "reason": "",
+            "retention": 1.0,
+            "recent_peak_nsucc_mean": float(recent_peak),
+            "current_nsucc_mean": 0.0,
+            "stable_ticks": int(stable_ticks),
+            "freeze_until": 0,
+        }
+        if not self.pre_floor_peak_guard_enable or not shrink_token:
+            return out
+        if not window.samples:
+            return out
+
+        eff_factor = (
+            float(adaptive_shrink_factor)
+            if float(adaptive_shrink_factor) > 0.0
+            else float(self.curriculum_shrink_factor)
+        )
+        next_tol = max(
+            eff_factor * float(cur_tol),
+            float(self.pbt_hard_floor_tol_threshold),
+        )
+        current_nsucc = float(window.samples[-1].nsucc_mean)
+        peak = float(recent_peak)
+        if peak <= 1e-9:
+            peak = max(float(s.nsucc_mean) for s in window.samples)
+        retention = current_nsucc / peak if peak > 1e-9 else 1.0
+        out["current_nsucc_mean"] = current_nsucc
+        out["recent_peak_nsucc_mean"] = peak
+        out["retention"] = float(retention)
+        out["stable_ticks"] = int(stable_ticks)
+
+        in_zone = (
+            float(cur_tol) <= self.pre_floor_peak_guard_tol_threshold + 1e-9
+            and float(next_tol) <= self.pre_floor_peak_guard_target_tol + 1e-9
+            and peak >= self.pre_floor_peak_guard_peak_threshold
+        )
+        if not in_zone:
+            return out
+
+        out["active"] = True
+        allow = (
+            retention >= self.pre_floor_peak_guard_min_retention
+            and int(stable_ticks) >= self.pre_floor_peak_guard_min_stable_ticks
+        )
+        if allow:
+            out["reason"] = "pre_floor_peak_retention_ok"
+            return out
+
+        out["blocked"] = True
+        out["reason"] = "pre_floor_peak_retention_guard"
+        freeze_until = int(env_frames) + int(self.pre_floor_peak_guard_freeze_frames)
+        out["freeze_until"] = freeze_until
+        self._curriculum_safety_freeze_until[policy_idx] = freeze_until
+        self._append_curriculum_safety_event(
+            {
+                "event": "pre_floor_peak_retention_guard",
+                "policy_idx": int(policy_idx),
+                "env_frames": int(env_frames),
+                "success_tolerance": float(cur_tol),
+                "next_tolerance": float(next_tol),
+                "current_nsucc_mean": float(current_nsucc),
+                "recent_peak_nsucc_mean": float(peak),
+                "retention": float(retention),
+                "stable_ticks": int(stable_ticks),
+                "reason": "pre_floor_peak_retention_guard",
+                "freeze_until": int(freeze_until),
+                "shrink_blocked": True,
+            }
+        )
         return out
 
     def _evaluate_late_floor_retention_gate(

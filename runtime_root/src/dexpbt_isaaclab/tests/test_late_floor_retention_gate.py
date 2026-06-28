@@ -41,12 +41,12 @@ def _make_observer(
         pbt_min_frames_between_restarts=0,
         curriculum_mode="mastery",
         late_floor_retention_gate_enable=gate_enable,
-        late_floor_retention_tol_threshold=0.025,
+        late_floor_retention_tol_threshold=0.030,
         late_floor_retention_peak_threshold=35.0,
-        late_floor_retention_min_retention=0.85,
+        late_floor_retention_min_retention=0.88,
         late_floor_retention_hard_min_retention=0.75,
         late_floor_retention_patience=2,
-        late_floor_retention_freeze_frames=200_000_000,
+        late_floor_retention_freeze_frames=250_000_000,
         late_floor_retention_block_shrink=True,
         late_floor_retention_freeze_mutation=True,
         late_floor_retention_rollback_enable=rollback_enable,
@@ -83,15 +83,33 @@ class LateFloorRetentionGateTest(_TmpWs):
         self.assertAlmostEqual(out["retention"], 0.8, places=6)
         self.assertEqual(forced, 0.0)
 
+    def test_blocks_at_tol_029_with_retention_085(self):
+        obs = _make_observer(self.ws)
+        window = obs._policy_window(1)
+        window.samples = [_sample(mean=40.0, max_=50.0, tol=0.029), _sample(mean=34.0, max_=50.0, tol=0.029)]
+        out, forced = obs._evaluate_late_floor_retention_gate(
+            1,
+            window,
+            env_frames=1_000_000_000,
+            cur_tol=0.029,
+            shrink_token=True,
+            recent_peak=40.0,
+            forced_tolerance=0.0,
+        )
+        self.assertTrue(out["active"])
+        self.assertTrue(out["blocked"])
+        self.assertEqual(out["reason"], "late_floor_low_retention")
+        self.assertEqual(forced, 0.0)
+
     def test_no_trigger_when_not_late_floor(self):
         obs = _make_observer(self.ws)
         window = obs._policy_window(1)
-        window.samples = [_sample(mean=32.0, max_=50.0, tol=0.030)]
+        window.samples = [_sample(mean=32.0, max_=50.0, tol=0.031)]
         out, _ = obs._evaluate_late_floor_retention_gate(
             1,
             window,
             env_frames=1_000_000_000,
-            cur_tol=0.030,
+            cur_tol=0.031,
             shrink_token=True,
             recent_peak=40.0,
             forced_tolerance=0.0,

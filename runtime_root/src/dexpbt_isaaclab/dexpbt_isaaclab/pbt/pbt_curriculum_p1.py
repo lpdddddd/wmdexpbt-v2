@@ -259,6 +259,13 @@ class CurriculumControlState:
     late_floor_retention_blocked_shrink: bool = False
     late_floor_retention_freeze_until: int = 0
     late_floor_retention_reason: str = ""
+    # Pre-floor peak retention guard audit (CSER retention patch).
+    pre_floor_peak_guard_active: bool = False
+    pre_floor_peak_guard_blocked: bool = False
+    pre_floor_peak_guard_retention: float = 0.0
+    pre_floor_peak_guard_recent_peak: float = 0.0
+    pre_floor_peak_guard_stable_ticks: int = 0
+    pre_floor_peak_guard_reason: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

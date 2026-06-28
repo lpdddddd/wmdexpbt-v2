@@ -27,6 +27,9 @@ CSER_LAUNCHER_5B = REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_5
 CSER_LAUNCHER_CONSERVATIVE_5B = (
     REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_conservative_5b.sh"
 )
+CSER_LAUNCHER_RETENTION_5B = (
+    REPO_ROOT / "results/launchers/start_regrasping_cser_dexpbt_conservative_retention_5b.sh"
+)
 CSER_DOC = REPO_ROOT / "results/docs/CSER_DEXPBT.md"
 
 _POSITIVE_AWR = re.compile(r"(?<!\-\-no\-)\-\-awr_enable\b")
@@ -134,6 +137,12 @@ class TestCserConservativeProfile(unittest.TestCase):
         self.assertTrue(args.eir_actor_distill_enable)
         self.assertEqual(args.eir_actor_distill_allowed_sources, "elite,archive")
         self.assertAlmostEqual(float(args.eir_actor_distill_weight), 0.0005)
+        self.assertFalse(args.pbt_allow_mid_self_mutation)
+        self.assertAlmostEqual(float(args.late_floor_retention_tol_threshold), 0.030)
+        self.assertAlmostEqual(float(args.pbt_floor_tol_threshold), 0.030)
+        self.assertAlmostEqual(float(args.pbt_hard_floor_tol_threshold), 0.025)
+        self.assertTrue(args.pre_floor_peak_guard_enable)
+        self.assertTrue(args.actor_distill_fallback_with_snippet_enable)
         self.assertEqual(args.wm_calibration_eval_tol_mode, "hybrid")
         self.assertAlmostEqual(float(args.wm_calibration_eval_tol_threshold), 0.05)
         self.assertEqual(int(args.wm_calibration_min_samples), 128)
@@ -191,3 +200,22 @@ class TestCserLauncherSanity(unittest.TestCase):
         self.assertIn("--no-awr_enable", text)
         self.assertIn("--no-pbt_wm_profile_copy_enable", text)
         self.assertIn("pbt_consolidation_stage1_end_frames=2200000000", text)
+
+    def test_retention_5b_launcher(self):
+        self.assertTrue(
+            CSER_LAUNCHER_RETENTION_5B.is_file(),
+            msg=str(CSER_LAUNCHER_RETENTION_5B),
+        )
+        text = CSER_LAUNCHER_RETENTION_5B.read_text()
+        self.assertIn("regrasping_cser_dexpbt_conservative_retention_5b_", text)
+        self.assertIn("--no-pbt_allow_mid_self_mutation", text)
+        self.assertIn("--pbt_floor_tol_threshold 0.030", text)
+        self.assertIn("--pbt_hard_floor_tol_threshold 0.025", text)
+        self.assertIn("--pre_floor_peak_guard_enable", text)
+        self.assertIn("--pre_floor_peak_guard_tol_threshold 0.030", text)
+        self.assertIn("--actor_distill_fallback_with_snippet_enable", text)
+        self.assertIn("--no-awr_enable", text)
+        self.assertIn("--no-eir_residual_apply_to_rollout", text)
+        self.assertIn("--no-eir_use_rssm_mppi", text)
+        self.assertIn("--no-pbt_wm_profile_copy_enable", text)
+        self.assertIn("patch_note=no_mid_self_mutation_pre_floor_retention_guard_early_floor_threshold_true_elitebank_fallback", text)

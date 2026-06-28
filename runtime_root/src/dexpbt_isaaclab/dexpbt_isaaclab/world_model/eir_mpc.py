@@ -160,6 +160,11 @@ class EIRConfig:
     actor_distill_ramp_frames: int = 300_000_000
     actor_distill_nsucc_ref: float = 20.0
 
+    # Parallel EliteBank actor-distill fallback when snippet path is weak.
+    actor_distill_fallback_with_snippet_enable: bool = True
+    actor_distill_fallback_min_snippet_bank_size: int = 5000
+    actor_distill_fallback_min_rerank_changed_frac: float = 1e-4
+
     # Soft candidate-retrieval gate (default hard_tol = legacy behaviour).
     candidate_gate_mode: str = "hard_tol"
     elite_candidate_tol_start: float = 0.070
@@ -963,6 +968,9 @@ class EIRBridge:
     teacher_selected_below_004: float = 0.0
     best_source_frac_elite_below_004: float = 0.0
     actor_distill_nonzero_below_004: float = 0.0
+    last_actor_distill_fallback_with_snippet_used: float = 0.0
+    last_actor_distill_fallback_reason: str = ""
+    last_snippet_blocks_actor_fallback: float = 0.0
 
     def record_bank_feature_source(self, source_flag: int) -> None:
         """Track whether bank updates use actor_mlp (0) or fallback keys (1)."""
@@ -1313,6 +1321,34 @@ def _compute_snippet_distill_loss(
     return loss
 
 
+def should_use_actor_distill_fallback(
+    *,
+    eir_cfg: EIRConfig,
+    use_snippet: bool,
+    snippet_distill_loss: float,
+    snippet_bank_size: float,
+    snippet_rerank_changed_frac: float,
+) -> tuple[bool, str]:
+    """Decide whether EliteBank actor-distill runs alongside snippet distill."""
+    if not bool(getattr(eir_cfg, "actor_distill_enable", False)):
+        return False, "snippet_disabled"
+    if not use_snippet:
+        return True, "snippet_disabled"
+    if not bool(getattr(eir_cfg, "actor_distill_fallback_with_snippet_enable", True)):
+        return False, "snippet_ok_no_fallback"
+    min_bank = int(getattr(eir_cfg, "actor_distill_fallback_min_snippet_bank_size", 5000))
+    min_rerank = float(
+        getattr(eir_cfg, "actor_distill_fallback_min_rerank_changed_frac", 1e-4)
+    )
+    if float(snippet_bank_size) < float(min_bank):
+        return True, "snippet_bank_small"
+    if float(snippet_distill_loss) <= 1e-8:
+        return True, "snippet_loss_zero"
+    if float(snippet_rerank_changed_frac) <= min_rerank:
+        return True, "snippet_rerank_inactive"
+    return False, "snippet_ok_no_fallback"
+
+
 def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tensor]:
     """EIR aux loss: ERD-style scorer BCE + gated recovery residual distill.
 
@@ -1590,7 +1626,23 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 start=int(start),
                 end=int(end),
             )
-        elif bool(getattr(eir_cfg, "actor_distill_enable", False)):
+        run_actor_distill, fallback_reason = should_use_actor_distill_fallback(
+            eir_cfg=eir_cfg,
+            use_snippet=_use_snippet,
+            snippet_distill_loss=float(getattr(bridge, "last_snippet_distill_loss", 0.0)),
+            snippet_bank_size=float(getattr(bridge, "last_snippet_bank_size", 0.0)),
+            snippet_rerank_changed_frac=float(
+                getattr(bridge, "last_snippet_wm_rerank_changed_frac", 0.0)
+            ),
+        )
+        bridge.last_actor_distill_fallback_reason = str(fallback_reason)
+        bridge.last_actor_distill_fallback_with_snippet_used = (
+            1.0 if (run_actor_distill and _use_snippet) else 0.0
+        )
+        bridge.last_snippet_blocks_actor_fallback = (
+            1.0 if (_use_snippet and not run_actor_distill) else 0.0
+        )
+        if run_actor_distill:
             bridge.last_actor_distill_loss_cap = float(eir_cfg.actor_distill_loss_cap)
             best_idx = rer["best_idx"]
             best_source = gather_best_source(cand_out["source_id"], best_idx)

@@ -601,6 +601,48 @@ parser.add_argument(
     help="Late-floor retention gate: rollback to last mastered safe tol "
     "after patience (default off).",
 )
+parser.add_argument(
+    "--pre_floor_peak_guard_enable",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Block shrink before crossing target tol when peak retention is weak.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_tol_threshold",
+    type=float,
+    default=0.030,
+    help="Pre-floor guard: current tolerance must be <= this.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_target_tol",
+    type=float,
+    default=0.025,
+    help="Pre-floor guard: projected next tolerance must be <= this.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_peak_threshold",
+    type=float,
+    default=35.0,
+    help="Pre-floor guard: recent peak nsucc_mean must be >= this.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_min_retention",
+    type=float,
+    default=0.92,
+    help="Pre-floor guard: require retention >= this to allow shrink.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_min_stable_ticks",
+    type=int,
+    default=3,
+    help="Pre-floor guard: require stable tolerance ticks >= this.",
+)
+parser.add_argument(
+    "--pre_floor_peak_guard_freeze_frames",
+    type=int,
+    default=200_000_000,
+    help="Pre-floor guard: curriculum freeze length when blocking shrink.",
+)
 # CSER-v0: staged PBT consolidation schedule (defaults inert).
 parser.add_argument(
     "--pbt_consolidation_enable",
@@ -2114,6 +2156,24 @@ parser.add_argument("--eir_actor_distill_tol", type=float, default=0.04)
 parser.add_argument("--eir_actor_distill_min_margin", type=float, default=0.02)
 parser.add_argument("--eir_actor_distill_margin_norm", type=float, default=0.05)
 parser.add_argument("--eir_actor_distill_max_delta", type=float, default=0.35)
+parser.add_argument(
+    "--actor_distill_fallback_with_snippet_enable",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Allow EliteBank actor-distill fallback when snippet path is weak.",
+)
+parser.add_argument(
+    "--actor_distill_fallback_min_snippet_bank_size",
+    type=int,
+    default=5000,
+    help="Snippet bank size below which actor-distill fallback may run.",
+)
+parser.add_argument(
+    "--actor_distill_fallback_min_rerank_changed_frac",
+    type=float,
+    default=1e-4,
+    help="Snippet WM rerank changed_frac below which fallback may run.",
+)
 parser.add_argument("--eir_actor_distill_allowed_sources", type=str, default="rssm,elite,archive")
 parser.add_argument("--eir_actor_distill_uncertainty_threshold", type=float, default=2.0)
 parser.add_argument("--eir_actor_distill_loss_cap", type=float, default=0.05)
@@ -4069,6 +4129,30 @@ def _patch_actor_train_for_seq_wm(
                     for k, v in _snippet_scalars.items():
                         try:
                             tb_writer.add_scalar(k, float(v), frames)
+                        except Exception:
+                            pass
+                    for k, v in {
+                        "actor_distill_fallback_with_snippet_used": float(
+                            getattr(xb, "last_actor_distill_fallback_with_snippet_used", 0.0)
+                        ),
+                        "actor_distill_fallback_reason": float(
+                            {
+                                "snippet_disabled": 0.0,
+                                "snippet_bank_small": 1.0,
+                                "snippet_loss_zero": 2.0,
+                                "snippet_rerank_inactive": 3.0,
+                                "snippet_ok_no_fallback": 4.0,
+                            }.get(
+                                str(getattr(xb, "last_actor_distill_fallback_reason", "")),
+                                -1.0,
+                            )
+                        ),
+                        "snippet_blocks_actor_fallback": float(
+                            getattr(xb, "last_snippet_blocks_actor_fallback", 0.0)
+                        ),
+                    }.items():
+                        try:
+                            tb_writer.add_scalar(f"eir/{k}", float(v), frames)
                         except Exception:
                             pass
                     _wcs = getattr(xb, "wm_calibration_state", None)
@@ -6527,6 +6611,15 @@ def main():
             wm_strategy_profile_name=str(
                 getattr(args_cli, "wm_strategy_profile", "") or ""
             ),
+            actor_distill_fallback_with_snippet_enable=bool(
+                args_cli.actor_distill_fallback_with_snippet_enable
+            ),
+            actor_distill_fallback_min_snippet_bank_size=int(
+                args_cli.actor_distill_fallback_min_snippet_bank_size
+            ),
+            actor_distill_fallback_min_rerank_changed_frac=float(
+                args_cli.actor_distill_fallback_min_rerank_changed_frac
+            ),
         )
         eir_bank_cfg = EliteRecoveryBankConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_elite_bank),
@@ -7329,6 +7422,23 @@ def main():
             ),
             late_floor_retention_rollback_enable=(
                 args_cli.late_floor_retention_rollback_enable
+            ),
+            pre_floor_peak_guard_enable=args_cli.pre_floor_peak_guard_enable,
+            pre_floor_peak_guard_tol_threshold=(
+                args_cli.pre_floor_peak_guard_tol_threshold
+            ),
+            pre_floor_peak_guard_target_tol=args_cli.pre_floor_peak_guard_target_tol,
+            pre_floor_peak_guard_peak_threshold=(
+                args_cli.pre_floor_peak_guard_peak_threshold
+            ),
+            pre_floor_peak_guard_min_retention=(
+                args_cli.pre_floor_peak_guard_min_retention
+            ),
+            pre_floor_peak_guard_min_stable_ticks=(
+                args_cli.pre_floor_peak_guard_min_stable_ticks
+            ),
+            pre_floor_peak_guard_freeze_frames=(
+                args_cli.pre_floor_peak_guard_freeze_frames
             ),
             # Phase A4 P4 (2026-06-09): floor-recovery + WM-guided ranking.
             pbt_floor_recovery_aware=args_cli.pbt_floor_recovery_aware,
