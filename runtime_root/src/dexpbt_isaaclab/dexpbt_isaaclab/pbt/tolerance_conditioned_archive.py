@@ -7,6 +7,7 @@ tolerance recorded in that metadata.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,13 @@ def archive_retention(state: dict[str, Any]) -> float | None:
     return None
 
 
+def archive_retention_valid_at_save(state: dict[str, Any]) -> bool | None:
+    """Return validity flag when present; None if the field is absent."""
+    if "same_tol_retention_valid_at_save" not in state:
+        return None
+    return bool(state.get("same_tol_retention_valid_at_save"))
+
+
 def select_compatible_archive(
     archive_dir: Path,
     *,
@@ -45,9 +53,9 @@ def select_compatible_archive(
     """Select highest-nsucc compatible old/new archive metadata.
 
     When ``require_retention_metadata`` is True (strict late-degradation
-    rescue), archives missing retention fields are rejected fail-closed.
-    Ordinary emergency recovery keeps the legacy default of treating missing
-    retention as 1.0 when ``require_retention_metadata`` is False.
+    rescue), archives must carry a finite retention that was valid at save
+    time. Ordinary emergency recovery keeps the legacy default of treating
+    missing retention as 1.0 when ``require_retention_metadata`` is False.
     """
     candidates: list[dict[str, Any]] = []
     for path in archive_dir.glob("*.json"):
@@ -70,19 +78,49 @@ def select_compatible_archive(
                 reject_log.append({"path": str(path), "reason": "mean_below_threshold"})
             continue
         retention = archive_retention(state)
-        if retention is None:
-            if require_retention_metadata and float(min_retention) > 0.0:
+        if require_retention_metadata:
+            if retention is None:
                 if reject_log is not None:
                     reject_log.append({
                         "path": str(path),
                         "reason": "missing_retention_metadata",
                     })
                 continue
-            retention = 1.0
-        if float(retention) < float(min_retention):
-            if reject_log is not None:
-                reject_log.append({"path": str(path), "reason": "retention_below_threshold"})
-            continue
+            if not math.isfinite(float(retention)):
+                if reject_log is not None:
+                    reject_log.append({
+                        "path": str(path),
+                        "reason": "retention_nonfinite",
+                    })
+                continue
+            valid_flag = archive_retention_valid_at_save(state)
+            if valid_flag is not True:
+                if reject_log is not None:
+                    reject_log.append({
+                        "path": str(path),
+                        "reason": "retention_invalid_at_save",
+                    })
+                continue
+            if float(retention) < float(min_retention):
+                if reject_log is not None:
+                    reject_log.append({
+                        "path": str(path),
+                        "reason": "retention_below_threshold",
+                    })
+                continue
+        else:
+            if retention is None:
+                retention = 1.0
+            elif not math.isfinite(float(retention)):
+                # Non-strict path: treat non-finite as missing → default 1.0.
+                retention = 1.0
+            if float(retention) < float(min_retention):
+                if reject_log is not None:
+                    reject_log.append({
+                        "path": str(path),
+                        "reason": "retention_below_threshold",
+                    })
+                continue
         state["_archive_metadata_path"] = str(path)
         state["_archive_retention_used"] = float(retention)
         candidates.append(state)

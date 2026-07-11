@@ -130,6 +130,8 @@ nohup python -u -m dexpbt_isaaclab.scripts.train \
   --late_degradation_rescue_min_source_advantage 8.0 \
   --late_degradation_rescue_source_min_retention 0.85 \
   --late_degradation_rescue_reject_collapse_source \
+  --late_degradation_rescue_require_source_control \
+  --no-late_degradation_rescue_bypass_elimination_burnin \
   --no-pbt_allow_mid_self_mutation \
   --no-pbt_wm_profile_copy_enable \
   --no-awr_enable \

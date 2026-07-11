@@ -256,6 +256,8 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --late_degradation_rescue_min_source_advantage 8.0 \
   --late_degradation_rescue_source_min_retention 0.85 \
   --late_degradation_rescue_reject_collapse_source \
+  --late_degradation_rescue_require_source_control \
+  --no-late_degradation_rescue_bypass_elimination_burnin \
   "${SHARED_WM_HEAD_FLAGS[@]}" \
   >>"$LOG" 2>&1 &
 

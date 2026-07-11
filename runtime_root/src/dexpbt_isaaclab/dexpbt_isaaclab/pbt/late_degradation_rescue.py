@@ -54,6 +54,7 @@ def population_success_tolerance(state: dict[str, Any] | None) -> float:
 
 
 def source_has_collapse_signal(state: dict[str, Any] | None) -> bool:
+    """Legacy population-meta collapse probe (incomplete for live workers)."""
     if not state:
         return True
     if bool(state.get("hard_collapse_triggered", False)):
@@ -64,6 +65,27 @@ def source_has_collapse_signal(state: dict[str, Any] | None) -> bool:
     if bool(cur.get("collapse_freeze_active", False)):
         return True
     return False
+
+
+def control_has_collapse_signal(control: Any) -> tuple[bool, str]:
+    """Authoritative collapse probe against CurriculumControlState-like objects."""
+    if control is None:
+        return True, "source_control_missing"
+    if bool(getattr(control, "hard_collapse_triggered", False)):
+        return True, "hard_collapse_triggered"
+    if bool(getattr(control, "collapse_freeze_active", False)):
+        return True, "collapse_freeze_active"
+    if bool(getattr(control, "collapse_rollback_active", False)):
+        return True, "collapse_rollback_active"
+    if bool(getattr(control, "curriculum_rollback_triggered", False)):
+        return True, "curriculum_rollback_triggered"
+    if bool(getattr(control, "bridge_probation_hard_collapse_triggered", False)):
+        return True, "bridge_probation_hard_collapse_triggered"
+    forced = float(getattr(control, "forced_success_tolerance", 0.0) or 0.0)
+    reason = str(getattr(control, "rollback_reason", "") or "")
+    if forced > 1e-9 and reason:
+        return True, "forced_rollback_active"
+    return False, "ok"
 
 
 def select_late_degradation_rescue_source(
@@ -83,8 +105,11 @@ def select_late_degradation_rescue_source(
     source_retention_fn: Callable[[int, float], float],
     eligible_fn: Callable[[dict[str, Any], int], tuple[bool, str]],
     archive_fn: Callable[..., tuple[dict[str, Any] | None, str]] | None = None,
+    source_collapse_fn: (
+        Callable[[int, dict[str, Any]], tuple[bool, str]] | None
+    ) = None,
 ) -> dict[str, Any]:
-    """Filter-first late rescue: tol → quality → ranking score.
+    """Filter-first late rescue: tol → quality → collapse → ranking.
 
     ``sorted_policies`` MUST be ``list[int]`` (population rank order), matching
     the rest of the PBT observer. Never unpack as ``(idx, score)``.
@@ -119,9 +144,15 @@ def select_late_degradation_rescue_source(
         if not math.isfinite(src_ret) or src_ret < float(source_min_retention):
             reject_reasons[idx] = "retention_below_threshold"
             continue
-        if reject_collapse_source and source_has_collapse_signal(state):
-            reject_reasons[idx] = "collapse_signal"
-            continue
+        if reject_collapse_source:
+            if source_collapse_fn is not None:
+                collapsed, collapse_reason = source_collapse_fn(idx, state)
+                if collapsed:
+                    reject_reasons[idx] = str(collapse_reason or "collapse_signal")
+                    continue
+            elif source_has_collapse_signal(state):
+                reject_reasons[idx] = "collapse_signal"
+                continue
         score = population_ranking_score(state)
         live_candidates.append((score, idx, state))
 

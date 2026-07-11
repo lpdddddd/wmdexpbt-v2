@@ -144,6 +144,7 @@ def test_archive_strict_rescue_accepts_with_retention_metadata(tmp_path: Path):
     (archive / "b.json").write_text(json.dumps({
         "nsucc_mean": 35.0,
         "same_tol_retention_at_save": 0.9,
+        "same_tol_retention_valid_at_save": True,
         "curriculum": {"success_tolerance": 0.020},
         "checkpoint": str(archive / "b.pth"),
     }))
@@ -289,6 +290,8 @@ def test_continuation_launcher_separates_tol_and_absolute_frame():
         "--late_degradation_rescue_min_source_advantage 8.0",
         "--late_degradation_rescue_source_min_retention 0.85",
         "--late_degradation_rescue_reject_collapse_source",
+        "--late_degradation_rescue_require_source_control",
+        "--no-late_degradation_rescue_bypass_elimination_burnin",
     ):
         assert flag in text, flag
 
@@ -315,6 +318,8 @@ def test_formal_5b_launcher_keeps_hard_offs_and_retention_stack():
         "--late_degradation_rescue_min_source_advantage 8.0",
         "--late_degradation_rescue_source_min_retention 0.85",
         "--late_degradation_rescue_reject_collapse_source",
+        "--late_degradation_rescue_require_source_control",
+        "--no-late_degradation_rescue_bypass_elimination_burnin",
         "--frame_stop_enable",
     ):
         assert flag in text, flag
@@ -651,17 +656,8 @@ def test_completion_marker_paths_match_supervisor(tmp_path: Path):
 
 
 def test_late_rescue_restart_failure_does_not_consume_quota(tmp_path: Path):
-    _stub_rl_games()
-    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
-
-    obs = object.__new__(DexPBTPbtAlgoObserver)
-    obs.policy_idx = 0
-    obs._late_rescue_executed_count = {}
-    obs._late_rescue_count = {}
-    obs._late_rescue_frame = {}
-    obs._late_rescue_selected_count = {0: 1}
-    obs._late_rescue_blocked_count = {}
-    obs._last_restart_type = 0
+    obs = _make_minimal_observer(tmp_path)
+    obs._late_rescue_selected_count[0] = 1
     events: list[dict] = []
     obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
 
@@ -669,6 +665,8 @@ def test_late_rescue_restart_failure_does_not_consume_quota(tmp_path: Path):
         raise RuntimeError("manifest write failed")
 
     obs._restart_process_with_new_params_impl = _boom
+    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
     ok = DexPBTPbtAlgoObserver._restart_process_with_new_params(
         obs,
         {"learning_rate": 1e-4},
@@ -682,8 +680,10 @@ def test_late_rescue_restart_failure_does_not_consume_quota(tmp_path: Path):
     assert ok is False
     assert obs._late_rescue_executed_count.get(0, 0) == 0
     assert obs._late_rescue_frame.get(0, -1) < 0
-    # selected already counted by caller; executed must stay 0
     assert obs._late_rescue_selected_count[0] == 1
+    assert any(
+        e.get("event_type") == "pbt_restart_transaction_rolled_back" for e in events
+    )
 
 
 def test_probation_suppress_does_not_inflate_ordinary_repeated_count(tmp_path: Path):
@@ -864,3 +864,488 @@ def test_bridge_hard_collapse_rolls_back_one_rung(tmp_path: Path):
     assert control.bridge_probation_rollback_reason == "bridge_probation_hard_collapse"
     assert control.bridge_probation_bad_streak == 0
     assert control.curriculum_repeated_collapse_count == 0
+
+# ---------------------------------------------------------------------------
+# Persistence / archive validity / collapse control / burn-in / transaction
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_observer(tmp_path: Path, **extra):
+    _stub_rl_games()
+    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "curriculum_control").mkdir(exist_ok=True)
+    (ws / "000").mkdir(exist_ok=True)
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    (run / "policy_00").mkdir(exist_ok=True)
+    defaults = dict(
+        policy_idx=0,
+        num_policies=2,
+        mutable_params={
+            "enable_wm": False,
+            "enable_counterfactual": False,
+            "wm_strategy": "none",
+            "learning_rate": 1e-4,
+        },
+        workspace=str(ws),
+        train_dir=str(run / "rl_games"),
+        task_name="test-task",
+        interval_steps=10_000_000,
+        start_after=0,
+        initial_delay=0,
+        num_envs=1,
+        late_degradation_rescue_enable=True,
+        late_degradation_rescue_max_per_policy=1,
+        late_degradation_rescue_cooldown_frames=300_000_000,
+        late_degradation_rescue_require_source_control=True,
+        late_degradation_rescue_reject_collapse_source=True,
+        late_degradation_rescue_bypass_elimination_burnin=False,
+        pbt_recovery_bypass_elimination_burnin=True,
+        pbt_min_frames_between_restarts=100_000_000,
+        same_tol_retention_enable=True,
+        bridge_curriculum_enable=True,
+    )
+    defaults.update(extra)
+    Path(defaults["train_dir"]).mkdir(parents=True, exist_ok=True)
+    obs = DexPBTPbtAlgoObserver(**defaults)
+    obs.writer = None
+    obs.curr_policy_workspace = ws / "000"
+    return obs
+
+
+def test_late_rescue_quota_persists_across_restart(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control,
+    )
+
+    obs_a = _make_minimal_observer(tmp_path)
+    # Seed a control JSON with tracker-like fields that must survive.
+    path = obs_a._curriculum_control_dir / "000.json"
+    write_curriculum_control(
+        path,
+        CurriculumControlState(
+            last_mastered_tolerance=0.021,
+            bridge_probation_entry_frame=1,
+            late_rescue_executed_count=0,
+        ),
+    )
+    obs_a._late_rescue_attempt_count[0] = 1
+    obs_a._late_rescue_selected_count[0] = 1
+    obs_a._late_rescue_executed_count[0] = 1
+    obs_a._late_rescue_blocked_count[0] = 0
+    obs_a._late_rescue_streak[0] = 0
+    obs_a._late_rescue_frame[0] = 3_200_000_000
+    obs_a._persist_late_rescue_runtime_state(0, env_frames=3_200_000_000)
+
+    obs_b = _make_minimal_observer(tmp_path)
+    obs_b._maybe_restore_bridge_state(0)
+    assert obs_b._late_rescue_executed_count[0] == 1
+    assert obs_b._late_rescue_frame[0] == 3_200_000_000
+    # Warm same-tol so ready() can evaluate quota/cooldown.
+    tracker = obs_b._same_tol_trackers.setdefault(
+        0, ToleranceBinRetentionTracker(ladder=LADDER)
+    )
+    for i in range(1, 5):
+        tracker.update(
+            tolerance=0.020, nsucc_mean=35.0, frame=i, lineage_id="a",
+            use_bridge_levels=True,
+        )
+    # Drop current mean to satisfy degradation thresholds, but quota blocks.
+    ready = obs_b._late_degradation_rescue_ready(
+        0, tolerance=0.020, nsucc_mean=10.0, env_frames=3_600_000_000
+    )
+    assert ready is False
+
+
+def test_late_rescue_cooldown_persists_across_restart(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control,
+    )
+
+    obs_a = _make_minimal_observer(
+        tmp_path,
+        late_degradation_rescue_max_per_policy=2,
+        late_degradation_rescue_retention_threshold=1.0,
+        late_degradation_rescue_peak_threshold=30.0,
+        late_degradation_rescue_current_mean_threshold=22.0,
+        late_degradation_rescue_patience=1,
+    )
+    write_curriculum_control(
+        obs_a._curriculum_control_dir / "000.json",
+        CurriculumControlState(),
+    )
+    obs_a._late_rescue_executed_count[0] = 0
+    obs_a._late_rescue_frame[0] = 3_200_000_000
+    obs_a._persist_late_rescue_runtime_state(0, env_frames=3_200_000_000)
+
+    obs_b = _make_minimal_observer(
+        tmp_path,
+        late_degradation_rescue_max_per_policy=2,
+        late_degradation_rescue_retention_threshold=1.0,
+        late_degradation_rescue_peak_threshold=30.0,
+        late_degradation_rescue_current_mean_threshold=22.0,
+        late_degradation_rescue_patience=1,
+    )
+    obs_b._maybe_restore_bridge_state(0)
+    tracker = obs_b._same_tol_trackers.setdefault(
+        0, ToleranceBinRetentionTracker(ladder=LADDER)
+    )
+    for i in range(1, 5):
+        tracker.update(
+            tolerance=0.020, nsucc_mean=40.0, frame=i, lineage_id="a",
+            use_bridge_levels=True,
+        )
+    # Drop current so retention <= 1.0 still holds; mean below threshold.
+    tracker.update(
+        tolerance=0.020, nsucc_mean=10.0, frame=10, lineage_id="a",
+        use_bridge_levels=True,
+    )
+    assert obs_b._late_rescue_frame[0] == 3_200_000_000
+    assert obs_b._late_degradation_rescue_ready(
+        0, tolerance=0.020, nsucc_mean=10.0, env_frames=3_300_000_000
+    ) is False
+    assert obs_b._late_degradation_rescue_ready(
+        0, tolerance=0.020, nsucc_mean=10.0, env_frames=3_600_000_000
+    ) is True
+
+
+def test_late_rescue_state_persist_failure_fail_closed(tmp_path: Path):
+    obs = _make_minimal_observer(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    obs.train_dir = tmp_path / "run" / "rl_games"
+    obs.train_dir.mkdir(parents=True, exist_ok=True)
+    manifest = obs.train_dir.parent / obs.RESTART_MANIFEST
+    manifest.write_text("{}")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    obs._persist_late_rescue_runtime_state = _boom
+    # Simulate the critical section after manifest commit.
+    prev_executed = 0
+    prev_frame = -10**18
+    obs._late_rescue_executed_count[0] = 1
+    obs._late_rescue_frame[0] = 100
+    try:
+        obs._persist_late_rescue_runtime_state(0, env_frames=100)
+        raised = False
+    except Exception:
+        raised = True
+        obs._late_rescue_executed_count[0] = prev_executed
+        obs._late_rescue_frame[0] = prev_frame
+        if manifest.exists():
+            manifest.unlink()
+        events.append({"event_type": "late_degradation_rescue_state_persist_failed"})
+    assert raised
+    assert obs._late_rescue_executed_count.get(0, 0) == 0
+    assert obs._late_rescue_frame.get(0, -1) < 0
+    assert not manifest.exists()
+    assert any(
+        e.get("event_type") == "late_degradation_rescue_state_persist_failed"
+        for e in events
+    )
+
+
+def test_archive_invalid_retention_at_save_rejected(tmp_path: Path):
+    archive = tmp_path / "best"
+    archive.mkdir()
+    (archive / "a.json").write_text(json.dumps({
+        "nsucc_mean": 40.0,
+        "same_tol_retention_at_save": 1.0,
+        "same_tol_retention_valid_at_save": False,
+        "curriculum": {"success_tolerance": 0.020},
+        "checkpoint": str(archive / "a.pth"),
+    }))
+    (archive / "a.pth").write_text("x")
+    reject: list[dict] = []
+    bad = select_compatible_archive(
+        archive, target_tolerance=0.020, max_gap=0.002, min_mean=28.0,
+        min_retention=0.85, require_retention_metadata=True, reject_log=reject,
+    )
+    assert bad is None
+    assert any(r["reason"] == "retention_invalid_at_save" for r in reject)
+
+
+def test_archive_nonfinite_retention_rejected(tmp_path: Path):
+    for value, _label in ((float("nan"), "nan"), (float("inf"), "inf"), (float("-inf"), "-inf")):
+        archive = tmp_path / f"best_{_label}"
+        archive.mkdir()
+        payload = {
+            "nsucc_mean": 40.0,
+            "same_tol_retention_at_save": value,
+            "same_tol_retention_valid_at_save": True,
+            "curriculum": {"success_tolerance": 0.020},
+            "checkpoint": str(archive / "a.pth"),
+        }
+        # json cannot encode nan/inf by default; write via python repr path
+        text = json.dumps({
+            **payload,
+            "same_tol_retention_at_save": 0.0,
+        })
+        # Force non-finite by patching after load via custom file
+        (archive / "a.json").write_text(text)
+        data = json.loads((archive / "a.json").read_text())
+        data["same_tol_retention_at_save"] = value
+        # Use a tiny custom loader path: write with allow_nan
+        (archive / "a.json").write_text(json.dumps(data, allow_nan=True))
+        (archive / "a.pth").write_text("x")
+        reject: list[dict] = []
+        bad = select_compatible_archive(
+            archive, target_tolerance=0.020, max_gap=0.002, min_mean=28.0,
+            min_retention=0.85, require_retention_metadata=True, reject_log=reject,
+        )
+        assert bad is None, _label
+        assert any(r["reason"] == "retention_nonfinite" for r in reject), reject
+
+
+def test_archive_valid_retention_accepted(tmp_path: Path):
+    archive = tmp_path / "best"
+    archive.mkdir()
+    (archive / "a.json").write_text(json.dumps({
+        "nsucc_mean": 35.0,
+        "same_tol_retention_at_save": 0.90,
+        "same_tol_retention_valid_at_save": True,
+        "curriculum": {"success_tolerance": 0.020},
+        "checkpoint": str(archive / "a.pth"),
+    }))
+    (archive / "a.pth").write_text("x")
+    ok = select_compatible_archive(
+        archive, target_tolerance=0.020, max_gap=0.002, min_mean=28.0,
+        min_retention=0.85, require_retention_metadata=True,
+    )
+    assert ok is not None
+
+
+def test_authoritative_source_collapse_rejection(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.late_degradation_rescue import (
+        select_late_degradation_rescue_source,
+    )
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control,
+    )
+
+    obs = _make_minimal_observer(tmp_path)
+    ctrl_dir = obs._curriculum_control_dir
+    for reason_field, kwargs in (
+        ("hard_collapse_triggered", {"hard_collapse_triggered": True}),
+        ("collapse_freeze_active", {"collapse_freeze_active": True}),
+        ("collapse_rollback_active", {"collapse_rollback_active": True}),
+        (
+            "bridge_probation_hard_collapse_triggered",
+            {"bridge_probation_hard_collapse_triggered": True},
+        ),
+    ):
+        write_curriculum_control(
+            ctrl_dir / "001.json",
+            CurriculumControlState(**kwargs),
+        )
+        population = {
+            0: {"nsucc_mean": 10.0, "curriculum": {"success_tolerance": 0.020}},
+            1: {
+                "nsucc_mean": 35.0,
+                "pbt_ranking_score": 90.0,
+                "curriculum": {"success_tolerance": 0.020},
+                "checkpoint": "1.pth",
+            },
+        }
+        decision = select_late_degradation_rescue_source(
+            sorted_policies=[1],
+            population=population,
+            target_policy_idx=0,
+            target_tolerance=0.020,
+            target_nsucc_mean=10.0,
+            env_frames=1,
+            n_top=1,
+            max_tol_gap=0.002,
+            source_min_mean=28.0,
+            min_source_advantage=8.0,
+            source_min_retention=0.85,
+            reject_collapse_source=True,
+            source_retention_fn=lambda *_: 0.92,
+            eligible_fn=lambda *_: (True, "ok"),
+            source_collapse_fn=lambda idx, st: obs._late_rescue_source_has_collapse(idx, st),
+        )
+        assert decision["action"] == "skip", reason_field
+        assert decision["strict_filter_reasons"][1] == reason_field
+
+
+def test_source_control_missing_fail_closed(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.late_degradation_rescue import (
+        select_late_degradation_rescue_source,
+    )
+
+    obs = _make_minimal_observer(
+        tmp_path, late_degradation_rescue_require_source_control=True
+    )
+    population = {
+        0: {"nsucc_mean": 10.0, "curriculum": {"success_tolerance": 0.020}},
+        1: {
+            "nsucc_mean": 35.0,
+            "pbt_ranking_score": 90.0,
+            "curriculum": {"success_tolerance": 0.020},
+            "checkpoint": "1.pth",
+        },
+    }
+    decision = select_late_degradation_rescue_source(
+        sorted_policies=[1],
+        population=population,
+        target_policy_idx=0,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        env_frames=1,
+        n_top=1,
+        max_tol_gap=0.002,
+        source_min_mean=28.0,
+        min_source_advantage=8.0,
+        source_min_retention=0.85,
+        reject_collapse_source=True,
+        source_retention_fn=lambda *_: 0.92,
+        eligible_fn=lambda *_: (True, "ok"),
+        source_collapse_fn=lambda idx, st: obs._late_rescue_source_has_collapse(idx, st),
+    )
+    assert decision["action"] == "skip"
+    assert decision["strict_filter_reasons"][1] == "source_control_missing"
+
+    obs2 = _make_minimal_observer(
+        tmp_path, late_degradation_rescue_require_source_control=False
+    )
+    decision2 = select_late_degradation_rescue_source(
+        sorted_policies=[1],
+        population=population,
+        target_policy_idx=0,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        env_frames=1,
+        n_top=1,
+        max_tol_gap=0.002,
+        source_min_mean=28.0,
+        min_source_advantage=8.0,
+        source_min_retention=0.85,
+        reject_collapse_source=True,
+        source_retention_fn=lambda *_: 0.92,
+        eligible_fn=lambda *_: (True, "ok"),
+        source_collapse_fn=lambda idx, st: obs2._late_rescue_source_has_collapse(idx, st),
+    )
+    assert decision2["action"] == "copy"
+    assert decision2["source_policy"] == 1
+
+
+def test_live_rescue_respects_target_burnin_by_default():
+    historical_archive_types = (
+        "archive", "best_stable_archive", "best_floor_recovery_archive",
+        "late_rescue_archive",
+    )
+    pbt_recovery_bypass = True
+    live_bypass_flag = False
+    tier_label = "late_rescue_live"
+    checkpoint_type = "live"
+    archive_recovery_bypass = (
+        checkpoint_type in historical_archive_types
+        or tier_label in historical_archive_types
+    ) and pbt_recovery_bypass
+    live_late_rescue_bypass = (
+        tier_label == "late_rescue_live" and live_bypass_flag
+    )
+    assert not (archive_recovery_bypass or live_late_rescue_bypass)
+
+    tier_label = "late_rescue_archive"
+    checkpoint_type = "late_rescue_archive"
+    archive_recovery_bypass = (
+        checkpoint_type in historical_archive_types
+        or tier_label in historical_archive_types
+    ) and pbt_recovery_bypass
+    live_late_rescue_bypass = (
+        tier_label == "late_rescue_live" and live_bypass_flag
+    )
+    assert archive_recovery_bypass or live_late_rescue_bypass
+
+    tier_label = "late_rescue_live"
+    live_bypass_flag = True
+    live_late_rescue_bypass = (
+        tier_label == "late_rescue_live" and live_bypass_flag
+    )
+    assert live_late_rescue_bypass
+
+
+def test_manifest_failure_rolls_back_runtime_state(tmp_path: Path):
+    obs = _make_minimal_observer(tmp_path)
+    obs.last_mutation_frame = 10
+    obs._restart_count = 2
+    obs._frames_at_restart = 20
+    obs._lineage_id = "lin-old"
+    obs._lineage_start_pf = 5
+    obs._weight_age_frame = 7
+    obs._recovery_restart_count = 1
+    obs._last_recovery_frame = 30
+    snap = obs._snapshot_restart_runtime_state()
+
+    # Mutate as a failed restart would.
+    obs.last_mutation_frame = 999
+    obs._restart_count = 99
+    obs._frames_at_restart = 999
+    obs._lineage_id = "lin-new"
+    obs._lineage_start_pf = 999
+    obs._weight_age_frame = 999
+    obs._recovery_restart_count = 99
+    obs._last_recovery_frame = 999
+    obs._late_rescue_executed_count[0] = 5
+    obs._late_rescue_frame[0] = 999
+
+    # Leave a fake manifest and tmp restart dir.
+    obs.train_dir = tmp_path / "run" / "rl_games"
+    obs.train_dir.mkdir(parents=True, exist_ok=True)
+    manifest = obs.train_dir.parent / obs.RESTART_MANIFEST
+    manifest.write_text("{}")
+    tmp_dir = obs.workspace / f"restart_p{obs.policy_idx}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_dir / "x.pth").write_text("x")
+
+    obs._restore_restart_runtime_state(snap)
+    obs._cleanup_failed_restart_artifacts()
+    assert obs.last_mutation_frame == 10
+    assert obs._restart_count == 2
+    assert obs._frames_at_restart == 20
+    assert obs._lineage_id == "lin-old"
+    assert obs._lineage_start_pf == 5
+    assert obs._weight_age_frame == 7
+    assert obs._recovery_restart_count == 1
+    assert obs._last_recovery_frame == 30
+    assert obs._late_rescue_executed_count[0] == 0
+    assert not manifest.exists()
+    assert not tmp_dir.exists()
+
+
+def test_late_rescue_counter_invariant(tmp_path: Path):
+    obs = _make_minimal_observer(tmp_path)
+
+    def _invariant():
+        a = int(obs._late_rescue_attempt_count.get(0, 0))
+        s = int(obs._late_rescue_selected_count.get(0, 0))
+        e = int(obs._late_rescue_executed_count.get(0, 0))
+        assert a >= s >= e, (a, s, e)
+
+    # no source
+    obs._late_rescue_attempt_count[0] = 1
+    obs._late_rescue_blocked_count[0] = 1
+    _invariant()
+    # anti-churn blocked after attempt
+    obs._late_rescue_attempt_count[0] = 2
+    obs._late_rescue_blocked_count[0] = 2
+    _invariant()
+    # selected then manifest failed (selected stays, executed not)
+    obs._late_rescue_attempt_count[0] = 3
+    obs._late_rescue_selected_count[0] = 1
+    obs._late_rescue_blocked_count[0] = 3
+    _invariant()
+    # successful rescue
+    obs._late_rescue_attempt_count[0] = 4
+    obs._late_rescue_selected_count[0] = 2
+    obs._late_rescue_executed_count[0] = 1
+    _invariant()

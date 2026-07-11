@@ -54,7 +54,9 @@ from dexpbt_isaaclab.pbt.pbt_tolerance_bridge import (
 )
 from dexpbt_isaaclab.pbt.tolerance_conditioned_archive import select_compatible_archive
 from dexpbt_isaaclab.pbt.late_degradation_rescue import (
+    control_has_collapse_signal,
     select_late_degradation_rescue_source,
+    source_has_collapse_signal,
 )
 
 # WM imports (lazy — only needed when enable_wm=True)
@@ -616,6 +618,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         late_degradation_rescue_min_source_advantage: float = 8.0,
         late_degradation_rescue_source_min_retention: float = 0.85,
         late_degradation_rescue_reject_collapse_source: bool = True,
+        late_degradation_rescue_require_source_control: bool = True,
+        late_degradation_rescue_bypass_elimination_burnin: bool = False,
         wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
@@ -1451,9 +1455,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.late_degradation_rescue_reject_collapse_source = bool(
             late_degradation_rescue_reject_collapse_source
         )
+        self.late_degradation_rescue_require_source_control = bool(
+            late_degradation_rescue_require_source_control
+        )
+        self.late_degradation_rescue_bypass_elimination_burnin = bool(
+            late_degradation_rescue_bypass_elimination_burnin
+        )
         self._late_rescue_streak: dict[int, int] = {}
         self._late_rescue_count: dict[int, int] = {}
         self._late_rescue_frame: dict[int, int] = {}
+        self._late_rescue_last_source_control_valid = 0.0
+        self._late_rescue_last_source_collapse_rejected = 0.0
+        self._late_rescue_last_burnin_bypassed = 0.0
         self.pbt_usable_live_min_mean = float(pbt_usable_live_min_mean)
         self.pbt_usable_live_min_max = float(pbt_usable_live_min_max)
         self.pbt_usable_live_max_drop_ratio = float(
@@ -3153,6 +3166,46 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             env_frames,
         )
         self.writer.add_scalar(
+            "pbt/late_rescue_attempt_count",
+            float(control.late_rescue_attempt_count),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_selected_count",
+            float(control.late_rescue_selected_count),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_executed_count",
+            float(control.late_rescue_executed_count),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_blocked_count",
+            float(control.late_rescue_blocked_count),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_last_frame",
+            float(control.late_rescue_last_frame),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_source_control_valid",
+            float(self._late_rescue_last_source_control_valid),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_source_collapse_rejected",
+            float(self._late_rescue_last_source_collapse_rejected),
+            env_frames,
+        )
+        self.writer.add_scalar(
+            "pbt/late_rescue_burnin_bypassed",
+            float(self._late_rescue_last_burnin_bypassed),
+            env_frames,
+        )
+        self.writer.add_scalar(
             "dexpbt/collapse_freeze_until_env_frames",
             float(control.collapse_freeze_until_env_frames),
             env_frames,
@@ -3880,6 +3933,218 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._late_rescue_streak.get(policy_idx, 0) + 1 if eligible else 0
         )
         return self._late_rescue_streak[policy_idx] >= self.late_degradation_rescue_patience
+
+    def _late_rescue_source_has_collapse(
+        self,
+        source_policy_idx: int,
+        source_state: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Authoritative collapse gate using curriculum_control JSON."""
+        path = self._curriculum_control_dir / f"{int(source_policy_idx):03d}.json"
+        if not path.is_file():
+            self._late_rescue_last_source_control_valid = 0.0
+            if self.late_degradation_rescue_require_source_control:
+                self._late_rescue_last_source_collapse_rejected = 1.0
+                self._write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_source_control_missing",
+                    "source_policy": int(source_policy_idx),
+                    "target_policy": int(self.policy_idx),
+                })
+                return True, "source_control_missing"
+            # Compatibility: fall back to population meta only.
+            if source_has_collapse_signal(source_state):
+                self._late_rescue_last_source_collapse_rejected = 1.0
+                return True, "collapse_signal"
+            return False, "ok_no_control"
+        try:
+            control = read_curriculum_control(path)
+        except Exception:
+            control = None
+        if control is None:
+            self._late_rescue_last_source_control_valid = 0.0
+            if self.late_degradation_rescue_require_source_control:
+                self._late_rescue_last_source_collapse_rejected = 1.0
+                self._write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_source_control_parse_error",
+                    "source_policy": int(source_policy_idx),
+                    "target_policy": int(self.policy_idx),
+                })
+                return True, "source_control_parse_error"
+            if source_has_collapse_signal(source_state):
+                self._late_rescue_last_source_collapse_rejected = 1.0
+                return True, "collapse_signal"
+            return False, "ok_parse_failed_compat"
+        self._late_rescue_last_source_control_valid = 1.0
+        collapsed, reason = control_has_collapse_signal(control)
+        if collapsed:
+            self._late_rescue_last_source_collapse_rejected = 1.0
+            self._write_pbt_copy_event({
+                "event_type": "late_degradation_rescue_source_collapse_rejected",
+                "source_policy": int(source_policy_idx),
+                "target_policy": int(self.policy_idx),
+                "reason": reason,
+            })
+            return True, reason
+        self._late_rescue_last_source_collapse_rejected = 0.0
+        return False, "ok"
+
+    def _persist_late_rescue_runtime_state(
+        self,
+        policy_idx: int,
+        *,
+        env_frames: int,
+    ) -> None:
+        """Atomically persist late-rescue quota/cooldown into curriculum_control."""
+        path = self._curriculum_control_dir / f"{int(policy_idx):03d}.json"
+        control = read_curriculum_control(path) or CurriculumControlState()
+        control.late_rescue_attempt_count = int(
+            self._late_rescue_attempt_count.get(policy_idx, 0)
+        )
+        control.late_rescue_selected_count = int(
+            self._late_rescue_selected_count.get(policy_idx, 0)
+        )
+        control.late_rescue_executed_count = int(
+            self._late_rescue_executed_count.get(
+                policy_idx, self._late_rescue_count.get(policy_idx, 0)
+            )
+        )
+        control.late_rescue_blocked_count = int(
+            self._late_rescue_blocked_count.get(policy_idx, 0)
+        )
+        control.late_rescue_streak = int(self._late_rescue_streak.get(policy_idx, 0))
+        control.late_rescue_last_frame = int(
+            self._late_rescue_frame.get(policy_idx, -1)
+        )
+        write_curriculum_control(path, control)
+        self._write_pbt_copy_event({
+            "event_type": "late_degradation_rescue_state_persisted",
+            "policy_idx": int(policy_idx),
+            "env_frames": int(env_frames),
+            "late_rescue_attempt_count": int(control.late_rescue_attempt_count),
+            "late_rescue_selected_count": int(control.late_rescue_selected_count),
+            "late_rescue_executed_count": int(control.late_rescue_executed_count),
+            "late_rescue_blocked_count": int(control.late_rescue_blocked_count),
+            "late_rescue_streak": int(control.late_rescue_streak),
+            "late_rescue_last_frame": int(control.late_rescue_last_frame),
+            "path": str(path),
+        })
+
+    def _snapshot_restart_runtime_state(self) -> dict[str, Any]:
+        pidx = int(self.policy_idx)
+        last_rollback = getattr(self, "_last_rollback_frame", {}) or {}
+        shrinks = getattr(self, "_shrinks_since_rollback", {}) or {}
+        rollback_reason = getattr(self, "_rollback_reason", {}) or {}
+        return {
+            "last_mutation_frame": int(getattr(self, "last_mutation_frame", -10**18)),
+            "restart_count": int(getattr(self, "_restart_count", 0)),
+            "frames_at_restart": int(getattr(self, "_frames_at_restart", -10**18)),
+            "last_rollback_frame": int(last_rollback.get(pidx, -10**18)),
+            "shrinks_since_rollback": int(shrinks.get(pidx, 0)),
+            "rollback_reason": str(rollback_reason.get(pidx, "")),
+            "lineage_id": str(getattr(self, "_lineage_id", "")),
+            "lineage_start_pf": int(getattr(self, "_lineage_start_pf", 0)),
+            "weight_age_frame": int(getattr(self, "_weight_age_frame", 0)),
+            "recovery_restart_count": int(getattr(self, "_recovery_restart_count", 0)),
+            "last_recovery_frame": int(getattr(self, "_last_recovery_frame", -10**18)),
+            "last_restart_type": int(getattr(self, "_last_restart_type", 0)),
+            "cross_restart_count": int(getattr(self, "_cross_restart_count", 0)),
+            "self_restart_count": int(getattr(self, "_self_restart_count", 0)),
+            "last_self_restart_frame": int(
+                getattr(self, "_last_self_restart_frame", -10**18)
+            ),
+            "wm_strategy_profile_generation": int(
+                getattr(self, "_wm_strategy_profile_generation", 0)
+            ),
+            "wm_strategy_profile_parent": int(
+                getattr(self, "_wm_strategy_profile_parent", -1)
+            ),
+            "wm_strategy_profile_copied_from_source": bool(
+                getattr(self, "_wm_strategy_profile_copied_from_source", False)
+            ),
+            "last_profile_copy_frame": int(
+                getattr(self, "_last_profile_copy_frame", -10**18)
+            ),
+            "late_rescue_executed_count": int(
+                getattr(self, "_late_rescue_executed_count", {}).get(pidx, 0)
+            ),
+            "late_rescue_frame": int(
+                getattr(self, "_late_rescue_frame", {}).get(pidx, -10**18)
+            ),
+            "late_rescue_count": int(
+                getattr(self, "_late_rescue_count", {}).get(pidx, 0)
+            ),
+            "late_rescue_selected_count": int(
+                getattr(self, "_late_rescue_selected_count", {}).get(pidx, 0)
+            ),
+        }
+
+    def _restore_restart_runtime_state(self, snap: dict[str, Any]) -> None:
+        pidx = int(self.policy_idx)
+        self.last_mutation_frame = int(snap["last_mutation_frame"])
+        self._restart_count = int(snap["restart_count"])
+        self._frames_at_restart = int(snap["frames_at_restart"])
+        if not hasattr(self, "_last_rollback_frame"):
+            self._last_rollback_frame = {}
+        if not hasattr(self, "_shrinks_since_rollback"):
+            self._shrinks_since_rollback = {}
+        if not hasattr(self, "_rollback_reason"):
+            self._rollback_reason = {}
+        self._last_rollback_frame[pidx] = int(snap["last_rollback_frame"])
+        self._shrinks_since_rollback[pidx] = int(snap["shrinks_since_rollback"])
+        self._rollback_reason[pidx] = str(snap["rollback_reason"])
+        self._lineage_id = str(snap["lineage_id"])
+        self._lineage_start_pf = int(snap["lineage_start_pf"])
+        self._weight_age_frame = int(snap["weight_age_frame"])
+        self._recovery_restart_count = int(snap["recovery_restart_count"])
+        self._last_recovery_frame = int(snap["last_recovery_frame"])
+        self._last_restart_type = int(snap["last_restart_type"])
+        self._cross_restart_count = int(snap["cross_restart_count"])
+        self._self_restart_count = int(snap["self_restart_count"])
+        self._last_self_restart_frame = int(snap["last_self_restart_frame"])
+        self._wm_strategy_profile_generation = int(
+            snap["wm_strategy_profile_generation"]
+        )
+        self._wm_strategy_profile_parent = int(snap["wm_strategy_profile_parent"])
+        self._wm_strategy_profile_copied_from_source = bool(
+            snap["wm_strategy_profile_copied_from_source"]
+        )
+        self._last_profile_copy_frame = int(snap["last_profile_copy_frame"])
+        if not hasattr(self, "_late_rescue_executed_count"):
+            self._late_rescue_executed_count = {}
+        if not hasattr(self, "_late_rescue_frame"):
+            self._late_rescue_frame = {}
+        if not hasattr(self, "_late_rescue_count"):
+            self._late_rescue_count = {}
+        if not hasattr(self, "_late_rescue_selected_count"):
+            self._late_rescue_selected_count = {}
+        self._late_rescue_executed_count[pidx] = int(
+            snap["late_rescue_executed_count"]
+        )
+        self._late_rescue_frame[pidx] = int(snap["late_rescue_frame"])
+        self._late_rescue_count[pidx] = int(snap["late_rescue_count"])
+        self._late_rescue_selected_count[pidx] = int(
+            snap["late_rescue_selected_count"]
+        )
+
+    def _cleanup_failed_restart_artifacts(self) -> None:
+        tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
+        if tmp_dir.exists():
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+        try:
+            supervisor_run_dir = self.train_dir.parent
+            manifest_path = supervisor_run_dir / self.RESTART_MANIFEST
+            if manifest_path.exists():
+                manifest_path.unlink()
+            for tmp in supervisor_run_dir.glob(f"{Path(self.RESTART_MANIFEST).stem}*.tmp"):
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     @staticmethod
     def _recent_slope(window: RollingNsuccWindow, n: int) -> float:
@@ -4903,6 +5168,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 require_retention_metadata=True,
             )
 
+        def _collapse(src_idx: int, state: dict[str, Any]) -> tuple[bool, str]:
+            return self._late_rescue_source_has_collapse(int(src_idx), state)
+
         return select_late_degradation_rescue_source(
             sorted_policies=list(sorted_policies),
             population=population,
@@ -4921,6 +5189,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_retention_fn=_retention,
             eligible_fn=_eligible,
             archive_fn=_archive,
+            source_collapse_fn=_collapse,
         )
 
     def _log_best_stable_recovery_outcome(
@@ -7730,42 +7999,49 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     )
                     self._last_restart_type = 3
                     return
-                self._late_rescue_selected_count[self.policy_idx] = (
-                    int(self._late_rescue_selected_count.get(self.policy_idx, 0)) + 1
-                )
-                self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_selected",
-                    "source_type": str(decision.get("checkpoint_type", "live")),
-                    "source_policy": source_policy,
-                    "target_policy": self.policy_idx,
-                    "source_tol": source_tol,
-                    "target_tol": own_rescue_tol,
-                    "tol_gap": abs(source_tol - own_rescue_tol),
-                    "target_same_tol_retention": self._same_tol_retention_snapshot(
-                        self.policy_idx, own_rescue_tol
-                    )["retention"],
-                    "rescue_selected_count": self._late_rescue_selected_count[
-                        self.policy_idx
-                    ],
-                    "env_frames": int(env_frames),
-                })
             source_params = source_state.get("params") or {}
             checkpoint_to_load = source_state["checkpoint"]
+            if not checkpoint_to_load or not Path(str(checkpoint_to_load)).is_file():
+                print(
+                    f"Policy {self.policy_idx}: skip restart "
+                    f"(source checkpoint missing: {checkpoint_to_load})"
+                )
+                if late_rescue:
+                    self._late_rescue_blocked_count[self.policy_idx] = (
+                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
+                self._last_restart_type = 3
+                return
 
             # Elimination-cooldown: block restarting THIS worker too soon
             # after its last restart, regardless of source tier. This is
             # an anti-churn guard on the *bottom worker*, distinct from
             # the source-side eligibility above.
             own_state = population.get(self.policy_idx)
+            historical_archive_types = (
+                "archive",
+                "best_stable_archive",
+                "best_floor_recovery_archive",
+                "late_rescue_archive",
+            )
+            archive_recovery_bypass = (
+                str(decision.get("checkpoint_type", "")) in historical_archive_types
+                or tier_label in historical_archive_types
+            ) and self.pbt_recovery_bypass_elimination_burnin
+            live_late_rescue_bypass = (
+                tier_label == "late_rescue_live"
+                and self.late_degradation_rescue_bypass_elimination_burnin
+            )
+            bypass_burnin = bool(archive_recovery_bypass or live_late_rescue_bypass)
+            self._late_rescue_last_burnin_bypassed = (
+                1.0 if (late_rescue and bypass_burnin) else 0.0
+            )
             recovery_tier = tier_label in (
                 "archive",
                 "best_stable_archive",
                 "best_floor_recovery_archive",
                 "late_rescue_archive",
                 "late_rescue_live",
-            )
-            bypass_burnin = (
-                recovery_tier and self.pbt_recovery_bypass_elimination_burnin
             )
             if not bypass_burnin and not self._is_eligible_for_elimination(
                 own_state, env_frames
@@ -7779,6 +8055,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._late_rescue_blocked_count[self.policy_idx] = (
                         int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
                     )
+                    self._write_pbt_copy_event({
+                        "event_type": "late_degradation_rescue_target_burnin_blocked",
+                        "source_policy": source_policy,
+                        "target_policy": self.policy_idx,
+                        "tier": tier_label,
+                        "env_frames": int(env_frames),
+                    })
                 if tier_label == "best_stable_archive":
                     self._best_stable_recovery_skipped_count += 1
                     self._log_best_stable_recovery_outcome(
@@ -7794,8 +8077,57 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._last_restart_type = 3  # skipped
                 return
 
+            # selected_count only after all gates that can still abort without
+            # attempting a restart (tol/quality already done; burn-in passed).
+            if late_rescue:
+                self._late_rescue_selected_count[self.policy_idx] = (
+                    int(self._late_rescue_selected_count.get(self.policy_idx, 0)) + 1
+                )
+                source_tol = float(
+                    (source_state.get("curriculum") or {}).get(
+                        "success_tolerance", float("nan")
+                    )
+                )
+                self._write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_selected",
+                    "source_type": str(decision.get("checkpoint_type", "live")),
+                    "source_policy": source_policy,
+                    "target_policy": self.policy_idx,
+                    "source_tol": source_tol,
+                    "target_tol": own_rescue_tol,
+                    "tol_gap": abs(source_tol - own_rescue_tol),
+                    "source_nsucc_mean": float(
+                        source_state.get("nsucc_mean", float("nan"))
+                    ),
+                    "target_nsucc_mean": float(own_rescue_nsucc),
+                    "source_advantage": float(
+                        float(source_state.get("nsucc_mean", float("nan")))
+                        - float(own_rescue_nsucc)
+                    ),
+                    "source_same_tol_retention": self._same_tol_retention_snapshot(
+                        source_policy, source_tol
+                    )["retention"] if math.isfinite(source_tol) else float("nan"),
+                    "target_same_tol_retention": self._same_tol_retention_snapshot(
+                        self.policy_idx, own_rescue_tol
+                    )["retention"],
+                    "source_control_valid": float(
+                        self._late_rescue_last_source_control_valid
+                    ),
+                    "source_collapse_rejected": float(
+                        self._late_rescue_last_source_collapse_rejected
+                    ),
+                    "checkpoint_type": str(decision.get("checkpoint_type", "live")),
+                    "rescue_selected_count": self._late_rescue_selected_count[
+                        self.policy_idx
+                    ],
+                    "env_frames": int(env_frames),
+                })
+
             if tier_label in self._source_tier_counts:
                 self._source_tier_counts[tier_label] += 1
+
+            # Snapshot before recovery accounting so a failed restart can roll back.
+            restart_txn_snap = self._snapshot_restart_runtime_state()
 
             # Account based on the tier of this replacement.
             if recovery_tier:
@@ -7813,6 +8145,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._cross_restart_count += 1
                 self._last_restart_type = 2  # cross
         else:
+            restart_txn_snap = self._snapshot_restart_runtime_state()
             # Patch F (2026-05-31): mid-tier self-mutation governor. The
             # legacy path mutated own params + relaunched on every tick
             # which produced 100% self-restart churn. Default behaviour now
@@ -8146,16 +8479,26 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             late_rescue=bool(late_rescue),
             late_rescue_decision=decision if late_rescue else None,
         )
-        if late_rescue and not restart_ok:
-            self._late_rescue_blocked_count[self.policy_idx] = (
-                int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-            )
+        if not restart_ok:
+            self._restore_restart_runtime_state(restart_txn_snap)
+            self._cleanup_failed_restart_artifacts()
             self._write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_restart_failed",
-                "source_policy": source_policy,
-                "target_policy": self.policy_idx,
+                "event_type": "pbt_restart_transaction_rolled_back",
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "late_rescue": bool(late_rescue),
                 "env_frames": int(env_frames),
             })
+            if late_rescue:
+                self._late_rescue_blocked_count[self.policy_idx] = (
+                    int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                )
+                self._write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_restart_failed",
+                    "source_policy": source_policy,
+                    "target_policy": self.policy_idx,
+                    "env_frames": int(env_frames),
+                })
             self._last_restart_type = 3
             return
 
@@ -8580,11 +8923,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 retention_at_save = 1.0
         tol_at_save = float(curriculum.get("success_tolerance", 0.075) or 0.075)
         same_tol_at_save = self._same_tol_retention_snapshot(self.policy_idx, tol_at_save)
+        retention_valid_at_save = bool(same_tol_at_save.get("valid", False))
         if self.same_tol_retention_enable:
-            retention_at_save = (
-                float(same_tol_at_save["retention"])
-                if bool(same_tol_at_save["valid"]) else float("nan")
-            )
+            if retention_valid_at_save:
+                retention_at_save = float(same_tol_at_save["retention"])
+            else:
+                # Do not serialize NaN into archive JSON; strict late rescue
+                # keys off same_tol_retention_valid_at_save instead.
+                retention_at_save = None
         last_mastered_at_save = float(
             self._last_mastered_tolerance.get(self.policy_idx, 0.075)
         )
@@ -8593,9 +8939,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # own gate using the raw fields below; this is a convenience hint.
         try:
             source_safe_at_save = bool(
-                (not math.isnan(retention_at_save))
+                retention_at_save is not None
+                and math.isfinite(float(retention_at_save))
                 and nsucc_mean >= 20.0
-                and retention_at_save >= 0.7
+                and float(retention_at_save) >= 0.7
             )
         except Exception:
             source_safe_at_save = False
@@ -8611,10 +8958,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "ranking_metric_mode": self.pbt_ranking_metric,
             "nsucc_zero_cap": self.pbt_nsucc_zero_cap,
             # Phase A4 P3 (2026-06-09): source-safe metadata.
-            "source_retention_at_save": float(retention_at_save),
+            "source_retention_at_save": (
+                float(retention_at_save) if retention_at_save is not None else None
+            ),
             "tolerance_bin_at_save": int(same_tol_at_save["bin_id"]),
-            "same_tol_retention_at_save": float(same_tol_at_save["retention"]),
-            "same_tol_retention_valid_at_save": bool(same_tol_at_save["valid"]),
+            "same_tol_retention_at_save": (
+                float(same_tol_at_save["retention"])
+                if retention_valid_at_save else None
+            ),
+            "same_tol_retention_valid_at_save": bool(retention_valid_at_save),
             "same_tol_peak_nsucc_mean_at_save": float(same_tol_at_save["peak"]),
             "last_mastered_tolerance_at_save": float(last_mastered_at_save),
             "source_safe_for_curriculum_at_save": bool(source_safe_at_save),
@@ -9078,10 +9430,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     ) -> bool:
         """Write restart manifest and request supervisor relaunch.
 
-        Returns True iff the restart manifest was atomically committed.
+        Returns True iff the restart manifest was atomically committed (and,
+        for late rescue, curriculum-control late-rescue state was persisted).
         """
+        snap = self._snapshot_restart_runtime_state()
         try:
-            return self._restart_process_with_new_params_impl(
+            ok = self._restart_process_with_new_params_impl(
                 new_params,
                 checkpoint_path,
                 source_policy,
@@ -9092,10 +9446,32 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 late_rescue=late_rescue,
                 late_rescue_decision=late_rescue_decision,
             )
+            if not ok:
+                self._restore_restart_runtime_state(snap)
+                self._cleanup_failed_restart_artifacts()
+                self._write_pbt_copy_event({
+                    "event_type": "pbt_restart_transaction_rolled_back",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "late_rescue": bool(late_rescue),
+                    "env_frames": int(env_frames),
+                    "reason": "restart_returned_false",
+                })
+            return bool(ok)
         except Exception as exc:
             print(
                 f"[PBT] restart manifest failed for policy {self.policy_idx}: {exc}"
             )
+            self._restore_restart_runtime_state(snap)
+            self._cleanup_failed_restart_artifacts()
+            self._write_pbt_copy_event({
+                "event_type": "pbt_restart_transaction_rolled_back",
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "late_rescue": bool(late_rescue),
+                "env_frames": int(env_frames),
+                "reason": f"exception:{type(exc).__name__}",
+            })
             return False
 
     def _restart_process_with_new_params_impl(
@@ -9762,6 +10138,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "wm_strategy_profile_copied_from_source": bool(
                 self._wm_strategy_profile_copied_from_source
             ),
+            "late_rescue": bool(late_rescue),
+            "late_rescue_attempt_count": int(
+                self._late_rescue_attempt_count.get(self.policy_idx, 0)
+            ),
+            "late_rescue_selected_count": int(
+                self._late_rescue_selected_count.get(self.policy_idx, 0)
+            ),
+            "late_rescue_executed_count": int(
+                self._late_rescue_executed_count.get(self.policy_idx, 0)
+            ),
+            "late_rescue_blocked_count": int(
+                self._late_rescue_blocked_count.get(self.policy_idx, 0)
+            ),
+            "late_rescue_last_frame": int(
+                self._late_rescue_frame.get(self.policy_idx, -1)
+            ),
+            "late_rescue_streak": int(
+                self._late_rescue_streak.get(self.policy_idx, 0)
+            ),
         }
 
         # Atomic manifest write
@@ -9779,13 +10174,51 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "env_frames": int(env_frames),
                 "manifest_path": str(manifest_path),
             })
-            self._late_rescue_executed_count[self.policy_idx] = (
-                int(self._late_rescue_executed_count.get(self.policy_idx, 0)) + 1
+            # Count + persist only after manifest commit. Persist failure is
+            # fail-closed: remove the manifest so supervisor cannot consume a
+            # restart whose quota was not durable.
+            prev_executed = int(
+                self._late_rescue_executed_count.get(self.policy_idx, 0)
             )
+            prev_frame = int(self._late_rescue_frame.get(self.policy_idx, -10**18))
+            self._late_rescue_executed_count[self.policy_idx] = prev_executed + 1
             self._late_rescue_count[self.policy_idx] = self._late_rescue_executed_count[
                 self.policy_idx
             ]
             self._late_rescue_frame[self.policy_idx] = int(env_frames)
+            # Update manifest diagnostic fields to the post-increment values.
+            try:
+                manifest["late_rescue_executed_count"] = int(
+                    self._late_rescue_executed_count[self.policy_idx]
+                )
+                manifest["late_rescue_last_frame"] = int(env_frames)
+                manifest_tmp.write_text(json.dumps(manifest))
+                manifest_tmp.replace(manifest_path)
+            except Exception:
+                pass
+            try:
+                self._persist_late_rescue_runtime_state(
+                    self.policy_idx, env_frames=int(env_frames)
+                )
+            except Exception as persist_exc:
+                self._late_rescue_executed_count[self.policy_idx] = prev_executed
+                self._late_rescue_count[self.policy_idx] = prev_executed
+                self._late_rescue_frame[self.policy_idx] = prev_frame
+                try:
+                    if manifest_path.exists():
+                        manifest_path.unlink()
+                except Exception:
+                    pass
+                self._write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_state_persist_failed",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "env_frames": int(env_frames),
+                    "error": str(persist_exc),
+                })
+                raise RuntimeError(
+                    "late_degradation_rescue_state_persist_failed"
+                ) from persist_exc
             self._write_pbt_copy_event({
                 "event_type": "late_degradation_rescue_executed",
                 "source_type": str(
@@ -9797,6 +10230,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "rescue_executed_count": self._late_rescue_executed_count[
                     self.policy_idx
                 ],
+                "late_rescue_last_frame": int(env_frames),
                 "env_frames": int(env_frames),
             })
 

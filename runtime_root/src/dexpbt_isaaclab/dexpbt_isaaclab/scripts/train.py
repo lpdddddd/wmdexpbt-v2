@@ -64,6 +64,16 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=True,
 )
+parser.add_argument(
+    "--late_degradation_rescue_require_source_control",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument(
+    "--late_degradation_rescue_bypass_elimination_burnin",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -7878,6 +7888,12 @@ def main():
             ),
             late_degradation_rescue_reject_collapse_source=(
                 args_cli.late_degradation_rescue_reject_collapse_source
+            ),
+            late_degradation_rescue_require_source_control=(
+                args_cli.late_degradation_rescue_require_source_control
+            ),
+            late_degradation_rescue_bypass_elimination_burnin=(
+                args_cli.late_degradation_rescue_bypass_elimination_burnin
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
