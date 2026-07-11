@@ -27,6 +27,8 @@ from dexpbt_isaaclab.dexpbt_utils import (
 )
 from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     CurriculumControlState,
+    LateRescueControlMissingError,
+    LateRescueControlParseError,
     RollingNsuccWindow,
     WindowSample,
     SKILL_DELTA_IMPROVE_EPS,
@@ -40,7 +42,9 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     post_shrink_consolidation_active,
     qualifies_best_stable_save,
     read_curriculum_control,
+    read_curriculum_control_required,
     write_curriculum_control,
+    write_curriculum_control_dict,
     write_curriculum_resume_snapshot,
 )
 from dexpbt_isaaclab.pbt.pbt_tolerance_bridge import (
@@ -3994,9 +3998,31 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         *,
         env_frames: int,
     ) -> None:
-        """Atomically persist late-rescue quota/cooldown into curriculum_control."""
+        """Atomically persist late-rescue quota/cooldown into curriculum_control.
+
+        Fail-closed: missing or unparseable target control must not be replaced
+        with an empty ``CurriculumControlState`` (would wipe retention / bridge /
+        probation / consolidation history).
+        """
         path = self._curriculum_control_dir / f"{int(policy_idx):03d}.json"
-        control = read_curriculum_control(path) or CurriculumControlState()
+        try:
+            control, raw = read_curriculum_control_required(path)
+        except LateRescueControlMissingError:
+            self._safe_write_pbt_copy_event({
+                "event_type": "late_degradation_rescue_target_control_missing",
+                "policy_idx": int(policy_idx),
+                "env_frames": int(env_frames),
+                "path": str(path),
+            })
+            raise
+        except LateRescueControlParseError:
+            self._safe_write_pbt_copy_event({
+                "event_type": "late_degradation_rescue_target_control_parse_error",
+                "policy_idx": int(policy_idx),
+                "env_frames": int(env_frames),
+                "path": str(path),
+            })
+            raise
         control.late_rescue_attempt_count = int(
             self._late_rescue_attempt_count.get(policy_idx, 0)
         )
@@ -4015,8 +4041,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         control.late_rescue_last_frame = int(
             self._late_rescue_frame.get(policy_idx, -1)
         )
-        write_curriculum_control(path, control)
-        self._write_pbt_copy_event({
+        # Preserve unknown JSON fields; only overwrite late-rescue keys.
+        raw.update(control.to_json())
+        write_curriculum_control_dict(path, raw)
+        self._safe_write_pbt_copy_event({
             "event_type": "late_degradation_rescue_state_persisted",
             "policy_idx": int(policy_idx),
             "env_frames": int(env_frames),
@@ -4145,6 +4173,97 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     pass
         except Exception:
             pass
+
+    def _snapshot_restart_persistent_state(self) -> dict[str, Any]:
+        """Byte-level snapshot of control JSON + restart manifest.
+
+        Restoring raw bytes preserves unknown JSON fields and avoids
+        reconstructing ``CurriculumControlState`` (which drops extras).
+        """
+        control_path = (
+            self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
+        )
+        manifest_path = Path(self.train_dir).parent / self.RESTART_MANIFEST
+        control_existed = control_path.is_file()
+        manifest_existed = manifest_path.is_file()
+        return {
+            "control_path": control_path,
+            "control_existed": bool(control_existed),
+            "control_bytes": control_path.read_bytes() if control_existed else None,
+            "manifest_path": manifest_path,
+            "manifest_existed": bool(manifest_existed),
+            "manifest_bytes": (
+                manifest_path.read_bytes() if manifest_existed else None
+            ),
+        }
+
+    @staticmethod
+    def _atomic_restore_file_bytes(
+        path: Path,
+        *,
+        existed: bool,
+        data: bytes | None,
+    ) -> None:
+        """Restore a file from a byte snapshot (or delete if it did not exist)."""
+        path = Path(path)
+        if existed:
+            assert data is not None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.parent / (
+                f"{path.stem}.{os.getpid()}.{_uuid_mod.uuid4().hex[:8]}.restore.tmp"
+            )
+            tmp.write_bytes(data)
+            os.replace(str(tmp), str(path))
+            return
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+    def _restore_restart_persistent_state(self, snapshot: dict[str, Any]) -> None:
+        self._atomic_restore_file_bytes(
+            Path(snapshot["control_path"]),
+            existed=bool(snapshot["control_existed"]),
+            data=snapshot.get("control_bytes"),
+        )
+        self._atomic_restore_file_bytes(
+            Path(snapshot["manifest_path"]),
+            existed=bool(snapshot["manifest_existed"]),
+            data=snapshot.get("manifest_bytes"),
+        )
+
+    def _abort_restart_transaction(
+        self,
+        *,
+        runtime_snap: dict[str, Any],
+        persistent_snap: dict[str, Any],
+        source_policy: int,
+        env_frames: int,
+        late_rescue: bool,
+        reason: str,
+    ) -> None:
+        """Single rollback owner: restore memory + files, cleanup, one audit."""
+        try:
+            self._restore_restart_runtime_state(runtime_snap)
+        except Exception as exc:
+            print(f"[PBT] restart runtime restore failed: {exc}")
+        try:
+            self._restore_restart_persistent_state(persistent_snap)
+        except Exception as exc:
+            print(f"[PBT] restart persistent restore failed: {exc}")
+        try:
+            self._cleanup_failed_restart_artifacts()
+        except Exception as exc:
+            print(f"[PBT] restart artifact cleanup failed: {exc}")
+        self._safe_write_pbt_copy_event({
+            "event_type": "pbt_restart_transaction_rolled_back",
+            "source_policy": int(source_policy),
+            "target_policy": int(self.policy_idx),
+            "late_rescue": bool(late_rescue),
+            "env_frames": int(env_frames),
+            "reason": str(reason),
+        })
 
     @staticmethod
     def _recent_slope(window: RollingNsuccWindow, n: int) -> float:
@@ -4827,6 +4946,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 fh.write(json.dumps(payload) + "\n")
         except Exception as exc:  # pragma: no cover - best effort
             print(f"[pbt-copy-events] write failed: {exc}")
+
+    def _safe_write_pbt_copy_event(self, payload: dict[str, Any]) -> None:
+        """Best-effort audit write; never raises into restart rollback paths."""
+        try:
+            self._write_pbt_copy_event(payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[pbt-copy-events] safe write failed: {exc}")
 
     def _write_profile_copy_event(self, payload: dict[str, Any]) -> None:
         try:
@@ -8261,6 +8387,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # otherwise 100M (configurable).
         recovery_consolidation_source = ""
         recovery_consolidation_frames = 0
+        source_safe_apply: dict[str, Any] | None = None
         # Mid-tier self-restart copies from self -> self; treat it like a
         # legacy event for inheritance purposes. The bottom-tier branch is
         # the only one that crosses worker boundaries.
@@ -8334,14 +8461,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     inherit_audit.get("strong_live_inherit_exact", False)
                 ),
             }
-            apply_source_safe_consolidation_on_copy(
-                ctrl_path,
-                consolidation_env_frames=recovery_consolidation_frames,
-                consolidation_source=recovery_consolidation_source,
-                num_envs=int(self.num_envs),
-                inherited_tolerance=float(tol_after),
-                inheritance_audit=audit_payload,
-            )
+            # Defer control JSON mutation until inside the restart transaction
+            # so a failed manifest/checkpoint path can restore raw bytes.
+            source_safe_apply = {
+                "path": ctrl_path,
+                "consolidation_env_frames": recovery_consolidation_frames,
+                "consolidation_source": recovery_consolidation_source,
+                "num_envs": int(self.num_envs),
+                "inherited_tolerance": float(tol_after),
+                "inheritance_audit": audit_payload,
+                "require_existing": bool(late_rescue),
+            }
         # Persist a copy-event record for downstream analysis. Note that
         # ``tier_label`` is only defined when the bottom-tier source-selection
         # cascade ran; mid-tier self-restarts log a synthetic label.
@@ -8468,6 +8598,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             )
             or 0
         )
+        # Transaction owner is `_restart_process_with_new_params`. Caller only
+        # reacts to the boolean; do NOT restore/cleanup/emit rollback here.
         restart_ok = self._restart_process_with_new_params(
             new_params,
             checkpoint_to_load,
@@ -8478,22 +8610,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_weight_age_frame=source_weight_age,
             late_rescue=bool(late_rescue),
             late_rescue_decision=decision if late_rescue else None,
+            runtime_snap=restart_txn_snap,
+            source_safe_apply=source_safe_apply,
         )
         if not restart_ok:
-            self._restore_restart_runtime_state(restart_txn_snap)
-            self._cleanup_failed_restart_artifacts()
-            self._write_pbt_copy_event({
-                "event_type": "pbt_restart_transaction_rolled_back",
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "late_rescue": bool(late_rescue),
-                "env_frames": int(env_frames),
-            })
             if late_rescue:
                 self._late_rescue_blocked_count[self.policy_idx] = (
                     int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
                 )
-                self._write_pbt_copy_event({
+                self._safe_write_pbt_copy_event({
                     "event_type": "late_degradation_rescue_restart_failed",
                     "source_policy": source_policy,
                     "target_policy": self.policy_idx,
@@ -9427,14 +9552,39 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         source_weight_age_frame: int = 0,
         late_rescue: bool = False,
         late_rescue_decision: dict[str, Any] | None = None,
+        runtime_snap: dict[str, Any] | None = None,
+        source_safe_apply: dict[str, Any] | None = None,
     ) -> bool:
-        """Write restart manifest and request supervisor relaunch.
+        """Own the full restart transaction (memory + control + manifest).
 
-        Returns True iff the restart manifest was atomically committed (and,
-        for late rescue, curriculum-control late-rescue state was persisted).
+        Commit order (documented intentionally):
+          1. snapshot runtime + persistent (control/manifest bytes)
+          2. apply source-safe consolidation to control (if requested)
+          3. prepare checkpoint / train_args / memory mutations
+          4. late-rescue: bump executed + persist quota/cooldown into control
+          5. atomic commit restart manifest
+          6. mark committed — post-commit audit/writer are best-effort only
+          7. SIGKILL / exit
+
+        Any failure before step 6 restores runtime + persistent bytes, cleans
+        restart artifacts, and emits exactly one
+        ``pbt_restart_transaction_rolled_back`` event. Callers must not also
+        restore/cleanup/emit that event.
         """
-        snap = self._snapshot_restart_runtime_state()
+        snap = (
+            runtime_snap
+            if runtime_snap is not None
+            else self._snapshot_restart_runtime_state()
+        )
+        persistent_snap = self._snapshot_restart_persistent_state()
+        # Mutable commit flag shared with impl so post-commit exceptions do
+        # not enter the rollback branch.
+        txn = {"committed": False}
         try:
+            if source_safe_apply is not None:
+                apply_kwargs = dict(source_safe_apply)
+                apply_path = Path(apply_kwargs.pop("path"))
+                apply_source_safe_consolidation_on_copy(apply_path, **apply_kwargs)
             ok = self._restart_process_with_new_params_impl(
                 new_params,
                 checkpoint_path,
@@ -9445,33 +9595,42 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 source_weight_age_frame=source_weight_age_frame,
                 late_rescue=late_rescue,
                 late_rescue_decision=late_rescue_decision,
+                txn=txn,
             )
-            if not ok:
-                self._restore_restart_runtime_state(snap)
-                self._cleanup_failed_restart_artifacts()
-                self._write_pbt_copy_event({
-                    "event_type": "pbt_restart_transaction_rolled_back",
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "late_rescue": bool(late_rescue),
-                    "env_frames": int(env_frames),
-                    "reason": "restart_returned_false",
-                })
-            return bool(ok)
+            if not ok and not txn["committed"]:
+                self._abort_restart_transaction(
+                    runtime_snap=snap,
+                    persistent_snap=persistent_snap,
+                    source_policy=int(source_policy),
+                    env_frames=int(env_frames),
+                    late_rescue=bool(late_rescue),
+                    reason="restart_returned_false",
+                )
+            return bool(ok) or bool(txn["committed"])
         except Exception as exc:
             print(
                 f"[PBT] restart manifest failed for policy {self.policy_idx}: {exc}"
             )
-            self._restore_restart_runtime_state(snap)
-            self._cleanup_failed_restart_artifacts()
-            self._write_pbt_copy_event({
-                "event_type": "pbt_restart_transaction_rolled_back",
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "late_rescue": bool(late_rescue),
-                "env_frames": int(env_frames),
-                "reason": f"exception:{type(exc).__name__}",
-            })
+            if txn["committed"]:
+                # Commit point already passed; do not roll back durable state.
+                self._safe_write_pbt_copy_event({
+                    "event_type": "pbt_restart_post_commit_error",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "late_rescue": bool(late_rescue),
+                    "env_frames": int(env_frames),
+                    "reason": f"exception:{type(exc).__name__}",
+                    "error": str(exc),
+                })
+                return True
+            self._abort_restart_transaction(
+                runtime_snap=snap,
+                persistent_snap=persistent_snap,
+                source_policy=int(source_policy),
+                env_frames=int(env_frames),
+                late_rescue=bool(late_rescue),
+                reason=f"exception:{type(exc).__name__}",
+            )
             return False
 
     def _restart_process_with_new_params_impl(
@@ -9485,6 +9644,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         source_weight_age_frame: int = 0,
         late_rescue: bool = False,
         late_rescue_decision: dict[str, Any] | None = None,
+        txn: dict[str, Any] | None = None,
     ) -> bool:
         src = Path(checkpoint_path).resolve()
         tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
@@ -10159,12 +10319,70 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             ),
         }
 
-        # Atomic manifest write
-        manifest_tmp = manifest_path.with_suffix(".tmp")
-        manifest_tmp.write_text(json.dumps(manifest))
-        manifest_tmp.replace(manifest_path)
+        # ------------------------------------------------------------------
+        # Commit point preparation.
+        # Order: (optional source-safe already applied) → late-rescue control
+        # persist → atomic manifest → mark committed → best-effort audit /
+        # writer → SIGKILL. Any failure before committed triggers full
+        # rollback of runtime + persistent byte snapshots.
+        # ------------------------------------------------------------------
         if late_rescue:
-            self._write_pbt_copy_event({
+            # Fail-closed if target control is missing/corrupt before we touch
+            # executed_count or write a supervisor-consumable manifest.
+            ctrl_path = (
+                self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
+            )
+            try:
+                read_curriculum_control_required(ctrl_path)
+            except LateRescueControlMissingError:
+                self._safe_write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_target_control_missing",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "env_frames": int(env_frames),
+                    "path": str(ctrl_path),
+                })
+                raise
+            except LateRescueControlParseError:
+                self._safe_write_pbt_copy_event({
+                    "event_type": "late_degradation_rescue_target_control_parse_error",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "env_frames": int(env_frames),
+                    "path": str(ctrl_path),
+                })
+                raise
+            prev_executed = int(
+                self._late_rescue_executed_count.get(self.policy_idx, 0)
+            )
+            self._late_rescue_executed_count[self.policy_idx] = prev_executed + 1
+            self._late_rescue_count[self.policy_idx] = self._late_rescue_executed_count[
+                self.policy_idx
+            ]
+            self._late_rescue_frame[self.policy_idx] = int(env_frames)
+            manifest["late_rescue_executed_count"] = int(
+                self._late_rescue_executed_count[self.policy_idx]
+            )
+            manifest["late_rescue_last_frame"] = int(env_frames)
+            # Persist quota/cooldown into control BEFORE manifest so a persist
+            # failure never leaves a consumable restart without durable quota.
+            self._persist_late_rescue_runtime_state(
+                self.policy_idx, env_frames=int(env_frames)
+            )
+
+        # Atomic manifest write (commit step for supervisor consumption).
+        manifest_tmp = manifest_path.with_suffix(
+            f".{os.getpid()}.{_uuid_mod.uuid4().hex[:8]}.tmp"
+        )
+        manifest_tmp.write_text(json.dumps(manifest))
+        os.replace(str(manifest_tmp), str(manifest_path))
+
+        if txn is not None:
+            txn["committed"] = True
+
+        # ---- Post-commit: best-effort only; must not trigger rollback. ----
+        if late_rescue:
+            self._safe_write_pbt_copy_event({
                 "event_type": "late_degradation_rescue_restart_manifest_committed",
                 "source_type": str(
                     (late_rescue_decision or {}).get("checkpoint_type", "live")
@@ -10174,52 +10392,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "env_frames": int(env_frames),
                 "manifest_path": str(manifest_path),
             })
-            # Count + persist only after manifest commit. Persist failure is
-            # fail-closed: remove the manifest so supervisor cannot consume a
-            # restart whose quota was not durable.
-            prev_executed = int(
-                self._late_rescue_executed_count.get(self.policy_idx, 0)
-            )
-            prev_frame = int(self._late_rescue_frame.get(self.policy_idx, -10**18))
-            self._late_rescue_executed_count[self.policy_idx] = prev_executed + 1
-            self._late_rescue_count[self.policy_idx] = self._late_rescue_executed_count[
-                self.policy_idx
-            ]
-            self._late_rescue_frame[self.policy_idx] = int(env_frames)
-            # Update manifest diagnostic fields to the post-increment values.
-            try:
-                manifest["late_rescue_executed_count"] = int(
-                    self._late_rescue_executed_count[self.policy_idx]
-                )
-                manifest["late_rescue_last_frame"] = int(env_frames)
-                manifest_tmp.write_text(json.dumps(manifest))
-                manifest_tmp.replace(manifest_path)
-            except Exception:
-                pass
-            try:
-                self._persist_late_rescue_runtime_state(
-                    self.policy_idx, env_frames=int(env_frames)
-                )
-            except Exception as persist_exc:
-                self._late_rescue_executed_count[self.policy_idx] = prev_executed
-                self._late_rescue_count[self.policy_idx] = prev_executed
-                self._late_rescue_frame[self.policy_idx] = prev_frame
-                try:
-                    if manifest_path.exists():
-                        manifest_path.unlink()
-                except Exception:
-                    pass
-                self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_state_persist_failed",
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "env_frames": int(env_frames),
-                    "error": str(persist_exc),
-                })
-                raise RuntimeError(
-                    "late_degradation_rescue_state_persist_failed"
-                ) from persist_exc
-            self._write_pbt_copy_event({
+            self._safe_write_pbt_copy_event({
                 "event_type": "late_degradation_rescue_executed",
                 "source_type": str(
                     (late_rescue_decision or {}).get("checkpoint_type", "live")
@@ -10236,43 +10409,49 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         self.mutable_params = dict(new_params)
         self.mutable_params["wm_strategy"] = selected_strategy
-        if self.writer is not None:
-            # M4: restart-related scalars
-            self.writer.add_scalar("pbt/source_policy", float(source_policy), env_frames)
-            self.writer.add_scalar("pbt/tier_bottom", float(tier == "bottom"), env_frames)
-            self.writer.add_scalar("pbt/restart_source_policy_idx", float(source_policy), env_frames)
-            if "success_tolerance" in sc:
+        try:
+            if self.writer is not None:
+                # M4: restart-related scalars
+                self.writer.add_scalar("pbt/source_policy", float(source_policy), env_frames)
+                self.writer.add_scalar("pbt/tier_bottom", float(tier == "bottom"), env_frames)
+                self.writer.add_scalar("pbt/restart_source_policy_idx", float(source_policy), env_frames)
+                if "success_tolerance" in sc:
+                    self.writer.add_scalar(
+                        "pbt/restart_loaded_success_tolerance",
+                        float(sc["success_tolerance"]),
+                        env_frames,
+                    )
+                # Patch F (2026-05-31): emit restart_type + lifetime counters
+                # for the soon-to-die process. The relaunched worker will pick
+                # up the resume hooks and continue incrementing these.
                 self.writer.add_scalar(
-                    "pbt/restart_loaded_success_tolerance",
-                    float(sc["success_tolerance"]),
+                    "pbt/restart_type", float(self._last_restart_type), env_frames
+                )
+                self.writer.add_scalar(
+                    "pbt/self_restart_count",
+                    float(self._self_restart_count),
                     env_frames,
                 )
-            # Patch F (2026-05-31): emit restart_type + lifetime counters
-            # for the soon-to-die process. The relaunched worker will pick
-            # up the resume hooks and continue incrementing these.
-            self.writer.add_scalar(
-                "pbt/restart_type", float(self._last_restart_type), env_frames
-            )
-            self.writer.add_scalar(
-                "pbt/self_restart_count",
-                float(self._self_restart_count),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "pbt/cross_restart_count",
-                float(self._cross_restart_count),
-                env_frames,
-            )
-            self.writer.flush()
-            self.writer.close()
+                self.writer.add_scalar(
+                    "pbt/cross_restart_count",
+                    float(self._cross_restart_count),
+                    env_frames,
+                )
+                self.writer.flush()
+                self.writer.close()
+        except Exception as writer_exc:
+            print(f"[PBT] post-commit writer failed (ignored): {writer_exc}")
 
         print(
             f"Policy {self.policy_idx}: DexPBT {tier} restart from policy {source_policy} "
             f"with checkpoint {restart_checkpoint} — "
             f"requesting supervisor restart (exit code {self.RESTART_EXIT_CODE})"
         )
-        sys.stdout.flush()
-        sys.stderr.flush()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
 
         # NOTE: We intentionally do NOT close env or SimulationApp here.
         # Isaac Sim's close() deadlocks when called from within an RL callback.
@@ -10285,8 +10464,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Return True for unit tests that mock process exit; production never
         # observes the return because the process is killed immediately after.
         import signal as _signal
-        sys.stdout.flush()
-        sys.stderr.flush()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         try:
             _signal.raise_signal(_signal.SIGKILL)
         except Exception:

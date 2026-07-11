@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -1014,41 +1015,78 @@ def test_late_rescue_cooldown_persists_across_restart(tmp_path: Path):
     ) is True
 
 
-def test_late_rescue_state_persist_failure_fail_closed(tmp_path: Path):
+def test_late_rescue_state_persist_failure_fail_closed(tmp_path: Path, monkeypatch):
+    """Persist failure before manifest must roll back executed_count and leave no manifest."""
+    from dexpbt_isaaclab.pbt import pbt_observer as obs_mod
+
     obs = _make_minimal_observer(tmp_path)
+    control_path = obs._curriculum_control_dir / "000.json"
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control_dict,
+    )
+
+    write_curriculum_control_dict(
+        control_path,
+        CurriculumControlState(last_mastered_tolerance=0.021).to_json(),
+    )
+    ckpt = tmp_path / "source.pth"
+    torch.save({"frame": 0, "model": {}, "pbt_history": []}, ckpt)
     events: list[dict] = []
     obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
-    obs.train_dir = tmp_path / "run" / "rl_games"
-    obs.train_dir.mkdir(parents=True, exist_ok=True)
-    manifest = obs.train_dir.parent / obs.RESTART_MANIFEST
-    manifest.write_text("{}")
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    import signal
 
-    def _boom(*_a, **_k):
-        raise RuntimeError("disk full")
+    monkeypatch.setattr(signal, "raise_signal", lambda *_a, **_k: None)
+    monkeypatch.setattr(os, "_exit", lambda *_a, **_k: None)
 
-    obs._persist_late_rescue_runtime_state = _boom
-    # Simulate the critical section after manifest commit.
-    prev_executed = 0
-    prev_frame = -10**18
-    obs._late_rescue_executed_count[0] = 1
-    obs._late_rescue_frame[0] = 100
-    try:
-        obs._persist_late_rescue_runtime_state(0, env_frames=100)
-        raised = False
-    except Exception:
-        raised = True
-        obs._late_rescue_executed_count[0] = prev_executed
-        obs._late_rescue_frame[0] = prev_frame
-        if manifest.exists():
-            manifest.unlink()
-        events.append({"event_type": "late_degradation_rescue_state_persist_failed"})
-    assert raised
+    def _boom_write(path, data, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(obs_mod, "write_curriculum_control_dict", _boom_write)
+    obs._late_rescue_attempt_count[0] = 1
+    obs._late_rescue_selected_count[0] = 1
+    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
+    ok = DexPBTPbtAlgoObserver._restart_process_with_new_params(
+        obs,
+        {
+            "gamma": 0.99,
+            "kl_threshold": 0.01,
+            "grad_norm": 1.0,
+            "critic_coef": 4.0,
+            "bounds_loss_coef": 1e-4,
+            "e_clip": 0.1,
+            "mini_epochs": 2,
+            "learning_rate": 1e-4,
+            "alpha_reach": 30.0,
+            "alpha_pick": 20.0,
+            "r_picked": 300.0,
+            "alpha_targ": 200.0,
+            "r_success": 1000.0,
+            "kuka_actions_penalty_scale": 3e-3,
+            "allegro_actions_penalty_scale": 3e-4,
+            "wm_strategy": "none",
+            "wm_ensemble_size": 3,
+            "enable_wm": False,
+            "enable_counterfactual": False,
+        },
+        str(ckpt),
+        1,
+        3_200_000_000,
+        "bottom",
+        source_curriculum={"success_tolerance": 0.020},
+        late_rescue=True,
+        late_rescue_decision={"checkpoint_type": "live"},
+        runtime_snap=obs._snapshot_restart_runtime_state(),
+    )
+    assert ok is False
     assert obs._late_rescue_executed_count.get(0, 0) == 0
     assert obs._late_rescue_frame.get(0, -1) < 0
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
     assert not manifest.exists()
     assert any(
-        e.get("event_type") == "late_degradation_rescue_state_persist_failed"
-        for e in events
+        e.get("event_type") == "pbt_restart_transaction_rolled_back" for e in events
     )
 
 
@@ -1349,3 +1387,421 @@ def test_late_rescue_counter_invariant(tmp_path: Path):
     obs._late_rescue_selected_count[0] = 2
     obs._late_rescue_executed_count[0] = 1
     _invariant()
+
+
+# ---------------------------------------------------------------------------
+# Restart transaction integration tests (call real restart owner)
+# ---------------------------------------------------------------------------
+
+_RESTART_PARAMS: dict = {
+    "gamma": 0.99,
+    "kl_threshold": 0.01,
+    "grad_norm": 1.0,
+    "critic_coef": 4.0,
+    "bounds_loss_coef": 1e-4,
+    "e_clip": 0.1,
+    "mini_epochs": 2,
+    "learning_rate": 1e-4,
+    "alpha_reach": 30.0,
+    "alpha_pick": 20.0,
+    "r_picked": 300.0,
+    "alpha_targ": 200.0,
+    "r_success": 1000.0,
+    "kuka_actions_penalty_scale": 3e-3,
+    "allegro_actions_penalty_scale": 3e-4,
+    "wm_strategy": "none",
+    "wm_ensemble_size": 3,
+    "enable_wm": False,
+    "enable_counterfactual": False,
+}
+
+
+def _seed_control_json(obs, *, extra: dict | None = None) -> Path:
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control_dict,
+    )
+
+    path = obs._curriculum_control_dir / f"{int(obs.policy_idx):03d}.json"
+    data = CurriculumControlState(
+        last_mastered_tolerance=0.021,
+        bridge_probation_entry_frame=7,
+        late_rescue_executed_count=0,
+    ).to_json()
+    data["custom_unknown_field"] = "preserve-me"
+    if extra:
+        data.update(extra)
+    write_curriculum_control_dict(path, data)
+    return path
+
+
+def _seed_checkpoint(tmp_path: Path) -> Path:
+    ckpt = tmp_path / "source.pth"
+    torch.save({"frame": 0, "model": {}, "pbt_history": []}, ckpt)
+    return ckpt
+
+
+def _patch_restart_exit(monkeypatch):
+    import os
+    import signal
+
+    monkeypatch.setattr(signal, "raise_signal", lambda *_a, **_k: None)
+    monkeypatch.setattr(os, "_exit", lambda *_a, **_k: None)
+
+
+def _call_restart(
+    obs,
+    ckpt: Path,
+    *,
+    late_rescue: bool = True,
+    source_safe_apply: dict | None = None,
+    runtime_snap: dict | None = None,
+):
+    from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+
+    snap = runtime_snap or obs._snapshot_restart_runtime_state()
+    return DexPBTPbtAlgoObserver._restart_process_with_new_params(
+        obs,
+        dict(_RESTART_PARAMS),
+        str(ckpt),
+        1,
+        3_200_000_000,
+        "bottom",
+        source_curriculum={"success_tolerance": 0.020},
+        source_weight_age_frame=100,
+        late_rescue=late_rescue,
+        late_rescue_decision={"checkpoint_type": "live"},
+        runtime_snap=snap,
+        source_safe_apply=source_safe_apply,
+    )
+
+
+def test_txn_source_safe_then_manifest_failure_restores_control(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = _seed_control_json(obs)
+    original = control_path.read_bytes()
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    real_replace = os.replace
+
+    def _boom_manifest(src, dst):
+        if str(dst).endswith("pbt_restart.json"):
+            raise OSError("simulated manifest replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _boom_manifest)
+
+    source_safe_apply = {
+        "path": control_path,
+        "consolidation_env_frames": 50_000_000,
+        "consolidation_source": "recovery_consolidation_source_safe",
+        "num_envs": 1,
+        "inherited_tolerance": 0.020,
+        "inheritance_audit": {"inheritance_reason": "test"},
+        "require_existing": True,
+    }
+    ok = _call_restart(obs, ckpt, source_safe_apply=source_safe_apply)
+    assert ok is False
+    assert control_path.read_bytes() == original
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
+    assert not manifest.exists()
+    assert not (obs.workspace / f"restart_p{obs.policy_idx}").exists()
+    assert obs._late_rescue_executed_count.get(0, 0) == 0
+    rollback = [
+        e for e in events if e.get("event_type") == "pbt_restart_transaction_rolled_back"
+    ]
+    assert len(rollback) == 1
+
+
+def test_txn_writer_exception_after_commit_keeps_quota(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = _seed_control_json(obs)
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    class _BadWriter:
+        def add_scalar(self, *a, **k):
+            return None
+
+        def flush(self):
+            raise RuntimeError("tb flush boom")
+
+        def close(self):
+            return None
+
+    obs.writer = _BadWriter()
+    obs._late_rescue_attempt_count[0] = 1
+    obs._late_rescue_selected_count[0] = 1
+
+    ok = _call_restart(obs, ckpt)
+    assert ok is True
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
+    assert manifest.is_file()
+    data = json.loads(control_path.read_text())
+    assert int(data["late_rescue_executed_count"]) == 1
+    assert int(obs._late_rescue_executed_count[0]) == 1
+    assert not any(
+        e.get("event_type") == "pbt_restart_transaction_rolled_back" for e in events
+    )
+
+
+def test_txn_target_control_missing_fail_closed(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = obs._curriculum_control_dir / "000.json"
+    assert not control_path.exists()
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    assert not control_path.exists()
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
+    assert not manifest.exists()
+    assert obs._late_rescue_executed_count.get(0, 0) == 0
+    assert any(
+        e.get("event_type") == "late_degradation_rescue_target_control_missing"
+        for e in events
+    )
+
+
+def test_txn_target_control_corrupt_fail_closed(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = obs._curriculum_control_dir / "000.json"
+    control_path.write_text("{not-json")
+    corrupt_bytes = control_path.read_bytes()
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    assert control_path.read_bytes() == corrupt_bytes
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
+    assert not manifest.exists()
+    assert obs._late_rescue_executed_count.get(0, 0) == 0
+    assert any(
+        e.get("event_type") == "late_degradation_rescue_target_control_parse_error"
+        for e in events
+    )
+
+
+def test_archive_nonfinite_tolerance_rejected(tmp_path: Path):
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        d = tmp_path / f"tol_{bad}"
+        d.mkdir()
+        p = d / "a.json"
+        p.write_text(json.dumps({
+            "curriculum": {"success_tolerance": bad},
+            "nsucc_mean": 40.0,
+            "nsucc_max": 50.0,
+            "frame": 1,
+            "checkpoint": str(d / "a.pth"),
+            "same_tol_retention_at_save": 0.9,
+            "same_tol_retention_valid_at_save": True,
+        }))
+        (d / "a.pth").write_text("x")
+        reject: list[dict] = []
+        assert select_compatible_archive(
+            d,
+            target_tolerance=0.02,
+            max_gap=0.01,
+            min_mean=28.0,
+            min_retention=0.85,
+            require_retention_metadata=True,
+            reject_log=reject,
+        ) is None
+        assert any(r["reason"] == "tolerance_nonfinite" for r in reject)
+
+
+def test_archive_nonfinite_mean_rejected(tmp_path: Path):
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        d = tmp_path / f"mean_{bad}"
+        d.mkdir()
+        p = d / "a.json"
+        p.write_text(json.dumps({
+            "curriculum": {"success_tolerance": 0.02},
+            "nsucc_mean": bad,
+            "nsucc_max": 50.0,
+            "frame": 1,
+            "checkpoint": str(d / "a.pth"),
+            "same_tol_retention_at_save": 0.9,
+            "same_tol_retention_valid_at_save": True,
+        }))
+        (d / "a.pth").write_text("x")
+        reject: list[dict] = []
+        assert select_compatible_archive(
+            d,
+            target_tolerance=0.02,
+            max_gap=0.01,
+            min_mean=28.0,
+            min_retention=0.85,
+            require_retention_metadata=True,
+            reject_log=reject,
+        ) is None
+        assert any(r["reason"] == "mean_nonfinite" for r in reject)
+
+
+def test_txn_duplicate_rollback_event_once(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    _seed_control_json(obs)
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    real_replace = os.replace
+
+    def _boom_manifest(src, dst):
+        if str(dst).endswith("pbt_restart.json"):
+            raise OSError("manifest boom")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _boom_manifest)
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    # Simulate former caller-side reaction without second rollback.
+    blocked_before = int(obs._late_rescue_blocked_count.get(0, 0))
+    obs._late_rescue_blocked_count[0] = blocked_before + 1
+    rollback = [
+        e for e in events if e.get("event_type") == "pbt_restart_transaction_rolled_back"
+    ]
+    assert len(rollback) == 1
+    assert obs._late_rescue_blocked_count[0] - blocked_before == 1
+
+
+def test_txn_blocked_count_once_on_failed_restart(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    _seed_control_json(obs)
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if str(dst).endswith("pbt_restart.json"):
+            raise OSError("manifest boom")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _boom)
+
+    before = int(obs._late_rescue_blocked_count.get(0, 0))
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    # Caller increments blocked exactly once on False.
+    obs._late_rescue_blocked_count[0] = before + 1
+    assert obs._late_rescue_blocked_count[0] == before + 1
+    assert (
+        len(
+            [
+                e
+                for e in events
+                if e.get("event_type") == "pbt_restart_transaction_rolled_back"
+            ]
+        )
+        == 1
+    )
+
+
+def test_txn_successful_commit(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = _seed_control_json(obs)
+    ckpt = _seed_checkpoint(tmp_path)
+    events: list[dict] = []
+    obs._write_pbt_copy_event = lambda payload: events.append(dict(payload))
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+    obs._late_rescue_attempt_count[0] = 1
+    obs._late_rescue_selected_count[0] = 1
+
+    ok = _call_restart(obs, ckpt)
+    assert ok is True
+    manifest = Path(obs.train_dir).parent / obs.RESTART_MANIFEST
+    assert manifest.is_file()
+    data = json.loads(control_path.read_text())
+    assert int(data["late_rescue_executed_count"]) == 1
+    assert int(data["late_rescue_last_frame"]) == 3_200_000_000
+    assert data.get("custom_unknown_field") == "preserve-me"
+    assert int(obs._late_rescue_executed_count[0]) == 1
+    assert int(obs._late_rescue_frame[0]) == 3_200_000_000
+    assert not any(
+        e.get("event_type") == "pbt_restart_transaction_rolled_back" for e in events
+    )
+
+
+def test_txn_counter_invariant_across_real_failures(tmp_path: Path, monkeypatch):
+    obs = _make_minimal_observer(tmp_path)
+    control_path = _seed_control_json(obs)
+    ckpt = _seed_checkpoint(tmp_path)
+    monkeypatch.setattr(obs, "_rewrite_checkpoint", lambda *a, **k: None)
+    _patch_restart_exit(monkeypatch)
+
+    def _inv():
+        a = int(obs._late_rescue_attempt_count.get(0, 0))
+        s = int(obs._late_rescue_selected_count.get(0, 0))
+        e = int(obs._late_rescue_executed_count.get(0, 0))
+        assert a >= s >= e, (a, s, e)
+
+    # no source (selection never happens)
+    obs._late_rescue_attempt_count[0] = 1
+    _inv()
+
+    # checkpoint missing -> restart fails before commit
+    obs._late_rescue_attempt_count[0] = 2
+    obs._late_rescue_selected_count[0] = 1
+    missing = tmp_path / "missing.pth"
+    ok = _call_restart(obs, missing)
+    assert ok is False
+    _inv()
+
+    # burn-in style: selected not incremented further; just keep invariant
+    obs._late_rescue_attempt_count[0] = 3
+    _inv()
+
+    # manifest failure
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if str(dst).endswith("pbt_restart.json"):
+            raise OSError("manifest boom")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", _boom)
+    obs._late_rescue_attempt_count[0] = 4
+    obs._late_rescue_selected_count[0] = 2
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    assert obs._late_rescue_executed_count.get(0, 0) == 0
+    _inv()
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    # state persist failure via missing control after delete
+    control_path.unlink()
+    obs._late_rescue_attempt_count[0] = 5
+    obs._late_rescue_selected_count[0] = 3
+    ok = _call_restart(obs, ckpt)
+    assert ok is False
+    _inv()
+
+    # successful restart
+    _seed_control_json(obs)
+    obs._late_rescue_attempt_count[0] = 6
+    obs._late_rescue_selected_count[0] = 4
+    ok = _call_restart(obs, ckpt)
+    assert ok is True
+    assert obs._late_rescue_executed_count[0] == 1
+    _inv()

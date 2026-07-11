@@ -308,6 +308,61 @@ class CurriculumControlState:
         return asdict(self)
 
 
+class LateRescueControlMissingError(RuntimeError):
+    """Target curriculum_control JSON is missing during a restart transaction."""
+
+
+class LateRescueControlParseError(RuntimeError):
+    """Target curriculum_control JSON cannot be parsed during a restart transaction."""
+
+
+def _atomic_write_text(
+    path: Path,
+    payload: str,
+    *,
+    max_retries: int = 3,
+    retry_sleep_s: float = 0.05,
+) -> None:
+    """Atomically write text via unique tmp + os.replace with retries."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_err: Exception | None = None
+    for attempt in range(max(1, int(max_retries))):
+        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(payload)
+            os.replace(str(tmp), str(path))
+            return
+        except (FileNotFoundError, OSError) as err:
+            last_err = err
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            if attempt + 1 < int(max_retries):
+                time.sleep(float(retry_sleep_s))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err  # pragma: no cover (defensive)
+
+
+def write_curriculum_control_dict(
+    path: Path,
+    data: dict[str, Any],
+    *,
+    max_retries: int = 3,
+    retry_sleep_s: float = 0.05,
+) -> None:
+    """Atomically write a full control JSON dict (preserves unknown fields)."""
+    _atomic_write_text(
+        path,
+        json.dumps(data, indent=2),
+        max_retries=max_retries,
+        retry_sleep_s=retry_sleep_s,
+    )
+
+
 def write_curriculum_control(
     path: Path,
     state: CurriculumControlState,
@@ -332,28 +387,12 @@ def write_curriculum_control(
       * Up to ``max_retries`` attempts on transient ``OSError`` /
         ``FileNotFoundError`` (e.g. someone else just renamed our tmp).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(state.to_json(), indent=2)
-    last_err: Exception | None = None
-    for attempt in range(max(1, int(max_retries))):
-        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
-        try:
-            tmp.write_text(payload)
-            os.replace(str(tmp), str(path))
-            return
-        except (FileNotFoundError, OSError) as err:
-            last_err = err
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
-            if attempt + 1 < int(max_retries):
-                time.sleep(float(retry_sleep_s))
-                continue
-            raise
-    if last_err is not None:
-        raise last_err  # pragma: no cover (defensive)
+    _atomic_write_text(
+        path,
+        json.dumps(state.to_json(), indent=2),
+        max_retries=max_retries,
+        retry_sleep_s=retry_sleep_s,
+    )
 
 
 def read_curriculum_control(path: Path) -> CurriculumControlState | None:
@@ -365,6 +404,34 @@ def read_curriculum_control(path: Path) -> CurriculumControlState | None:
         return CurriculumControlState(**{k: v for k, v in data.items() if k in known})
     except Exception:
         return None
+
+
+def read_curriculum_control_required(path: Path) -> tuple[CurriculumControlState, dict[str, Any]]:
+    """Fail-closed read for restart / late-rescue transactions.
+
+    Returns ``(typed_state, raw_dict)`` so callers can update known fields while
+    preserving unknown JSON keys on write-back.
+    """
+    if not path.is_file():
+        raise LateRescueControlMissingError(
+            f"curriculum_control missing: {path}"
+        )
+    try:
+        raw = path.read_text()
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise LateRescueControlParseError(
+                f"curriculum_control is not a JSON object: {path}"
+            )
+    except LateRescueControlParseError:
+        raise
+    except Exception as exc:
+        raise LateRescueControlParseError(
+            f"curriculum_control parse failed: {path}: {exc}"
+        ) from exc
+    known = {f.name for f in CurriculumControlState.__dataclass_fields__.values()}
+    control = CurriculumControlState(**{k: v for k, v in data.items() if k in known})
+    return control, data
 
 
 def post_shrink_consolidation_active(
@@ -383,6 +450,7 @@ def apply_source_safe_consolidation_on_copy(
     num_envs: int,
     inherited_tolerance: float,
     inheritance_audit: dict[str, Any] | None = None,
+    require_existing: bool = False,
 ) -> None:
     """Phase A4 P3 (2026-06-09): on a source_safe cross/recovery copy.
 
@@ -400,10 +468,17 @@ def apply_source_safe_consolidation_on_copy(
 
     The control JSON is the single source of truth for the env loop
     (`apply_env_tolerance_curriculum`); we do NOT add any --*_resume flag.
+
+    When ``require_existing`` is True (restart / late-rescue transactions),
+    missing or unparseable control fails closed instead of creating defaults.
     """
     from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
 
-    control = read_curriculum_control(path) or CurriculumControlState()
+    if require_existing:
+        control, raw = read_curriculum_control_required(path)
+    else:
+        raw = None
+        control = read_curriculum_control(path) or CurriculumControlState()
     control.post_shrink_consolidation_until_restart_step = 0
     control.blocked_by_consolidation = False
     freeze_steps = env_frames_to_sim_steps(
@@ -419,7 +494,12 @@ def apply_source_safe_consolidation_on_copy(
         for k, v in inheritance_audit.items():
             if hasattr(control, k):
                 setattr(control, k, v)
-    write_curriculum_control(path, control)
+    if raw is not None:
+        # Preserve unknown fields from the original JSON document.
+        raw.update(control.to_json())
+        write_curriculum_control_dict(path, raw)
+    else:
+        write_curriculum_control(path, control)
 
 
 def mark_shrink_consumed(

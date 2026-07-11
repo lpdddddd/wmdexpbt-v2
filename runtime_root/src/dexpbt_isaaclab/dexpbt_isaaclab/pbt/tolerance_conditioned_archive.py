@@ -40,6 +40,18 @@ def archive_retention_valid_at_save(state: dict[str, Any]) -> bool | None:
     return bool(state.get("same_tol_retention_valid_at_save"))
 
 
+def _finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
 def select_compatible_archive(
     archive_dir: Path,
     *,
@@ -56,6 +68,9 @@ def select_compatible_archive(
     rescue), archives must carry a finite retention that was valid at save
     time. Ordinary emergency recovery keeps the legacy default of treating
     missing retention as 1.0 when ``require_retention_metadata`` is False.
+
+    Tolerance and nsucc_mean must always be finite; NaN/Inf never participate
+    in gap checks or ranking.
     """
     candidates: list[dict[str, Any]] = []
     for path in archive_dir.glob("*.json"):
@@ -65,18 +80,72 @@ def select_compatible_archive(
             state = json.loads(path.read_text())
         except Exception:
             continue
-        tol = archive_tolerance(state)
-        if tol is None or abs(tol - float(target_tolerance)) > float(max_gap):
+
+        raw_tol = (state.get("curriculum") or {}).get("success_tolerance")
+        if raw_tol is None:
             if reject_log is not None:
-                reject_log.append({
-                    "path": str(path),
-                    "reason": "tolerance_gap" if tol is not None else "tolerance_missing",
-                })
+                reject_log.append({"path": str(path), "reason": "tolerance_missing"})
             continue
-        if float(state.get("nsucc_mean", 0.0) or 0.0) < float(min_mean):
+        tol = _finite_float(raw_tol)
+        if tol is None:
+            if reject_log is not None:
+                reject_log.append({"path": str(path), "reason": "tolerance_nonfinite"})
+            continue
+        if abs(tol - float(target_tolerance)) > float(max_gap):
+            if reject_log is not None:
+                reject_log.append({"path": str(path), "reason": "tolerance_gap"})
+            continue
+
+        if "nsucc_mean" not in state or state.get("nsucc_mean") is None:
+            if reject_log is not None:
+                reject_log.append({"path": str(path), "reason": "mean_missing"})
+            continue
+        mean = _finite_float(state.get("nsucc_mean"))
+        if mean is None:
+            if reject_log is not None:
+                reject_log.append({"path": str(path), "reason": "mean_nonfinite"})
+            continue
+        if mean < float(min_mean):
             if reject_log is not None:
                 reject_log.append({"path": str(path), "reason": "mean_below_threshold"})
             continue
+
+        nsucc_max = _finite_float(state.get("nsucc_max", 0.0))
+        if nsucc_max is None:
+            if require_retention_metadata:
+                if reject_log is not None:
+                    reject_log.append({"path": str(path), "reason": "max_nonfinite"})
+                continue
+            nsucc_max = 0.0
+
+        frame_raw = state.get("frame", 0)
+        try:
+            frame = int(frame_raw)
+        except (TypeError, ValueError):
+            frame = -1
+        if require_retention_metadata and frame < 0:
+            if reject_log is not None:
+                reject_log.append({"path": str(path), "reason": "frame_invalid"})
+            continue
+
+        if require_retention_metadata:
+            ckpt = state.get("checkpoint")
+            if not ckpt:
+                if reject_log is not None:
+                    reject_log.append({"path": str(path), "reason": "checkpoint_missing"})
+                continue
+            ckpt_path = Path(str(ckpt))
+            if not ckpt_path.is_file():
+                # Relative checkpoint next to metadata is also accepted.
+                alt = path.with_suffix(".pth")
+                if not alt.is_file():
+                    if reject_log is not None:
+                        reject_log.append({
+                            "path": str(path),
+                            "reason": "checkpoint_missing",
+                        })
+                    continue
+
         retention = archive_retention(state)
         if require_retention_metadata:
             if retention is None:
@@ -109,10 +178,7 @@ def select_compatible_archive(
                     })
                 continue
         else:
-            if retention is None:
-                retention = 1.0
-            elif not math.isfinite(float(retention)):
-                # Non-strict path: treat non-finite as missing → default 1.0.
+            if retention is None or not math.isfinite(float(retention)):
                 retention = 1.0
             if float(retention) < float(min_retention):
                 if reject_log is not None:
@@ -121,13 +187,17 @@ def select_compatible_archive(
                         "reason": "retention_below_threshold",
                     })
                 continue
+
         state["_archive_metadata_path"] = str(path)
         state["_archive_retention_used"] = float(retention)
+        state["_archive_mean_used"] = float(mean)
+        state["_archive_max_used"] = float(nsucc_max)
+        state["_archive_frame_used"] = int(max(0, frame))
         candidates.append(state)
     if not candidates:
         return None
     return max(candidates, key=lambda s: (
-        float(s.get("nsucc_mean", 0.0) or 0.0),
-        float(s.get("nsucc_max", 0.0) or 0.0),
-        int(s.get("frame", 0) or 0),
+        float(s.get("_archive_mean_used", 0.0)),
+        float(s.get("_archive_max_used", 0.0)),
+        int(s.get("_archive_frame_used", 0)),
     ))
