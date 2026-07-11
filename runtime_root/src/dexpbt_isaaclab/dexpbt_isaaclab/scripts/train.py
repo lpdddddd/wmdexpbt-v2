@@ -16,6 +16,46 @@ parser.add_argument("--task", type=str, default="DexPBT-Reorientation-KukaAllegr
 parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--max_iterations", type=int, default=None)
+parser.add_argument("--frame_stop_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--target_population_frames", type=int, default=0)
+parser.add_argument("--frame_stop_all_workers", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--frame_stop_grace_iterations", type=int, default=2)
+# CSER 2cm bridge control plane. Defaults are opt-in for backward compatibility.
+parser.add_argument("--same_tol_retention_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--same_tol_retention_bins", type=str, default="0.030,0.025,0.022,0.020,0.018")
+parser.add_argument("--same_tol_retention_min_samples", type=int, default=3)
+parser.add_argument("--same_tol_retention_warmup_ticks", type=int, default=3)
+parser.add_argument("--same_tol_retention_reset_on_lineage_change", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--same_tol_retention_reset_on_cross_copy", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--same_tol_retention_keep_on_rollback", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--bridge_curriculum_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--bridge_curriculum_start_tol", type=float, default=0.025)
+parser.add_argument("--bridge_curriculum_probation_tol", type=float, default=0.0205)
+parser.add_argument("--bridge_curriculum_target_tol", type=float, default=0.018)
+parser.add_argument("--bridge_curriculum_mode", choices=["ladder", "micro_factor"], default="ladder")
+parser.add_argument("--bridge_tolerance_ladder", type=str, default="0.025,0.0235,0.022,0.021,0.0205,0.020,0.0195,0.019,0.0185,0.018")
+parser.add_argument("--bridge_min_same_tol_retention", type=float, default=0.90)
+parser.add_argument("--bridge_min_stable_ticks", type=int, default=4)
+parser.add_argument("--bridge_min_frames_per_level", type=int, default=150_000_000)
+parser.add_argument("--bridge_post_shrink_consolidation_frames", type=int, default=200_000_000)
+parser.add_argument("--bridge_probation_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--bridge_probation_entry_tol", type=float, default=0.0205)
+parser.add_argument("--bridge_probation_frames", type=int, default=400_000_000)
+parser.add_argument("--bridge_probation_min_ticks", type=int, default=4)
+parser.add_argument("--bridge_probation_block_further_shrink", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--bridge_probation_block_ordinary_rollback", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--bridge_probation_allow_hard_collapse_rollback", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--bridge_probation_hard_collapse_mean", type=float, default=3.0)
+parser.add_argument("--bridge_probation_hard_collapse_patience", type=int, default=4)
+parser.add_argument("--late_degradation_rescue_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--late_degradation_rescue_tol_threshold", type=float, default=0.022)
+parser.add_argument("--late_degradation_rescue_peak_threshold", type=float, default=30.0)
+parser.add_argument("--late_degradation_rescue_current_mean_threshold", type=float, default=22.0)
+parser.add_argument("--late_degradation_rescue_retention_threshold", type=float, default=0.65)
+parser.add_argument("--late_degradation_rescue_patience", type=int, default=3)
+parser.add_argument("--late_degradation_rescue_max_tol_gap", type=float, default=0.002)
+parser.add_argument("--late_degradation_rescue_cooldown_frames", type=int, default=300000000)
+parser.add_argument("--late_degradation_rescue_max_per_policy", type=int, default=1)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -2043,6 +2083,14 @@ parser.add_argument("--elite_snippet_sample_pool", type=int, default=4096)
 parser.add_argument("--elite_snippet_knn_topk", type=int, default=32)
 parser.add_argument("--elite_snippet_min_priority", type=float, default=1.0)
 parser.add_argument("--snippet_distill_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--snippet_adjacent_stage_mixing_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--snippet_primary_stage_fraction", type=float, default=0.70)
+parser.add_argument("--snippet_adjacent_stage_fraction", type=float, default=0.30)
+parser.add_argument("--snippet_tolerance_compatibility_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--snippet_tolerance_max_gap", type=float, default=0.004)
+parser.add_argument("--snippet_tolerance_soft_scale", type=float, default=0.002)
+parser.add_argument("--snippet_min_primary_candidates", type=int, default=8)
+parser.add_argument("--snippet_fallback_to_adjacent_when_sparse", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--snippet_distill_weight", type=float, default=0.001)
 parser.add_argument("--snippet_distill_loss_cap", type=float, default=0.05)
 parser.add_argument("--snippet_distill_start_after_frames", type=int, default=300000000)
@@ -6655,6 +6703,18 @@ def main():
             guidance_bank_tol=float(args_cli.eir_guidance_bank_tol),
             guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
             guidance_mid_priority_scale=float(args_cli.eir_guidance_mid_priority_scale),
+            adjacent_stage_mixing_enable=bool(args_cli.snippet_adjacent_stage_mixing_enable),
+            primary_stage_fraction=float(args_cli.snippet_primary_stage_fraction),
+            adjacent_stage_fraction=float(args_cli.snippet_adjacent_stage_fraction),
+            tolerance_compatibility_enable=bool(
+                args_cli.snippet_tolerance_compatibility_enable
+            ),
+            tolerance_max_gap=float(args_cli.snippet_tolerance_max_gap),
+            tolerance_soft_scale=float(args_cli.snippet_tolerance_soft_scale),
+            min_primary_candidates=int(args_cli.snippet_min_primary_candidates),
+            fallback_to_adjacent_when_sparse=bool(
+                args_cli.snippet_fallback_to_adjacent_when_sparse
+            ),
         )
         snippet_distill_cfg = SnippetDistillConfig(
             enabled=eir_enabled and bool(args_cli.snippet_distill_enable),
@@ -7736,6 +7796,68 @@ def main():
             ),
             pbt_consolidation_collapse_nsucc_mean_threshold=(
                 args_cli.pbt_consolidation_collapse_nsucc_mean_threshold
+            ),
+            frame_stop_enable=args_cli.frame_stop_enable,
+            target_population_frames=args_cli.target_population_frames,
+            frame_stop_grace_iterations=args_cli.frame_stop_grace_iterations,
+            same_tol_retention_enable=args_cli.same_tol_retention_enable,
+            same_tol_retention_bins=args_cli.same_tol_retention_bins,
+            same_tol_retention_min_samples=args_cli.same_tol_retention_min_samples,
+            same_tol_retention_warmup_ticks=args_cli.same_tol_retention_warmup_ticks,
+            same_tol_retention_reset_on_lineage_change=(
+                args_cli.same_tol_retention_reset_on_lineage_change
+            ),
+            same_tol_retention_reset_on_cross_copy=(
+                args_cli.same_tol_retention_reset_on_cross_copy
+            ),
+            same_tol_retention_keep_on_rollback=args_cli.same_tol_retention_keep_on_rollback,
+            bridge_curriculum_enable=args_cli.bridge_curriculum_enable,
+            bridge_curriculum_start_tol=args_cli.bridge_curriculum_start_tol,
+            bridge_curriculum_probation_tol=args_cli.bridge_curriculum_probation_tol,
+            bridge_curriculum_target_tol=args_cli.bridge_curriculum_target_tol,
+            bridge_curriculum_mode=args_cli.bridge_curriculum_mode,
+            bridge_tolerance_ladder=args_cli.bridge_tolerance_ladder,
+            bridge_min_same_tol_retention=args_cli.bridge_min_same_tol_retention,
+            bridge_min_stable_ticks=args_cli.bridge_min_stable_ticks,
+            bridge_min_frames_per_level=args_cli.bridge_min_frames_per_level,
+            bridge_post_shrink_consolidation_frames=(
+                args_cli.bridge_post_shrink_consolidation_frames
+            ),
+            bridge_probation_enable=args_cli.bridge_probation_enable,
+            bridge_probation_entry_tol=args_cli.bridge_probation_entry_tol,
+            bridge_probation_frames=args_cli.bridge_probation_frames,
+            bridge_probation_min_ticks=args_cli.bridge_probation_min_ticks,
+            bridge_probation_block_further_shrink=(
+                args_cli.bridge_probation_block_further_shrink
+            ),
+            bridge_probation_block_ordinary_rollback=(
+                args_cli.bridge_probation_block_ordinary_rollback
+            ),
+            bridge_probation_allow_hard_collapse_rollback=(
+                args_cli.bridge_probation_allow_hard_collapse_rollback
+            ),
+            bridge_probation_hard_collapse_mean=(
+                args_cli.bridge_probation_hard_collapse_mean
+            ),
+            bridge_probation_hard_collapse_patience=(
+                args_cli.bridge_probation_hard_collapse_patience
+            ),
+            late_degradation_rescue_enable=args_cli.late_degradation_rescue_enable,
+            late_degradation_rescue_tol_threshold=args_cli.late_degradation_rescue_tol_threshold,
+            late_degradation_rescue_peak_threshold=args_cli.late_degradation_rescue_peak_threshold,
+            late_degradation_rescue_current_mean_threshold=(
+                args_cli.late_degradation_rescue_current_mean_threshold
+            ),
+            late_degradation_rescue_retention_threshold=(
+                args_cli.late_degradation_rescue_retention_threshold
+            ),
+            late_degradation_rescue_patience=args_cli.late_degradation_rescue_patience,
+            late_degradation_rescue_max_tol_gap=args_cli.late_degradation_rescue_max_tol_gap,
+            late_degradation_rescue_cooldown_frames=(
+                args_cli.late_degradation_rescue_cooldown_frames
+            ),
+            late_degradation_rescue_max_per_policy=(
+                args_cli.late_degradation_rescue_max_per_policy
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )

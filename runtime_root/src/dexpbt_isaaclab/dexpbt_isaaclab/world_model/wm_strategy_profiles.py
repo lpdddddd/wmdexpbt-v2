@@ -37,6 +37,7 @@ PROFILE_IDS: dict[str, int] = {
     "unified_elite_wm_pbt": 18,
     "cser_dexpbt": 19,
     "cser_dexpbt_conservative": 20,
+    "cser_dexpbt_2cm_bridge": 21,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -91,6 +92,10 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "CSER-v0 conservative: same as cser_dexpbt but keeps low-weight "
         "EliteBank actor distill (elite,archive) as early fallback."
     ),
+    "cser_dexpbt_2cm_bridge": (
+        "CSER conservative with tolerance-local retention, 2cm ladder/probation, "
+        "and conservative late-degradation rescue."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -113,6 +118,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "unified_elite_wm_pbt": "unified",
     "cser_dexpbt": "unified",
     "cser_dexpbt_conservative": "unified",
+    "cser_dexpbt_2cm_bridge": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -736,6 +742,61 @@ _CSER_DEXPBT_CONSERVATIVE: dict[str, Any] = {
     "pre_floor_peak_guard_freeze_frames": 200_000_000,
 }
 
+_CSER_DEXPBT_2CM_BRIDGE: dict[str, Any] = {
+    **_CSER_DEXPBT_CONSERVATIVE,
+    "same_tol_retention_enable": True,
+    "same_tol_retention_bins": "0.030,0.025,0.022,0.020,0.018",
+    "same_tol_retention_min_samples": 3,
+    "same_tol_retention_warmup_ticks": 3,
+    "same_tol_retention_reset_on_lineage_change": True,
+    "same_tol_retention_reset_on_cross_copy": True,
+    "same_tol_retention_keep_on_rollback": False,
+    "bridge_curriculum_enable": True,
+    "bridge_curriculum_start_tol": 0.025,
+    "bridge_curriculum_probation_tol": 0.0205,
+    "bridge_curriculum_target_tol": 0.018,
+    "bridge_curriculum_mode": "ladder",
+    "bridge_tolerance_ladder": "0.025,0.0235,0.022,0.021,0.0205,0.020,0.0195,0.019,0.0185,0.018",
+    "bridge_min_same_tol_retention": 0.90,
+    "bridge_min_stable_ticks": 4,
+    "bridge_min_frames_per_level": 150_000_000,
+    "bridge_post_shrink_consolidation_frames": 200_000_000,
+    "bridge_probation_enable": True,
+    "bridge_probation_entry_tol": 0.0205,
+    "bridge_probation_frames": 400_000_000,
+    "bridge_probation_min_ticks": 4,
+    "bridge_probation_block_further_shrink": True,
+    "bridge_probation_block_ordinary_rollback": True,
+    "bridge_probation_allow_hard_collapse_rollback": True,
+    "bridge_probation_hard_collapse_mean": 3.0,
+    "bridge_probation_hard_collapse_patience": 4,
+    "snippet_adjacent_stage_mixing_enable": True,
+    "snippet_primary_stage_fraction": 0.70,
+    "snippet_adjacent_stage_fraction": 0.30,
+    "snippet_tolerance_compatibility_enable": True,
+    "snippet_tolerance_max_gap": 0.004,
+    "snippet_tolerance_soft_scale": 0.002,
+    "snippet_min_primary_candidates": 8,
+    "snippet_fallback_to_adjacent_when_sparse": True,
+    "late_degradation_rescue_enable": True,
+    "late_degradation_rescue_tol_threshold": 0.022,
+    "late_degradation_rescue_peak_threshold": 30.0,
+    "late_degradation_rescue_current_mean_threshold": 22.0,
+    "late_degradation_rescue_retention_threshold": 0.65,
+    "late_degradation_rescue_patience": 3,
+    "late_degradation_rescue_max_tol_gap": 0.002,
+    "late_degradation_rescue_cooldown_frames": 300_000_000,
+    "late_degradation_rescue_max_per_policy": 1,
+    # These are enforced by the new launcher; retaining the hard-off values
+    # here makes profile expansion restart-safe.
+    "pbt_allow_mid_self_mutation": False,
+    "pbt_wm_profile_copy_enable": False,
+    "awr_enable": False,
+    "eir_residual_apply_to_rollout": False,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -756,6 +817,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "unified_elite_wm_pbt": _UNIFIED_ELITE_WM_PBT,
     "cser_dexpbt": _CSER_DEXPBT,
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
+    "cser_dexpbt_2cm_bridge": _CSER_DEXPBT_2CM_BRIDGE,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

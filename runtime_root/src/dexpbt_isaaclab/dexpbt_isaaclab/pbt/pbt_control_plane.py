@@ -225,6 +225,13 @@ def quantize_population_frame(raw_frame: int, tick: int) -> int:
     return (int(raw_frame) // tick_i) * tick_i
 
 
+def population_frame_target_reached(population_frame: int, target_frame: int, tick: int) -> bool:
+    """Compare PBT clocks at their shared quantized resolution."""
+    if int(target_frame) <= 0:
+        return False
+    return int(population_frame) >= quantize_population_frame(target_frame, tick)
+
+
 def pbt_population_frame(algo) -> int:
     if getattr(algo, "_pbt_restored_from_pbt_copy", False) and not getattr(
         algo, "_pbt_frame_snapshot_driven", False

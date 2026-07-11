@@ -1256,7 +1256,10 @@ def _compute_snippet_distill_loss(
     a2c = _get_a2c_network(bridge.agent_ref)
     stage = _stage_for_tol(eir_cfg, cache.tol_mean)
     acts, _sim, pri, valid = bank.retrieve_candidates(
-        feat_r, k=int(getattr(sd_cfg, "topk", 8)), stage=stage
+        feat_r,
+        k=int(getattr(sd_cfg, "topk", 8)),
+        stage=stage,
+        query_tolerance=float(cache.tol_mean),
     )
     if not valid:
         return feat.new_zeros(())

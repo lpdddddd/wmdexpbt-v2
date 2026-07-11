@@ -47,6 +47,7 @@ class BottomRestartContext:
     nsucc_mean: float = 0.0
     recent_peak_nsucc_mean: float = 0.0
     tier: str = "bottom"
+    late_degradation_rescue: bool = False
 
 
 def resolve_pbt_stage(raw_frame: int, cfg: PbtConsolidationConfig) -> str:
@@ -140,6 +141,11 @@ def should_allow_bottom_restart(
         return True, ""
 
     if stage == STAGE_SELECTION:
+        # A separately-qualified rescue may bypass the normal late-stage
+        # hard-collapse-only gate; selection/source/copy remain in the
+        # observer so this never re-enables mutation or generic churn.
+        if ctx.late_degradation_rescue:
+            return True, "late_degradation_rescue"
         if cfg.stage3_hard_collapse_only:
             if ctx.hard_collapse or override:
                 return True, ""

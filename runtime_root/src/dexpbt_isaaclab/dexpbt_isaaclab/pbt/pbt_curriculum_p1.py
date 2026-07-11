@@ -266,6 +266,29 @@ class CurriculumControlState:
     pre_floor_peak_guard_recent_peak: float = 0.0
     pre_floor_peak_guard_stable_ticks: int = 0
     pre_floor_peak_guard_reason: str = ""
+    # CSER 2cm bridge audit/control.  Defaults keep existing profiles inert.
+    same_tol_bin_id: int = -1
+    same_tol_retention: float = 1.0
+    same_tol_retention_valid: bool = False
+    same_tol_peak_nsucc_mean: float = 0.0
+    same_tol_sample_count: int = 0
+    same_tol_stable_ticks: int = 0
+    retention_reference_tolerance: float = 0.0
+    cross_tol_peak_ignored: bool = False
+    retention_tracker: dict[str, Any] = field(default_factory=dict)
+    bridge_active: bool = False
+    bridge_level: int = -1
+    bridge_entry_frame: int = -1
+    bridge_level_entry_frame: int = -1
+    bridge_shrink_count: int = 0
+    bridge_next_tolerance: float = 0.0
+    bridge_shrink_blocked: bool = False
+    bridge_block_reason: str = ""
+    bridge_probation_active: bool = False
+    bridge_probation_entry_frame: int = -1
+    bridge_probation_rollback_blocked: bool = False
+    bridge_probation_hard_collapse: bool = False
+    bridge_probation_exit: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -505,6 +528,26 @@ def apply_env_tolerance_curriculum(
 
     use_token = bool(pbt_single_shrink_per_window)
     may_shrink = control.shrink_token if use_token else control.allow_shrink
+
+    # The bridge value is observer-authoritative.  It is deliberately applied
+    # before multiplicative adaptive-fast logic so a rung cannot be skipped by
+    # a stale factor in a restarted worker.
+    if may_shrink and control.bridge_next_tolerance > 1e-9:
+        bridged = max(float(control.bridge_next_tolerance), target_tolerance)
+        bridged = min(bridged, initial_tolerance)
+        if bridged < float(success_tolerance) - 1e-12:
+            mark_shrink_consumed(
+                curriculum_control_path,
+                frames_since_restart=frames_since_restart,
+                consolidation_env_frames=max(
+                    int(post_shrink_consolidation_env_frames),
+                    int(control.adaptive_consolidation_frames or 0),
+                ),
+                num_envs=num_envs,
+                pre_shrink_tolerance=float(success_tolerance),
+                post_shrink_tolerance=bridged,
+            )
+            return bridged, frames_since_restart
 
     # Phase A4 P2 (2026-06-08): adaptive-fast may override the shrink factor
     # and consolidation length per-tick via the observer-written control

@@ -53,6 +53,14 @@ class EliteSnippetBankConfig:
     recent_fraction: float = 0.2
     top_fraction: float = 0.6
     diversity_fraction: float = 0.2
+    adjacent_stage_mixing_enable: bool = False
+    primary_stage_fraction: float = 0.70
+    adjacent_stage_fraction: float = 0.30
+    tolerance_compatibility_enable: bool = False
+    tolerance_max_gap: float = 0.004
+    tolerance_soft_scale: float = 0.002
+    min_primary_candidates: int = 8
+    fallback_to_adjacent_when_sparse: bool = True
 
     def __post_init__(self) -> None:
         self.horizon = max(1, int(self.horizon))
@@ -198,23 +206,66 @@ class EliteSnippetBank:
             keep = self._mask_helper._select_keep_indices(combined, self.capacity)
             self._store_block({k: v[keep] for k, v in combined.items()})
 
-    def retrieve_candidates(self, feat, *, k: int, stage=None):
+    @staticmethod
+    def _adjacent_stages(stage: int) -> tuple[int, ...]:
+        # Stage constants: FLOOR=1, HARD=2, MID=3.
+        return {1: (3,), 3: (1,), 2: (1,)}.get(int(stage), ())
+
+    def retrieve_candidates(self, feat, *, k: int, stage=None, query_tolerance=None):
         B, H, A, k = int(feat.shape[0]), self.H, self.A, max(1, int(k))
         dev = feat.device
         self.retrieve_calls += B
         if self.size == 0:
             return torch.zeros(B, k, H, A, device=dev), torch.zeros(B, k, device=dev), torch.zeros(B, k, device=dev), False
         pool_idx = torch.arange(self.size)
+        primary_count = 0
+        adjacent_count = 0
         if stage is not None:
             bucket = self.scalars["bucket_id"][: self.size]
-            sel = (torch.div(bucket, 2.0, rounding_mode="floor") == float(stage)).nonzero(as_tuple=False).reshape(-1)
-            if sel.numel() > 0:
-                pool_idx = sel
+            stage_of = torch.div(bucket, 2.0, rounding_mode="floor")
+            primary = (stage_of == float(stage)).nonzero(as_tuple=False).reshape(-1)
+            primary_count = int(primary.numel())
+            adjacent = torch.empty(0, dtype=torch.long)
+            if self.cfg.adjacent_stage_mixing_enable:
+                adjacent = torch.cat([
+                    (stage_of == float(adj)).nonzero(as_tuple=False).reshape(-1)
+                    for adj in self._adjacent_stages(int(stage))
+                ]) if self._adjacent_stages(int(stage)) else adjacent
+                adjacent_count = int(adjacent.numel())
+            if primary.numel() > 0 and (
+                not self.cfg.fallback_to_adjacent_when_sparse
+                or primary.numel() >= int(self.cfg.min_primary_candidates)
+                or adjacent.numel() == 0
+            ):
+                pool_idx = primary
+            elif primary.numel() > 0 and adjacent.numel() > 0:
+                # Do not let a single FLOOR entry suppress mature MID entries.
+                p_take = max(1, int(round(self.cfg.primary_stage_fraction * self.cfg.sample_pool)))
+                a_take = max(1, int(round(self.cfg.adjacent_stage_fraction * self.cfg.sample_pool)))
+                pool_idx = torch.cat([primary[:p_take], adjacent[:a_take]])
+            elif primary.numel() > 0:
+                pool_idx = primary
+            elif adjacent.numel() > 0:
+                pool_idx = adjacent
+        tol_weight = None
+        if self.cfg.tolerance_compatibility_enable and query_tolerance is not None:
+            gap = (self.scalars["success_tol"][: self.size] - float(query_tolerance)).abs()
+            compatible = (gap <= float(self.cfg.tolerance_max_gap)).nonzero(as_tuple=False).reshape(-1)
+            compatible_set = set(compatible.tolist())
+            filtered = torch.tensor(
+                [idx for idx in pool_idx.tolist() if idx in compatible_set], dtype=torch.long
+            )
+            if filtered.numel() > 0:
+                pool_idx = filtered
         if pool_idx.numel() > self.cfg.sample_pool:
             pool_idx = pool_idx[torch.argsort(self.scalars["priority_score"][pool_idx], descending=True)[: self.cfg.sample_pool]]
         pf = self.feature[pool_idx].to(device=dev, dtype=feat.dtype)
         pa = self.actions[pool_idx].to(device=dev, dtype=feat.dtype)
         pp = self.scalars["priority_score"][pool_idx].to(device=dev, dtype=feat.dtype)
+        if self.cfg.tolerance_compatibility_enable and query_tolerance is not None:
+            gap = (self.scalars["success_tol"][pool_idx] - float(query_tolerance)).abs()
+            tol_weight = torch.exp(-gap / max(float(self.cfg.tolerance_soft_scale), 1e-6))
+            pp = pp * tol_weight.to(device=dev, dtype=feat.dtype)
         kk = min(k, int(pool_idx.shape[0]))
         sim = torch.nn.functional.normalize(feat, dim=-1) @ torch.nn.functional.normalize(pf, dim=-1).t()
         top_sim, top_idx = torch.topk(sim, kk, dim=1)
@@ -225,6 +276,11 @@ class EliteSnippetBank:
             ga = torch.cat([ga, ga[:, -1:, :, :].expand(B, pad, H, A)], 1)
             top_sim = torch.cat([top_sim, top_sim[:, -1:].expand(B, pad)], 1)
             gp = torch.cat([gp, gp[:, -1:].expand(B, pad)], 1)
+        self.last_update_diagnostics.update({
+            "retrieve_primary_candidates": float(primary_count),
+            "retrieve_adjacent_candidates": float(adjacent_count),
+            "retrieve_sparse_fallback": float(primary_count > 0 and primary_count < int(self.cfg.min_primary_candidates)),
+        })
         return ga, top_sim, gp, True
 
     def merge(self, other_state, *, max_entries=None):
@@ -242,6 +298,10 @@ class EliteSnippetBank:
         out = {"elite_snippet/bank_size": float(self.size), "elite_snippet/inserted_rows": float(self.add_count), "elite_snippet/retrieval_hit_rate": float(self.retrieval_hit_rate)}
         if self.size > 0:
             out["elite_snippet/priority_mean"] = float(self.scalars["priority_score"][: self.size].mean())
+            stages = torch.div(self.scalars["bucket_id"][: self.size], 2.0, rounding_mode="floor")
+            out["elite_snippet/bank_size_floor"] = float((stages == 1).sum())
+            out["elite_snippet/bank_size_hard"] = float((stages == 2).sum())
+            out["elite_snippet/bank_size_mid"] = float((stages == 3).sum())
         return out
 
     def top_entries_state(self, n: int):

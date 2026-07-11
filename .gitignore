@@ -40,6 +40,9 @@ nohup_*.log
 *.dmp
 
 # --- results/: keep scripts + reports, drop run dirs and big artifacts ---
+results/runs/
+results/pointers/
+results/latest/
 results/regrasping_*/
 results/baseline_*/
 results/cbwm_*/
@@ -47,6 +50,10 @@ results/smoke_*/
 results/track_*/
 results/*.log
 results/__pycache__/
+results/launchers/*.log
+**/.xdg_cache/
+**/.xdg_data/
+**/.xdg_config/
 
 # Within runs we already ignored above; the following are extra safety
 **/*.pth
