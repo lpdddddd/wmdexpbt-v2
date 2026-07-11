@@ -68,7 +68,13 @@ class AdaptivePrecisionConfig:
     rescue_enable: bool = False
     rescue_retention_threshold: float = 0.70
     rescue_degradation_patience: int = 3
-    rescue_population_quantile: float = 0.60  # source must be in top (1-q) of pop
+    # Primary: only the top fraction of the ranked population may be a source.
+    # Example: 0.40 with 6 policies → ceil(0.40*6)=3 allowed sources.
+    rescue_source_top_fraction: float = 0.40
+    # Legacy CLI/profile alias. When set and top_fraction is left at the
+    # sentinel below, top_fraction becomes ``1 - quantile``. Prefer setting
+    # ``rescue_source_top_fraction`` explicitly in new profiles.
+    rescue_population_quantile: float = 0.60
     rescue_source_min_retention: float = 0.85
     rescue_min_source_advantage_sigma: float = 1.0  # advantage in pop-std units
     rescue_max_log_tol_gap: float = 0.20
@@ -76,8 +82,14 @@ class AdaptivePrecisionConfig:
     rescue_max_per_lineage: int = 1
     rescue_require_source_control: bool = True
     rescue_reject_collapse_source: bool = True
+    # Internal: when True, derive top_fraction from rescue_population_quantile.
+    _derive_top_fraction_from_quantile: bool = False
 
     def __post_init__(self) -> None:
+        if self._derive_top_fraction_from_quantile:
+            self.rescue_source_top_fraction = max(
+                0.0, min(1.0, 1.0 - float(self.rescue_population_quantile))
+            )
         self.validate()
 
     def validate(self) -> None:
@@ -98,6 +110,7 @@ class AdaptivePrecisionConfig:
             "probation_min_same_level_retention",
             "rescue_retention_threshold",
             "rescue_population_quantile",
+            "rescue_source_top_fraction",
             "rescue_source_min_retention",
         ):
             v = float(getattr(self, name))
@@ -105,6 +118,15 @@ class AdaptivePrecisionConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if not (self.rescue_max_log_tol_gap >= 0):
             raise ValueError("rescue_max_log_tol_gap must be >= 0")
+
+
+def rescue_source_top_k(population_size: int, top_fraction: float) -> int:
+    """How many top-ranked policies may serve as adaptive rescue sources."""
+    n = max(0, int(population_size))
+    if n <= 0:
+        return 0
+    frac = max(0.0, min(1.0, float(top_fraction)))
+    return max(1, int(math.ceil(frac * n)))
 
 
 def curriculum_progress(
@@ -245,16 +267,34 @@ class ProbationState:
     active: bool = False
     entry_tolerance: float = 0.0
     entry_frame: int = -1
+    # Wider tolerance observed immediately before the shrink that armed
+    # probation. Used as a ladder-free hard-collapse rollback target.
+    previous_tolerance_before_entry: float = 0.0
+    source_tolerance: float = 0.0
     peak_nsucc_mean: float = 0.0
     current_nsucc_mean: float = 0.0
     same_level_retention: float = 1.0
     stable_ticks: int = 0
     hard_collapse_streak: int = 0
 
-    def arm(self, *, tolerance: float, frame: int, nsucc_mean: float) -> None:
+    def arm(
+        self,
+        *,
+        tolerance: float,
+        frame: int,
+        nsucc_mean: float,
+        previous_tolerance: float | None = None,
+    ) -> None:
         self.active = True
         self.entry_tolerance = _finite(tolerance)
         self.entry_frame = int(frame)
+        prev = (
+            _finite(previous_tolerance)
+            if previous_tolerance is not None
+            else 0.0
+        )
+        self.previous_tolerance_before_entry = prev
+        self.source_tolerance = prev
         self.peak_nsucc_mean = _finite(nsucc_mean)
         self.current_nsucc_mean = _finite(nsucc_mean)
         self.same_level_retention = 1.0
@@ -357,6 +397,8 @@ def select_rescue_source(
     candidates: list[dict[str, Any]],
     population_nsucc_means: list[float],
     cfg: AdaptivePrecisionConfig,
+    allowed_source_ids: Optional[set[int]] = None,
+    sorted_population: Optional[list[int]] = None,
 ) -> RescueDecision:
     """Pick a rescue source by population rank + retention + tolerance compat.
 
@@ -364,8 +406,18 @@ def select_rescue_source(
     ``tolerance``, ``ranking_score``, ``has_control`` (bool), ``collapsed``
     (bool).  Fail-closed: any missing control (strict), non-finite metric,
     collapsed source, or incompatible tolerance is rejected.
+
+    Population top-fraction filter (explicit semantics):
+      top_k = ceil(rescue_source_top_fraction * valid_population_size)
+      only policies in ``sorted_population[:top_k]`` (or ``allowed_source_ids``)
+      may be selected.  When neither is provided, fall back to an nsucc-mean
+      rank cut equivalent to the top-fraction of the finite mean list.
     """
-    means = [_finite(m, float("-inf")) for m in population_nsucc_means if math.isfinite(_finite(m, float("nan")))]
+    means = [
+        _finite(m, float("-inf"))
+        for m in population_nsucc_means
+        if math.isfinite(_finite(m, float("nan")))
+    ]
     if len(means) >= 2:
         mu = sum(means) / len(means)
         var = sum((m - mu) ** 2 for m in means) / max(len(means) - 1, 1)
@@ -375,16 +427,29 @@ def select_rescue_source(
         sigma = 0.0
     sorted_means = sorted(means, reverse=True)
     n = len(sorted_means)
-    # Rank threshold: source must be within the top (1 - quantile) of population.
+
+    allowed: Optional[set[int]] = None
+    if allowed_source_ids is not None:
+        allowed = {int(x) for x in allowed_source_ids}
+    elif sorted_population is not None and len(sorted_population) > 0:
+        top_k = rescue_source_top_k(
+            len(sorted_population), float(cfg.rescue_source_top_fraction)
+        )
+        allowed = {int(x) for x in list(sorted_population)[:top_k]}
+    else:
+        allowed = None
+
     rank_cut_value = None
-    if n >= 1:
-        cut_index = max(0, min(n - 1, int(math.floor(float(cfg.rescue_population_quantile) * n))))
-        rank_cut_value = sorted_means[cut_index]
+    if allowed is None and n >= 1:
+        top_k = rescue_source_top_k(n, float(cfg.rescue_source_top_fraction))
+        rank_cut_value = sorted_means[min(n - 1, top_k - 1)]
 
     best: Optional[RescueDecision] = None
     best_score = float("-inf")
     for cand in candidates:
         idx = int(cand.get("idx", -1))
+        if allowed is not None and idx not in allowed:
+            continue
         s_mean = _finite(cand.get("nsucc_mean", float("nan")), float("nan"))
         s_ret = _finite(cand.get("retention", float("nan")), float("nan"))
         s_tol = _finite(cand.get("tolerance", float("nan")), float("nan"))
@@ -399,9 +464,11 @@ def select_rescue_source(
             continue
         if s_ret < float(cfg.rescue_source_min_retention):
             continue
-        if log_tolerance_gap(s_tol, target_tolerance, eps=cfg.eps) > float(cfg.rescue_max_log_tol_gap):
+        if log_tolerance_gap(s_tol, target_tolerance, eps=cfg.eps) > float(
+            cfg.rescue_max_log_tol_gap
+        ):
             continue
-        if rank_cut_value is not None and s_mean < rank_cut_value:
+        if rank_cut_value is not None and s_mean < rank_cut_value - 1e-12:
             continue
         # Source advantage normalized by population spread.
         if sigma > 1e-9:
@@ -410,7 +477,10 @@ def select_rescue_source(
             adv_sigma = float("inf") if s_mean > _finite(target_nsucc_mean) else 0.0
         if adv_sigma < float(cfg.rescue_min_source_advantage_sigma):
             continue
-        rank = sum(1 for m in sorted_means if m > s_mean)
+        if sorted_population is not None and idx in sorted_population:
+            rank = int(list(sorted_population).index(idx))
+        else:
+            rank = sum(1 for m in sorted_means if m > s_mean)
         # Prefer the highest ranking-score compatible source.
         if s_rank_score > best_score:
             best_score = s_rank_score

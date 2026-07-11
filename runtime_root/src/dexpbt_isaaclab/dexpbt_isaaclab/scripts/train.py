@@ -129,6 +129,7 @@ parser.add_argument("--adaptive_rescue_enable", action=argparse.BooleanOptionalA
 parser.add_argument("--adaptive_rescue_retention_threshold", type=float, default=0.70)
 parser.add_argument("--adaptive_rescue_degradation_patience", type=int, default=3)
 parser.add_argument("--adaptive_rescue_population_quantile", type=float, default=0.60)
+parser.add_argument("--adaptive_rescue_source_top_fraction", type=float, default=None)
 parser.add_argument("--adaptive_rescue_source_min_retention", type=float, default=0.85)
 parser.add_argument("--adaptive_rescue_min_source_advantage_sigma", type=float, default=1.0)
 parser.add_argument("--adaptive_rescue_max_log_tol_gap", type=float, default=0.20)
@@ -8055,6 +8056,11 @@ def main():
             ),
             adaptive_rescue_population_quantile=float(
                 args_cli.adaptive_rescue_population_quantile
+            ),
+            adaptive_rescue_source_top_fraction=(
+                float(args_cli.adaptive_rescue_source_top_fraction)
+                if args_cli.adaptive_rescue_source_top_fraction is not None
+                else None
             ),
             adaptive_rescue_source_min_retention=float(
                 args_cli.adaptive_rescue_source_min_retention

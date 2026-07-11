@@ -868,6 +868,10 @@ _CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
     "adaptive_rescue_enable": True,
     "adaptive_rescue_retention_threshold": 0.70,
     "adaptive_rescue_degradation_patience": 3,
+    # Top 40% of ranked population may be adaptive rescue sources
+    # (6 policies → ceil(0.40*6)=3). CLI alias adaptive_rescue_population_quantile
+    # still maps to top_fraction = 1 - quantile when only the alias is set.
+    "adaptive_rescue_source_top_fraction": 0.40,
     "adaptive_rescue_population_quantile": 0.60,
     "adaptive_rescue_source_min_retention": 0.85,
     "adaptive_rescue_min_source_advantage_sigma": 1.0,

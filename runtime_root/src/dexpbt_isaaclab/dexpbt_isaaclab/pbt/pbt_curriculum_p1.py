@@ -303,6 +303,32 @@ class CurriculumControlState:
     late_rescue_blocked_count: int = 0
     late_rescue_streak: int = 0
     late_rescue_last_frame: int = -1
+    # Progress-refine adaptive precision audit (defaults inert for legacy).
+    adaptive_precision_active: bool = False
+    adaptive_curriculum_progress: float = 0.0
+    adaptive_probation_active: bool = False
+    adaptive_probation_entry_tolerance: float = 0.0
+    adaptive_probation_entry_frame: int = -1
+    adaptive_probation_can_shrink: bool = True
+    adaptive_probation_block_reason: str = ""
+    adaptive_probation_ordinary_rollback_blocked: bool = False
+    adaptive_probation_hard_collapse: bool = False
+    adaptive_probation_hard_collapse_streak: int = 0
+    adaptive_probation_rollback_triggered: bool = False
+    adaptive_probation_rollback_from_tol: float = 0.0
+    adaptive_probation_rollback_to_tol: float = 0.0
+    adaptive_rescue_ready: bool = False
+    adaptive_rescue_reason: str = ""
+    adaptive_rescue_attempt_count: int = 0
+    adaptive_rescue_selected_count: int = 0
+    adaptive_rescue_executed_count: int = 0
+    adaptive_rescue_blocked_count: int = 0
+    adaptive_rescue_source_policy: int = -1
+    adaptive_rescue_source_rank: int = -1
+    adaptive_rescue_source_advantage_sigma: float = 0.0
+    adaptive_rescue_last_frame: int = -1
+    adaptive_rescue_lineage_id: str = ""
+    adaptive_rescue_executed_for_lineage: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

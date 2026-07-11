@@ -80,7 +80,10 @@ Curriculum progress and consolidation:
 | continuous-weight distillation | `world_model/snippet_distill.py::compute_snippet_distill_loss` |
 | runtime gate + teacher confidence + retrieval | `world_model/eir_mpc.py::_compute_snippet_distill_loss_progress` |
 | curriculum-progress consolidation | `pbt/pbt_consolidation_schedule.py` (`schedule_mode="curriculum_progress"`) |
-| probation + retention-conditioned rescue | `pbt/adaptive_precision_consolidation.py` + observer wiring |
+| probation + retention-conditioned rescue | `pbt/adaptive_precision_consolidation.py` |
+| adaptive probation shrink/rollback gate | `pbt_observer._build_curriculum_control_state` via `_adaptive_precision_state` |
+| adaptive rescue trigger + source select | `_adaptive_degradation_rescue_ready` → `_select_adaptive_degradation_rescue_source` → `_ternary_pbt` |
+| adaptive sidecar byte-level txn | `_snapshot_restart_persistent_state` / `_restore_restart_persistent_state` |
 
 ## Key formula → code map
 
@@ -95,6 +98,35 @@ Curriculum progress and consolidation:
 | `c` (curriculum progress) | `adaptive_precision_consolidation.curriculum_progress` |
 | stage boundaries | `resolve_stage` / `resolve_pbt_stage(schedule_mode=curriculum_progress)` |
 | probation / rescue | `ProbationState`, `evaluate_degradation_rescue`, `select_rescue_source` |
+| rescue top-fraction | `rescue_source_top_k` / `rescue_source_top_fraction` (6 policies → top 3) |
+
+## Adaptive PBT control chain (wired)
+
+Adaptive probation and rescue are **execution-path gates**, not metrics-only:
+
+1. **Shrink** — after mastery / adaptive-fast / safety / late-floor decide
+   `shrink_token`, active probation may clear it via `ProbationState.can_shrink`
+   and roll back single-shot bookkeeping (`adaptive_<block_reason>`).
+2. **Ordinary rollback** — while probation is active and not hard-collapsed,
+   ordinary forced-tolerance rollback (hard-collapse / repeated-collapse /
+   late-floor) is blocked.
+3. **Hard-collapse rollback** — when `hard_collapsed` holds, a ladder-free
+   wider tolerance is chosen from last mastered safe → previous tolerance
+   before entry; otherwise freeze-only.
+4. **Rescue** — with `late_degradation_rescue_enable=False` and
+   `adaptive_rescue_enable=True`, `_ternary_pbt` uses `rescue_mode=adaptive`,
+   calls `_select_adaptive_degradation_rescue_source` (never the legacy late
+   selector), then reuses existing live-source / burn-in / restart transaction
+   gates. Legacy absolute tol-gap recheck applies **only** to `rescue_mode=legacy`.
+5. **Quota** — `rescue_executed_for_lineage` increments only after a successful
+   restart commit; lineage id change resets streak + lineage quota.
+6. **Transaction** — adaptive sidecar bytes join curriculum control + manifest
+   in the durable restart snapshot/rollback.
+
+Formal profile `cser_dexpbt_progress_refine` **fail-fasts** on AdaptivePrecisionConfig
+build / sidecar parse / update failures instead of silently disabling adaptive
+control.
+
 
 ## Profile settings
 
@@ -145,9 +177,14 @@ teacher_margin_mean,retrieval_valid_frac,retrieval_budget_frac,
 effective_sample_size,loss,fallback_frac,nonfinite_count}`,
 `snippet_retrieval/{tolerance_weight_mean,log_tolerance_gap_mean,no_compatible_frac}`,
 `adaptive_consolidation/{curriculum_progress,stage,local_retention,
-probation_active,probation_frames,shrink_blocked,hard_collapse_streak,
-degradation_streak}`. Registered in
-`dexpbt_utils.PROGRESS_REFINE_TB_SCALAR_NAMES`.
+probation_active,probation_frames,shrink_blocked,probation_can_shrink,
+hard_collapse_streak,degradation_streak,ordinary_rollback_blocked,
+hard_collapse_rollback,rescue_ready,rescue_attempt_count,rescue_selected_count,
+rescue_executed_count,rescue_blocked_count,rescue_source_policy,
+rescue_source_rank,rescue_source_advantage_sigma,rescue_reason_hash,
+rescue_quota_used}`. Registered in
+`dexpbt_utils.PROGRESS_REFINE_TB_SCALAR_NAMES` (progress_refine scalars) with
+additional adaptive consolidation scalars emitted by the observer.
 
 ## Launch commands
 

@@ -643,6 +643,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         adaptive_rescue_retention_threshold: float = 0.70,
         adaptive_rescue_degradation_patience: int = 3,
         adaptive_rescue_population_quantile: float = 0.60,
+        adaptive_rescue_source_top_fraction: float | None = None,
         adaptive_rescue_source_min_retention: float = 0.85,
         adaptive_rescue_min_source_advantage_sigma: float = 1.0,
         adaptive_rescue_max_log_tol_gap: float = 0.20,
@@ -1562,6 +1563,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "best_floor_recovery_archive": 0,
             "late_rescue_live": 0,
             "late_rescue_archive": 0,
+            "adaptive_rescue_live": 0,
+            "adaptive_rescue_archive": 0,
             "skipped": 0,
         }
         # The "checkpoint provenance" for the current tick. live|archive.
@@ -1639,6 +1642,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 rescue_enable=bool(adaptive_rescue_enable),
                 rescue_retention_threshold=float(adaptive_rescue_retention_threshold),
                 rescue_degradation_patience=int(adaptive_rescue_degradation_patience),
+                rescue_source_top_fraction=float(
+                    adaptive_rescue_source_top_fraction
+                    if adaptive_rescue_source_top_fraction is not None
+                    else max(0.0, min(1.0, 1.0 - float(adaptive_rescue_population_quantile)))
+                ),
                 rescue_population_quantile=float(adaptive_rescue_population_quantile),
                 rescue_source_min_retention=float(adaptive_rescue_source_min_retention),
                 rescue_min_source_advantage_sigma=float(
@@ -1654,16 +1662,31 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     adaptive_rescue_reject_collapse_source
                 ),
             )
-        except Exception as _apc_exc:  # never block observer construction
+        except Exception as _apc_exc:
+            if str(getattr(self, "wm_strategy_profile_name", "") or "") == "cser_dexpbt_progress_refine":
+                raise RuntimeError(
+                    "AdaptivePrecisionConfig construction failed for formal "
+                    f"profile cser_dexpbt_progress_refine: {_apc_exc}"
+                ) from _apc_exc
             print(f"[adaptive-precision] config build failed (disabled): {_apc_exc}")
             self._adaptive_precision_cfg = None
             self.adaptive_precision_enable = False
-        # Per-policy adaptive precision runtime state (serialized to control JSON).
+        # Per-policy adaptive precision runtime state (serialized to sidecar JSON).
         self._adaptive_probation: dict[int, Any] = {}
         self._adaptive_retention: dict[int, Any] = {}
         self._adaptive_degradation_streak: dict[int, int] = {}
         self._adaptive_last_rescue_frame: dict[int, int] = {}
         self._adaptive_rescue_executed: dict[int, int] = {}
+        self._adaptive_rescue_executed_for_lineage: dict[int, int] = {}
+        self._adaptive_lineage_id: dict[int, str] = {}
+        self._adaptive_rescue_attempt_count: dict[int, int] = {}
+        self._adaptive_rescue_selected_count: dict[int, int] = {}
+        self._adaptive_rescue_blocked_count: dict[int, int] = {}
+        self._adaptive_rescue_last_reason: dict[int, str] = {}
+        self._adaptive_rescue_last_source: dict[int, int] = {}
+        self._adaptive_rescue_last_source_rank: dict[int, int] = {}
+        self._adaptive_rescue_last_advantage_sigma: dict[int, float] = {}
+        self._adaptive_last_audit: dict[int, dict[str, Any]] = {}
         self.wm_calibration_enable = bool(wm_calibration_enable)
         # Last decision type the observer emitted at the current PBT tick.
         # 0=none, 1=self, 2=cross, 3=skipped. Used both for TB log and for
@@ -1768,6 +1791,47 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{int(policy_idx):03d}.json"
 
+    def _adaptive_precision_required(self) -> bool:
+        return str(self.wm_strategy_profile_name or "") == "cser_dexpbt_progress_refine"
+
+    def _adaptive_precision_state(
+        self,
+        policy_idx: int,
+    ):
+        """Return (cfg, probation, tracker) or None when adaptive is inert.
+
+        Formal profile fails closed if the feature is enabled but config/state
+        cannot be materialised. Legacy profiles stay inert on any failure.
+        """
+        if not self.adaptive_precision_enable:
+            return None
+        try:
+            self._adaptive_precision_restore(policy_idx)
+        except Exception as exc:
+            if self._adaptive_precision_required():
+                raise RuntimeError(
+                    f"adaptive precision restore failed for formal profile "
+                    f"(policy={policy_idx}): {exc}"
+                ) from exc
+            print(f"[adaptive-precision] restore failed (ignored): {exc}")
+            return None
+        cfg = self._adaptive_precision_cfg
+        if cfg is None:
+            if self._adaptive_precision_required():
+                raise RuntimeError(
+                    "adaptive precision required but AdaptivePrecisionConfig is missing"
+                )
+            return None
+        probation = self._adaptive_probation.get(policy_idx)
+        tracker = self._adaptive_retention.get(policy_idx)
+        if probation is None or tracker is None:
+            if self._adaptive_precision_required():
+                raise RuntimeError(
+                    f"adaptive precision state missing for policy {policy_idx}"
+                )
+            return None
+        return cfg, probation, tracker
+
     def _adaptive_precision_restore(self, policy_idx: int) -> None:
         """Restore probation / retention / rescue state from the sidecar JSON."""
         if policy_idx in self._adaptive_probation:
@@ -1781,10 +1845,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         path = self._adaptive_precision_path(policy_idx)
         data: dict[str, Any] = {}
         if path.exists():
-            try:
-                data = json.loads(path.read_text()) or {}
-            except Exception:
-                data = {}
+            last_err: Exception | None = None
+            for _attempt in range(3):
+                try:
+                    data = json.loads(path.read_text()) or {}
+                    last_err = None
+                    break
+                except Exception as exc:
+                    last_err = exc
+                    data = {}
+            if last_err is not None and self._adaptive_precision_required():
+                raise RuntimeError(
+                    f"adaptive sidecar parse failed for policy {policy_idx}: {last_err}"
+                ) from last_err
         if data.get("probation"):
             self._adaptive_probation[policy_idx] = ProbationState.from_json(data["probation"])
         else:
@@ -1794,14 +1867,38 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 data["retention"]
             )
         else:
-            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker(
-                quant=float(cfg.tolerance_log_quant)
-            )
+            quant = float(cfg.tolerance_log_quant) if cfg is not None else 0.05
+            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker(quant=quant)
         self._adaptive_degradation_streak[policy_idx] = int(data.get("degradation_streak", 0))
         self._adaptive_last_rescue_frame[policy_idx] = int(
             data.get("last_rescue_frame", -(10**18))
         )
         self._adaptive_rescue_executed[policy_idx] = int(data.get("rescue_executed", 0))
+        self._adaptive_rescue_executed_for_lineage[policy_idx] = int(
+            data.get("rescue_executed_for_lineage", data.get("rescue_executed", 0))
+        )
+        self._adaptive_lineage_id[policy_idx] = str(data.get("adaptive_lineage_id", "") or "")
+        self._adaptive_rescue_attempt_count[policy_idx] = int(
+            data.get("rescue_attempt_count", 0)
+        )
+        self._adaptive_rescue_selected_count[policy_idx] = int(
+            data.get("rescue_selected_count", 0)
+        )
+        self._adaptive_rescue_blocked_count[policy_idx] = int(
+            data.get("rescue_blocked_count", 0)
+        )
+        self._adaptive_rescue_last_reason[policy_idx] = str(
+            data.get("rescue_last_reason", "") or ""
+        )
+        self._adaptive_rescue_last_source[policy_idx] = int(
+            data.get("rescue_last_source", -1)
+        )
+        self._adaptive_rescue_last_source_rank[policy_idx] = int(
+            data.get("rescue_last_source_rank", -1)
+        )
+        self._adaptive_rescue_last_advantage_sigma[policy_idx] = float(
+            data.get("rescue_last_advantage_sigma", 0.0) or 0.0
+        )
         self._adaptive_prev_tol = getattr(self, "_adaptive_prev_tol", {})
         self._adaptive_prev_tol[policy_idx] = data.get("prev_tolerance")
         self._adaptive_eps_init = getattr(self, "_adaptive_eps_init", {})
@@ -1818,12 +1915,48 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._adaptive_last_rescue_frame.get(policy_idx, -(10**18))
             ),
             "rescue_executed": int(self._adaptive_rescue_executed.get(policy_idx, 0)),
+            "rescue_executed_for_lineage": int(
+                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
+            ),
+            "adaptive_lineage_id": str(self._adaptive_lineage_id.get(policy_idx, "")),
+            "rescue_attempt_count": int(
+                self._adaptive_rescue_attempt_count.get(policy_idx, 0)
+            ),
+            "rescue_selected_count": int(
+                self._adaptive_rescue_selected_count.get(policy_idx, 0)
+            ),
+            "rescue_blocked_count": int(
+                self._adaptive_rescue_blocked_count.get(policy_idx, 0)
+            ),
+            "rescue_last_reason": str(
+                self._adaptive_rescue_last_reason.get(policy_idx, "")
+            ),
+            "rescue_last_source": int(
+                self._adaptive_rescue_last_source.get(policy_idx, -1)
+            ),
+            "rescue_last_source_rank": int(
+                self._adaptive_rescue_last_source_rank.get(policy_idx, -1)
+            ),
+            "rescue_last_advantage_sigma": float(
+                self._adaptive_rescue_last_advantage_sigma.get(policy_idx, 0.0)
+            ),
             "prev_tolerance": getattr(self, "_adaptive_prev_tol", {}).get(policy_idx),
             "eps_init": float(getattr(self, "_adaptive_eps_init", {}).get(policy_idx, 0.0)),
         }
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload))
         os.replace(str(tmp), str(path))
+
+    def _adaptive_reset_lineage_quota(self, policy_idx: int, lineage_id: str) -> None:
+        """Reset per-lineage adaptive rescue quota and degradation streak."""
+        stored = str(self._adaptive_lineage_id.get(policy_idx, "") or "")
+        current = str(lineage_id or "")
+        if current == stored:
+            return
+        self._adaptive_lineage_id[policy_idx] = current
+        self._adaptive_degradation_streak[policy_idx] = 0
+        self._adaptive_rescue_executed_for_lineage[policy_idx] = 0
+        self._adaptive_last_rescue_frame[policy_idx] = -(10**18)
 
     def _adaptive_precision_update(
         self, *, sample: Any, state: dict[str, Any] | None, env_frames: int
@@ -1847,6 +1980,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         cur_tol = float(getattr(sample, "success_tolerance", 0.075) or 0.075)
         nsucc_mean = float(getattr(sample, "nsucc_mean", 0.0) or 0.0)
         lineage_id = str(getattr(sample, "lineage_id", "") or "")
+        self._adaptive_reset_lineage_quota(pidx, lineage_id)
 
         # Target tolerance from the state's curriculum block; fall back to the
         # configured bridge target (both default to the env target tolerance).
@@ -1880,7 +2014,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         prev_tol = prev_map.get(pidx)
         probation = self._adaptive_probation[pidx]
         if prev_tol is not None and cur_tol < float(prev_tol) - 1e-9:
-            probation.arm(tolerance=cur_tol, frame=int(env_frames), nsucc_mean=nsucc_mean)
+            probation.arm(
+                tolerance=cur_tol,
+                frame=int(env_frames),
+                nsucc_mean=nsucc_mean,
+                previous_tolerance=float(prev_tol),
+            )
         prev_map[pidx] = cur_tol
         self._adaptive_prev_tol = prev_map
 
@@ -1919,6 +2058,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     else 0.0,
                 ),
                 ("adaptive_consolidation/shrink_blocked", 0.0 if can_shrink else 1.0),
+                ("adaptive_consolidation/probation_can_shrink", 1.0 if can_shrink else 0.0),
                 (
                     "adaptive_consolidation/hard_collapse_streak",
                     float(probation.hard_collapse_streak),
@@ -1927,11 +2067,211 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "adaptive_consolidation/degradation_streak",
                     float(self._adaptive_degradation_streak.get(pidx, 0)),
                 ),
+                (
+                    "adaptive_consolidation/rescue_quota_used",
+                    float(self._adaptive_rescue_executed_for_lineage.get(pidx, 0)),
+                ),
             ):
                 try:
                     self.writer.add_scalar(name, val, int(env_frames))
                 except Exception:
                     pass
+
+    def _adaptive_degradation_rescue_ready(
+        self,
+        *,
+        policy_idx: int,
+        tolerance: float,
+        nsucc_mean: float,
+        env_frames: int,
+        lineage_id: str,
+    ) -> tuple[bool, str]:
+        """Retention-conditioned adaptive rescue trigger (no legacy late rescue)."""
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            evaluate_degradation_rescue,
+        )
+
+        state = self._adaptive_precision_state(policy_idx)
+        if state is None:
+            return False, "disabled"
+        cfg, _probation, tracker = state
+        if not bool(cfg.rescue_enable):
+            return False, "disabled"
+        self._adaptive_reset_lineage_quota(policy_idx, lineage_id)
+        snap = tracker.snapshot(float(tolerance), min_samples=1)
+        last_frame = int(self._adaptive_last_rescue_frame.get(policy_idx, -(10**18)))
+        frames_since = int(env_frames) - last_frame
+        ready, reason = evaluate_degradation_rescue(
+            tolerance=float(tolerance),
+            nsucc_mean=float(nsucc_mean),
+            same_level_retention=float(snap["retention"]),
+            same_level_valid=bool(snap["valid"]),
+            degradation_streak=int(self._adaptive_degradation_streak.get(policy_idx, 0)),
+            executed_this_lineage=int(
+                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
+            ),
+            frames_since_last_rescue=int(frames_since),
+            cfg=cfg,
+        )
+        self._adaptive_rescue_last_reason[policy_idx] = str(reason)
+        return bool(ready), str(reason)
+
+    def _select_adaptive_degradation_rescue_source(
+        self,
+        *,
+        sorted_policies: list[int],
+        population: dict[int, dict[str, Any] | None],
+        env_frames: int,
+        target_tolerance: float,
+        target_nsucc_mean: float,
+    ) -> dict[str, Any]:
+        """Convert adaptive ``select_rescue_source`` into the ternary decision schema."""
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            log_tolerance_gap,
+            rescue_source_top_k,
+            select_rescue_source,
+        )
+
+        empty = {
+            "action": "skip",
+            "tier": "skipped",
+            "checkpoint_type": "none",
+            "source_policy": -1,
+            "source_state": None,
+            "strict_candidates": [],
+            "relaxed_candidates": [],
+            "strict_filter_reasons": {},
+            "relaxed_filter_reasons": {},
+            "archive_reason": "no_compatible_source",
+            "adaptive_rescue_reason": "no_compatible_source",
+            "adaptive_source_rank": -1,
+            "adaptive_source_advantage_sigma": 0.0,
+        }
+        state = self._adaptive_precision_state(self.policy_idx)
+        if state is None:
+            empty["adaptive_rescue_reason"] = "disabled"
+            empty["archive_reason"] = "disabled"
+            return empty
+        cfg, _probation, _tracker = state
+        candidates: list[dict[str, Any]] = []
+        pop_means: list[float] = []
+        filter_reasons: dict[int, str] = {}
+        for idx in sorted_policies:
+            if int(idx) == int(self.policy_idx):
+                continue
+            st = population.get(idx)
+            if not isinstance(st, dict):
+                filter_reasons[int(idx)] = "missing_state"
+                continue
+            ckpt = st.get("checkpoint")
+            if not ckpt or not Path(str(ckpt)).is_file():
+                filter_reasons[int(idx)] = "missing_checkpoint"
+                continue
+            curr = st.get("curriculum") or {}
+            try:
+                s_mean = float(st.get("nsucc_mean", float("nan")))
+                s_tol = float(curr.get("success_tolerance", float("nan")))
+                s_rank = float(st.get("pbt_ranking_score", st.get("objective", float("nan"))))
+            except Exception:
+                filter_reasons[int(idx)] = "nonfinite"
+                continue
+            if not all(math.isfinite(x) for x in (s_mean, s_tol, s_rank)):
+                filter_reasons[int(idx)] = "nonfinite"
+                continue
+            pop_means.append(s_mean)
+            # Source retention from *source* adaptive tracker.
+            src_state = self._adaptive_precision_state(int(idx))
+            if src_state is None:
+                s_ret = float("nan")
+                has_ret = False
+            else:
+                _c, _p, src_tracker = src_state
+                snap = src_tracker.snapshot(s_tol, min_samples=1)
+                s_ret = float(snap["retention"])
+                has_ret = bool(snap["valid"])
+            ctrl_path = self._curriculum_control_dir / f"{int(idx):03d}.json"
+            has_control = ctrl_path.is_file()
+            collapsed = False
+            if has_control:
+                try:
+                    control = read_curriculum_control(ctrl_path)
+                except Exception:
+                    control = None
+                if control is None:
+                    if cfg.rescue_require_source_control:
+                        filter_reasons[int(idx)] = "source_control_parse_error"
+                        continue
+                    has_control = False
+                else:
+                    collapsed, _reason = control_has_collapse_signal(control)
+            elif cfg.rescue_require_source_control:
+                filter_reasons[int(idx)] = "source_control_missing"
+                continue
+            if not has_ret:
+                # Still allow candidate construction; selector rejects non-finite.
+                s_ret = float("nan")
+            candidates.append(
+                {
+                    "idx": int(idx),
+                    "nsucc_mean": s_mean,
+                    "retention": s_ret,
+                    "tolerance": s_tol,
+                    "ranking_score": s_rank,
+                    "has_control": bool(has_control),
+                    "collapsed": bool(collapsed),
+                }
+            )
+        # Include target mean in population spread / top-fraction baseline.
+        if math.isfinite(float(target_nsucc_mean)):
+            pop_means.append(float(target_nsucc_mean))
+        top_k = rescue_source_top_k(
+            len(sorted_policies), float(cfg.rescue_source_top_fraction)
+        )
+        allowed = {int(x) for x in sorted_policies[:top_k]}
+        decision = select_rescue_source(
+            target_tolerance=float(target_tolerance),
+            target_nsucc_mean=float(target_nsucc_mean),
+            candidates=candidates,
+            population_nsucc_means=pop_means,
+            cfg=cfg,
+            allowed_source_ids=allowed,
+            sorted_population=list(sorted_policies),
+        )
+        if not decision.eligible:
+            empty["adaptive_rescue_reason"] = str(decision.reason)
+            empty["archive_reason"] = str(decision.reason)
+            empty["relaxed_filter_reasons"] = {
+                str(k): v for k, v in filter_reasons.items()
+            }
+            return empty
+        src_idx = int(decision.source_idx)
+        src_state = population.get(src_idx)
+        assert src_state is not None
+        src_tol = float(
+            (src_state.get("curriculum") or {}).get("success_tolerance", float("nan"))
+        )
+        return {
+            "action": "copy",
+            "tier": "adaptive_rescue_live",
+            "checkpoint_type": "live",
+            "source_policy": src_idx,
+            "source_state": src_state,
+            "strict_candidates": [src_idx],
+            "relaxed_candidates": [c["idx"] for c in candidates],
+            "strict_filter_reasons": {},
+            "relaxed_filter_reasons": {
+                str(k): v for k, v in filter_reasons.items()
+            },
+            "archive_reason": str(decision.reason),
+            "adaptive_rescue_reason": "selected",
+            "adaptive_source_rank": int(decision.source_rank),
+            "adaptive_source_advantage_sigma": float(decision.source_advantage_sigma),
+            "adaptive_log_tolerance_gap": float(
+                log_tolerance_gap(src_tol, target_tolerance, eps=cfg.eps)
+                if math.isfinite(src_tol)
+                else float("nan")
+            ),
+        }
 
     def _update_curriculum_windows_and_control(
         self,
@@ -1962,6 +2302,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                             sample=sample, state=state, env_frames=int(env_frames)
                         )
                     except Exception as _apc_exc:
+                        if self._adaptive_precision_required():
+                            raise RuntimeError(
+                                f"adaptive precision update failed for formal profile: {_apc_exc}"
+                            ) from _apc_exc
                         print(f"[adaptive-precision] update failed (ignored): {_apc_exc}")
                 if self.same_tol_retention_enable:
                     self._maybe_restore_bridge_state(policy_idx)
@@ -2250,6 +2594,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         drop_ratio = window.drop_ratio_vs_prior(2)
         forced_tolerance = 0.0
         collapse_rollback_active = False
+        adaptive_probation_active = False
+        adaptive_probation_can_shrink = True
+        adaptive_probation_block_reason = ""
+        adaptive_probation_ordinary_rollback_blocked = False
+        adaptive_probation_hard_collapse = False
+        adaptive_probation_rollback_triggered = False
+        adaptive_probation_rollback_from_tol = 0.0
+        adaptive_probation_rollback_to_tol = 0.0
+        adaptive_probation_hard_collapse_streak = 0
+        adaptive_probation_entry_tolerance = 0.0
+        adaptive_probation_entry_frame = -1
+        adaptive_precision_active = bool(self.adaptive_precision_enable)
+        adaptive_curriculum_progress = float(
+            getattr(self, "_adaptive_curriculum_progress", 0.0) or 0.0
+        )
         rollback_cooldown_active = False
         rollback_reason = ""
         rollback_count = int(self._rollback_count.get(policy_idx, 0))
@@ -2297,6 +2656,24 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self.bridge_probation_block_ordinary_rollback
             and probation_active_early
         )
+        adaptive_state = (
+            self._adaptive_precision_state(policy_idx)
+            if self.adaptive_precision_enable
+            else None
+        )
+        adaptive_ordinary_block = False
+        if adaptive_state is not None:
+            _acfg, _aprob, _atrack = adaptive_state
+            adaptive_probation_active = bool(_aprob.active)
+            adaptive_probation_entry_tolerance = float(_aprob.entry_tolerance)
+            adaptive_probation_entry_frame = int(_aprob.entry_frame)
+            adaptive_probation_hard_collapse_streak = int(_aprob.hard_collapse_streak)
+            adaptive_ordinary_block = bool(
+                _aprob.active
+                and _acfg.probation_block_ordinary_rollback
+                and not _aprob.hard_collapsed(_acfg)
+            )
+            adaptive_probation_ordinary_rollback_blocked = bool(adaptive_ordinary_block)
         legacy_hard_collapse = False
         bridge_probation_hard_collapse = False
         bridge_probation_legacy_collapse_suppressed = False
@@ -2420,7 +2797,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 allow_by_shrink = (
                     int(self._shrinks_since_rollback.get(policy_idx, 0)) > 0
                 )
-                # During probation only bridge hard-collapse may set forced tol.
+                # During probation only bridge/adaptive hard-collapse may set forced tol.
                 allow_forced = True
                 if probation_active_early and not bridge_probation_hard_collapse:
                     allow_forced = False
@@ -2429,6 +2806,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         bridge_probation_rollback_reason
                         or "legacy_hard_collapse_suppressed"
                     )
+                adaptive_hard_collapse_now = False
+                if adaptive_state is not None:
+                    _acfg, _aprob, _atrack = adaptive_state
+                    if (
+                        _aprob.active
+                        and _acfg.probation_allow_hard_collapse_rollback
+                        and _aprob.hard_collapsed(_acfg)
+                    ):
+                        adaptive_hard_collapse_now = True
+                        adaptive_probation_hard_collapse = True
+                    elif adaptive_ordinary_block:
+                        allow_forced = False
+                        adaptive_probation_ordinary_rollback_blocked = True
                 if allow_forced and (allow_by_cooldown or allow_by_shrink):
                     if bridge_probation_hard_collapse:
                         forced_tolerance = float(
@@ -2438,6 +2828,30 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         )
                         rollback_reason = "bridge_probation_hard_collapse"
                         bridge_probation_rollback_reason = rollback_reason
+                    elif adaptive_hard_collapse_now:
+                        # Ladder-free rollback target priority.
+                        candidates = [
+                            float(self._last_mastered_safe_tolerance.get(policy_idx, 0.0) or 0.0),
+                            float(getattr(_aprob, "previous_tolerance_before_entry", 0.0) or 0.0),
+                            float(getattr(_aprob, "source_tolerance", 0.0) or 0.0),
+                        ]
+                        wider = [
+                            t for t in candidates
+                            if t > float(cur_tol) + 1e-9 and math.isfinite(t)
+                        ]
+                        if wider:
+                            forced_tolerance = float(max(wider))
+                            rollback_reason = "adaptive_probation_hard_collapse"
+                            adaptive_probation_rollback_triggered = True
+                            adaptive_probation_rollback_from_tol = float(cur_tol)
+                            adaptive_probation_rollback_to_tol = float(forced_tolerance)
+                            _aprob.hard_collapse_streak = 0
+                        else:
+                            # Freeze only; do not write an invalid forced tolerance.
+                            allow_forced = False
+                            forced_tolerance = 0.0
+                            rollback_reason = "adaptive_probation_hard_collapse_freeze_only"
+                            adaptive_probation_hard_collapse = True
                     else:
                         forced_tolerance = float(
                             self._last_mastered_tolerance.get(policy_idx, 0.075)
@@ -2447,23 +2861,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                             if allow_by_cooldown
                             else "shrink_after_last_rollback"
                         )
-                    collapse_rollback_active = True
-                    self._last_rollback_frame[policy_idx] = int(env_frames)
-                    last_rollback_frame = int(env_frames)
-                    self._rollback_count[policy_idx] = rollback_count + 1
-                    rollback_count += 1
-                    self._shrinks_since_rollback[policy_idx] = 0
-                    rollback_and_freeze_same_tick = collapse_detected
-                    if bridge_probation_hard_collapse:
-                        self._bridge_probation_bad_streak[policy_idx] = 0
-                        self._repeated_collapse_count[policy_idx] = 0
-                        repeated_collapse_count = 0
+                    if allow_forced:
+                        collapse_rollback_active = True
+                        self._last_rollback_frame[policy_idx] = int(env_frames)
+                        last_rollback_frame = int(env_frames)
+                        self._rollback_count[policy_idx] = rollback_count + 1
+                        rollback_count += 1
+                        self._shrinks_since_rollback[policy_idx] = 0
+                        rollback_and_freeze_same_tick = collapse_detected
+                        if bridge_probation_hard_collapse:
+                            self._bridge_probation_bad_streak[policy_idx] = 0
+                            self._repeated_collapse_count[policy_idx] = 0
+                            repeated_collapse_count = 0
+                        if adaptive_hard_collapse_now and adaptive_probation_rollback_triggered:
+                            self._repeated_collapse_count[policy_idx] = 0
+                            repeated_collapse_count = 0
                 elif allow_forced:
                     rollback_reason = "cooldown_blocked"
             if (
                 self.curriculum_rollback_on_repeated_collapse
                 and self.curriculum_rollback_to_last_mastered
                 and not probation_ordinary_block
+                and not adaptive_ordinary_block
                 and danger_zone
                 and repeated_collapse_count
                 >= self.curriculum_rollback_collapse_patience
@@ -3030,6 +3449,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             recent_peak=recent_peak,
             forced_tolerance=forced_tolerance,
         )
+        if late_floor_retention.get("rollback_applied") and adaptive_ordinary_block:
+            # Adaptive probation owns ordinary rollback; undo late-floor force.
+            late_floor_retention = dict(late_floor_retention)
+            late_floor_retention["rollback_applied"] = False
+            forced_tolerance = 0.0
+            adaptive_probation_ordinary_rollback_blocked = True
         if late_floor_retention.get("rollback_applied"):
             collapse_rollback_active = True
             curriculum_rollback_triggered = True
@@ -3057,6 +3482,64 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 if cur > 0:
                     self._shrinks_since_rollback[policy_idx] = cur - 1
             shrinks_in_window = 0
+
+        # Adaptive probation shrink gate: may only clear an already-issued token.
+        if adaptive_state is not None and shrink_token:
+            _acfg, _aprob, _atrack = adaptive_state
+            can_shrink, block_reason = _aprob.can_shrink(
+                frame=int(env_frames), cfg=_acfg
+            )
+            adaptive_probation_can_shrink = bool(can_shrink)
+            adaptive_probation_block_reason = str(block_reason)
+            adaptive_probation_active = bool(_aprob.active)
+            if not can_shrink:
+                shrink_token = False
+                allow_shrink = False
+                shrink_blocked_reason = f"adaptive_{block_reason}"
+                shrink_reason = f"adaptive_{block_reason}"
+                if (
+                    self.pbt_single_shrink_per_window
+                    and self._shrink_issued_this_window.get(policy_idx, False)
+                ):
+                    self._shrink_issued_this_window[policy_idx] = False
+                    current = int(self._shrinks_since_rollback.get(policy_idx, 0))
+                    if current > 0:
+                        self._shrinks_since_rollback[policy_idx] = current - 1
+                shrinks_in_window = 0
+        elif adaptive_state is not None:
+            _acfg, _aprob, _atrack = adaptive_state
+            can_shrink, block_reason = _aprob.can_shrink(
+                frame=int(env_frames), cfg=_acfg
+            )
+            adaptive_probation_can_shrink = bool(can_shrink)
+            adaptive_probation_block_reason = str(block_reason)
+            adaptive_probation_active = bool(_aprob.active)
+
+        self._adaptive_last_audit[policy_idx] = {
+            "adaptive_precision_active": bool(adaptive_precision_active),
+            "adaptive_curriculum_progress": float(adaptive_curriculum_progress),
+            "adaptive_probation_active": bool(adaptive_probation_active),
+            "adaptive_probation_entry_tolerance": float(adaptive_probation_entry_tolerance),
+            "adaptive_probation_entry_frame": int(adaptive_probation_entry_frame),
+            "adaptive_probation_can_shrink": bool(adaptive_probation_can_shrink),
+            "adaptive_probation_block_reason": str(adaptive_probation_block_reason),
+            "adaptive_probation_ordinary_rollback_blocked": bool(
+                adaptive_probation_ordinary_rollback_blocked
+            ),
+            "adaptive_probation_hard_collapse": bool(adaptive_probation_hard_collapse),
+            "adaptive_probation_hard_collapse_streak": int(
+                adaptive_probation_hard_collapse_streak
+            ),
+            "adaptive_probation_rollback_triggered": bool(
+                adaptive_probation_rollback_triggered
+            ),
+            "adaptive_probation_rollback_from_tol": float(
+                adaptive_probation_rollback_from_tol
+            ),
+            "adaptive_probation_rollback_to_tol": float(
+                adaptive_probation_rollback_to_tol
+            ),
+        }
 
         wm_payload = self._load_policy_wm_imagined_eval(policy_idx) or {}
         wm_imagined_valid = bool(wm_payload.get("imagined_valid", False))
@@ -3302,6 +3785,65 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             ),
             late_rescue_streak=int(self._late_rescue_streak.get(policy_idx, 0)),
             late_rescue_last_frame=int(self._late_rescue_frame.get(policy_idx, -1)),
+            adaptive_precision_active=bool(adaptive_precision_active),
+            adaptive_curriculum_progress=float(adaptive_curriculum_progress),
+            adaptive_probation_active=bool(adaptive_probation_active),
+            adaptive_probation_entry_tolerance=float(adaptive_probation_entry_tolerance),
+            adaptive_probation_entry_frame=int(adaptive_probation_entry_frame),
+            adaptive_probation_can_shrink=bool(adaptive_probation_can_shrink),
+            adaptive_probation_block_reason=str(adaptive_probation_block_reason),
+            adaptive_probation_ordinary_rollback_blocked=bool(
+                adaptive_probation_ordinary_rollback_blocked
+            ),
+            adaptive_probation_hard_collapse=bool(adaptive_probation_hard_collapse),
+            adaptive_probation_hard_collapse_streak=int(
+                adaptive_probation_hard_collapse_streak
+            ),
+            adaptive_probation_rollback_triggered=bool(
+                adaptive_probation_rollback_triggered
+            ),
+            adaptive_probation_rollback_from_tol=float(
+                adaptive_probation_rollback_from_tol
+            ),
+            adaptive_probation_rollback_to_tol=float(
+                adaptive_probation_rollback_to_tol
+            ),
+            adaptive_rescue_ready=bool(
+                self._adaptive_rescue_last_reason.get(policy_idx, "") == "ready"
+            ),
+            adaptive_rescue_reason=str(
+                self._adaptive_rescue_last_reason.get(policy_idx, "")
+            ),
+            adaptive_rescue_attempt_count=int(
+                self._adaptive_rescue_attempt_count.get(policy_idx, 0)
+            ),
+            adaptive_rescue_selected_count=int(
+                self._adaptive_rescue_selected_count.get(policy_idx, 0)
+            ),
+            adaptive_rescue_executed_count=int(
+                self._adaptive_rescue_executed.get(policy_idx, 0)
+            ),
+            adaptive_rescue_blocked_count=int(
+                self._adaptive_rescue_blocked_count.get(policy_idx, 0)
+            ),
+            adaptive_rescue_source_policy=int(
+                self._adaptive_rescue_last_source.get(policy_idx, -1)
+            ),
+            adaptive_rescue_source_rank=int(
+                self._adaptive_rescue_last_source_rank.get(policy_idx, -1)
+            ),
+            adaptive_rescue_source_advantage_sigma=float(
+                self._adaptive_rescue_last_advantage_sigma.get(policy_idx, 0.0)
+            ),
+            adaptive_rescue_last_frame=int(
+                self._adaptive_last_rescue_frame.get(policy_idx, -1)
+            ),
+            adaptive_rescue_lineage_id=str(
+                self._adaptive_lineage_id.get(policy_idx, "")
+            ),
+            adaptive_rescue_executed_for_lineage=int(
+                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
+            ),
         )
 
     def _log_curriculum_control_scalars(
@@ -3369,6 +3911,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             1.0 if control.shrink_token else 0.0,
             env_frames,
         )
+        if self.adaptive_precision_enable:
+            self.writer.add_scalar(
+                "adaptive_consolidation/probation_can_shrink",
+                1.0 if control.adaptive_probation_can_shrink else 0.0,
+                env_frames,
+            )
+            self.writer.add_scalar(
+                "adaptive_consolidation/ordinary_rollback_blocked",
+                1.0 if control.adaptive_probation_ordinary_rollback_blocked else 0.0,
+                env_frames,
+            )
+            self.writer.add_scalar(
+                "adaptive_consolidation/hard_collapse_rollback",
+                1.0 if control.adaptive_probation_rollback_triggered else 0.0,
+                env_frames,
+            )
+            self.writer.add_scalar(
+                "adaptive_consolidation/rescue_blocked_count",
+                float(control.adaptive_rescue_blocked_count),
+                env_frames,
+            )
         self.writer.add_scalar(
             "dexpbt/post_shrink_consolidation_active",
             1.0
@@ -4376,6 +4939,42 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "late_rescue_selected_count": int(
                 getattr(self, "_late_rescue_selected_count", {}).get(pidx, 0)
             ),
+            "adaptive_degradation_streak": int(
+                getattr(self, "_adaptive_degradation_streak", {}).get(pidx, 0)
+            ),
+            "adaptive_last_rescue_frame": int(
+                getattr(self, "_adaptive_last_rescue_frame", {}).get(pidx, -(10**18))
+            ),
+            "adaptive_rescue_executed": int(
+                getattr(self, "_adaptive_rescue_executed", {}).get(pidx, 0)
+            ),
+            "adaptive_rescue_executed_for_lineage": int(
+                getattr(self, "_adaptive_rescue_executed_for_lineage", {}).get(pidx, 0)
+            ),
+            "adaptive_lineage_id": str(
+                getattr(self, "_adaptive_lineage_id", {}).get(pidx, "")
+            ),
+            "adaptive_rescue_attempt_count": int(
+                getattr(self, "_adaptive_rescue_attempt_count", {}).get(pidx, 0)
+            ),
+            "adaptive_rescue_selected_count": int(
+                getattr(self, "_adaptive_rescue_selected_count", {}).get(pidx, 0)
+            ),
+            "adaptive_rescue_blocked_count": int(
+                getattr(self, "_adaptive_rescue_blocked_count", {}).get(pidx, 0)
+            ),
+            "adaptive_rescue_last_reason": str(
+                getattr(self, "_adaptive_rescue_last_reason", {}).get(pidx, "")
+            ),
+            "adaptive_rescue_last_source": int(
+                getattr(self, "_adaptive_rescue_last_source", {}).get(pidx, -1)
+            ),
+            "adaptive_rescue_last_source_rank": int(
+                getattr(self, "_adaptive_rescue_last_source_rank", {}).get(pidx, -1)
+            ),
+            "adaptive_rescue_last_advantage_sigma": float(
+                getattr(self, "_adaptive_rescue_last_advantage_sigma", {}).get(pidx, 0.0)
+            ),
         }
 
     def _restore_restart_runtime_state(self, snap: dict[str, Any]) -> None:
@@ -4425,6 +5024,59 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._late_rescue_selected_count[pidx] = int(
             snap["late_rescue_selected_count"]
         )
+        for attr, default in (
+            ("_adaptive_degradation_streak", {}),
+            ("_adaptive_last_rescue_frame", {}),
+            ("_adaptive_rescue_executed", {}),
+            ("_adaptive_rescue_executed_for_lineage", {}),
+            ("_adaptive_lineage_id", {}),
+            ("_adaptive_rescue_attempt_count", {}),
+            ("_adaptive_rescue_selected_count", {}),
+            ("_adaptive_rescue_blocked_count", {}),
+            ("_adaptive_rescue_last_reason", {}),
+            ("_adaptive_rescue_last_source", {}),
+            ("_adaptive_rescue_last_source_rank", {}),
+            ("_adaptive_rescue_last_advantage_sigma", {}),
+        ):
+            if not hasattr(self, attr):
+                setattr(self, attr, default if isinstance(default, dict) else {})
+        self._adaptive_degradation_streak[pidx] = int(
+            snap.get("adaptive_degradation_streak", 0)
+        )
+        self._adaptive_last_rescue_frame[pidx] = int(
+            snap.get("adaptive_last_rescue_frame", -(10**18))
+        )
+        self._adaptive_rescue_executed[pidx] = int(
+            snap.get("adaptive_rescue_executed", 0)
+        )
+        self._adaptive_rescue_executed_for_lineage[pidx] = int(
+            snap.get("adaptive_rescue_executed_for_lineage", 0)
+        )
+        self._adaptive_lineage_id[pidx] = str(snap.get("adaptive_lineage_id", ""))
+        self._adaptive_rescue_attempt_count[pidx] = int(
+            snap.get("adaptive_rescue_attempt_count", 0)
+        )
+        self._adaptive_rescue_selected_count[pidx] = int(
+            snap.get("adaptive_rescue_selected_count", 0)
+        )
+        self._adaptive_rescue_blocked_count[pidx] = int(
+            snap.get("adaptive_rescue_blocked_count", 0)
+        )
+        self._adaptive_rescue_last_reason[pidx] = str(
+            snap.get("adaptive_rescue_last_reason", "")
+        )
+        self._adaptive_rescue_last_source[pidx] = int(
+            snap.get("adaptive_rescue_last_source", -1)
+        )
+        self._adaptive_rescue_last_source_rank[pidx] = int(
+            snap.get("adaptive_rescue_last_source_rank", -1)
+        )
+        self._adaptive_rescue_last_advantage_sigma[pidx] = float(
+            snap.get("adaptive_rescue_last_advantage_sigma", 0.0)
+        )
+        # Drop in-memory adaptive objects so restore reloads sidecar bytes.
+        self._adaptive_probation.pop(pidx, None)
+        self._adaptive_retention.pop(pidx, None)
 
     def _cleanup_failed_restart_artifacts(self) -> None:
         tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
@@ -4456,8 +5108,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
         )
         manifest_path = Path(self.train_dir).parent / self.RESTART_MANIFEST
+        adaptive_path = self._adaptive_precision_path(int(self.policy_idx))
         control_existed = control_path.is_file()
         manifest_existed = manifest_path.is_file()
+        adaptive_existed = adaptive_path.is_file()
         return {
             "control_path": control_path,
             "control_existed": bool(control_existed),
@@ -4466,6 +5120,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "manifest_existed": bool(manifest_existed),
             "manifest_bytes": (
                 manifest_path.read_bytes() if manifest_existed else None
+            ),
+            "adaptive_path": adaptive_path,
+            "adaptive_existed": bool(adaptive_existed),
+            "adaptive_bytes": (
+                adaptive_path.read_bytes() if adaptive_existed else None
             ),
         }
 
@@ -4504,6 +5163,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             existed=bool(snapshot["manifest_existed"]),
             data=snapshot.get("manifest_bytes"),
         )
+        if "adaptive_path" in snapshot:
+            self._atomic_restore_file_bytes(
+                Path(snapshot["adaptive_path"]),
+                existed=bool(snapshot.get("adaptive_existed")),
+                data=snapshot.get("adaptive_bytes"),
+            )
+            # Force next adaptive access to re-read restored bytes.
+            pidx = int(self.policy_idx)
+            self._adaptive_probation.pop(pidx, None)
+            self._adaptive_retention.pop(pidx, None)
 
     def _abort_restart_transaction(
         self,
@@ -4514,6 +5183,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         env_frames: int,
         late_rescue: bool,
         reason: str,
+        adaptive_rescue: bool = False,
     ) -> None:
         """Single rollback owner: restore memory + files, cleanup, one audit."""
         try:
@@ -4533,9 +5203,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "source_policy": int(source_policy),
             "target_policy": int(self.policy_idx),
             "late_rescue": bool(late_rescue),
+            "adaptive_rescue": bool(adaptive_rescue),
             "env_frames": int(env_frames),
             "reason": str(reason),
         })
+        if adaptive_rescue:
+            self._safe_write_pbt_copy_event({
+                "event_type": "adaptive_degradation_rescue_rolled_back",
+                "rescue_mode": "adaptive",
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "env_frames": int(env_frames),
+                "reason": str(reason),
+            })
 
     @staticmethod
     def _recent_slope(window: RollingNsuccWindow, n: int) -> float:
@@ -7996,6 +8676,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Phase A4 P3 (2026-06-09): mid-tier promising protection update so
         # workers earn protection before they get pushed into bottom.
         late_rescue = False
+        adaptive_rescue = False
+        rescue_mode = "none"
+        rescue_active = False
+        adaptive_rescue_reason = "disabled"
         if tier == "mid":
             self._maybe_enter_promising_protection(
                 self.policy_idx,
@@ -8023,6 +8707,33 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self.policy_idx, tolerance=own_rescue_tol,
                 nsucc_mean=own_rescue_nsucc, env_frames=env_frames,
             )
+            own_lineage = str(
+                ((population.get(self.policy_idx) or {}).get("lineage_id"))
+                or getattr(self, "_lineage_id", "")
+                or ""
+            )
+            if self.adaptive_precision_enable:
+                adaptive_rescue, adaptive_rescue_reason = (
+                    self._adaptive_degradation_rescue_ready(
+                        policy_idx=self.policy_idx,
+                        tolerance=own_rescue_tol,
+                        nsucc_mean=own_rescue_nsucc,
+                        env_frames=env_frames,
+                        lineage_id=own_lineage,
+                    )
+                )
+            else:
+                adaptive_rescue, adaptive_rescue_reason = False, "disabled"
+            if adaptive_rescue:
+                rescue_mode = "adaptive"
+            elif late_rescue:
+                rescue_mode = "legacy"
+            else:
+                rescue_mode = "none"
+            rescue_active = rescue_mode != "none"
+            # Keep legacy bool for legacy-only accounting; shared gates use rescue_active.
+            late_rescue = bool(rescue_mode == "legacy")
+            adaptive_rescue = bool(rescue_mode == "adaptive")
             if self.writer is not None:
                 self.writer.add_scalar(
                     "pbt/late_degradation_rescue_triggered",
@@ -8031,6 +8742,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self.writer.add_scalar(
                     "pbt/late_degradation_rescue_count",
                     float(self._late_rescue_count.get(self.policy_idx, 0)),
+                    env_frames,
+                )
+                self.writer.add_scalar(
+                    "adaptive_consolidation/rescue_ready",
+                    1.0 if adaptive_rescue else 0.0,
+                    env_frames,
+                )
+                reason_hash = float(abs(hash(adaptive_rescue_reason)) % 10_000)
+                self.writer.add_scalar(
+                    "adaptive_consolidation/rescue_reason_hash",
+                    reason_hash,
                     env_frames,
                 )
             # Phase A4 P3 (2026-06-09): promising-worker anti-churn gate.
@@ -8045,7 +8767,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._collapse_freeze_until.get(self.policy_idx, 0)
                 > int(env_frames)
             )
-            if protected and not late_rescue and not (override_allowed and collapse_override):
+            if protected and not rescue_active and not (override_allowed and collapse_override):
                 print(
                     f"Policy {self.policy_idx}: skip restart (promising "
                     f"protection until env_frames="
@@ -8085,7 +8807,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             fr_protected, fr_reason = self._is_floor_recovery_protected(
                 self.policy_idx, env_frames
             )
-            if fr_protected and not late_rescue and not (override_allowed and collapse_override):
+            if fr_protected and not rescue_active and not (override_allowed and collapse_override):
                 print(
                     f"Policy {self.policy_idx}: skip restart (floor recovery "
                     f"protection until env_frames="
@@ -8149,7 +8871,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         self._recent_peak_nsucc_mean.get(self.policy_idx, 0.0)
                     ),
                     tier="bottom",
-                    late_degradation_rescue=late_rescue,
+                    late_degradation_rescue=rescue_active,
                 )
                 cons_allow, cons_reason = should_allow_bottom_restart(
                     stage=cons_stage,
@@ -8215,7 +8937,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             # Late degradation rescue filters by tolerance compatibility
             # *before* quality ranking so a slightly worse but compatible
             # source beats an incompatible top-ranked source.
-            if late_rescue:
+            if rescue_mode == "adaptive":
+                self._adaptive_rescue_attempt_count[self.policy_idx] = (
+                    int(self._adaptive_rescue_attempt_count.get(self.policy_idx, 0)) + 1
+                )
+                decision = self._select_adaptive_degradation_rescue_source(
+                    sorted_policies=sorted_policies,
+                    population=population,
+                    env_frames=env_frames,
+                    target_tolerance=own_rescue_tol,
+                    target_nsucc_mean=own_rescue_nsucc,
+                )
+            elif rescue_mode == "legacy":
                 self._late_rescue_attempt_count[self.policy_idx] = (
                     int(self._late_rescue_attempt_count.get(self.policy_idx, 0)) + 1
                 )
@@ -8256,6 +8989,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "best_floor_recovery_archive",
                     "late_rescue_live",
                     "late_rescue_archive",
+                    "adaptive_rescue_live",
+                    "adaptive_rescue_archive",
                     "skipped",
                 )
                 for k in tier_one_hot:
@@ -8355,6 +9090,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._late_rescue_blocked_count[self.policy_idx] = (
                         int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
                     )
+                if adaptive_rescue:
+                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
+                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
+                    self._adaptive_rescue_last_reason[self.policy_idx] = str(
+                        decision.get("adaptive_rescue_reason", "no_compatible_source")
+                    )
                 self._last_restart_type = 3  # skipped
                 return
 
@@ -8374,13 +9116,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                             int(self._late_rescue_blocked_count.get(self.policy_idx, 0))
                             + 1
                         )
+                    if adaptive_rescue:
+                        self._adaptive_rescue_blocked_count[self.policy_idx] = (
+                            int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0))
+                            + 1
+                        )
                     self._last_restart_type = 3
                     return
 
             source_policy = int(decision["source_policy"])
             source_state = decision["source_state"]
             assert source_state is not None
-            if late_rescue:
+            if rescue_mode == "legacy":
                 source_tol = float(
                     (source_state.get("curriculum") or {}).get(
                         "success_tolerance", float("nan")
@@ -8411,6 +9158,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._late_rescue_blocked_count[self.policy_idx] = (
                         int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
                     )
+                if adaptive_rescue:
+                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
+                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
                 self._last_restart_type = 3
                 return
 
@@ -8433,6 +9184,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 tier_label == "late_rescue_live"
                 and self.late_degradation_rescue_bypass_elimination_burnin
             )
+            # Adaptive rescue currently never bypasses elimination burn-in.
             bypass_burnin = bool(archive_recovery_bypass or live_late_rescue_bypass)
             self._late_rescue_last_burnin_bypassed = (
                 1.0 if (late_rescue and bypass_burnin) else 0.0
@@ -8443,6 +9195,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "best_floor_recovery_archive",
                 "late_rescue_archive",
                 "late_rescue_live",
+                "adaptive_rescue_live",
+                "adaptive_rescue_archive",
             )
             if not bypass_burnin and not self._is_eligible_for_elimination(
                 own_state, env_frames
@@ -8458,6 +9212,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     )
                     self._write_pbt_copy_event({
                         "event_type": "late_degradation_rescue_target_burnin_blocked",
+                        "source_policy": source_policy,
+                        "target_policy": self.policy_idx,
+                        "tier": tier_label,
+                        "env_frames": int(env_frames),
+                    })
+                if adaptive_rescue:
+                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
+                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
+                    self._write_pbt_copy_event({
+                        "event_type": "adaptive_degradation_rescue_target_burnin_blocked",
+                        "rescue_mode": "adaptive",
                         "source_policy": source_policy,
                         "target_policy": self.policy_idx,
                         "tier": tier_label,
@@ -8523,6 +9289,79 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     ],
                     "env_frames": int(env_frames),
                 })
+
+            if adaptive_rescue:
+                self._adaptive_rescue_selected_count[self.policy_idx] = (
+                    int(self._adaptive_rescue_selected_count.get(self.policy_idx, 0)) + 1
+                )
+                source_tol = float(
+                    (source_state.get("curriculum") or {}).get(
+                        "success_tolerance", float("nan")
+                    )
+                )
+                src_ret = float("nan")
+                tgt_ret = float("nan")
+                src_adapt = self._adaptive_precision_state(int(source_policy))
+                if src_adapt is not None and math.isfinite(source_tol):
+                    _c, _p, tr = src_adapt
+                    src_ret = float(tr.snapshot(source_tol, min_samples=1)["retention"])
+                tgt_adapt = self._adaptive_precision_state(int(self.policy_idx))
+                if tgt_adapt is not None:
+                    _c, _p, tr = tgt_adapt
+                    tgt_ret = float(tr.snapshot(own_rescue_tol, min_samples=1)["retention"])
+                self._adaptive_rescue_last_source[self.policy_idx] = int(source_policy)
+                self._adaptive_rescue_last_source_rank[self.policy_idx] = int(
+                    decision.get("adaptive_source_rank", -1)
+                )
+                self._adaptive_rescue_last_advantage_sigma[self.policy_idx] = float(
+                    decision.get("adaptive_source_advantage_sigma", 0.0)
+                )
+                self._adaptive_rescue_last_reason[self.policy_idx] = "selected"
+                self._write_pbt_copy_event({
+                    "event_type": "adaptive_degradation_rescue_selected",
+                    "rescue_mode": "adaptive",
+                    "source_policy": int(source_policy),
+                    "target_policy": int(self.policy_idx),
+                    "source_tolerance": source_tol,
+                    "target_tolerance": float(own_rescue_tol),
+                    "log_tolerance_gap": float(
+                        decision.get("adaptive_log_tolerance_gap", float("nan"))
+                    ),
+                    "source_retention": src_ret,
+                    "target_retention": tgt_ret,
+                    "source_rank": int(decision.get("adaptive_source_rank", -1)),
+                    "source_advantage_sigma": float(
+                        decision.get("adaptive_source_advantage_sigma", 0.0)
+                    ),
+                    "env_frames": int(env_frames),
+                })
+                if self.writer is not None:
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_selected_count",
+                        float(self._adaptive_rescue_selected_count[self.policy_idx]),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_source_policy",
+                        float(source_policy),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_source_rank",
+                        float(decision.get("adaptive_source_rank", -1)),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_source_advantage_sigma",
+                        float(decision.get("adaptive_source_advantage_sigma", 0.0)),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_attempt_count",
+                        float(self._adaptive_rescue_attempt_count.get(self.policy_idx, 0)),
+                        env_frames,
+                    )
+
 
             if tier_label in self._source_tier_counts:
                 self._source_tier_counts[tier_label] += 1
@@ -8850,8 +9689,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         mutation_frozen = int(env_frames) < self._mutation_frozen_until.get(
             self.policy_idx, 0
         )
-        if late_rescue or mutation_frozen:
-            # Late rescue restores a compatible policy; never mutate params.
+        if rescue_active or mutation_frozen:
+            # Rescue restores a compatible policy; never mutate params.
             new_params = dict(source_params)
         else:
             cons_stage = resolve_pbt_stage(
@@ -8889,6 +9728,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_weight_age_frame=source_weight_age,
             late_rescue=bool(late_rescue),
             late_rescue_decision=decision if late_rescue else None,
+            adaptive_rescue=bool(adaptive_rescue),
+            adaptive_rescue_decision=decision if adaptive_rescue else None,
             runtime_snap=restart_txn_snap,
             source_safe_apply=source_safe_apply,
         )
@@ -8899,6 +9740,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 )
                 self._safe_write_pbt_copy_event({
                     "event_type": "late_degradation_rescue_restart_failed",
+                    "source_policy": source_policy,
+                    "target_policy": self.policy_idx,
+                    "env_frames": int(env_frames),
+                })
+            if adaptive_rescue:
+                self._adaptive_rescue_blocked_count[self.policy_idx] = (
+                    int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                )
+                self._safe_write_pbt_copy_event({
+                    "event_type": "adaptive_degradation_rescue_restart_failed",
+                    "rescue_mode": "adaptive",
                     "source_policy": source_policy,
                     "target_policy": self.policy_idx,
                     "env_frames": int(env_frames),
@@ -9831,6 +10683,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         source_weight_age_frame: int = 0,
         late_rescue: bool = False,
         late_rescue_decision: dict[str, Any] | None = None,
+        adaptive_rescue: bool = False,
+        adaptive_rescue_decision: dict[str, Any] | None = None,
         runtime_snap: dict[str, Any] | None = None,
         source_safe_apply: dict[str, Any] | None = None,
     ) -> bool:
@@ -9874,6 +10728,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 source_weight_age_frame=source_weight_age_frame,
                 late_rescue=late_rescue,
                 late_rescue_decision=late_rescue_decision,
+                adaptive_rescue=adaptive_rescue,
+                adaptive_rescue_decision=adaptive_rescue_decision,
                 txn=txn,
             )
             if not ok and not txn["committed"]:
@@ -9883,6 +10739,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     source_policy=int(source_policy),
                     env_frames=int(env_frames),
                     late_rescue=bool(late_rescue),
+                    adaptive_rescue=bool(adaptive_rescue),
                     reason="restart_returned_false",
                 )
             return bool(ok) or bool(txn["committed"])
@@ -9897,6 +10754,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "source_policy": int(source_policy),
                     "target_policy": int(self.policy_idx),
                     "late_rescue": bool(late_rescue),
+                    "adaptive_rescue": bool(adaptive_rescue),
                     "env_frames": int(env_frames),
                     "reason": f"exception:{type(exc).__name__}",
                     "error": str(exc),
@@ -9908,6 +10766,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 source_policy=int(source_policy),
                 env_frames=int(env_frames),
                 late_rescue=bool(late_rescue),
+                adaptive_rescue=bool(adaptive_rescue),
                 reason=f"exception:{type(exc).__name__}",
             )
             return False
@@ -9923,6 +10782,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         source_weight_age_frame: int = 0,
         late_rescue: bool = False,
         late_rescue_decision: dict[str, Any] | None = None,
+        adaptive_rescue: bool = False,
+        adaptive_rescue_decision: dict[str, Any] | None = None,
         txn: dict[str, Any] | None = None,
     ) -> bool:
         src = Path(checkpoint_path).resolve()
@@ -10649,6 +11510,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self.policy_idx, env_frames=int(env_frames)
             )
 
+        if adaptive_rescue:
+            prev_executed = int(
+                self._adaptive_rescue_executed.get(self.policy_idx, 0)
+            )
+            self._adaptive_rescue_executed[self.policy_idx] = prev_executed + 1
+            self._adaptive_rescue_executed_for_lineage[self.policy_idx] = int(
+                self._adaptive_rescue_executed_for_lineage.get(self.policy_idx, 0)
+            ) + 1
+            self._adaptive_last_rescue_frame[self.policy_idx] = int(env_frames)
+            self._adaptive_rescue_last_reason[self.policy_idx] = "executed"
+            manifest["adaptive_rescue"] = True
+            manifest["adaptive_rescue_executed_count"] = int(
+                self._adaptive_rescue_executed[self.policy_idx]
+            )
+            manifest["adaptive_rescue_executed_for_lineage"] = int(
+                self._adaptive_rescue_executed_for_lineage[self.policy_idx]
+            )
+            manifest["adaptive_rescue_last_frame"] = int(env_frames)
+            # Persist adaptive sidecar BEFORE manifest so a persist failure
+            # never leaves a consumable restart without durable quota.
+            self._adaptive_precision_persist(self.policy_idx)
+
         # Atomic manifest write (commit step for supervisor consumption).
         manifest_tmp = manifest_path.with_suffix(
             f".{os.getpid()}.{_uuid_mod.uuid4().hex[:8]}.tmp"
@@ -10685,6 +11568,54 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "late_rescue_last_frame": int(env_frames),
                 "env_frames": int(env_frames),
             })
+
+        if adaptive_rescue:
+            self._safe_write_pbt_copy_event({
+                "event_type": "adaptive_degradation_rescue_restart_manifest_committed",
+                "rescue_mode": "adaptive",
+                "source_type": str(
+                    (adaptive_rescue_decision or {}).get("checkpoint_type", "live")
+                ),
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "env_frames": int(env_frames),
+                "manifest_path": str(manifest_path),
+            })
+            self._safe_write_pbt_copy_event({
+                "event_type": "adaptive_degradation_rescue_executed",
+                "rescue_mode": "adaptive",
+                "source_type": str(
+                    (adaptive_rescue_decision or {}).get("checkpoint_type", "live")
+                ),
+                "source_policy": int(source_policy),
+                "target_policy": int(self.policy_idx),
+                "mutation_disabled": True,
+                "rescue_executed_count": int(
+                    self._adaptive_rescue_executed[self.policy_idx]
+                ),
+                "rescue_executed_for_lineage": int(
+                    self._adaptive_rescue_executed_for_lineage[self.policy_idx]
+                ),
+                "adaptive_rescue_last_frame": int(env_frames),
+                "env_frames": int(env_frames),
+            })
+            if self.writer is not None:
+                try:
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_executed_count",
+                        float(self._adaptive_rescue_executed[self.policy_idx]),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "adaptive_consolidation/rescue_quota_used",
+                        float(
+                            self._adaptive_rescue_executed_for_lineage[self.policy_idx]
+                        ),
+                        env_frames,
+                    )
+                except Exception:
+                    pass
+
 
         self.mutable_params = dict(new_params)
         self.mutable_params["wm_strategy"] = selected_strategy
