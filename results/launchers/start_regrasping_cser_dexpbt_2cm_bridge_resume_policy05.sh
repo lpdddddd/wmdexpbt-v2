@@ -126,6 +126,10 @@ nohup python -u -m dexpbt_isaaclab.scripts.train \
   --bridge_curriculum_enable --bridge_probation_enable \
   --snippet_adjacent_stage_mixing_enable --snippet_tolerance_compatibility_enable \
   --late_degradation_rescue_enable \
+  --late_degradation_rescue_source_min_mean 28.0 \
+  --late_degradation_rescue_min_source_advantage 8.0 \
+  --late_degradation_rescue_source_min_retention 0.85 \
+  --late_degradation_rescue_reject_collapse_source \
   --no-pbt_allow_mid_self_mutation \
   --no-pbt_wm_profile_copy_enable \
   --no-awr_enable \

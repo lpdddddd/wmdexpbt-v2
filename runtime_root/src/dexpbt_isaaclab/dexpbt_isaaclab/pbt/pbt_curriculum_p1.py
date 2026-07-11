@@ -294,6 +294,7 @@ class CurriculumControlState:
     bridge_probation_hard_collapse_triggered: bool = False
     bridge_probation_bad_streak: int = 0
     bridge_probation_rollback_reason: str = ""
+    bridge_probation_suppressed_legacy_collapse_count: int = 0
     bridge_pending_next_tolerance: float = 0.0
     bridge_level_timer_pending: bool = False
     late_rescue_attempt_count: int = 0

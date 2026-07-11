@@ -787,6 +787,10 @@ _CSER_DEXPBT_2CM_BRIDGE: dict[str, Any] = {
     "late_degradation_rescue_max_tol_gap": 0.002,
     "late_degradation_rescue_cooldown_frames": 300_000_000,
     "late_degradation_rescue_max_per_policy": 1,
+    "late_degradation_rescue_source_min_mean": 28.0,
+    "late_degradation_rescue_min_source_advantage": 8.0,
+    "late_degradation_rescue_source_min_retention": 0.85,
+    "late_degradation_rescue_reject_collapse_source": True,
     # These are enforced by the new launcher; retaining the hard-off values
     # here makes profile expansion restart-safe.
     "pbt_allow_mid_self_mutation": False,

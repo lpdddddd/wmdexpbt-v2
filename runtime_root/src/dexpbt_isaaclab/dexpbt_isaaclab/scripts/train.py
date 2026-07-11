@@ -56,6 +56,14 @@ parser.add_argument("--late_degradation_rescue_patience", type=int, default=3)
 parser.add_argument("--late_degradation_rescue_max_tol_gap", type=float, default=0.002)
 parser.add_argument("--late_degradation_rescue_cooldown_frames", type=int, default=300000000)
 parser.add_argument("--late_degradation_rescue_max_per_policy", type=int, default=1)
+parser.add_argument("--late_degradation_rescue_source_min_mean", type=float, default=28.0)
+parser.add_argument("--late_degradation_rescue_min_source_advantage", type=float, default=8.0)
+parser.add_argument("--late_degradation_rescue_source_min_retention", type=float, default=0.85)
+parser.add_argument(
+    "--late_degradation_rescue_reject_collapse_source",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -7858,6 +7866,18 @@ def main():
             ),
             late_degradation_rescue_max_per_policy=(
                 args_cli.late_degradation_rescue_max_per_policy
+            ),
+            late_degradation_rescue_source_min_mean=(
+                args_cli.late_degradation_rescue_source_min_mean
+            ),
+            late_degradation_rescue_min_source_advantage=(
+                args_cli.late_degradation_rescue_min_source_advantage
+            ),
+            late_degradation_rescue_source_min_retention=(
+                args_cli.late_degradation_rescue_source_min_retention
+            ),
+            late_degradation_rescue_reject_collapse_source=(
+                args_cli.late_degradation_rescue_reject_collapse_source
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
