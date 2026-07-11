@@ -1,0 +1,10 @@
+smoke_run=false
+patch=P2_stability
+target_frames=5000000000
+max_iterations=38147
+curriculum_mode=mastery
+pbt_single_shrink_per_window=true
+pbt_early_collapse_detect=true
+pbt_recovery_tolerance_mode=last_mastered
+pbt_recovery_bypass_elimination_burnin=true
+note=fixed-h1 5B formal; no h3; no CF; staggered launch

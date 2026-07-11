@@ -1,0 +1,1031 @@
+{
+  "run_dir": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950",
+  "config_version": "strategy_zoo_v1.4_elite_distill_rescue_selector_copy_fix",
+  "tb": {
+    "tb_available": true,
+    "policies": {
+      "0": {},
+      "1": {
+        "best_source_frac_elite": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "teacher_selected_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "best_source_frac_elite_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_nonzero_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_activation_nonzero_frac": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_active_fraction": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_weighted_loss": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_clip_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_low_margin": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_bad_source": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_tol": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_high_uncertainty": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_uncertainty_missing": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_add_count": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_size": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "elite_candidate_gate_weight": {
+          "last": 0.2249998152256012,
+          "mean": 0.38495861297557254,
+          "late_mean": 0.6265740047766294
+        },
+        "actor_distill_delta_linf_mean_all": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        }
+      },
+      "2": {},
+      "3": {},
+      "4": {
+        "best_source_frac_elite": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "teacher_selected_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "best_source_frac_elite_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_nonzero_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_activation_nonzero_frac": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_active_fraction": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_weighted_loss": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_clip_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_low_margin": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_bad_source": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_tol": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_high_uncertainty": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_uncertainty_missing": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_add_count": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_size": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "elite_candidate_gate_weight": {
+          "last": 0.09071873873472214,
+          "mean": 0.32821227446198464,
+          "late_mean": 0.09071879567844528
+        },
+        "actor_distill_delta_linf_mean_all": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        }
+      },
+      "5": {
+        "best_source_frac_elite": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "teacher_selected_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "best_source_frac_elite_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_nonzero_below_004": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_activation_nonzero_frac": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_active_fraction": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_weighted_loss": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_clip_large_delta": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_low_margin": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_bad_source": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_tol": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_high_uncertainty": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "actor_distill_reject_uncertainty_missing": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_add_count": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "bank_elite_bank_size": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        },
+        "elite_candidate_gate_weight": {
+          "last": 0.0,
+          "mean": 0.002190580503833516,
+          "late_mean": 0.0
+        },
+        "actor_distill_delta_linf_mean_all": {
+          "last": 0.0,
+          "mean": 0.0,
+          "late_mean": 0.0
+        }
+      }
+    },
+    "event_files": {
+      "0": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_00/rl_games/attempt_5_2026-06-17_23-24-18/summaries/events.out.tfevents.1781709881.autodl-container-l15rjnak8t-75a31c36",
+      "1": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_01/rl_games/attempt_3_2026-06-17_22-45-34/summaries/events.out.tfevents.1781707556.autodl-container-l15rjnak8t-75a31c36",
+      "2": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_02/rl_games/attempt_2_2026-06-17_23-29-04/summaries/events.out.tfevents.1781710167.autodl-container-l15rjnak8t-75a31c36",
+      "3": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_03/rl_games/attempt_3_2026-06-17_22-41-11/summaries/events.out.tfevents.1781707294.autodl-container-l15rjnak8t-75a31c36",
+      "4": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_04/rl_games/attempt_5_2026-06-18_03-44-48/summaries/events.out.tfevents.1781725509.autodl-container-l15rjnak8t-75a31c36",
+      "5": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_pbt_wm_strategy_zoo_v14_elite_rescue_2b_debug_20260617_205950/policy_05/rl_games/attempt_3_2026-06-18_03-00-28/summaries/events.out.tfevents.1781722852.autodl-container-l15rjnak8t-75a31c36"
+    }
+  },
+  "elite_distill_rescue": {
+    "elite_bank_actor_distill_fast_v2": {
+      "policy_idx": 1,
+      "profile": "elite_bank_actor_distill_fast_v2",
+      "actor_distill_activation_nonzero_frac": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_active_fraction": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_weighted_loss": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_clip_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_low_margin": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_bad_source": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_tol": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      }
+    },
+    "elite_bank_actor_distill_fast": {
+      "policy_idx": null,
+      "profile": "elite_bank_actor_distill_fast",
+      "tb_missing": true
+    },
+    "elite_bank_actor_distill": {
+      "policy_idx": 4,
+      "profile": "elite_bank_actor_distill",
+      "actor_distill_activation_nonzero_frac": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_active_fraction": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_weighted_loss": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_clip_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_low_margin": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_bad_source": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_tol": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      }
+    },
+    "elite_bank_actor_distill_strong_v2": {
+      "policy_idx": 5,
+      "profile": "elite_bank_actor_distill_strong_v2",
+      "actor_distill_activation_nonzero_frac": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_active_fraction": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_weighted_loss": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_clip_large_delta": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_low_margin": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_bad_source": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "actor_distill_reject_tol": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      }
+    },
+    "elite_bank_actor_distill_strong": {
+      "policy_idx": null,
+      "profile": "elite_bank_actor_distill_strong",
+      "tb_missing": true
+    }
+  },
+  "elite_bank": {
+    "elite_bank_actor_distill_fast_v2": {
+      "policy_idx": 1,
+      "best_source_frac_elite": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "teacher_selected_below_004": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "bank_elite_bank_add_count_last": 0.0,
+      "bank_elite_bank_size_last": 0.0
+    },
+    "elite_bank_actor_distill": {
+      "policy_idx": 4,
+      "best_source_frac_elite": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "teacher_selected_below_004": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "bank_elite_bank_add_count_last": 0.0,
+      "bank_elite_bank_size_last": 0.0
+    },
+    "elite_bank_actor_distill_strong_v2": {
+      "policy_idx": 5,
+      "best_source_frac_elite": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "teacher_selected_below_004": {
+        "last": 0.0,
+        "mean": 0.0,
+        "late_mean": 0.0
+      },
+      "bank_elite_bank_add_count_last": 0.0,
+      "bank_elite_bank_size_last": 0.0
+    }
+  },
+  "profile_copy": {
+    "event_count": 13,
+    "attempt_count": 0,
+    "accept_count": 0,
+    "reject_reason_counts": {
+      "before_after_frames": 10,
+      "source_frames_too_low": 1,
+      "nsucc_gap": 2
+    },
+    "top1_override_used_count": 0,
+    "transitions": [],
+    "events_tail": [
+      {
+        "env_frames": 360054784,
+        "source_policy": 4,
+        "target_policy": 1,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "elite_bank_actor_distill_fast_v2",
+        "target_new_profile": "elite_bank_actor_distill_fast_v2",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 0.0,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 1.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781706044.90673,
+        "policy_idx": 1,
+        "pbt_iteration": 18
+      },
+      {
+        "env_frames": 400031744,
+        "source_policy": 5,
+        "target_policy": 0,
+        "source_profile": "elite_bank_actor_distill_strong_v2",
+        "target_old_profile": "ppo_only",
+        "target_new_profile": "ppo_only",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 0.0,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 0.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781706435.8719773,
+        "policy_idx": 0,
+        "pbt_iteration": 20
+      },
+      {
+        "env_frames": 440008704,
+        "source_policy": 4,
+        "target_policy": 3,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "wm_pbt_source_selector",
+        "target_new_profile": "wm_pbt_source_selector",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 15.382080078125,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 0.9750524367674275,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781707240.792997,
+        "policy_idx": 3,
+        "pbt_iteration": 22
+      },
+      {
+        "env_frames": 460062720,
+        "source_policy": 4,
+        "target_policy": 1,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "elite_bank_actor_distill_fast_v2",
+        "target_new_profile": "elite_bank_actor_distill_fast_v2",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 0.0,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 0.04959422903516682,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781707503.476835,
+        "policy_idx": 1,
+        "pbt_iteration": 23
+      },
+      {
+        "env_frames": 500039680,
+        "source_policy": 5,
+        "target_policy": 0,
+        "source_profile": "elite_bank_actor_distill_strong_v2",
+        "target_old_profile": "ppo_only",
+        "target_new_profile": "ppo_only",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 0.0001220703125,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 0.0008726003490401396,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781707689.5522594,
+        "policy_idx": 0,
+        "pbt_iteration": 25
+      },
+      {
+        "env_frames": 600047616,
+        "source_policy": 4,
+        "target_policy": 0,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "ppo_only",
+        "target_new_profile": "ppo_only",
+        "decision": "source_frames_too_low",
+        "reject_reason": "source_frames_too_low",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 580124672,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": 20.2633056640625,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 20.701904296875,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 0.9762944072119092,
+        "target_retention": 1.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781708843.2190921,
+        "policy_idx": 0,
+        "pbt_iteration": 30
+      },
+      {
+        "env_frames": 700055552,
+        "source_policy": 4,
+        "target_policy": 0,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "ppo_only",
+        "target_new_profile": "ppo_only",
+        "decision": "nsucc_gap",
+        "reject_reason": "nsucc_gap",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 680001536,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": 21.4952392578125,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 19.2840576171875,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 0.9255003685593549,
+        "target_retention": 0.906443109367337,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781709827.6877081,
+        "policy_idx": 0,
+        "pbt_iteration": 35
+      },
+      {
+        "env_frames": 660078592,
+        "source_policy": 4,
+        "target_policy": 2,
+        "source_profile": "elite_bank_actor_distill",
+        "target_old_profile": "wm_pbt_source_selector_v2",
+        "target_new_profile": "wm_pbt_source_selector_v2",
+        "decision": "nsucc_gap",
+        "reject_reason": "nsucc_gap",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 660078592,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": 20.0780029296875,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 17.5440673828125,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 0.8471744720598248,
+        "target_retention": 1.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781710113.9186301,
+        "policy_idx": 2,
+        "pbt_iteration": 33
+      },
+      {
+        "env_frames": 440008704,
+        "source_policy": 2,
+        "target_policy": 4,
+        "source_profile": "wm_pbt_source_selector_v2",
+        "target_old_profile": "elite_bank_actor_distill",
+        "target_new_profile": "elite_bank_actor_distill",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 17.3360595703125,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 1.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781723925.1984484,
+        "policy_idx": 4,
+        "pbt_iteration": 22
+      },
+      {
+        "env_frames": 540016640,
+        "source_policy": 2,
+        "target_policy": 4,
+        "source_profile": "wm_pbt_source_selector_v2",
+        "target_old_profile": "elite_bank_actor_distill",
+        "target_new_profile": "elite_bank_actor_distill",
+        "decision": "before_after_frames",
+        "reject_reason": "before_after_frames",
+        "eligible": false,
+        "attempted": false,
+        "accepted": false,
+        "weighted_prob": 0.0,
+        "source_bonus": 1.0,
+        "target_need_factor": 1.0,
+        "diversity_count": 6,
+        "diversity_after_copy": 0,
+        "top1_override_used": false,
+        "source_frames": 0,
+        "source_min_frames": 600000000,
+        "source_nsucc_mean": NaN,
+        "source_min_nsucc_mean": 20.0,
+        "target_nsucc_mean": 17.1087646484375,
+        "source_has_retention": true,
+        "target_has_retention": true,
+        "source_retention": 1.0,
+        "target_retention": 1.0,
+        "profile_generation": 0,
+        "weight_generation": 0,
+        "timestamp": 1781725457.581346,
+        "policy_idx": 4,
+        "pbt_iteration": 27
+      }
+    ]
+  },
+  "lineage": {
+    "present": true,
+    "unique_profiles": [
+      "elite_bank_actor_distill",
+      "elite_bank_actor_distill_fast_v2",
+      "elite_bank_actor_distill_strong_v2",
+      "ppo_only",
+      "wm_pbt_source_selector",
+      "wm_pbt_source_selector_v2"
+    ],
+    "profile_diversity_count": 6,
+    "policies": {
+      "004": {
+        "policy_idx": 4,
+        "wm_strategy_profile_name": "elite_bank_actor_distill",
+        "wm_strategy_profile_id": 5,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 4,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 540016640,
+        "pbt_iteration": 27
+      },
+      "003": {
+        "policy_idx": 3,
+        "wm_strategy_profile_name": "wm_pbt_source_selector",
+        "wm_strategy_profile_id": 4,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 3,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 440008704,
+        "pbt_iteration": 22
+      },
+      "005": {
+        "policy_idx": 5,
+        "wm_strategy_profile_name": "elite_bank_actor_distill_strong_v2",
+        "wm_strategy_profile_id": 13,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 5,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 240123904,
+        "pbt_iteration": 12
+      },
+      "001": {
+        "policy_idx": 1,
+        "wm_strategy_profile_name": "elite_bank_actor_distill_fast_v2",
+        "wm_strategy_profile_id": 12,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 1,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 460062720,
+        "pbt_iteration": 23
+      },
+      "000": {
+        "policy_idx": 0,
+        "wm_strategy_profile_name": "ppo_only",
+        "wm_strategy_profile_id": 1,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 0,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 700055552,
+        "pbt_iteration": 35
+      },
+      "002": {
+        "policy_idx": 2,
+        "wm_strategy_profile_name": "wm_pbt_source_selector_v2",
+        "wm_strategy_profile_id": 8,
+        "wm_strategy_profile_generation": 0,
+        "wm_strategy_profile_parent": 2,
+        "wm_strategy_profile_copied_from_source": false,
+        "env_frames": 660078592,
+        "pbt_iteration": 33
+      }
+    }
+  },
+  "same_frame_nsucc": {
+    "500000000": {
+      "ppo_only": {
+        "policy_idx": 0,
+        "nsucc_mean": 0.0001220703125
+      },
+      "elite_bank_actor_distill_fast_v2": {
+        "policy_idx": 1,
+        "nsucc_mean": 0.0
+      },
+      "wm_pbt_source_selector_v2": {
+        "policy_idx": 2,
+        "nsucc_mean": 12.666748046875
+      },
+      "wm_pbt_source_selector": {
+        "policy_idx": 3,
+        "nsucc_mean": 17.5263671875
+      },
+      "elite_bank_actor_distill": {
+        "policy_idx": 4,
+        "nsucc_mean": 19.095703125
+      },
+      "elite_bank_actor_distill_strong_v2": {
+        "policy_idx": 5,
+        "nsucc_mean": 17.989990234375
+      }
+    },
+    "1000000000": {
+      "ppo_only": {
+        "policy_idx": 0,
+        "nsucc_mean": 24.1109619140625
+      },
+      "elite_bank_actor_distill_fast_v2": {
+        "policy_idx": 1,
+        "nsucc_mean": 21.3193359375
+      },
+      "wm_pbt_source_selector_v2": {
+        "policy_idx": 2,
+        "nsucc_mean": 24.72802734375
+      },
+      "wm_pbt_source_selector": {
+        "policy_idx": 3,
+        "nsucc_mean": 31.6240234375
+      },
+      "elite_bank_actor_distill": {
+        "policy_idx": 4,
+        "nsucc_mean": 26.0067138671875
+      },
+      "elite_bank_actor_distill_strong_v2": {
+        "policy_idx": 5,
+        "nsucc_mean": 31.6761474609375
+      }
+    },
+    "1500000000": {
+      "ppo_only": {
+        "policy_idx": 0,
+        "nsucc_mean": 23.1363525390625
+      },
+      "elite_bank_actor_distill_fast_v2": {
+        "policy_idx": 1,
+        "nsucc_mean": 26.901123046875
+      },
+      "wm_pbt_source_selector_v2": {
+        "policy_idx": 2,
+        "nsucc_mean": 28.4998779296875
+      },
+      "wm_pbt_source_selector": {
+        "policy_idx": 3,
+        "nsucc_mean": 29.0797119140625
+      },
+      "elite_bank_actor_distill": {
+        "policy_idx": 4,
+        "nsucc_mean": 27.329833984375
+      },
+      "elite_bank_actor_distill_strong_v2": {
+        "policy_idx": 5,
+        "nsucc_mean": 32.5972900390625
+      }
+    },
+    "2000000000": {
+      "ppo_only": {
+        "policy_idx": 0,
+        "nsucc_mean": 26.3167724609375
+      },
+      "elite_bank_actor_distill_fast_v2": {
+        "policy_idx": 1,
+        "nsucc_mean": 35.7569580078125
+      },
+      "wm_pbt_source_selector_v2": {
+        "policy_idx": 2,
+        "nsucc_mean": 25.9957275390625
+      },
+      "wm_pbt_source_selector": {
+        "policy_idx": 3,
+        "nsucc_mean": 30.603271484375
+      },
+      "elite_bank_actor_distill": {
+        "policy_idx": 4,
+        "nsucc_mean": 17.1087646484375
+      },
+      "elite_bank_actor_distill_strong_v2": {
+        "policy_idx": 5,
+        "nsucc_mean": 23.2867431640625
+      }
+    }
+  },
+  "population": {
+    "top3": [
+      {
+        "policy_idx": 1,
+        "profile": "elite_bank_actor_distill_fast_v2",
+        "nsucc_mean": 35.7569580078125
+      },
+      {
+        "policy_idx": 3,
+        "profile": "wm_pbt_source_selector",
+        "nsucc_mean": 30.603271484375
+      },
+      {
+        "policy_idx": 0,
+        "profile": "ppo_only",
+        "nsucc_mean": 26.3167724609375
+      }
+    ],
+    "top3_nsucc_mean": 30.892333984375
+  }
+}

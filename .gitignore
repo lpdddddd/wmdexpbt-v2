@@ -1,0 +1,75 @@
+# ============================================================================
+# wmdexpbt repo .gitignore
+# Goal: track src code + scripts + reports/plans; ignore conda env, caches,
+# training run artifacts, and large binaries.
+# ============================================================================
+
+# --- Conda env / runtime / extension cache (huge, ~20 GB) ---
+runtime_root/envs/
+runtime_root/cache/
+runtime_root/runtime/
+
+# --- IsaacLab vendor: keep source, drop docs and built artifacts ---
+runtime_root/src/IsaacLab/docs/
+runtime_root/src/IsaacLab/_build/
+runtime_root/src/IsaacLab/**/*.pyc
+
+# --- Python build / cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# --- Training artifacts under runtime_root/src/dexpbt_isaaclab/ ---
+runtime_root/src/dexpbt_isaaclab/dexpbt_single_arm_ws/
+runtime_root/src/dexpbt_isaaclab/logs/
+runtime_root/src/dexpbt_isaaclab/audit/
+runtime_root/src/dexpbt_isaaclab/**/*.tfevents*
+runtime_root/src/dexpbt_isaaclab/**/nn/*.pth
+runtime_root/src/dexpbt_isaaclab/**/runs/
+
+# --- Top-level scratch logs ---
+nohup_*.log
+*.dmp
+
+# --- results/: keep scripts + reports, drop run dirs and big artifacts ---
+results/runs/
+results/pointers/
+results/latest/
+results/regrasping_*/
+results/baseline_*/
+results/cbwm_*/
+results/smoke_*/
+results/track_*/
+results/*.log
+results/__pycache__/
+results/launchers/*.log
+**/.xdg_cache/
+**/.xdg_data/
+**/.xdg_config/
+
+# Within runs we already ignored above; the following are extra safety
+**/*.pth
+**/*.pt
+**/*.tfevents*
+**/checkpoint_*.json
+**/wm_checkpoints/
+**/cf_block_*/
+**/dexpbt_8gpu_ws/
+
+# --- Editor / OS junk ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# --- Cursor agent transcripts (separate dir but just in case) ---
+.cursor/

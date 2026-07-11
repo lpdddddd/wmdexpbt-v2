@@ -1,0 +1,56 @@
+{
+  "audit_baseline_commit": "86bd7eb307b3dcdf3321abb721d160e7f6130971",
+  "audit_date": "2026-06-15",
+  "post_audit_fixes_applied": true,
+  "risk_A": {
+    "verdict": "limitation",
+    "needs_fix": false,
+    "summary": "hard_tol time-ramp in wm_activation_gate vs step-on in compute_actor_distill_activation; all zoo profiles use soft_tol/confidence_only/shrink_candidate."
+  },
+  "risk_B": {
+    "verdict": "bug",
+    "needs_fix": true,
+    "fixed_in_audit": true,
+    "summary": "Outer distill_lambda_for_tol(start_tol=0.04) blocked entire EIR path above 0.04 before soft actor-distill could run; elite/archive retrieval at tol>0.04 was NOT stage-blocked (stage=None uses full bank)."
+  },
+  "risk_C": {
+    "verdict": "bug",
+    "needs_fix": true,
+    "fixed_in_audit": true,
+    "summary": "wm_source_activation_weight was telemetry-only; ranking now uses blend_wm_ranking_score(real, wm, activation_weight)."
+  },
+  "risk_D": {
+    "verdict": "ok",
+    "needs_fix": false,
+    "summary": "authoritative profile apply + restart skip flags verified by existing and audit tests."
+  },
+  "risk_E": {
+    "verdict": "limitation",
+    "needs_fix": false,
+    "summary": "bridge.last_nsucc_mean defaults -1.0 -> w_perf=1.0; nsucc_ref inactive until threaded from observer/training_curve."
+  },
+  "risk_F": {
+    "verdict": "limitation",
+    "needs_fix": false,
+    "partial_fix_in_audit": true,
+    "summary": "by-tol-bin used success_tolerance; added curriculum_tol_bin/actor_distill_tol_bin to training_curve and analyzer fallback."
+  },
+  "safe_to_smoke": true,
+  "tests_run": [
+    "py_compile (6 modules)",
+    "tests.test_wm_activation_gate",
+    "tests.test_wm_strategy_profiles",
+    "tests.test_pbt_wm_strategy_zoo_full_preflight",
+    "tests.test_wm_soft_gate_risk_audit",
+    "bash -n start_regrasping_pbt_wm_strategy_zoo_full_3b.sh"
+  ],
+  "tests_passed": true,
+  "files_patched_in_audit": [
+    "runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/wm_activation_gate.py",
+    "runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/world_model/eir_mpc.py",
+    "runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/pbt/pbt_observer.py",
+    "runtime_root/src/dexpbt_isaaclab/dexpbt_isaaclab/scripts/train.py",
+    "results/analyze_pbt_wm_strategy_zoo_full_run.py",
+    "runtime_root/src/dexpbt_isaaclab/tests/test_wm_soft_gate_risk_audit.py"
+  ]
+}

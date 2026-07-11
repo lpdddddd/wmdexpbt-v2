@@ -1,0 +1,364 @@
+"""Preflight tests for PBT-WM Strategy Zoo v1.0 launcher + WM curriculum controller."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import RollingNsuccWindow, WindowSample
+from dexpbt_isaaclab.pbt.pbt_observer import DexPBTPbtAlgoObserver
+from dexpbt_isaaclab.scripts.launch_pbt import (
+    LAUNCH_PBT_BOOLEAN_FLAGS,
+    normalize_extra_args,
+)
+from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+    PROFILE_TABLES,
+    apply_wm_strategy_profile,
+    profile_capability_flags,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_full_3b.sh"
+)
+V12_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v12_2b_debug.sh"
+)
+V13_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v13_elite_2b_debug.sh"
+)
+V17_LAUNCHER = (
+    REPO_ROOT
+    / "results/launchers/start_regrasping_pbt_wm_strategy_zoo_v17_online_elite_awr_2b_debug.sh"
+)
+
+ZOO_PROFILES_V17 = [
+    "ppo_only",
+    "elite_bank_actor_distill_fast_awr",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector_awr",
+    "elite_bank_actor_distill_awr",
+    "elite_bank_actor_distill_strong_awr",
+]
+
+ZOO_PROFILES_V13 = [
+    "ppo_only",
+    "elite_bank_actor_distill_fast",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector",
+    "elite_bank_actor_distill",
+    "elite_bank_actor_distill_strong",
+]
+
+ZOO_PROFILES = [
+    "ppo_only",
+    "rssm_mppi_actor_distill",
+    "wm_curriculum_controller",
+    "wm_pbt_source_selector",
+    "elite_bank_actor_distill",
+    "conservative_rssm_planner_distill",
+]
+
+ZOO_PROFILES_V12 = [
+    "ppo_only",
+    "light_rssm_mppi_actor_distill",
+    "wm_pbt_source_selector_v2",
+    "wm_pbt_source_selector",
+    "elite_bank_actor_distill",
+    "light_conservative_rssm_planner_distill",
+]
+
+
+def _ns(**kwargs):
+    return argparse.Namespace(**kwargs)
+
+
+def _simulate_profile_expansion(profile: str, *, restart_pollution: list[str] | None = None):
+    """Dry-run: parse-like defaults + optional restart pollution, then expand."""
+    args = _ns(wm_strategy_profile=profile)
+    for dest in {k for t in PROFILE_TABLES.values() for k in t}:
+        if not hasattr(args, dest):
+            setattr(args, dest, None)
+    argv = ["train.py", f"--wm_strategy_profile={profile}"]
+    if restart_pollution:
+        argv.extend(restart_pollution)
+        for tok in restart_pollution:
+            if tok == "--enable_wm":
+                args.enable_wm = True
+            elif tok.startswith("--wm_strategy="):
+                args.wm_strategy = tok.split("=", 1)[1]
+            elif tok == "--eir_enable":
+                args.eir_enable = True
+            elif tok == "--no-eir_enable":
+                args.eir_enable = False
+    apply_wm_strategy_profile(
+        args,
+        argv=argv,
+        authoritative=(profile != "legacy"),
+    )
+    return args, profile_capability_flags(args)
+
+
+class TestStrategyZooLauncher(unittest.TestCase):
+    def test_strategy_zoo_launcher_has_six_distinct_profiles(self):
+        self.assertTrue(LAUNCHER.is_file(), f"missing launcher {LAUNCHER}")
+        text = LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(set(profiles)), 6)
+
+    def test_v12_launcher_has_six_distinct_profiles(self):
+        self.assertTrue(V12_LAUNCHER.is_file(), f"missing launcher {V12_LAUNCHER}")
+        text = V12_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V12:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(set(profiles)), 6)
+        self.assertIn("strategy_zoo_v1.2_performance_debug", text)
+
+    def test_v13_launcher_has_six_elite_centered_profiles(self):
+        self.assertTrue(V13_LAUNCHER.is_file(), f"missing launcher {V13_LAUNCHER}")
+        text = V13_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V13:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(profiles, ZOO_PROFILES_V13)
+        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(set(profiles)), 6)
+        self.assertIn("strategy_zoo_v1.3_elite_centered_performance_debug", text)
+        self.assertNotIn("light_rssm_mppi_actor_distill", text)
+        self.assertIn("pbt_wm_profile_copy_min_source_retention=0.50", text)
+
+    def test_v17_launcher_has_six_v13_plus_awr_profiles(self):
+        self.assertTrue(V17_LAUNCHER.is_file(), f"missing launcher {V17_LAUNCHER}")
+        text = V17_LAUNCHER.read_text()
+        self.assertIn("--profile-per-policy", text)
+        for prof in ZOO_PROFILES_V17:
+            self.assertIn(prof, text)
+        line = next(l for l in text.splitlines() if "PROFILE_LIST=" in l)
+        profiles = line.split("=", 1)[1].strip().strip('"').split(",")
+        self.assertEqual(profiles, ZOO_PROFILES_V17)
+        self.assertIn("awr_batch_steps=4096", text)
+        self.assertIn("awr_copy_top_k_steps=50000", text)
+        self.assertNotIn("fast_v2", text)
+        self.assertNotIn("large_delta_mode=clip", text)
+
+    def test_v13_elite_profiles_capability_flags(self):
+        for profile in (
+            "elite_bank_actor_distill_fast",
+            "elite_bank_actor_distill_strong",
+        ):
+            _, caps = _simulate_profile_expansion(profile)
+            self.assertTrue(caps["profile_actor_distill_enabled"])
+            self.assertTrue(caps["profile_elite_bank_enabled"])
+            self.assertFalse(caps["profile_rssm_mppi_enabled"])
+            self.assertFalse(caps["profile_residual_apply_enabled"])
+
+    def test_wm_pbt_source_selector_v2_not_polluted_by_shared_launcher_flags(self):
+        args, caps = _simulate_profile_expansion(
+            "wm_pbt_source_selector_v2",
+            restart_pollution=[
+                "--wm_imagined_soft_uncertainty_threshold=0.95",
+                "--wm_imagined_min_logit_abs_mean=0.05",
+                "--wm_imagined_min_head_signal_std=0.02",
+                "--wm_imagined_soft_validity_weight=0.25",
+            ],
+        )
+        self.assertEqual(args.wm_imagined_soft_uncertainty_threshold, 0.90)
+        self.assertEqual(args.wm_imagined_min_logit_abs_mean, 0.10)
+        self.assertEqual(args.wm_imagined_min_head_signal_std, 0.05)
+        self.assertEqual(args.wm_imagined_soft_validity_weight, 0.10)
+        self.assertFalse(args.eir_residual_apply_to_rollout)
+        self.assertFalse(caps["profile_residual_apply_enabled"])
+
+    def test_strategy_zoo_launcher_does_not_assign_aggressive_residual(self):
+        text = LAUNCHER.read_text()
+        self.assertIn("--no-eir_residual_apply_to_rollout", text)
+        self.assertNotIn(
+            "--eir_residual_apply_to_rollout",
+            text.replace("--no-eir_residual_apply_to_rollout", ""),
+        )
+
+    def test_launcher_documents_ppo_only_anchor_semantics(self):
+        text = LAUNCHER.read_text()
+        self.assertIn("ppo_only_note=", text)
+        self.assertIn("not an exact original DexPBT reproduction", text)
+
+    def test_launcher_has_head_rescue_and_candidate_gate_flags(self):
+        text = LAUNCHER.read_text()
+        for flag in (
+            "--seq_wm_head_balance_enable",
+            "--seq_wm_head_pos_weight_auto",
+            "--seq_wm_lambda_horizon_success",
+            "--wm_imagined_valid_mode",
+            "--eir_candidate_gate_mode",
+            "--eir_candidate_min_weight_for_retrieval",
+        ):
+            self.assertIn(flag, text, f"missing launcher flag {flag}")
+        self.assertIn("wm_imagined_head_rescue=true", text)
+        self.assertIn("soft_candidate_retrieval=true", text)
+
+    def test_ppo_only_profile_has_no_wm_or_candidate_activation(self):
+        args, caps = _simulate_profile_expansion("ppo_only")
+        self.assertFalse(args.enable_wm)
+        self.assertFalse(args.eir_enable)
+        self.assertNotEqual(getattr(args, "eir_candidate_gate_mode", "hard_tol"), "profile_soft")
+
+
+class TestLaunchPbtNormalize(unittest.TestCase):
+    def test_bool_flag_not_merged_with_next_flag(self):
+        extra = [
+            "--pbt_wm_profile_copy_enable",
+            "--pbt_wm_profile_copy_after_frames",
+            "1000000000",
+        ]
+        out = normalize_extra_args(extra)
+        self.assertEqual(
+            out,
+            [
+                "--pbt_wm_profile_copy_enable",
+                "--pbt_wm_profile_copy_after_frames=1000000000",
+            ],
+        )
+        self.assertNotIn(
+            "--pbt_wm_profile_copy_enable=--pbt_wm_profile_copy_after_frames", out
+        )
+
+    def test_value_flag_still_normalized(self):
+        extra = ["--pbt_wm_profile_copy_prob", "0.3"]
+        out = normalize_extra_args(extra)
+        self.assertEqual(out, ["--pbt_wm_profile_copy_prob=0.3"])
+
+    def test_strategy_zoo_bool_flags_listed(self):
+        required = {
+            "--pbt_wm_profile_copy_enable",
+            "--no-pbt_wm_profile_copy_enable",
+            "--wm_curriculum_controller_enable",
+            "--no-wm_curriculum_controller_enable",
+            "--wm_curriculum_controller_hard_block_shrink",
+            "--no-wm_curriculum_controller_hard_block_shrink",
+            "--wm_curriculum_controller_use_recovery_prob",
+            "--no-wm_curriculum_controller_use_recovery_prob",
+        }
+        self.assertTrue(required.issubset(LAUNCH_PBT_BOOLEAN_FLAGS))
+
+
+class TestProfileContaminationPreflight(unittest.TestCase):
+    def test_ppo_only_not_polluted_by_restart_wm_args(self):
+        args, caps = _simulate_profile_expansion(
+            "ppo_only",
+            restart_pollution=[
+                "--enable_wm",
+                "--wm_strategy=rssm_belief_value",
+                "--eir_enable",
+            ],
+        )
+        self.assertFalse(args.enable_wm)
+        self.assertFalse(args.eir_enable)
+        self.assertEqual(args.pbt_wm_score_mode, "off")
+        self.assertFalse(caps["profile_residual_apply_enabled"])
+
+    def test_all_profiles_disable_residual_apply(self):
+        for profile in ZOO_PROFILES:
+            args, caps = _simulate_profile_expansion(profile)
+            self.assertFalse(
+                args.eir_residual_apply_to_rollout,
+                msg=f"{profile} must keep residual rollout apply off",
+            )
+            self.assertFalse(caps["profile_residual_apply_enabled"])
+
+    def test_wm_pbt_source_selector_active_score(self):
+        args, caps = _simulate_profile_expansion("wm_pbt_source_selector")
+        self.assertEqual(args.pbt_wm_score_mode, "active")
+        self.assertTrue(caps["profile_wm_pbt_score_enabled"])
+
+    def test_ppo_only_anchor_flags(self):
+        args, caps = _simulate_profile_expansion("ppo_only")
+        self.assertFalse(args.enable_wm)
+        self.assertEqual(args.pbt_wm_score_mode, "off")
+        self.assertFalse(caps["profile_wm_pbt_score_enabled"])
+
+
+def _make_observer(tmp: Path) -> DexPBTPbtAlgoObserver:
+    obs = object.__new__(DexPBTPbtAlgoObserver)
+    obs.wm_curriculum_controller_enable = True
+    obs.wm_curriculum_controller_start_after_frames = 0
+    obs.wm_curriculum_controller_min_nsucc_mean = 10.0
+    obs.wm_curriculum_controller_drop_risk_threshold = 0.45
+    obs.wm_curriculum_controller_uncertainty_threshold = 0.55
+    obs.wm_curriculum_controller_min_success_prob = 0.20
+    obs.wm_curriculum_controller_freeze_frames = 100_000_000
+    obs.wm_curriculum_controller_hard_block_shrink = True
+    obs.wm_curriculum_controller_use_recovery_prob = False
+    obs.workspace = tmp
+    obs.policy_idx = 0
+    obs._wm_curriculum_freeze_until = {}
+    return obs
+
+
+class TestWMCurriculumController(unittest.TestCase):
+    def _window(self, nsucc_mean: float = 15.0) -> RollingNsuccWindow:
+        w = RollingNsuccWindow(max_len=8)
+        w.append(
+            WindowSample(
+                env_frames=600_000_000,
+                nsucc_mean=nsucc_mean,
+                nsucc_max=nsucc_mean + 5,
+                success_tolerance=0.05,
+            )
+        )
+        return w
+
+    def test_wm_curriculum_controller_blocks_shrink_on_high_drop_risk(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "wm_imagined").mkdir()
+            payload = {
+                "imagined_valid": True,
+                "wm_drop_risk": 0.9,
+                "wm_success_prob": 0.1,
+                "wm_recovery_prob": 0.1,
+                "uncertainty": 0.2,
+            }
+            (tmp / "wm_imagined" / "000.json").write_text(json.dumps(payload))
+            obs = _make_observer(tmp)
+            out = obs._evaluate_wm_curriculum_controller(0, self._window(), 600_000_000)
+            self.assertTrue(out["blocked_shrink"])
+            self.assertEqual(out["fallback_reason_id"], 5)
+
+    def test_wm_curriculum_controller_does_not_block_on_invalid_eval(self):
+        with tempfile.TemporaryDirectory() as td:
+            obs = _make_observer(Path(td))
+            out = obs._evaluate_wm_curriculum_controller(0, self._window(), 600_000_000)
+            self.assertFalse(out["blocked_shrink"])
+            self.assertEqual(out["fallback_reason_id"], 3)
+
+    def test_wm_curriculum_controller_logs_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            (tmp / "wm_imagined").mkdir()
+            (tmp / "wm_imagined" / "000.json").write_text("{bad json")
+            obs = _make_observer(tmp)
+            out = obs._evaluate_wm_curriculum_controller(0, self._window(), 600_000_000)
+            self.assertFalse(out["eval_valid"])
+            self.assertEqual(out["fallback_reason_id"], 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,66 @@
+{
+  "plan_id": "rssm_mppi_activation_smoke_v1",
+  "status": "plan_only",
+  "do_not_launch_in_v13_task": true,
+  "v12_evidence": {
+    "mppi_active": 0,
+    "rssm_candidate_added": 0,
+    "actor_distill_reject_bad_source": "high on p0/p1/p2",
+    "elite_route_worked": {
+      "best_source_frac_elite_approx": 0.58,
+      "bank_elite_bank_add_count_approx": 3940000,
+      "policies": ["p4", "p5"]
+    },
+    "mppi_blocker_hypothesis": "belief uncertainty ~0.93-1.48 vs threshold 0.4"
+  },
+  "smoke_run": {
+    "max_active": [1, 2],
+    "target_frames_min": 300000000,
+    "target_frames_max": 500000000,
+    "profile_primary": "light_rssm_mppi_actor_distill_debug",
+    "profile_optional_secondary": "light_conservative_rssm_planner_distill",
+    "launcher_to_create": "results/launchers/start_regrasping_rssm_mppi_activation_smoke.sh",
+    "mix_with_v13_performance_run": false
+  },
+  "success_criteria": {
+    "mppi_active_gt": 0,
+    "rssm_candidate_added_gt": 0,
+    "mppi_belief_valid_gt": 0,
+    "mppi_fallback_reason_distribution": "logged and not single-blocker dominated",
+    "rssm_model_promoted_or_loaded": true,
+    "candidate_gate_weight_gte_min_weight": true
+  },
+  "root_cause_hypotheses": [
+    "MPPI blocked by uncertainty gate (threshold too low vs observed uncertainty)",
+    "RSSM model not promoted or loaded",
+    "Candidate gate weight below eir_candidate_min_weight_for_retrieval",
+    "Actor distill allowed_sources excludes RSSM when candidate weight is zero",
+    "Shared launcher WM imagined-head thresholds suppress RSSM planner signal"
+  ],
+  "preflight_checks": [
+    "eir_use_rssm_mppi=True and eir_mppi_mode != off",
+    "Document temporary MPPI uncertainty threshold override for smoke",
+    "Verify RSSM promotion checkpoint writes",
+    "Include rssm in eir_actor_distill_allowed_sources for smoke profile",
+    "TensorBoard tags configured"
+  ],
+  "telemetry_tags": [
+    "eir/mppi_active",
+    "eir/rssm_candidate_added",
+    "eir/mppi_belief_valid",
+    "eir/mppi_fallback_reason",
+    "eir/mppi_uncertainty",
+    "eir/candidate_gate_weight",
+    "eir/actor_distill_reject_bad_source",
+    "eir/best_source_frac_rssm",
+    "world_model/rssm_promoted",
+    "world_model/rssm_load_success"
+  ],
+  "failure_actions": {
+    "mppi_active_zero": "sweep uncertainty threshold and RSSM load path",
+    "rssm_never_promoted": "inspect seq_wm train cadence and promotion gates",
+    "candidates_added_distill_rejects": "relax allowed_sources or gate_mode for smoke only",
+    "oom": "reduce num-envs or disable second policy"
+  },
+  "relation_to_v13": "v1.3 elite-centered performance run excludes RSSM-MPPI profiles; this smoke is a separate diagnostic track"
+}

@@ -1,0 +1,21 @@
+{
+  "report": "WM_IMAGINED_HEAD_RESCUE",
+  "status": "stub",
+  "wm_imagined_valid_modes": ["strict_uncertainty", "soft_calibrated", "shadow_only"],
+  "launcher_enabled": {
+    "wm_imagined_head_rescue": true,
+    "wm_imagined_valid_mode": "soft_calibrated",
+    "wm_head_balance": true
+  },
+  "diagnostics_fields": [
+    "imagined_valid_strict",
+    "imagined_valid_soft",
+    "imagined_head_has_signal",
+    "valid_reason",
+    "wm_validity_weight",
+    "checkpoint_age_frames",
+    "head_signal_std",
+    "logit_abs_mean"
+  ],
+  "tests": ["tests/test_wm_imagined_head_diagnostics.py"]
+}

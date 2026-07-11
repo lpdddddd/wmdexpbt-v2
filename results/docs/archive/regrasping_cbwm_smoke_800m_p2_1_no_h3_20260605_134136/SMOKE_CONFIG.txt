@@ -1,0 +1,10 @@
+smoke_run=true
+patch=P2_stability
+target_frames=800000000
+max_iterations=20
+curriculum_mode=mastery
+pbt_single_shrink_per_window=true
+pbt_early_collapse_detect=true
+pbt_recovery_tolerance_mode=last_mastered
+pbt_recovery_bypass_elimination_burnin=true
+note=P2 smoke: single-shot shrink, early freeze, best_stable recovery audit
