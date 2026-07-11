@@ -211,15 +211,82 @@ class EliteSnippetBank:
         # Stage constants: FLOOR=1, HARD=2, MID=3.
         return {1: (3,), 3: (1,), 2: (1,)}.get(int(stage), ())
 
+    def _rank_pool_indices(
+        self,
+        indices: torch.Tensor,
+        *,
+        query_tolerance: float | None,
+        feat_probe: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Rank a candidate index set by priority, tol weight, then diversity.
+
+        Bounded CPU ranking over the existing bank; no full-bank GPU scan.
+        """
+        if indices.numel() == 0:
+            return indices
+        pri = self.scalars["priority_score"][indices].clone()
+        if (
+            self.cfg.tolerance_compatibility_enable
+            and query_tolerance is not None
+        ):
+            gap = (self.scalars["success_tol"][indices] - float(query_tolerance)).abs()
+            pri = pri * torch.exp(
+                -gap / max(float(self.cfg.tolerance_soft_scale), 1e-6)
+            )
+        # Stable secondary key: newer frames first for mild diversity.
+        frame = self.scalars["frame"][indices]
+        order = torch.argsort(pri + 1e-9 * frame, descending=True)
+        return indices[order]
+
+    def _mix_primary_adjacent(
+        self, primary: torch.Tensor, adjacent: torch.Tensor
+    ) -> torch.Tensor:
+        """Always mix when both pools exist; fill shortfalls from the other."""
+        pool = max(1, int(self.cfg.sample_pool))
+        p_take = max(1, int(round(float(self.cfg.primary_stage_fraction) * pool)))
+        a_take = max(1, int(round(float(self.cfg.adjacent_stage_fraction) * pool)))
+        # Cap to available, then top up from the other side.
+        p_n = min(int(primary.numel()), p_take)
+        a_n = min(int(adjacent.numel()), a_take)
+        short = pool - (p_n + a_n)
+        if short > 0 and int(primary.numel()) > p_n:
+            extra = min(short, int(primary.numel()) - p_n)
+            p_n += extra
+            short -= extra
+        if short > 0 and int(adjacent.numel()) > a_n:
+            a_n += min(short, int(adjacent.numel()) - a_n)
+        parts = []
+        if p_n > 0:
+            parts.append(primary[:p_n])
+        if a_n > 0:
+            parts.append(adjacent[:a_n])
+        return torch.cat(parts) if parts else torch.empty(0, dtype=torch.long)
+
     def retrieve_candidates(self, feat, *, k: int, stage=None, query_tolerance=None):
         B, H, A, k = int(feat.shape[0]), self.H, self.A, max(1, int(k))
         dev = feat.device
         self.retrieve_calls += B
+        empty = (
+            torch.zeros(B, k, H, A, device=dev),
+            torch.zeros(B, k, device=dev),
+            torch.zeros(B, k, device=dev),
+            False,
+        )
         if self.size == 0:
-            return torch.zeros(B, k, H, A, device=dev), torch.zeros(B, k, device=dev), torch.zeros(B, k, device=dev), False
+            self.last_update_diagnostics.update({
+                "retrieve_primary_candidates": 0.0,
+                "retrieve_adjacent_candidates": 0.0,
+                "retrieve_sparse_fallback": 0.0,
+                "compatible_candidate_count": 0.0,
+                "retrieval_valid": 0.0,
+                "no_tolerance_compatible_candidate": 0.0,
+                "fallback_to_actor_distill": 0.0,
+            })
+            return empty
         pool_idx = torch.arange(self.size)
         primary_count = 0
         adjacent_count = 0
+        sparse_fallback = 0.0
         if stage is not None:
             bucket = self.scalars["bucket_id"][: self.size]
             stage_of = torch.div(bucket, 2.0, rounding_mode="floor")
@@ -227,38 +294,61 @@ class EliteSnippetBank:
             primary_count = int(primary.numel())
             adjacent = torch.empty(0, dtype=torch.long)
             if self.cfg.adjacent_stage_mixing_enable:
-                adjacent = torch.cat([
-                    (stage_of == float(adj)).nonzero(as_tuple=False).reshape(-1)
-                    for adj in self._adjacent_stages(int(stage))
-                ]) if self._adjacent_stages(int(stage)) else adjacent
+                adj_stages = self._adjacent_stages(int(stage))
+                if adj_stages:
+                    adjacent = torch.cat([
+                        (stage_of == float(adj)).nonzero(as_tuple=False).reshape(-1)
+                        for adj in adj_stages
+                    ])
                 adjacent_count = int(adjacent.numel())
-            if primary.numel() > 0 and (
-                not self.cfg.fallback_to_adjacent_when_sparse
-                or primary.numel() >= int(self.cfg.min_primary_candidates)
-                or adjacent.numel() == 0
-            ):
-                pool_idx = primary
-            elif primary.numel() > 0 and adjacent.numel() > 0:
-                # Do not let a single FLOOR entry suppress mature MID entries.
-                p_take = max(1, int(round(self.cfg.primary_stage_fraction * self.cfg.sample_pool)))
-                a_take = max(1, int(round(self.cfg.adjacent_stage_fraction * self.cfg.sample_pool)))
-                pool_idx = torch.cat([primary[:p_take], adjacent[:a_take]])
+            primary = self._rank_pool_indices(primary, query_tolerance=query_tolerance)
+            adjacent = self._rank_pool_indices(adjacent, query_tolerance=query_tolerance)
+            if self.cfg.adjacent_stage_mixing_enable and primary.numel() > 0 and adjacent.numel() > 0:
+                # Always mix at the configured fraction when both exist.
+                # fallback_to_adjacent_when_sparse only covers primary-empty /
+                # severely-sparse cases below; it must not disable normal mixing.
+                pool_idx = self._mix_primary_adjacent(primary, adjacent)
+                if primary_count < int(self.cfg.min_primary_candidates):
+                    sparse_fallback = 1.0
             elif primary.numel() > 0:
                 pool_idx = primary
-            elif adjacent.numel() > 0:
+            elif adjacent.numel() > 0 and (
+                self.cfg.fallback_to_adjacent_when_sparse
+                or self.cfg.adjacent_stage_mixing_enable
+            ):
                 pool_idx = adjacent
-        tol_weight = None
+                sparse_fallback = 1.0
+            elif primary.numel() > 0:
+                pool_idx = primary
+        compatible_count = float(pool_idx.numel())
+        no_compat = 0.0
         if self.cfg.tolerance_compatibility_enable and query_tolerance is not None:
             gap = (self.scalars["success_tol"][: self.size] - float(query_tolerance)).abs()
             compatible = (gap <= float(self.cfg.tolerance_max_gap)).nonzero(as_tuple=False).reshape(-1)
             compatible_set = set(compatible.tolist())
             filtered = torch.tensor(
-                [idx for idx in pool_idx.tolist() if idx in compatible_set], dtype=torch.long
+                [idx for idx in pool_idx.tolist() if idx in compatible_set],
+                dtype=torch.long,
             )
-            if filtered.numel() > 0:
-                pool_idx = filtered
+            compatible_count = float(filtered.numel())
+            if filtered.numel() == 0:
+                # Fail-closed: do not silently teach from incompatible snippets.
+                no_compat = 1.0
+                self.last_update_diagnostics.update({
+                    "retrieve_primary_candidates": float(primary_count),
+                    "retrieve_adjacent_candidates": float(adjacent_count),
+                    "retrieve_sparse_fallback": float(sparse_fallback),
+                    "compatible_candidate_count": 0.0,
+                    "retrieval_valid": 0.0,
+                    "no_tolerance_compatible_candidate": 1.0,
+                    "fallback_to_actor_distill": 1.0,
+                })
+                return empty
+            pool_idx = filtered
         if pool_idx.numel() > self.cfg.sample_pool:
-            pool_idx = pool_idx[torch.argsort(self.scalars["priority_score"][pool_idx], descending=True)[: self.cfg.sample_pool]]
+            pool_idx = self._rank_pool_indices(
+                pool_idx, query_tolerance=query_tolerance
+            )[: self.cfg.sample_pool]
         pf = self.feature[pool_idx].to(device=dev, dtype=feat.dtype)
         pa = self.actions[pool_idx].to(device=dev, dtype=feat.dtype)
         pp = self.scalars["priority_score"][pool_idx].to(device=dev, dtype=feat.dtype)
@@ -279,7 +369,11 @@ class EliteSnippetBank:
         self.last_update_diagnostics.update({
             "retrieve_primary_candidates": float(primary_count),
             "retrieve_adjacent_candidates": float(adjacent_count),
-            "retrieve_sparse_fallback": float(primary_count > 0 and primary_count < int(self.cfg.min_primary_candidates)),
+            "retrieve_sparse_fallback": float(sparse_fallback),
+            "compatible_candidate_count": float(compatible_count),
+            "retrieval_valid": 1.0,
+            "no_tolerance_compatible_candidate": float(no_compat),
+            "fallback_to_actor_distill": 0.0,
         })
         return ga, top_sim, gp, True
 

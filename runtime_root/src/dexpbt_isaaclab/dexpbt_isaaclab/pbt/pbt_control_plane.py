@@ -225,11 +225,23 @@ def quantize_population_frame(raw_frame: int, tick: int) -> int:
     return (int(raw_frame) // tick_i) * tick_i
 
 
+def effective_population_frame_target(target_frame: int, tick: int) -> int:
+    """Ceil target onto the next authoritative tick so we never stop early.
+
+    5B / 20M already divides evenly; non-multiples must round *up*.
+    """
+    if int(target_frame) <= 0:
+        return 0
+    tick_i = max(int(tick), 1)
+    t = int(target_frame)
+    return ((t + tick_i - 1) // tick_i) * tick_i
+
+
 def population_frame_target_reached(population_frame: int, target_frame: int, tick: int) -> bool:
-    """Compare PBT clocks at their shared quantized resolution."""
+    """Compare PBT clocks at ceil-quantized target resolution."""
     if int(target_frame) <= 0:
         return False
-    return int(population_frame) >= quantize_population_frame(target_frame, tick)
+    return int(population_frame) >= effective_population_frame_target(target_frame, tick)
 
 
 def pbt_population_frame(algo) -> int:

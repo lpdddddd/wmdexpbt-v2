@@ -1261,7 +1261,18 @@ def _compute_snippet_distill_loss(
         stage=stage,
         query_tolerance=float(cache.tol_mean),
     )
+    diag = dict(getattr(bank, "last_update_diagnostics", {}) or {})
+    bridge.last_snippet_retrieval_valid = 1.0 if valid else 0.0
+    bridge.last_snippet_no_tolerance_compatible = float(
+        diag.get("no_tolerance_compatible_candidate", 0.0)
+    )
+    bridge.last_snippet_compatible_candidate_count = float(
+        diag.get("compatible_candidate_count", 0.0)
+    )
     if not valid:
+        bridge.last_snippet_distill_loss = 0.0
+        if float(diag.get("no_tolerance_compatible_candidate", 0.0)) > 0.5:
+            bridge.last_actor_distill_fallback_reason = "no_tolerance_compatible_candidate"
         return feat.new_zeros(())
 
     def _mu_fn(f):
@@ -1350,6 +1361,21 @@ def should_use_actor_distill_fallback(
     if float(snippet_rerank_changed_frac) <= min_rerank:
         return True, "snippet_rerank_inactive"
     return False, "snippet_ok_no_fallback"
+
+
+def should_use_actor_distill_fallback_for_retrieval(
+    *,
+    eir_cfg: EIRConfig,
+    retrieval_valid: bool,
+    retrieval_diag: dict | None = None,
+) -> tuple[bool, str]:
+    """Force EliteBank actor-distill when snippet retrieval is fail-closed."""
+    if not bool(getattr(eir_cfg, "actor_distill_enable", False)):
+        return False, "actor_distill_disabled"
+    diag = retrieval_diag or {}
+    if (not retrieval_valid) or float(diag.get("no_tolerance_compatible_candidate", 0.0)) > 0.5:
+        return True, "no_tolerance_compatible_candidate"
+    return False, "retrieval_ok"
 
 
 def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tensor]:
@@ -1638,6 +1664,10 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 getattr(bridge, "last_snippet_wm_rerank_changed_frac", 0.0)
             ),
         )
+        if float(getattr(bridge, "last_snippet_no_tolerance_compatible", 0.0)) > 0.5:
+            if bool(getattr(eir_cfg, "actor_distill_enable", False)):
+                run_actor_distill = True
+                fallback_reason = "no_tolerance_compatible_candidate"
         bridge.last_actor_distill_fallback_reason = str(fallback_reason)
         bridge.last_actor_distill_fallback_with_snippet_used = (
             1.0 if (run_actor_distill and _use_snippet) else 0.0

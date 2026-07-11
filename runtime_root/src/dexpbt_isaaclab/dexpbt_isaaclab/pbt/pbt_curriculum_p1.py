@@ -289,6 +289,19 @@ class CurriculumControlState:
     bridge_probation_rollback_blocked: bool = False
     bridge_probation_hard_collapse: bool = False
     bridge_probation_exit: bool = False
+    # Bridge probation collapse audit (defaults inert for non-bridge profiles).
+    bridge_probation_legacy_collapse_suppressed: bool = False
+    bridge_probation_hard_collapse_triggered: bool = False
+    bridge_probation_bad_streak: int = 0
+    bridge_probation_rollback_reason: str = ""
+    bridge_pending_next_tolerance: float = 0.0
+    bridge_level_timer_pending: bool = False
+    late_rescue_attempt_count: int = 0
+    late_rescue_selected_count: int = 0
+    late_rescue_executed_count: int = 0
+    late_rescue_blocked_count: int = 0
+    late_rescue_streak: int = 0
+    late_rescue_last_frame: int = -1
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -433,6 +446,14 @@ def mark_shrink_consumed(
         control.pre_shrink_tolerance = float(pre_shrink_tolerance)
     if post_shrink_tolerance > 0.0:
         control.post_shrink_tolerance = float(post_shrink_tolerance)
+    # Confirm bridge shrink consumption so the observer may advance the
+    # per-level timer only after tolerance actually changed.
+    if float(getattr(control, "bridge_next_tolerance", 0.0) or 0.0) > 1e-9:
+        control.bridge_shrink_count = int(getattr(control, "bridge_shrink_count", 0) or 0) + 1
+        control.bridge_next_tolerance = 0.0
+        control.bridge_pending_next_tolerance = 0.0
+        control.bridge_level_timer_pending = False
+        control.just_shrank = True
     write_curriculum_control(path, control)
 
 

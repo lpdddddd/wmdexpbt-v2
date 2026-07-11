@@ -47,6 +47,7 @@ from dexpbt_isaaclab.pbt.pbt_tolerance_bridge import (
     DEFAULT_BRIDGE_LADDER,
     DEFAULT_RETENTION_BINS,
     ToleranceBinRetentionTracker,
+    bridge_level_id,
     next_bridge_tolerance,
     parse_float_tuple,
     previous_bridge_tolerance,
@@ -1379,6 +1380,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self.same_tol_retention_keep_on_rollback = bool(same_tol_retention_keep_on_rollback)
         self._same_tol_trackers: dict[int, ToleranceBinRetentionTracker] = {}
+        self._bridge_state_restored: set[int] = set()
+        self._last_confirmed_tolerance: dict[int, float] = {}
+        self._bridge_shrink_count: dict[int, int] = {}
+        self._late_rescue_attempt_count: dict[int, int] = {}
+        self._late_rescue_selected_count: dict[int, int] = {}
+        self._late_rescue_executed_count: dict[int, int] = {}
+        self._late_rescue_blocked_count: dict[int, int] = {}
+        self._pending_late_rescue: bool = False
         self.bridge_curriculum_enable = bool(bridge_curriculum_enable)
         self.bridge_curriculum_start_tol = float(bridge_curriculum_start_tol)
         self.bridge_curriculum_probation_tol = float(bridge_curriculum_probation_tol)
@@ -1643,17 +1652,55 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 )
                 window.append(sample)
                 if self.same_tol_retention_enable:
+                    self._maybe_restore_bridge_state(policy_idx)
                     tracker = self._same_tol_trackers.setdefault(
                         policy_idx,
-                        ToleranceBinRetentionTracker(bins=self.same_tol_retention_bins),
+                        ToleranceBinRetentionTracker(
+                            bins=self.same_tol_retention_bins,
+                            ladder=(
+                                self.bridge_tolerance_ladder
+                                if self.bridge_curriculum_enable else ()
+                            ),
+                        ),
                     )
+                    if self.bridge_curriculum_enable and not tracker.ladder:
+                        tracker.ladder = self.bridge_tolerance_ladder
+                    prev_tol = self._last_confirmed_tolerance.get(policy_idx)
+                    cur_sample_tol = float(sample.success_tolerance)
+                    if (
+                        self.bridge_curriculum_enable
+                        and prev_tol is not None
+                        and cur_sample_tol < float(prev_tol) - 1e-9
+                    ):
+                        # Tolerance actually moved stricter: stamp level timer now.
+                        self._bridge_level_entry_frame[policy_idx] = int(env_frames)
+                        self._bridge_probation_bad_streak[policy_idx] = 0
+                        self._bridge_shrink_count[policy_idx] = (
+                            int(self._bridge_shrink_count.get(policy_idx, 0)) + 1
+                        )
                     tracker.update(
                         tolerance=sample.success_tolerance,
                         nsucc_mean=sample.nsucc_mean,
                         frame=env_frames,
                         lineage_id=sample.lineage_id,
                         reset_on_lineage_change=self.same_tol_retention_reset_on_lineage_change,
+                        use_bridge_levels=bool(self.bridge_curriculum_enable),
                     )
+                    self._last_confirmed_tolerance[policy_idx] = cur_sample_tol
+                    if (
+                        self.bridge_curriculum_enable
+                        and prev_tol is not None
+                        and abs(cur_sample_tol - float(prev_tol)) > 1e-9
+                    ):
+                        # Level change (any direction) clears probation bad streak.
+                        level_now = bridge_level_id(
+                            cur_sample_tol, self.bridge_tolerance_ladder
+                        )
+                        level_prev = bridge_level_id(
+                            float(prev_tol), self.bridge_tolerance_ladder
+                        )
+                        if level_now != level_prev:
+                            self._bridge_probation_bad_streak[policy_idx] = 0
                 nm = window.samples[-1].nsucc_mean
                 peak = self._recent_peak_nsucc_mean.get(policy_idx, 0.0)
                 if nm > peak:
@@ -1896,8 +1943,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         same_tol = self._same_tol_retention_snapshot(policy_idx, cur_tol)
         # In bridge mode all ordinary curriculum decisions use only the
-        # current tolerance bin.  During bin warmup retention is deliberately
-        # invalid, never a synthetic low value.
+        # current ladder level (or coarse bin when bridge is off).  During
+        # warmup retention is deliberately invalid, never a synthetic low.
         decision_retention = (
             float(same_tol["retention"]) if bool(same_tol["valid"]) else 1.0
         )
@@ -1913,12 +1960,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             and policy_idx not in self._bridge_probation_entry_frame
         ):
             self._bridge_probation_entry_frame[policy_idx] = int(env_frames)
+        probation_entry_early = int(self._bridge_probation_entry_frame.get(policy_idx, -1))
+        probation_active_early = bool(
+            self.bridge_probation_enable
+            and probation_entry_early >= 0
+            and int(env_frames) - probation_entry_early < self.bridge_probation_frames
+        )
         probation_ordinary_block = bool(
             self.bridge_probation_block_ordinary_rollback
-            and policy_idx in self._bridge_probation_entry_frame
-            and int(env_frames) - int(self._bridge_probation_entry_frame[policy_idx])
-            < self.bridge_probation_frames
+            and probation_active_early
         )
+        legacy_hard_collapse = False
+        bridge_probation_hard_collapse = False
+        bridge_probation_legacy_collapse_suppressed = False
+        bridge_probation_rollback_reason = ""
         danger_zone = bool(
             self.curriculum_danger_zone_enable
             and cur_tol <= self.curriculum_danger_tol + 1e-9
@@ -1944,6 +1999,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 patience=self.collapse_patience,
                 recent_peak=recent_peak,
             )
+            legacy_hard_collapse = bool(hard_collapse_detected)
             if hard_collapse_detected:
                 collapse_detected = True
                 drop_ratio = hard_drop
@@ -1954,6 +2010,35 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 )
                 repeated_collapse_count += 1
                 self._repeated_collapse_count[policy_idx] = repeated_collapse_count
+
+            # Bridge probation: never apply legacy cross-tol peak rollback.
+            # Only a strict same-level mean streak may roll back.
+            if probation_active_early:
+                nsucc_now = (
+                    float(window.samples[-1].nsucc_mean) if window.samples else 0.0
+                )
+                level_warm = bool(same_tol["valid"])
+                if nsucc_now < self.bridge_probation_hard_collapse_mean and level_warm:
+                    self._bridge_probation_bad_streak[policy_idx] = (
+                        int(self._bridge_probation_bad_streak.get(policy_idx, 0)) + 1
+                    )
+                else:
+                    if level_warm:
+                        self._bridge_probation_bad_streak[policy_idx] = 0
+                bad_streak = int(self._bridge_probation_bad_streak.get(policy_idx, 0))
+                if (
+                    self.bridge_probation_allow_hard_collapse_rollback
+                    and level_warm
+                    and bad_streak >= self.bridge_probation_hard_collapse_patience
+                ):
+                    bridge_probation_hard_collapse = True
+                    hard_collapse_detected = True
+                    bridge_probation_rollback_reason = "bridge_probation_hard_collapse"
+                if legacy_hard_collapse and not bridge_probation_hard_collapse:
+                    bridge_probation_legacy_collapse_suppressed = True
+                    # Keep freeze/logging from legacy signal, but do not force tol.
+                    hard_collapse_detected = False
+
             if hard_collapse_detected:
                 rollback_cooldown_active = (
                     int(env_frames) - last_rollback_frame
@@ -1963,21 +2048,43 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 allow_by_shrink = (
                     int(self._shrinks_since_rollback.get(policy_idx, 0)) > 0
                 )
-                if allow_by_cooldown or allow_by_shrink:
-                    forced_tolerance = float(
-                        self._last_mastered_tolerance.get(policy_idx, 0.075)
+                # During probation only bridge hard-collapse may set forced tol.
+                allow_forced = True
+                if probation_active_early and not bridge_probation_hard_collapse:
+                    allow_forced = False
+                    bridge_probation_legacy_collapse_suppressed = True
+                    bridge_probation_rollback_reason = (
+                        bridge_probation_rollback_reason
+                        or "legacy_hard_collapse_suppressed"
                     )
+                if allow_forced and (allow_by_cooldown or allow_by_shrink):
+                    if bridge_probation_hard_collapse:
+                        forced_tolerance = float(
+                            previous_bridge_tolerance(
+                                cur_tol, ladder=self.bridge_tolerance_ladder
+                            )
+                        )
+                        rollback_reason = "bridge_probation_hard_collapse"
+                        bridge_probation_rollback_reason = rollback_reason
+                    else:
+                        forced_tolerance = float(
+                            self._last_mastered_tolerance.get(policy_idx, 0.075)
+                        )
+                        rollback_reason = (
+                            "cooldown_elapsed"
+                            if allow_by_cooldown
+                            else "shrink_after_last_rollback"
+                        )
                     collapse_rollback_active = True
                     self._last_rollback_frame[policy_idx] = int(env_frames)
                     last_rollback_frame = int(env_frames)
                     self._rollback_count[policy_idx] = rollback_count + 1
                     rollback_count += 1
                     self._shrinks_since_rollback[policy_idx] = 0
-                    rollback_reason = (
-                        "cooldown_elapsed" if allow_by_cooldown else "shrink_after_last_rollback"
-                    )
                     rollback_and_freeze_same_tick = collapse_detected
-                else:
+                    if bridge_probation_hard_collapse:
+                        self._bridge_probation_bad_streak[policy_idx] = 0
+                elif allow_forced:
                     rollback_reason = "cooldown_blocked"
             if (
                 self.curriculum_rollback_on_repeated_collapse
@@ -2323,7 +2430,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     adaptive_consolidation_frames,
                     self.bridge_post_shrink_consolidation_frames,
                 )
-                self._bridge_level_entry_frame[policy_idx] = int(env_frames)
+                # Do NOT stamp _bridge_level_entry_frame here.  Safety / WM /
+                # pre-floor gates may still clear shrink_token later; the
+                # level timer advances only after tolerance actually changes.
         tol_stable = window.tolerance_stable_for_intervals(1)
         last_tol = self._last_mastered_tolerance.get(policy_idx, 0.075)
         if gate_pass and window.samples:
@@ -2757,20 +2866,51 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             ),
             bridge_active=bridge_active,
             bridge_level=(
-                self.bridge_tolerance_ladder.index(cur_tol)
-                if cur_tol in self.bridge_tolerance_ladder else -1
+                bridge_level_id(cur_tol, self.bridge_tolerance_ladder)
+                if self.bridge_curriculum_enable and self.bridge_tolerance_ladder
+                else -1
             ),
             bridge_entry_frame=bridge_entry,
-            bridge_level_entry_frame=level_entry,
+            bridge_level_entry_frame=int(
+                self._bridge_level_entry_frame.get(policy_idx, level_entry)
+            ),
+            bridge_shrink_count=int(self._bridge_shrink_count.get(policy_idx, 0)),
             bridge_next_tolerance=bridge_next_tol,
             bridge_shrink_blocked=bool(bridge_block_reason),
             bridge_block_reason=bridge_block_reason,
             bridge_probation_active=probation_active,
             bridge_probation_entry_frame=probation_entry,
             bridge_probation_rollback_blocked=probation_ordinary_block,
+            bridge_probation_hard_collapse=bool(bridge_probation_hard_collapse),
             bridge_probation_exit=bool(
                 probation_entry >= 0 and not probation_active
             ),
+            bridge_probation_legacy_collapse_suppressed=bool(
+                bridge_probation_legacy_collapse_suppressed
+            ),
+            bridge_probation_hard_collapse_triggered=bool(
+                bridge_probation_hard_collapse
+            ),
+            bridge_probation_bad_streak=int(
+                self._bridge_probation_bad_streak.get(policy_idx, 0)
+            ),
+            bridge_probation_rollback_reason=str(bridge_probation_rollback_reason),
+            bridge_pending_next_tolerance=float(bridge_next_tol),
+            bridge_level_timer_pending=bool(bridge_next_tol > 1e-9),
+            late_rescue_attempt_count=int(
+                self._late_rescue_attempt_count.get(policy_idx, 0)
+            ),
+            late_rescue_selected_count=int(
+                self._late_rescue_selected_count.get(policy_idx, 0)
+            ),
+            late_rescue_executed_count=int(
+                self._late_rescue_executed_count.get(policy_idx, 0)
+            ),
+            late_rescue_blocked_count=int(
+                self._late_rescue_blocked_count.get(policy_idx, 0)
+            ),
+            late_rescue_streak=int(self._late_rescue_streak.get(policy_idx, 0)),
+            late_rescue_last_frame=int(self._late_rescue_frame.get(policy_idx, -1)),
         )
 
     def _log_curriculum_control_scalars(
@@ -3453,18 +3593,32 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return {
                 "bin_id": -1, "retention": 1.0, "valid": True, "peak": 0.0,
                 "samples": 0, "stable_ticks": 0, "first_frame": -1, "last_frame": -1,
+                "level_id": -1,
             }
+        self._maybe_restore_bridge_state(policy_idx)
         tracker = self._same_tol_trackers.setdefault(
-            policy_idx, ToleranceBinRetentionTracker(bins=self.same_tol_retention_bins)
+            policy_idx,
+            ToleranceBinRetentionTracker(
+                bins=self.same_tol_retention_bins,
+                ladder=(
+                    self.bridge_tolerance_ladder
+                    if self.bridge_curriculum_enable else ()
+                ),
+            ),
         )
-        state = tracker.state(tolerance)
+        if self.bridge_curriculum_enable and not tracker.ladder:
+            tracker.ladder = self.bridge_tolerance_ladder
+        use_levels = bool(self.bridge_curriculum_enable and tracker.ladder)
+        state = tracker.state(tolerance, use_bridge_levels=use_levels)
         return {
             "bin_id": tracker.current_bin(tolerance),
-            "retention": tracker.retention(tolerance),
+            "level_id": tracker.current_level(tolerance) if use_levels else -1,
+            "retention": tracker.retention(tolerance, use_bridge_levels=use_levels),
             "valid": tracker.is_valid(
                 tolerance,
                 min_samples=self.same_tol_retention_min_samples,
                 warmup_ticks=self.same_tol_retention_warmup_ticks,
+                use_bridge_levels=use_levels,
             ),
             "peak": state.peak_nsucc_mean,
             "samples": state.sample_count,
@@ -3474,19 +3628,103 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "tracker": tracker,
         }
 
+    def _maybe_restore_bridge_state(self, policy_idx: int) -> None:
+        """Restore tracker / probation / late-rescue state from control JSON."""
+        if policy_idx in self._bridge_state_restored:
+            return
+        self._bridge_state_restored.add(policy_idx)
+        if not (self.same_tol_retention_enable or self.bridge_curriculum_enable
+                or self.late_degradation_rescue_enable):
+            return
+        path = self._curriculum_control_dir / f"{policy_idx:03d}.json"
+        control = read_curriculum_control(path)
+        if control is None:
+            return
+        try:
+            lineage = None
+            window = self._policy_nsucc_windows.get(policy_idx)
+            if window and window.samples:
+                lineage = getattr(window.samples[-1], "lineage_id", None)
+            tracker_data = getattr(control, "retention_tracker", None) or {}
+            if isinstance(tracker_data, dict) and tracker_data:
+                restored = ToleranceBinRetentionTracker.from_json(tracker_data)
+                if self.bridge_curriculum_enable and not restored.ladder:
+                    restored.ladder = self.bridge_tolerance_ladder
+                saved_lineage = restored.lineage_id
+                if (
+                    self.same_tol_retention_reset_on_lineage_change
+                    and lineage is not None
+                    and saved_lineage is not None
+                    and lineage != saved_lineage
+                ):
+                    restored.states.clear()
+                    restored.lineage_id = lineage
+                    restored.last_bridge_level_id = -1
+                self._same_tol_trackers[policy_idx] = restored
+            if int(getattr(control, "bridge_entry_frame", -1)) >= 0:
+                self._bridge_entry_frame[policy_idx] = int(control.bridge_entry_frame)
+            if int(getattr(control, "bridge_level_entry_frame", -1)) >= 0:
+                self._bridge_level_entry_frame[policy_idx] = int(
+                    control.bridge_level_entry_frame
+                )
+            if int(getattr(control, "bridge_probation_entry_frame", -1)) >= 0:
+                self._bridge_probation_entry_frame[policy_idx] = int(
+                    control.bridge_probation_entry_frame
+                )
+            self._bridge_probation_bad_streak[policy_idx] = int(
+                getattr(control, "bridge_probation_bad_streak", 0) or 0
+            )
+            self._bridge_shrink_count[policy_idx] = int(
+                getattr(control, "bridge_shrink_count", 0) or 0
+            )
+            self._late_rescue_streak[policy_idx] = int(
+                getattr(control, "late_rescue_streak", 0) or 0
+            )
+            # Prefer executed count as the quota-consuming counter.
+            executed = int(getattr(control, "late_rescue_executed_count", 0) or 0)
+            legacy = int(self._late_rescue_count.get(policy_idx, 0))
+            self._late_rescue_executed_count[policy_idx] = max(executed, legacy)
+            self._late_rescue_count[policy_idx] = self._late_rescue_executed_count[
+                policy_idx
+            ]
+            self._late_rescue_attempt_count[policy_idx] = int(
+                getattr(control, "late_rescue_attempt_count", 0) or 0
+            )
+            self._late_rescue_selected_count[policy_idx] = int(
+                getattr(control, "late_rescue_selected_count", 0) or 0
+            )
+            self._late_rescue_blocked_count[policy_idx] = int(
+                getattr(control, "late_rescue_blocked_count", 0) or 0
+            )
+            last_frame = int(getattr(control, "late_rescue_last_frame", -1) or -1)
+            if last_frame >= 0:
+                self._late_rescue_frame[policy_idx] = last_frame
+            ref_tol = float(getattr(control, "retention_reference_tolerance", 0.0) or 0.0)
+            if ref_tol > 1e-9:
+                self._last_confirmed_tolerance[policy_idx] = ref_tol
+        except Exception as exc:
+            print(
+                f"[PBT] bridge state restore skipped for policy {policy_idx}: {exc}"
+            )
+
     def _late_degradation_rescue_ready(
         self, policy_idx: int, *, tolerance: float, nsucc_mean: float, env_frames: int
     ) -> bool:
         if not self.late_degradation_rescue_enable:
             return False
         same = self._same_tol_retention_snapshot(policy_idx, tolerance)
+        executed = int(
+            self._late_rescue_executed_count.get(
+                policy_idx, self._late_rescue_count.get(policy_idx, 0)
+            )
+        )
         eligible = (
             bool(same["valid"])
             and tolerance <= self.late_degradation_rescue_tol_threshold
             and float(same["peak"]) >= self.late_degradation_rescue_peak_threshold
             and nsucc_mean <= self.late_degradation_rescue_current_mean_threshold
             and float(same["retention"]) <= self.late_degradation_rescue_retention_threshold
-            and self._late_rescue_count.get(policy_idx, 0) < self.late_degradation_rescue_max_per_policy
+            and executed < self.late_degradation_rescue_max_per_policy
             and env_frames - self._late_rescue_frame.get(policy_idx, -10**18)
             >= self.late_degradation_rescue_cooldown_frames
         )
@@ -4451,9 +4689,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
     def _select_tolerance_compatible_archive(
         self, *, target_tolerance: float, max_gap: float, min_mean: float,
-        min_retention: float,
+        min_retention: float, require_retention_metadata: bool = False,
     ) -> tuple[dict[str, Any] | None, str]:
         """Reuse existing best_* checkpoint files, filtered by saved tolerance."""
+        reject_log: list[dict[str, Any]] = []
         for directory, kind in (
             (self.best_floor_recovery_workspace, "best_floor_recovery_archive"),
             (self.best_stable_workspace, "best_stable_archive"),
@@ -4462,6 +4701,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             state = select_compatible_archive(
                 directory, target_tolerance=target_tolerance, max_gap=max_gap,
                 min_mean=min_mean, min_retention=min_retention,
+                require_retention_metadata=require_retention_metadata,
+                reject_log=reject_log,
             )
             if state is None:
                 continue
@@ -4471,11 +4712,96 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             if not checkpoint.exists():
                 meta = Path(str(state.get("_archive_metadata_path", "")))
                 checkpoint = meta.with_suffix(".pth")
-            if checkpoint.exists():
-                state["checkpoint"] = str(checkpoint)
-                state["_source_checkpoint_type"] = kind
-                return state, "ok"
+            if not checkpoint.exists():
+                reject_log.append({
+                    "path": str(state.get("_archive_metadata_path", "")),
+                    "reason": "checkpoint_missing",
+                })
+                continue
+            state["checkpoint"] = str(checkpoint)
+            state["_source_checkpoint_type"] = kind
+            state["_archive_reject_log"] = reject_log
+            return state, "ok"
         return None, "no_compatible_archive"
+
+    def _select_late_degradation_rescue_source(
+        self,
+        *,
+        sorted_policies: list[tuple[int, float]],
+        population: dict[int, dict[str, Any] | None],
+        env_frames: int,
+        n_top: int,
+        target_tolerance: float,
+    ) -> dict[str, Any]:
+        """Filter by tolerance compatibility first, then rank quality."""
+        max_gap = float(self.late_degradation_rescue_max_tol_gap)
+        live_candidates: list[tuple[float, int, dict[str, Any]]] = []
+        for src_idx, score in sorted_policies:
+            if int(src_idx) == int(self.policy_idx):
+                continue
+            state = population.get(int(src_idx))
+            if not state:
+                continue
+            src_tol = float(
+                (state.get("curriculum") or {}).get("success_tolerance", float("nan"))
+            )
+            if not math.isfinite(src_tol) or abs(src_tol - target_tolerance) > max_gap:
+                continue
+            if not self._eligible_as_source_with_reason(state, env_frames)[0]:
+                continue
+            nsucc = float(
+                (state.get("curriculum") or {}).get("nsucc_mean", 0.0) or 0.0
+            )
+            live_candidates.append((float(score), int(src_idx), state))
+        live_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        if live_candidates:
+            _score, src_idx, state = live_candidates[0]
+            return {
+                "action": "copy",
+                "tier": "late_rescue_live",
+                "checkpoint_type": "live",
+                "source_policy": int(src_idx),
+                "source_state": state,
+                "strict_candidates": [c[1] for c in live_candidates[:n_top]],
+                "relaxed_candidates": [],
+                "strict_filter_reasons": {},
+                "relaxed_filter_reasons": {},
+                "archive_reason": "late_rescue_tol_filtered",
+            }
+        archive, reason = self._select_tolerance_compatible_archive(
+            target_tolerance=target_tolerance,
+            max_gap=max_gap,
+            min_mean=self.late_degradation_rescue_peak_threshold * 0.5,
+            min_retention=0.5,
+            require_retention_metadata=True,
+        )
+        if archive is not None:
+            return {
+                "action": "copy",
+                "tier": "late_rescue_archive",
+                "checkpoint_type": str(
+                    archive.get("_source_checkpoint_type", "archive")
+                ),
+                "source_policy": int(archive.get("policy_idx", -1)),
+                "source_state": archive,
+                "strict_candidates": [],
+                "relaxed_candidates": [],
+                "strict_filter_reasons": {},
+                "relaxed_filter_reasons": {},
+                "archive_reason": reason,
+            }
+        return {
+            "action": "skip",
+            "tier": "skipped",
+            "checkpoint_type": "none",
+            "source_policy": -1,
+            "source_state": None,
+            "strict_candidates": [],
+            "relaxed_candidates": [],
+            "strict_filter_reasons": {},
+            "relaxed_filter_reasons": {},
+            "archive_reason": "late_degradation_no_compatible_source",
+        }
 
     def _log_best_stable_recovery_outcome(
         self,
@@ -6021,7 +6347,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "policy_idx": int(self.policy_idx),
                 "population_frame": int(population_frame),
                 "target_population_frames": int(self.target_population_frames),
+                "effective_target_population_frames": int(
+                    # ceil onto tick so non-multiples never stop early
+                    ((int(self.target_population_frames) + max(int(self.interval_steps), 1) - 1)
+                     // max(int(self.interval_steps), 1))
+                    * max(int(self.interval_steps), 1)
+                ),
+                "pbt_iteration": int(self.pbt_iteration),
                 "completed_at": time.time(),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
                 "checkpoint": str(own_state.get("checkpoint", "")),
             }, indent=2))
             self._frame_stop_triggered = True
@@ -6875,6 +7209,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         # Phase A4 P3 (2026-06-09): mid-tier promising protection update so
         # workers earn protection before they get pushed into bottom.
+        late_rescue = False
         if tier == "mid":
             self._maybe_enter_promising_protection(
                 self.policy_idx,
@@ -7089,14 +7424,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "pbt/protected_by_skill_delta_gate", 0.0, env_frames
                 )
             # Patch G (2026-05-31): tiered source selection cascade.
-            # `_select_source` produces a fully audited decision dict
-            # covering L1 strict / L2 relaxed / L3 archive / L4 skip.
-            decision = self._select_source(
-                sorted_policies=sorted_policies,
-                population=population,
-                env_frames=env_frames,
-                n_top=n_top,
-            )
+            # Late degradation rescue filters by tolerance compatibility
+            # *before* quality ranking so a slightly worse but compatible
+            # source beats an incompatible top-ranked source.
+            if late_rescue:
+                self._late_rescue_attempt_count[self.policy_idx] = (
+                    int(self._late_rescue_attempt_count.get(self.policy_idx, 0)) + 1
+                )
+                decision = self._select_late_degradation_rescue_source(
+                    sorted_policies=sorted_policies,
+                    population=population,
+                    env_frames=env_frames,
+                    n_top=n_top,
+                    target_tolerance=own_rescue_tol,
+                )
+            else:
+                decision = self._select_source(
+                    sorted_policies=sorted_policies,
+                    population=population,
+                    env_frames=env_frames,
+                    n_top=n_top,
+                )
             self._last_source_tier_label = str(decision["tier"])
             self._last_source_checkpoint_type = str(decision["checkpoint_type"])
             tier_label = self._last_source_tier_label
@@ -7212,6 +7560,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             if decision["action"] == "skip":
                 # IMPORTANT: do not call _restart_process_with_new_params;
                 # the bottom worker keeps training in place.
+                if late_rescue:
+                    self._late_rescue_blocked_count[self.policy_idx] = (
+                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
                 self._last_restart_type = 3  # skipped
                 return
 
@@ -7226,6 +7578,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         f"Policy {self.policy_idx}: skip restart "
                         f"({src_reason})"
                     )
+                    if late_rescue:
+                        self._late_rescue_blocked_count[self.policy_idx] = (
+                            int(self._late_rescue_blocked_count.get(self.policy_idx, 0))
+                            + 1
+                        )
                     self._last_restart_type = 3
                     return
 
@@ -7243,15 +7600,20 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     or abs(source_tol - own_rescue_tol)
                     > self.late_degradation_rescue_max_tol_gap
                 ):
-                    print("Policy %s: skip restart (late_degradation_no_compatible_source)" % self.policy_idx)
+                    print(
+                        "Policy %s: skip restart (late_degradation_no_compatible_source)"
+                        % self.policy_idx
+                    )
+                    self._late_rescue_blocked_count[self.policy_idx] = (
+                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
                     self._last_restart_type = 3
                     return
-                self._late_rescue_count[self.policy_idx] = (
-                    self._late_rescue_count.get(self.policy_idx, 0) + 1
+                self._late_rescue_selected_count[self.policy_idx] = (
+                    int(self._late_rescue_selected_count.get(self.policy_idx, 0)) + 1
                 )
-                self._late_rescue_frame[self.policy_idx] = int(env_frames)
                 self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue",
+                    "event_type": "late_degradation_rescue_selected",
                     "source_type": str(decision.get("checkpoint_type", "live")),
                     "source_policy": source_policy,
                     "target_policy": self.policy_idx,
@@ -7261,7 +7623,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "target_same_tol_retention": self._same_tol_retention_snapshot(
                         self.policy_idx, own_rescue_tol
                     )["retention"],
-                    "rescue_count": self._late_rescue_count[self.policy_idx],
+                    "rescue_selected_count": self._late_rescue_selected_count[
+                        self.policy_idx
+                    ],
                     "env_frames": int(env_frames),
                 })
             source_params = source_state.get("params") or {}
@@ -7276,6 +7640,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "archive",
                 "best_stable_archive",
                 "best_floor_recovery_archive",
+                "late_rescue_archive",
             )
             bypass_burnin = (
                 recovery_tier and self.pbt_recovery_bypass_elimination_burnin
@@ -7288,6 +7653,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     f"frames_since_restart < min_frames_between_restarts="
                     f"{self.min_frames_between_restarts}"
                 )
+                if late_rescue:
+                    self._late_rescue_blocked_count[self.policy_idx] = (
+                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
+                    )
                 if tier_label == "best_stable_archive":
                     self._best_stable_recovery_skipped_count += 1
                     self._log_best_stable_recovery_outcome(
@@ -7621,7 +7990,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         mutation_frozen = int(env_frames) < self._mutation_frozen_until.get(
             self.policy_idx, 0
         )
-        if mutation_frozen:
+        if late_rescue or mutation_frozen:
+            # Late rescue restores a compatible policy; never mutate params.
             new_params = dict(source_params)
         else:
             cons_stage = resolve_pbt_stage(env_frames, self.pbt_consolidation_cfg)
@@ -7631,6 +8001,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             new_params = _mutate_params(
                 source_params, eff_mut_rate, self.change_min, self.change_max
             )
+        if late_rescue:
+            # Quota / cooldown only after we are about to write the restart
+            # manifest and perform the real copy.
+            self._late_rescue_executed_count[self.policy_idx] = (
+                int(self._late_rescue_executed_count.get(self.policy_idx, 0)) + 1
+            )
+            self._late_rescue_count[self.policy_idx] = self._late_rescue_executed_count[
+                self.policy_idx
+            ]
+            self._late_rescue_frame[self.policy_idx] = int(env_frames)
+            self._write_pbt_copy_event({
+                "event_type": "late_degradation_rescue_executed",
+                "source_type": str(decision.get("checkpoint_type", "live")),
+                "source_policy": source_policy,
+                "target_policy": self.policy_idx,
+                "mutation_disabled": True,
+                "rescue_executed_count": self._late_rescue_executed_count[
+                    self.policy_idx
+                ],
+                "env_frames": int(env_frames),
+            })
         # Keep all bounded parameters inside paper-aligned safe ranges even when
         # inherited from an already-diverged source policy.
         for k in list(new_params.keys()):
