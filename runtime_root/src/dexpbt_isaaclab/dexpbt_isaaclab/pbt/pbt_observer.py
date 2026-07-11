@@ -624,6 +624,32 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         late_degradation_rescue_reject_collapse_source: bool = True,
         late_degradation_rescue_require_source_control: bool = True,
         late_degradation_rescue_bypass_elimination_burnin: bool = False,
+        # progress_refine: curriculum-progress consolidation schedule + adaptive
+        # precision probation/rescue.  Defaults keep the frames schedule so all
+        # existing profiles are unaffected.
+        pbt_consolidation_schedule_mode: str = "frames",
+        adaptive_consolidation_stage_consolidation_progress: float = 0.50,
+        adaptive_consolidation_stage_selection_progress: float = 0.85,
+        adaptive_precision_consolidation_enable: bool = False,
+        adaptive_consolidation_tolerance_log_quant: float = 0.05,
+        adaptive_probation_min_frames: int = 200_000_000,
+        adaptive_probation_min_stable_ticks: int = 4,
+        adaptive_probation_min_same_level_retention: float = 0.90,
+        adaptive_probation_block_ordinary_rollback: bool = True,
+        adaptive_probation_allow_hard_collapse_rollback: bool = True,
+        adaptive_probation_hard_collapse_mean: float = 3.0,
+        adaptive_probation_hard_collapse_patience: int = 4,
+        adaptive_rescue_enable: bool = False,
+        adaptive_rescue_retention_threshold: float = 0.70,
+        adaptive_rescue_degradation_patience: int = 3,
+        adaptive_rescue_population_quantile: float = 0.60,
+        adaptive_rescue_source_min_retention: float = 0.85,
+        adaptive_rescue_min_source_advantage_sigma: float = 1.0,
+        adaptive_rescue_max_log_tol_gap: float = 0.20,
+        adaptive_rescue_cooldown_frames: int = 300_000_000,
+        adaptive_rescue_max_per_lineage: int = 1,
+        adaptive_rescue_require_source_control: bool = True,
+        adaptive_rescue_reject_collapse_source: bool = True,
         wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
@@ -1568,7 +1594,76 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             collapse_nsucc_mean_threshold=float(
                 pbt_consolidation_collapse_nsucc_mean_threshold
             ),
+            schedule_mode=str(pbt_consolidation_schedule_mode),
+            stage_consolidation_progress=float(
+                adaptive_consolidation_stage_consolidation_progress
+            ),
+            stage_selection_progress=float(
+                adaptive_consolidation_stage_selection_progress
+            ),
         )
+        # progress_refine: adaptive precision consolidation controller (probation
+        # + retention-conditioned rescue).  Built lazily; state persists via the
+        # curriculum-control JSON.  Inert unless explicitly enabled.
+        self.adaptive_precision_enable = bool(adaptive_precision_consolidation_enable)
+        self._adaptive_curriculum_progress: float | None = None
+        try:
+            from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+                AdaptivePrecisionConfig,
+            )
+
+            self._adaptive_precision_cfg = AdaptivePrecisionConfig(
+                enabled=self.adaptive_precision_enable,
+                tolerance_log_quant=float(adaptive_consolidation_tolerance_log_quant),
+                stage_consolidation_start=float(
+                    adaptive_consolidation_stage_consolidation_progress
+                ),
+                stage_selection_start=float(
+                    adaptive_consolidation_stage_selection_progress
+                ),
+                probation_min_frames=int(adaptive_probation_min_frames),
+                probation_min_stable_ticks=int(adaptive_probation_min_stable_ticks),
+                probation_min_same_level_retention=float(
+                    adaptive_probation_min_same_level_retention
+                ),
+                probation_block_ordinary_rollback=bool(
+                    adaptive_probation_block_ordinary_rollback
+                ),
+                probation_allow_hard_collapse_rollback=bool(
+                    adaptive_probation_allow_hard_collapse_rollback
+                ),
+                probation_hard_collapse_mean=float(adaptive_probation_hard_collapse_mean),
+                probation_hard_collapse_patience=int(
+                    adaptive_probation_hard_collapse_patience
+                ),
+                rescue_enable=bool(adaptive_rescue_enable),
+                rescue_retention_threshold=float(adaptive_rescue_retention_threshold),
+                rescue_degradation_patience=int(adaptive_rescue_degradation_patience),
+                rescue_population_quantile=float(adaptive_rescue_population_quantile),
+                rescue_source_min_retention=float(adaptive_rescue_source_min_retention),
+                rescue_min_source_advantage_sigma=float(
+                    adaptive_rescue_min_source_advantage_sigma
+                ),
+                rescue_max_log_tol_gap=float(adaptive_rescue_max_log_tol_gap),
+                rescue_cooldown_frames=int(adaptive_rescue_cooldown_frames),
+                rescue_max_per_lineage=int(adaptive_rescue_max_per_lineage),
+                rescue_require_source_control=bool(
+                    adaptive_rescue_require_source_control
+                ),
+                rescue_reject_collapse_source=bool(
+                    adaptive_rescue_reject_collapse_source
+                ),
+            )
+        except Exception as _apc_exc:  # never block observer construction
+            print(f"[adaptive-precision] config build failed (disabled): {_apc_exc}")
+            self._adaptive_precision_cfg = None
+            self.adaptive_precision_enable = False
+        # Per-policy adaptive precision runtime state (serialized to control JSON).
+        self._adaptive_probation: dict[int, Any] = {}
+        self._adaptive_retention: dict[int, Any] = {}
+        self._adaptive_degradation_streak: dict[int, int] = {}
+        self._adaptive_last_rescue_frame: dict[int, int] = {}
+        self._adaptive_rescue_executed: dict[int, int] = {}
         self.wm_calibration_enable = bool(wm_calibration_enable)
         # Last decision type the observer emitted at the current PBT tick.
         # 0=none, 1=self, 2=cross, 3=skipped. Used both for TB log and for
@@ -1668,6 +1763,176 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             lineage_id=lineage_id,
         )
 
+    def _adaptive_precision_path(self, policy_idx: int) -> "Path":
+        d = self.workspace / "adaptive_precision"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f"{int(policy_idx):03d}.json"
+
+    def _adaptive_precision_restore(self, policy_idx: int) -> None:
+        """Restore probation / retention / rescue state from the sidecar JSON."""
+        if policy_idx in self._adaptive_probation:
+            return
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            PrecisionRetentionTracker,
+            ProbationState,
+        )
+
+        cfg = self._adaptive_precision_cfg
+        path = self._adaptive_precision_path(policy_idx)
+        data: dict[str, Any] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text()) or {}
+            except Exception:
+                data = {}
+        if data.get("probation"):
+            self._adaptive_probation[policy_idx] = ProbationState.from_json(data["probation"])
+        else:
+            self._adaptive_probation[policy_idx] = ProbationState()
+        if data.get("retention"):
+            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker.from_json(
+                data["retention"]
+            )
+        else:
+            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker(
+                quant=float(cfg.tolerance_log_quant)
+            )
+        self._adaptive_degradation_streak[policy_idx] = int(data.get("degradation_streak", 0))
+        self._adaptive_last_rescue_frame[policy_idx] = int(
+            data.get("last_rescue_frame", -(10**18))
+        )
+        self._adaptive_rescue_executed[policy_idx] = int(data.get("rescue_executed", 0))
+        self._adaptive_prev_tol = getattr(self, "_adaptive_prev_tol", {})
+        self._adaptive_prev_tol[policy_idx] = data.get("prev_tolerance")
+        self._adaptive_eps_init = getattr(self, "_adaptive_eps_init", {})
+        self._adaptive_eps_init[policy_idx] = float(data.get("eps_init", 0.0) or 0.0)
+
+    def _adaptive_precision_persist(self, policy_idx: int) -> None:
+        path = self._adaptive_precision_path(policy_idx)
+        payload = {
+            "policy_idx": int(policy_idx),
+            "probation": self._adaptive_probation[policy_idx].to_json(),
+            "retention": self._adaptive_retention[policy_idx].to_json(),
+            "degradation_streak": int(self._adaptive_degradation_streak.get(policy_idx, 0)),
+            "last_rescue_frame": int(
+                self._adaptive_last_rescue_frame.get(policy_idx, -(10**18))
+            ),
+            "rescue_executed": int(self._adaptive_rescue_executed.get(policy_idx, 0)),
+            "prev_tolerance": getattr(self, "_adaptive_prev_tol", {}).get(policy_idx),
+            "eps_init": float(getattr(self, "_adaptive_eps_init", {}).get(policy_idx, 0.0)),
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(str(tmp), str(path))
+
+    def _adaptive_precision_update(
+        self, *, sample: Any, state: dict[str, Any] | None, env_frames: int
+    ) -> None:
+        """Advance the adaptive precision controller for the current policy.
+
+        Maintains per-precision-band retention, generalized post-shrink
+        probation, and the degradation streak used by rescue.  State survives
+        restart via a sidecar JSON.  Emits ``adaptive_consolidation/*`` metrics.
+        """
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            curriculum_progress as _curr_prog,
+        )
+
+        cfg = self._adaptive_precision_cfg
+        if cfg is None:
+            return
+        pidx = int(self.policy_idx)
+        self._adaptive_precision_restore(pidx)
+
+        cur_tol = float(getattr(sample, "success_tolerance", 0.075) or 0.075)
+        nsucc_mean = float(getattr(sample, "nsucc_mean", 0.0) or 0.0)
+        lineage_id = str(getattr(sample, "lineage_id", "") or "")
+
+        # Target tolerance from the state's curriculum block; fall back to the
+        # configured bridge target (both default to the env target tolerance).
+        target_tol = float(self.bridge_curriculum_target_tol)
+        if isinstance(state, dict):
+            curr = state.get("curriculum") or {}
+            try:
+                target_tol = float(
+                    curr.get("target_tolerance", curr.get("target_success_tolerance", target_tol))
+                )
+            except Exception:
+                pass
+        # Initial (loosest) tolerance = monotonic max observed.
+        eps_init_map = getattr(self, "_adaptive_eps_init", {})
+        eps_init = max(float(eps_init_map.get(pidx, 0.0) or 0.0), cur_tol)
+        eps_init_map[pidx] = eps_init
+        self._adaptive_eps_init = eps_init_map
+
+        c = _curr_prog(eps_init, target_tol, cur_tol, eps=float(cfg.eps))
+        self._adaptive_curriculum_progress = float(c)
+
+        tracker = self._adaptive_retention[pidx]
+        tracker.update(
+            cur_tol, nsucc_mean, lineage_id=lineage_id, reset_on_lineage_change=True
+        )
+        snap = tracker.snapshot(cur_tol, min_samples=1)
+        retention = float(snap["retention"])
+
+        # Detect a stricter shrink -> arm probation for the new precision band.
+        prev_map = getattr(self, "_adaptive_prev_tol", {})
+        prev_tol = prev_map.get(pidx)
+        probation = self._adaptive_probation[pidx]
+        if prev_tol is not None and cur_tol < float(prev_tol) - 1e-9:
+            probation.arm(tolerance=cur_tol, frame=int(env_frames), nsucc_mean=nsucc_mean)
+        prev_map[pidx] = cur_tol
+        self._adaptive_prev_tol = prev_map
+
+        probation.update(
+            nsucc_mean=nsucc_mean,
+            same_level_retention=retention,
+            frame=int(env_frames),
+            cfg=cfg,
+        )
+        probation.maybe_exit(frame=int(env_frames), cfg=cfg)
+
+        # Degradation streak feeds retention-conditioned rescue.
+        if retention < float(cfg.rescue_retention_threshold):
+            self._adaptive_degradation_streak[pidx] = (
+                int(self._adaptive_degradation_streak.get(pidx, 0)) + 1
+            )
+        else:
+            self._adaptive_degradation_streak[pidx] = 0
+
+        self._adaptive_precision_persist(pidx)
+
+        if self.writer is not None:
+            stage = resolve_pbt_stage(
+                int(env_frames), self.pbt_consolidation_cfg, curriculum_progress=c
+            )
+            can_shrink, shrink_block = probation.can_shrink(frame=int(env_frames), cfg=cfg)
+            for name, val in (
+                ("adaptive_consolidation/curriculum_progress", float(c)),
+                ("adaptive_consolidation/stage", float(stage_id(stage))),
+                ("adaptive_consolidation/local_retention", float(retention)),
+                ("adaptive_consolidation/probation_active", 1.0 if probation.active else 0.0),
+                (
+                    "adaptive_consolidation/probation_frames",
+                    float(max(0, int(env_frames) - int(probation.entry_frame)))
+                    if probation.active
+                    else 0.0,
+                ),
+                ("adaptive_consolidation/shrink_blocked", 0.0 if can_shrink else 1.0),
+                (
+                    "adaptive_consolidation/hard_collapse_streak",
+                    float(probation.hard_collapse_streak),
+                ),
+                (
+                    "adaptive_consolidation/degradation_streak",
+                    float(self._adaptive_degradation_streak.get(pidx, 0)),
+                ),
+            ):
+                try:
+                    self.writer.add_scalar(name, val, int(env_frames))
+                except Exception:
+                    pass
+
     def _update_curriculum_windows_and_control(
         self,
         population: dict[int, dict[str, Any] | None],
@@ -1691,6 +1956,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     pbt_iteration=self.pbt_iteration,
                 )
                 window.append(sample)
+                if self.adaptive_precision_enable and policy_idx == self.policy_idx:
+                    try:
+                        self._adaptive_precision_update(
+                            sample=sample, state=state, env_frames=int(env_frames)
+                        )
+                    except Exception as _apc_exc:
+                        print(f"[adaptive-precision] update failed (ignored): {_apc_exc}")
                 if self.same_tol_retention_enable:
                     self._maybe_restore_bridge_state(policy_idx)
                     tracker = self._same_tol_trackers.setdefault(
@@ -6769,6 +7041,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     initial_delay=self.initial_delay,
                     interval_steps=self.interval_steps,
                     cfg=self.pbt_consolidation_cfg,
+                    curriculum_progress=self._adaptive_curriculum_progress,
                 )
             )
             if self.writer is not None:
@@ -7858,7 +8131,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     else 0.0
                 )
                 cons_stage = resolve_pbt_stage(
-                    env_frames, self.pbt_consolidation_cfg
+                    env_frames,
+                    self.pbt_consolidation_cfg,
+                    curriculum_progress=self._adaptive_curriculum_progress,
                 )
                 own_tol = float(
                     ((population.get(self.policy_idx) or {}).get("curriculum") or {})
@@ -8579,7 +8854,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             # Late rescue restores a compatible policy; never mutate params.
             new_params = dict(source_params)
         else:
-            cons_stage = resolve_pbt_stage(env_frames, self.pbt_consolidation_cfg)
+            cons_stage = resolve_pbt_stage(
+                env_frames,
+                self.pbt_consolidation_cfg,
+                curriculum_progress=self._adaptive_curriculum_progress,
+            )
             eff_mut_rate = effective_mutation_rate(
                 self.mutation_rate, cons_stage, self.pbt_consolidation_cfg
             )

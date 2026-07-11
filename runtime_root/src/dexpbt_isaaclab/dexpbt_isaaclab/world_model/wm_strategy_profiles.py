@@ -38,6 +38,8 @@ PROFILE_IDS: dict[str, int] = {
     "cser_dexpbt": 19,
     "cser_dexpbt_conservative": 20,
     "cser_dexpbt_2cm_bridge": 21,
+    # Progress-Conditioned CSER-DexPBT — generalized, curriculum-agnostic method.
+    "cser_dexpbt_progress_refine": 22,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -96,6 +98,11 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "CSER conservative with tolerance-local retention, 2cm ladder/probation, "
         "and conservative late-degradation rescue."
     ),
+    "cser_dexpbt_progress_refine": (
+        "CSER with row-wise progress-conditioned refinement, continuous "
+        "tolerance-conditioned retrieval, and adaptive curriculum-aware "
+        "population consolidation."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -119,6 +126,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "cser_dexpbt": "unified",
     "cser_dexpbt_conservative": "unified",
     "cser_dexpbt_2cm_bridge": "unified",
+    "cser_dexpbt_progress_refine": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -141,6 +149,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "unified_elite_wm_pbt": 1.0,
     "cser_dexpbt": 1.0,
     "cser_dexpbt_conservative": 1.0,
+    "cser_dexpbt_progress_refine": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -803,6 +812,77 @@ _CSER_DEXPBT_2CM_BRIDGE: dict[str, Any] = {
     "eir_mppi_mode": "off",
 }
 
+_CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
+    # Inherit the *generic* conservative substrate (elite snippet bank, first-step
+    # distillation, WM calibration rerank, actor-distill fallback, PBT source
+    # safety, conservative consolidation, hard safety flags) but NOT the 2cm
+    # bridge / fixed-ladder / fixed-threshold rescue control plane.
+    **_CSER_DEXPBT_CONSERVATIVE,
+    # --- turn OFF the fixed-ladder / fixed-threshold control plane ---
+    "bridge_curriculum_enable": False,
+    "bridge_probation_enable": False,
+    "same_tol_retention_enable": False,
+    "late_degradation_rescue_enable": False,
+    "late_floor_retention_gate_enable": False,
+    "pre_floor_peak_guard_enable": False,
+    "snippet_adjacent_stage_mixing_enable": False,
+    # --- progress-conditioned refinement gate ---
+    "progress_refinement_enable": True,
+    "progress_refinement_history_steps": 8,
+    "progress_refinement_proximity_temperature": 1.0,
+    "progress_refinement_progress_margin": 0.02,
+    "progress_refinement_progress_temperature": 0.05,
+    "progress_refinement_oscillation_enable": True,
+    "progress_refinement_oscillation_center": 0.10,
+    "progress_refinement_oscillation_temperature": 0.05,
+    "progress_refinement_start_after_frames": 300_000_000,
+    "progress_refinement_ramp_frames": 300_000_000,
+    "progress_refinement_only_lifted": True,
+    "progress_refinement_min_gate_for_retrieval": 0.05,
+    "progress_refinement_max_active_fraction": 0.35,
+    "progress_refinement_teacher_margin_temperature": 0.05,
+    "progress_refinement_min_teacher_confidence": 0.05,
+    "progress_refinement_detach_gate": True,
+    # --- relative-tolerance recovery labels ---
+    "eir_dhat_margin_mode": "relative_tol",
+    "eir_dhat_improve_margin_relative": 0.25,
+    "eir_drop_dhat_margin_relative": 0.50,
+    # --- continuous log-relative tolerance retrieval ---
+    "snippet_tolerance_compatibility_enable": True,
+    "snippet_tolerance_compatibility_mode": "log_relative",
+    "snippet_tolerance_max_log_gap": 0.20,
+    "snippet_tolerance_log_soft_scale": 0.10,
+    "snippet_retrieve_lambda_sim": 1.0,
+    "snippet_retrieve_lambda_priority": 0.5,
+    "snippet_retrieve_lambda_tol": 0.5,
+    "snippet_retrieve_lambda_progress": 0.25,
+    "snippet_progress_priority_weight": 0.5,
+    # --- adaptive curriculum-progress consolidation + probation + rescue ---
+    "adaptive_precision_consolidation_enable": True,
+    "pbt_consolidation_schedule_mode": "curriculum_progress",
+    "adaptive_consolidation_stage_consolidation_progress": 0.50,
+    "adaptive_consolidation_stage_selection_progress": 0.85,
+    "adaptive_probation_min_frames": 200_000_000,
+    "adaptive_probation_min_stable_ticks": 4,
+    "adaptive_probation_min_same_level_retention": 0.90,
+    "adaptive_rescue_enable": True,
+    "adaptive_rescue_retention_threshold": 0.70,
+    "adaptive_rescue_degradation_patience": 3,
+    "adaptive_rescue_population_quantile": 0.60,
+    "adaptive_rescue_source_min_retention": 0.85,
+    "adaptive_rescue_min_source_advantage_sigma": 1.0,
+    "adaptive_rescue_max_log_tol_gap": 0.20,
+    "adaptive_rescue_cooldown_frames": 300_000_000,
+    "adaptive_rescue_max_per_lineage": 1,
+    # --- hard-off guards (defense in depth vs restart pollution) ---
+    "pbt_allow_mid_self_mutation": False,
+    "pbt_wm_profile_copy_enable": False,
+    "awr_enable": False,
+    "eir_residual_apply_to_rollout": False,
+    "eir_use_rssm_mppi": False,
+    "eir_mppi_mode": "off",
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -824,6 +904,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "cser_dexpbt": _CSER_DEXPBT,
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
     "cser_dexpbt_2cm_bridge": _CSER_DEXPBT_2CM_BRIDGE,
+    "cser_dexpbt_progress_refine": _CSER_DEXPBT_PROGRESS_REFINE,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

@@ -36,6 +36,12 @@ class PbtConsolidationConfig:
     stage3_hard_collapse_only: bool = True
     stage2_retention_threshold: float = 0.85
     collapse_nsucc_mean_threshold: float = 1.0
+    # Schedule keying: "frames" (legacy, default for all old profiles) or
+    # "curriculum_progress" (progress_refine).  In curriculum_progress mode the
+    # stage boundaries below are dimensionless curriculum progress c in [0, 1].
+    schedule_mode: str = "frames"
+    stage_consolidation_progress: float = 0.50
+    stage_selection_progress: float = 0.85
 
 
 @dataclass
@@ -50,10 +56,27 @@ class BottomRestartContext:
     late_degradation_rescue: bool = False
 
 
-def resolve_pbt_stage(raw_frame: int, cfg: PbtConsolidationConfig) -> str:
-    """Return consolidation stage name for a population env frame."""
+def resolve_pbt_stage(
+    raw_frame: int,
+    cfg: PbtConsolidationConfig,
+    *,
+    curriculum_progress: float | None = None,
+) -> str:
+    """Return consolidation stage name.
+
+    In ``frames`` mode the stage is keyed on the population env frame (legacy).
+    In ``curriculum_progress`` mode the stage is keyed on the dimensionless
+    curriculum progress ``c`` (falls back to frames when ``c`` is unavailable).
+    """
     if not cfg.enabled:
         return STAGE_EXPLORATION
+    if str(cfg.schedule_mode) == "curriculum_progress" and curriculum_progress is not None:
+        c = float(curriculum_progress)
+        if c < float(cfg.stage_consolidation_progress):
+            return STAGE_EXPLORATION
+        if c < float(cfg.stage_selection_progress):
+            return STAGE_CONSOLIDATION
+        return STAGE_SELECTION
     f = int(raw_frame)
     if f < int(cfg.stage1_end_frames):
         return STAGE_EXPLORATION
@@ -99,9 +122,10 @@ def evaluate_consolidated_tick(
     initial_delay: int,
     interval_steps: int,
     cfg: PbtConsolidationConfig,
+    curriculum_progress: float | None = None,
 ) -> tuple[bool, int, str, str, int]:
     """Return (should_tick, derived_iteration, skip_reason, stage, effective_interval)."""
-    stage = resolve_pbt_stage(raw_frame, cfg)
+    stage = resolve_pbt_stage(raw_frame, cfg, curriculum_progress=curriculum_progress)
     eff_interval = effective_tick_interval(interval_steps, stage, cfg)
     should_tick, derived, skip_reason = evaluate_pbt_tick_schedule(
         raw_frame=int(raw_frame),
@@ -157,12 +181,20 @@ def should_allow_bottom_restart(
     return True, ""
 
 
-def consolidation_meta(raw_frame: int, cfg: PbtConsolidationConfig) -> dict[str, Any]:
-    stage = resolve_pbt_stage(raw_frame, cfg)
+def consolidation_meta(
+    raw_frame: int,
+    cfg: PbtConsolidationConfig,
+    *,
+    curriculum_progress: float | None = None,
+) -> dict[str, Any]:
+    stage = resolve_pbt_stage(raw_frame, cfg, curriculum_progress=curriculum_progress)
     return {
         "stage": stage,
         "stage_id": stage_id(stage),
         "raw_frame": int(raw_frame),
+        "curriculum_progress": (
+            float(curriculum_progress) if curriculum_progress is not None else -1.0
+        ),
     }
 
 

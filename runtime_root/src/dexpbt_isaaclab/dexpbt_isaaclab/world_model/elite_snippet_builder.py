@@ -27,6 +27,13 @@ class SnippetBatch:
     i0: torch.Tensor
     d0: torch.Tensor
     d1: torch.Tensor
+    # Progress-conditioned refinement context (defaults to neutral zeros so old
+    # callers / caches without a progress config keep working unchanged).
+    normalized_error: Optional[torch.Tensor] = None
+    recent_progress: Optional[torch.Tensor] = None
+    oscillation: Optional[torch.Tensor] = None
+    progress_history_valid: Optional[torch.Tensor] = None
+    normalized_improvement: Optional[torch.Tensor] = None
 
 
 class SnippetTargetBuilder:
@@ -87,12 +94,30 @@ class SnippetTargetBuilder:
         act_snip = torch.stack([actions[idx + h] for h in range(H)], dim=1)
         closest = torch.stack([d_hat[idx + h] for h in range(H)], dim=1).min(dim=1).values
         recovery = ((s0[idx] > 0.5) | (s1[idx] > 0.5) | (i0[idx] > 0.5)).float()
+
+        # Progress context: read pre-computed flat fields when the cache carries
+        # them (progress config enabled); otherwise fall back to neutral zeros.
+        def ctx(name: str) -> torch.Tensor:
+            t = getattr(cache, name, None)
+            if t is None:
+                return torch.zeros(m, device=dev)
+            return t.reshape(n_flat).to(device=dev)[idx]
+
+        norm_err = ctx("normalized_error_flat")
+        recent_prog = ctx("recent_progress_flat")
+        osc = ctx("oscillation_flat")
+        hist_valid = ctx("progress_history_valid_flat")
+        # Normalized improvement over the snippet horizon: (d_t - min_j d_{t+j}) / eps_t.
+        eps = 1e-6
+        norm_improve = (d_hat[idx] - closest) / (tol[idx].clamp_min(0.0) + eps).clamp_min(eps)
         return SnippetBatch(
             feat_start=feature_flat[idx], actions=act_snip.clamp(-1.0, 1.0),
             d_hat=d_hat[idx], success_tol=tol[idx], lifted=lifted[idx],
             picked=picked[idx], dropped=dropped[idx], closest_d_hat=closest,
             success_h=s1[idx], improve_h=i0[idx], drop_h=d1[idx], recovery_label=recovery,
             s0=s0[idx], s1=s1[idx], i0=i0[idx], d0=d0[idx], d1=d1[idx],
+            normalized_error=norm_err, recent_progress=recent_prog, oscillation=osc,
+            progress_history_valid=hist_valid, normalized_improvement=norm_improve,
         )
 
     @staticmethod
@@ -103,4 +128,6 @@ class SnippetTargetBuilder:
             feat_start=z1, actions=z1.new_zeros(0, 1, 1), d_hat=z0, success_tol=z0,
             lifted=z0, picked=z0, dropped=z0, closest_d_hat=z0, success_h=z0,
             improve_h=z0, drop_h=z0, recovery_label=z0, s0=z0, s1=z0, i0=z0, d0=z0, d1=z0,
+            normalized_error=z0, recent_progress=z0, oscillation=z0,
+            progress_history_valid=z0, normalized_improvement=z0,
         )

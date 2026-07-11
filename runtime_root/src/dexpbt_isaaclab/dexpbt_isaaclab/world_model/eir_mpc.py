@@ -900,6 +900,9 @@ class EIRBridge:
     last_snippet_distill_active_frac: float = 0.0
     last_snippet_wm_rerank_changed_frac: float = 0.0
     last_snippet_wm_rerank_wm_term_mean: float = 0.0
+    # Progress-conditioned refinement telemetry.
+    progress_refine_cfg: Any = None
+    last_progress_refine: dict = field(default_factory=dict)
     last_bank_metrics: dict = field(default_factory=dict)
     last_bank_update_diagnostics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
@@ -1225,6 +1228,247 @@ def _alpha_wm_from_bridge(bridge: EIRBridge) -> float:
     return float(getattr(st, "alpha_wm", 0.0))
 
 
+def _compute_snippet_distill_loss_progress(
+    bridge: EIRBridge,
+    *,
+    eir_cfg: EIRConfig,
+    cache: Any,
+    feat: torch.Tensor,
+    risky: torch.Tensor,
+    frames: int,
+    start: int,
+    end: int,
+) -> torch.Tensor:
+    """Progress-conditioned snippet distillation (cser_dexpbt_progress_refine).
+
+    Row weight is ``w_t = g_t * c_teacher_t * I_retrieval_t`` where ``g_t`` is the
+    scale-invariant progress gate, ``c_teacher_t`` the continuous teacher
+    confidence, and ``I_retrieval_t`` the per-row retrieval-valid indicator.
+    Retrieval uses the batched log-relative tolerance API and is only run for
+    rows whose gate clears the retrieval budget (compute-budget control); the
+    gate statistics are computed over all risky rows.
+    """
+    from .snippet_distill import compute_snippet_distill_loss
+    from .snippet_wm_reranker import (
+        effective_alpha_wm,
+        score_snippet_candidates,
+        wm_head_probs_for_candidates,
+    )
+    from .progress_conditioned_refinement import (
+        compute_refinement_gate,
+        select_retrieval_rows,
+        teacher_confidence,
+    )
+
+    pcfg = bridge.progress_refine_cfg
+    sd_cfg = bridge.snippet_distill_cfg
+    bank = bridge.snippet_bank
+    dev, dtype = feat.device, feat.dtype
+    zero = feat.new_zeros(())
+
+    def _slice(name: str) -> Optional[torch.Tensor]:
+        t = getattr(cache, name, None)
+        if t is None:
+            return None
+        return t[start:end].to(device=dev)[risky]
+
+    norm_err = _slice("normalized_error_flat")
+    recent = _slice("recent_progress_flat")
+    osc = _slice("oscillation_flat")
+    hist = _slice("progress_history_valid_flat")
+    if norm_err is None or hist is None:
+        bridge.last_actor_distill_fallback_reason = "progress_context_missing"
+        bridge.last_snippet_distill_loss = 0.0
+        bridge.last_progress_refine = {"progress_refine/fallback_frac": 1.0}
+        return zero
+    if recent is None:
+        recent = torch.zeros_like(norm_err)
+    if osc is None:
+        osc = torch.zeros_like(norm_err)
+    lifted = None
+    if getattr(cache, "lifted_flat", None) is not None:
+        lifted = cache.lifted_flat[start:end].to(device=dev)[risky]
+    tol_r = cache.success_tol_flat[start:end].to(device=dev)[risky].float()
+    feat_r = feat.detach()[risky]
+    R = int(feat_r.shape[0])
+
+    gate_res = compute_refinement_gate(
+        normalized_error=norm_err,
+        recent_progress=recent,
+        oscillation=osc,
+        history_valid=hist,
+        frames=int(frames),
+        cfg=pcfg,
+        lifted=lifted,
+    )
+    gate = gate_res.gate.to(dtype)
+    retr_mask, budget_frac = select_retrieval_rows(gate, pcfg)
+
+    a2c = _get_a2c_network(bridge.agent_ref)
+
+    def _mu_fn(f):
+        mu = a2c.mu(f)
+        mu_act = getattr(a2c, "mu_act", None)
+        return mu_act(mu) if mu_act is not None else mu
+
+    mu_r = _mu_fn(feat_r).detach()
+    action_dim = int(mu_r.shape[-1])
+    teacher_first = mu_r.clone()  # zero-weight rows stay no-ops (teacher == actor)
+    retrieval_valid = torch.zeros(R, device=dev, dtype=dtype)
+    conf = torch.zeros(R, device=dev, dtype=dtype)
+    fallback_rows = 0
+
+    sel_idx = retr_mask.nonzero(as_tuple=False).reshape(-1)
+    rerank_changed_frac = 0.0
+    wm_term_mean = 0.0
+    retr_diag: dict[str, float] = {}
+    if int(sel_idx.numel()) > 0:
+        res = bank.retrieve_candidates_batched(
+            feat_r[sel_idx],
+            query_tolerance=tol_r[sel_idx],
+            normalized_error=norm_err[sel_idx],
+            recent_progress=recent[sel_idx],
+            k=int(getattr(sd_cfg, "topk", 8)),
+        )
+        retr_diag = dict(res.diagnostics)
+        cand_first = res.actions[:, :, 0, :]  # [n, k, A]
+        pri = res.priority  # [n, k]
+        sim = res.similarity  # [n, k]
+        tolw = res.tolerance_weight  # [n, k]
+        eps = 1e-6
+        base = (
+            float(bank.cfg.retrieve_lambda_sim) * sim
+            + float(bank.cfg.retrieve_lambda_priority) * torch.log1p(pri.clamp_min(0.0))
+            + float(bank.cfg.retrieve_lambda_tol) * torch.log(tolw.clamp_min(0.0) + eps)
+        )  # [n, k] pre-WM candidate score
+        mu_sel = mu_r[sel_idx]  # [n, A]
+        action_delta = ((cand_first - mu_sel[:, None, :]) ** 2).sum(dim=-1)  # [n, k]
+
+        best_idx = pri.argmax(dim=1)
+        unc = None
+        alpha_wm = effective_alpha_wm(
+            wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
+            alpha_wm=_alpha_wm_from_bridge(bridge),
+        )
+        rerank_cfg = bridge.snippet_wm_rerank_cfg
+        if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
+            belief_r = _belief_for_risky_rows(
+                bridge, start=start, end=end, risky=risky, device=dev, dtype=dtype
+            )
+            if belief_r is not None:
+                belief_sel = belief_r[sel_idx]
+            else:
+                belief_sel = feat_r[sel_idx]
+            p_rec, p_succ, p_drop, unc = wm_head_probs_for_candidates(
+                belief_flat=belief_sel,
+                cand_first_actions=cand_first,
+                predict_fn=bridge.rssm_predict_fn,
+            )
+            best_idx, rerank_diag = score_snippet_candidates(
+                priority=pri,
+                p_recovery=p_rec,
+                p_success=p_succ,
+                p_drop=p_drop,
+                uncertainty=unc,
+                action_delta=action_delta,
+                alpha_wm=alpha_wm,
+                cfg=rerank_cfg,
+            )
+            rerank_changed_frac = float(rerank_diag.get("snippet_wm_rerank/changed_frac", 0.0))
+            wm_term_mean = float(rerank_diag.get("snippet_wm_rerank/wm_term_mean", 0.0))
+
+        n = int(sel_idx.numel())
+        ar = torch.arange(n, device=dev)
+        teacher_sel = cand_first[ar, best_idx]  # [n, A]
+        # Margin: best candidate score vs the candidate most like the actor.
+        score_best = base.max(dim=1).values
+        actor_like = action_delta.argmin(dim=1)
+        score_actor = base[ar, actor_like]
+        wm_unc_best = None
+        if unc is not None:
+            wm_unc_best = unc[ar, best_idx].clamp(0.0, 1.0)
+        rv = res.valid_mask.to(dtype)
+        c_sel, c_diag = teacher_confidence(
+            score_best=score_best,
+            score_actor=score_actor,
+            cfg=pcfg,
+            wm_uncertainty=wm_unc_best,
+            alpha_wm=float(alpha_wm),
+            retrieval_valid=rv,
+        )
+        # Rows that failed retrieval fall back (no compatible snippet).
+        fallback_rows = int((rv <= 0.5).sum().item())
+        teacher_first[sel_idx] = torch.where(
+            rv[:, None] > 0.5, teacher_sel, teacher_first[sel_idx]
+        )
+        retrieval_valid[sel_idx] = rv
+        conf[sel_idx] = c_sel.to(dtype)
+
+    # Continuous row weight w = gate * teacher_confidence * retrieval_valid.
+    row_weight = gate * conf * retrieval_valid
+    loss, stats = compute_snippet_distill_loss(
+        mu_fn=_mu_fn,
+        feat_start=feat_r,
+        teacher_first_action=teacher_first,
+        cfg=sd_cfg,
+        row_weight=row_weight,
+        min_gate=float(pcfg.min_gate_for_retrieval),
+    )
+
+    valid_r = float(retrieval_valid.mean().item()) if R else 0.0
+    fallback_frac = float(fallback_rows) / float(max(int(sel_idx.numel()), 1))
+    bridge.last_snippet_distill_loss = float(stats.get("snippet_distill/loss", 0.0))
+    bridge.last_snippet_distill_active_frac = float(stats.get("snippet_distill/active_frac", 0.0))
+    bridge.last_snippet_wm_rerank_changed_frac = float(rerank_changed_frac)
+    bridge.last_snippet_wm_rerank_wm_term_mean = float(wm_term_mean)
+    bridge.last_snippet_retrieval_valid = valid_r
+    bridge.last_snippet_no_tolerance_compatible = float(
+        retr_diag.get("snippet_retrieval/no_compatible_frac", 0.0)
+    )
+    if valid_r <= 0.0:
+        bridge.last_actor_distill_fallback_reason = "no_compatible_or_low_gate"
+    bridge.last_progress_refine = {
+        "progress_refine/gate_mean": float(gate.mean().item()) if R else 0.0,
+        "progress_refine/gate_p50": float(torch.quantile(gate, 0.5).item()) if R else 0.0,
+        "progress_refine/gate_p90": float(torch.quantile(gate, 0.9).item()) if R else 0.0,
+        "progress_refine/active_frac": float(stats.get("snippet_distill/weight_pos_frac", 0.0)),
+        "progress_refine/history_valid_frac": float(gate_res.history_valid.mean().item()) if R else 0.0,
+        "progress_refine/normalized_error_mean": float(norm_err.mean().item()) if R else 0.0,
+        "progress_refine/normalized_error_active_mean": float(
+            (norm_err * (row_weight > 0).float()).sum().item()
+            / max(float((row_weight > 0).float().sum().item()), 1.0)
+        ),
+        "progress_refine/recent_progress_mean": float(recent.mean().item()) if R else 0.0,
+        "progress_refine/recent_progress_active_mean": float(
+            (recent * (row_weight > 0).float()).sum().item()
+            / max(float((row_weight > 0).float().sum().item()), 1.0)
+        ),
+        "progress_refine/oscillation_mean": float(osc.mean().item()) if R else 0.0,
+        "progress_refine/teacher_confidence_mean": float(conf.mean().item()) if R else 0.0,
+        "progress_refine/teacher_margin_mean": float(conf.mean().item()) if R else 0.0,
+        "progress_refine/retrieval_valid_frac": valid_r,
+        "progress_refine/retrieval_budget_frac": float(budget_frac),
+        "progress_refine/effective_sample_size": float(
+            stats.get("snippet_distill/effective_sample_size", 0.0)
+        ),
+        "progress_refine/loss": float(stats.get("snippet_distill/loss", 0.0)),
+        "progress_refine/fallback_frac": float(fallback_frac),
+        "progress_refine/nonfinite_count": float(
+            gate_res.nonfinite_count + int(stats.get("snippet_distill/nonfinite_count", 0.0))
+        ),
+        "snippet_retrieval/tolerance_weight_mean": float(
+            retr_diag.get("snippet_retrieval/tolerance_weight_mean", 0.0)
+        ),
+        "snippet_retrieval/log_tolerance_gap_mean": float(
+            retr_diag.get("snippet_retrieval/log_tolerance_gap_mean", 0.0)
+        ),
+        "snippet_retrieval/no_compatible_frac": float(
+            retr_diag.get("snippet_retrieval/no_compatible_frac", 0.0)
+        ),
+    }
+    return loss
+
+
 def _compute_snippet_distill_loss(
     bridge: EIRBridge,
     *,
@@ -1251,6 +1495,19 @@ def _compute_snippet_distill_loss(
         return feat.new_zeros(())
     if not bool(risky.any()):
         return feat.new_zeros(())
+
+    pcfg = getattr(bridge, "progress_refine_cfg", None)
+    if pcfg is not None and bool(getattr(pcfg, "enabled", False)):
+        return _compute_snippet_distill_loss_progress(
+            bridge,
+            eir_cfg=eir_cfg,
+            cache=cache,
+            feat=feat,
+            risky=risky,
+            frames=frames,
+            start=start,
+            end=end,
+        )
 
     feat_r = feat.detach()[risky]
     a2c = _get_a2c_network(bridge.agent_ref)
