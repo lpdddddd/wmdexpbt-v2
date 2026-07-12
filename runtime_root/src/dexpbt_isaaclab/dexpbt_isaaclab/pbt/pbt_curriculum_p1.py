@@ -329,6 +329,12 @@ class CurriculumControlState:
     adaptive_rescue_last_frame: int = -1
     adaptive_rescue_lineage_id: str = ""
     adaptive_rescue_executed_for_lineage: int = 0
+    adaptive_probation_hard_collapse_trigger_source: str = ""
+    adaptive_probation_hard_collapse_independent: bool = False
+    adaptive_probation_legacy_collapse_also_active: bool = False
+    adaptive_probation_freeze_only_streak: int = 0
+    adaptive_rollback_target_source: str = ""
+    adaptive_rollback_log_gap: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

@@ -82,6 +82,25 @@ class AdaptivePrecisionConfig:
     rescue_max_per_lineage: int = 1
     rescue_require_source_control: bool = True
     rescue_reject_collapse_source: bool = True
+    # Source retention validity (single-sample retention==1 is not enough).
+    rescue_source_min_samples: int = 3
+    rescue_source_min_stable_ticks: int = 2
+    # Peer sidecar freshness.
+    rescue_source_max_staleness_frames: int = 40_000_000
+    rescue_require_lineage_match_with_checkpoint: bool = True
+    # Archive rescue cascade.
+    rescue_archive_enable: bool = True
+    rescue_archive_max_age_frames: int = 1_000_000_000
+    rescue_archive_require_retention: bool = True
+    rescue_archive_min_nsucc_mean: float = 0.0
+    # Emergency burn-in bypass (off by default for ordinary degradation).
+    rescue_bypass_elimination_burnin: bool = False
+    rescue_bypass_on_hard_collapse: bool = True
+    rescue_min_frames_before_emergency_bypass: int = 40_000_000
+    rescue_emergency_require_archive_or_stable_source: bool = True
+    # Probation rollback target selection.
+    probation_rollback_max_log_gap: float = 0.30
+    probation_freeze_only_max_ticks: int = 3
     # Internal: when True, derive top_fraction from rescue_population_quantile.
     _derive_top_fraction_from_quantile: bool = False
 
@@ -118,6 +137,14 @@ class AdaptivePrecisionConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if not (self.rescue_max_log_tol_gap >= 0):
             raise ValueError("rescue_max_log_tol_gap must be >= 0")
+        if not (self.probation_rollback_max_log_gap >= 0):
+            raise ValueError("probation_rollback_max_log_gap must be >= 0")
+        if int(self.rescue_source_min_samples) < 1:
+            raise ValueError("rescue_source_min_samples must be >= 1")
+        if int(self.rescue_source_min_stable_ticks) < 0:
+            raise ValueError("rescue_source_min_stable_ticks must be >= 0")
+        if int(self.probation_freeze_only_max_ticks) < 0:
+            raise ValueError("probation_freeze_only_max_ticks must be >= 0")
 
 
 def rescue_source_top_k(population_size: int, top_fraction: float) -> int:
@@ -184,13 +211,23 @@ class PrecisionRetentionState:
     sample_count: int = 0
     peak_nsucc_mean: float = 0.0
     last_nsucc_mean: float = 0.0
+    stable_ticks: int = 0
 
-    def update(self, nsucc_mean: float) -> None:
+    def update(
+        self,
+        nsucc_mean: float,
+        *,
+        min_retention_for_stable: float = 0.85,
+    ) -> None:
         v = _finite(nsucc_mean)
         self.sample_count += 1
         self.last_nsucc_mean = v
         if v > self.peak_nsucc_mean:
             self.peak_nsucc_mean = v
+        if self.retention >= float(min_retention_for_stable) and self.peak_nsucc_mean > 0:
+            self.stable_ticks += 1
+        else:
+            self.stable_ticks = 0
 
     @property
     def retention(self) -> float:
@@ -221,25 +258,43 @@ class PrecisionRetentionTracker:
         *,
         lineage_id: Optional[str] = None,
         reset_on_lineage_change: bool = True,
+        min_retention_for_stable: float = 0.85,
     ) -> PrecisionRetentionState:
         if lineage_id is not None and reset_on_lineage_change and str(lineage_id) != self.lineage_id:
             self.states.clear()
             self.lineage_id = str(lineage_id)
         key = self._key(tolerance)
         st = self.states.setdefault(key, PrecisionRetentionState())
-        st.update(nsucc_mean)
+        st.update(nsucc_mean, min_retention_for_stable=float(min_retention_for_stable))
         return st
 
-    def snapshot(self, tolerance: float, *, min_samples: int = 1) -> dict[str, Any]:
+    def snapshot(
+        self,
+        tolerance: float,
+        *,
+        min_samples: int = 1,
+        min_stable_ticks: int = 0,
+    ) -> dict[str, Any]:
         st = self.states.get(self._key(tolerance))
         if st is None:
-            return {"valid": False, "retention": 1.0, "peak": 0.0, "last": 0.0, "samples": 0}
+            return {
+                "valid": False,
+                "retention": 1.0,
+                "peak": 0.0,
+                "last": 0.0,
+                "samples": 0,
+                "stable_ticks": 0,
+            }
         return {
-            "valid": bool(st.sample_count >= int(min_samples)),
+            "valid": bool(
+                st.sample_count >= int(min_samples)
+                and int(st.stable_ticks) >= int(min_stable_ticks)
+            ),
             "retention": st.retention,
             "peak": st.peak_nsucc_mean,
             "last": st.last_nsucc_mean,
             "samples": st.sample_count,
+            "stable_ticks": int(st.stable_ticks),
         }
 
     def reset(self) -> None:
@@ -456,8 +511,11 @@ def select_rescue_source(
         s_rank_score = _finite(cand.get("ranking_score", float("nan")), float("nan"))
         has_control = bool(cand.get("has_control", False))
         collapsed = bool(cand.get("collapsed", False))
+        retention_valid = bool(cand.get("retention_valid", False))
         if any(math.isnan(x) for x in (s_mean, s_ret, s_tol, s_rank_score)):
             continue  # non-finite -> reject
+        if not retention_valid:
+            continue
         if cfg.rescue_require_source_control and not has_control:
             continue
         if cfg.rescue_reject_collapse_source and collapsed:
@@ -494,3 +552,200 @@ def select_rescue_source(
     if best is None:
         return RescueDecision(eligible=False, reason="no_compatible_source")
     return best
+
+
+
+# ---------------------------------------------------------------------------
+# Adaptive hard-collapse rollback target selection (ladder-free, log-gap capped)
+# ---------------------------------------------------------------------------
+
+ROLLBACK_SOURCE_NONE = 0
+ROLLBACK_SOURCE_PREVIOUS = 1
+ROLLBACK_SOURCE_SOURCE_TOL = 2
+ROLLBACK_SOURCE_LAST_MASTERED_SAFE = 3
+ROLLBACK_SOURCE_SCALE_FALLBACK = 4
+
+ROLLBACK_SOURCE_NAME = {
+    ROLLBACK_SOURCE_NONE: "none",
+    ROLLBACK_SOURCE_PREVIOUS: "previous_tolerance",
+    ROLLBACK_SOURCE_SOURCE_TOL: "source_tolerance",
+    ROLLBACK_SOURCE_LAST_MASTERED_SAFE: "last_mastered_safe",
+    ROLLBACK_SOURCE_SCALE_FALLBACK: "scale_fallback",
+}
+
+
+@dataclass
+class AdaptiveRollbackDecision:
+    eligible: bool
+    target_tolerance: float
+    source: str
+    source_id: int
+    log_gap: float
+    reason: str
+
+
+def select_adaptive_rollback_target(
+    *,
+    current_tolerance: float,
+    previous_tolerance_before_entry: float | None,
+    source_tolerance: float | None,
+    last_mastered_safe_tolerance: float | None,
+    initial_tolerance: float | None,
+    shrink_factor: float,
+    max_log_gap: float,
+    eps: float = 1e-6,
+) -> AdaptiveRollbackDecision:
+    """Pick a locally wider rollback target with fixed priority + log-gap cap.
+
+    Priority (first legal wins — never ``max(wider)``):
+      1. previous_tolerance_before_entry
+      2. source_tolerance
+      3. last_mastered_safe_tolerance
+      4. scale-derived fallback ``current / shrink_factor`` (capped by initial)
+    """
+    cur = _finite(current_tolerance, float("nan"))
+    if not math.isfinite(cur) or cur <= 0:
+        return AdaptiveRollbackDecision(
+            eligible=False,
+            target_tolerance=0.0,
+            source="none",
+            source_id=ROLLBACK_SOURCE_NONE,
+            log_gap=0.0,
+            reason="current_tolerance_invalid",
+        )
+    sf = float(shrink_factor)
+    if not (0.0 < sf < 1.0):
+        return AdaptiveRollbackDecision(
+            eligible=False,
+            target_tolerance=0.0,
+            source="none",
+            source_id=ROLLBACK_SOURCE_NONE,
+            log_gap=0.0,
+            reason="shrink_factor_invalid",
+        )
+    init = _finite(initial_tolerance, float("nan")) if initial_tolerance is not None else float("nan")
+    max_gap = float(max_log_gap)
+
+    def _ok(cand: float | None) -> tuple[bool, float, float]:
+        if cand is None:
+            return False, 0.0, 0.0
+        t = _finite(cand, float("nan"))
+        if not math.isfinite(t) or t <= cur + eps:
+            return False, 0.0, 0.0
+        gap = log_tolerance_gap(t, cur, eps=eps)
+        if gap > max_gap + 1e-12:
+            return False, t, gap
+        return True, t, gap
+
+    ordered = [
+        (ROLLBACK_SOURCE_PREVIOUS, previous_tolerance_before_entry),
+        (ROLLBACK_SOURCE_SOURCE_TOL, source_tolerance),
+        (ROLLBACK_SOURCE_LAST_MASTERED_SAFE, last_mastered_safe_tolerance),
+    ]
+    for src_id, cand in ordered:
+        ok, t, gap = _ok(cand)
+        if ok:
+            return AdaptiveRollbackDecision(
+                eligible=True,
+                target_tolerance=float(t),
+                source=ROLLBACK_SOURCE_NAME[src_id],
+                source_id=int(src_id),
+                log_gap=float(gap),
+                reason="selected",
+            )
+
+    # Scale-derived fallback: widen by 1/shrink_factor, never above initial.
+    fallback = cur / sf
+    if math.isfinite(init) and init > 0:
+        fallback = min(fallback, init)
+    ok, t, gap = _ok(fallback)
+    if ok:
+        return AdaptiveRollbackDecision(
+            eligible=True,
+            target_tolerance=float(t),
+            source=ROLLBACK_SOURCE_NAME[ROLLBACK_SOURCE_SCALE_FALLBACK],
+            source_id=ROLLBACK_SOURCE_SCALE_FALLBACK,
+            log_gap=float(gap),
+            reason="scale_fallback",
+        )
+    return AdaptiveRollbackDecision(
+        eligible=False,
+        target_tolerance=0.0,
+        source="none",
+        source_id=ROLLBACK_SOURCE_NONE,
+        log_gap=0.0,
+        reason="no_legal_wider_tolerance",
+    )
+
+
+def validate_source_retention_snapshot(
+    snap: dict[str, Any],
+    *,
+    cfg: AdaptivePrecisionConfig,
+) -> tuple[bool, str]:
+    """Fail-closed retention validity for adaptive rescue sources."""
+    if not isinstance(snap, dict):
+        return False, "source_retention_warmup"
+    samples = int(snap.get("samples", 0) or 0)
+    stable = int(snap.get("stable_ticks", 0) or 0)
+    ret = _finite(snap.get("retention", float("nan")), float("nan"))
+    peak = _finite(snap.get("peak", float("nan")), float("nan"))
+    last = _finite(snap.get("last", float("nan")), float("nan"))
+    if samples < int(cfg.rescue_source_min_samples):
+        return False, "source_retention_insufficient_samples"
+    if stable < int(cfg.rescue_source_min_stable_ticks):
+        return False, "source_retention_insufficient_stability"
+    if any(not math.isfinite(x) for x in (ret, peak, last)):
+        return False, "source_retention_nonfinite"
+    if not bool(snap.get("valid", False)):
+        return False, "source_retention_warmup"
+    if ret < float(cfg.rescue_source_min_retention):
+        return False, "source_retention_below_min"
+    return True, "ok"
+
+
+def evaluate_sidecar_freshness(
+    *,
+    sidecar: dict[str, Any],
+    population_frame: int,
+    population_lineage_id: str = "",
+    checkpoint_frame: int | None = None,
+    interval_steps: int = 10_000_000,
+    cfg: AdaptivePrecisionConfig,
+    require_freshness_fields: bool = True,
+) -> tuple[bool, str]:
+    """Peer sidecar freshness / lineage gate. Fail-closed when strict."""
+    if not isinstance(sidecar, dict):
+        return False, "source_adaptive_sidecar_schema_error"
+    has_frame = "last_update_frame" in sidecar
+    if not has_frame:
+        if require_freshness_fields:
+            return False, "source_sidecar_freshness_unknown"
+        return True, "freshness_unknown_compat"
+    try:
+        last_update = int(sidecar.get("last_update_frame", -(10**18)))
+    except Exception:
+        return False, "source_adaptive_state_nonfinite"
+    pop_frame = int(population_frame)
+    if pop_frame < last_update:
+        return False, "source_adaptive_state_stale"
+    if pop_frame - last_update > int(cfg.rescue_source_max_staleness_frames):
+        return False, "source_adaptive_state_stale"
+    if cfg.rescue_require_lineage_match_with_checkpoint:
+        side_lin = str(sidecar.get("last_update_lineage_id", "") or "")
+        pop_lin = str(population_lineage_id or "")
+        if side_lin and pop_lin and side_lin != pop_lin:
+            return False, "source_adaptive_lineage_mismatch"
+    if checkpoint_frame is not None and "last_checkpoint_frame" in sidecar:
+        try:
+            side_ckpt = int(sidecar.get("last_checkpoint_frame", -1))
+        except Exception:
+            return False, "source_adaptive_state_nonfinite"
+        if side_ckpt >= 0 and abs(int(checkpoint_frame) - side_ckpt) > max(
+            1, int(interval_steps)
+        ):
+            return False, "source_adaptive_state_stale"
+    return True, "ok"
+
+
+ADAPTIVE_SIDECAR_SCHEMA_VERSION = 2

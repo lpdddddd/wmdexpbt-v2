@@ -82,7 +82,7 @@ Curriculum progress and consolidation:
 | curriculum-progress consolidation | `pbt/pbt_consolidation_schedule.py` (`schedule_mode="curriculum_progress"`) |
 | probation + retention-conditioned rescue | `pbt/adaptive_precision_consolidation.py` |
 | adaptive probation shrink/rollback gate | `pbt_observer._build_curriculum_control_state` via `_adaptive_precision_state` |
-| adaptive rescue trigger + source select | `_adaptive_degradation_rescue_ready` → `_select_adaptive_degradation_rescue_source` → `_ternary_pbt` |
+| adaptive rescue trigger + source select | `_adaptive_degradation_rescue_ready` → `_select_adaptive_rescue_source_cascade` (live → archive → ordinary) → `_ternary_pbt` |
 | adaptive sidecar byte-level txn | `_snapshot_restart_persistent_state` / `_restore_restart_persistent_state` |
 
 ## Key formula → code map
@@ -99,6 +99,7 @@ Curriculum progress and consolidation:
 | stage boundaries | `resolve_stage` / `resolve_pbt_stage(schedule_mode=curriculum_progress)` |
 | probation / rescue | `ProbationState`, `evaluate_degradation_rescue`, `select_rescue_source` |
 | rescue top-fraction | `rescue_source_top_k` / `rescue_source_top_fraction` (6 policies → top 3) |
+| rollback target | `select_adaptive_rollback_target` (priority + log-gap, never `max(wider)`) |
 
 ## Adaptive PBT control chain (wired)
 
@@ -109,24 +110,38 @@ Adaptive probation and rescue are **execution-path gates**, not metrics-only:
    and roll back single-shot bookkeeping (`adaptive_<block_reason>`).
 2. **Ordinary rollback** — while probation is active and not hard-collapsed,
    ordinary forced-tolerance rollback (hard-collapse / repeated-collapse /
-   late-floor) is blocked.
-3. **Hard-collapse rollback** — when `hard_collapsed` holds, a ladder-free
-   wider tolerance is chosen from last mastered safe → previous tolerance
-   before entry; otherwise freeze-only.
-4. **Rescue** — with `late_degradation_rescue_enable=False` and
-   `adaptive_rescue_enable=True`, `_ternary_pbt` uses `rescue_mode=adaptive`,
-   calls `_select_adaptive_degradation_rescue_source` (never the legacy late
-   selector), then reuses existing live-source / burn-in / restart transaction
-   gates. Legacy absolute tol-gap recheck applies **only** to `rescue_mode=legacy`.
-5. **Quota** — `rescue_executed_for_lineage` increments only after a successful
+   late-floor) is blocked. Adaptive hard collapse lifts this suppression.
+3. **Hard-collapse rollback** — adaptive hard collapse is an **independent**
+   trigger (does not require legacy `evaluate_collapse_freeze`). Rollback target
+   priority is previous → source → last mastered safe → scale fallback
+   `current/shrink_factor` (capped by initial), each capped by
+   `adaptive_probation_rollback_max_log_gap`. Illegal → freeze-only (no forced
+   tolerance). Trigger source audit: `adaptive_only` / `legacy_only` /
+   `adaptive_and_legacy` / `bridge`.
+4. **Rescue cascade** — with `late_degradation_rescue_enable=False` and
+   `adaptive_rescue_enable=True`, `_ternary_pbt` uses `rescue_mode=adaptive` and
+   `_select_adaptive_rescue_source_cascade`: compatible live → validated archive
+   (stable / floor / best-nsucc) → ordinary safe source. Peer sidecar parse /
+   freshness / retention failures only reject that candidate; local formal
+   adaptive state still fail-fasts. Legacy absolute tol-gap recheck applies
+   **only** to `rescue_mode=legacy`.
+5. **Source retention / freshness** — rescue sources need
+   `min_samples` + `min_stable_ticks` (single-sample retention=1 is rejected)
+   and a fresh sidecar (`last_update_frame` within
+   `adaptive_rescue_source_max_staleness_frames`).
+6. **Burn-in** — ordinary adaptive degradation does **not** bypass elimination
+   burn-in (`adaptive_rescue_bypass_elimination_burnin=False` by default).
+   Optional emergency bypass requires both bypass flags + adaptive hard collapse
+   + age + stable/archive source.
+7. **Quota** — `rescue_executed_for_lineage` increments only after a successful
    restart commit; lineage id change resets streak + lineage quota.
-6. **Transaction** — adaptive sidecar bytes join curriculum control + manifest
-   in the durable restart snapshot/rollback.
+8. **Transaction** — adaptive sidecar bytes join curriculum control + manifest
+   in the durable restart snapshot/rollback. Adaptive rescue tiers use recovery
+   curriculum freeze frames.
 
-Formal profile `cser_dexpbt_progress_refine` **fail-fasts** on AdaptivePrecisionConfig
-build / sidecar parse / update failures instead of silently disabling adaptive
-control.
-
+Formal profile `cser_dexpbt_progress_refine` **fail-fasts** only on **local**
+AdaptivePrecisionConfig / sidecar / update failures. Peer candidate failures are
+soft rejects.
 
 ## Profile settings
 
@@ -134,10 +149,16 @@ The profile (`_CSER_DEXPBT_PROGRESS_REFINE` in `world_model/wm_strategy_profiles
 inherits the generic `cser_dexpbt_conservative` substrate and:
 
 - enables `progress_refinement_enable`, `adaptive_precision_consolidation_enable`,
-  `adaptive_rescue_enable`
+  `adaptive_rescue_enable`, `adaptive_rescue_archive_enable`
 - sets `pbt_consolidation_schedule_mode=curriculum_progress`,
   `eir_dhat_margin_mode=relative_tol`,
-  `snippet_tolerance_compatibility_mode=log_relative`
+  `snippet_tolerance_compatibility_mode=log_relative`,
+  `adaptive_probation_rollback_max_log_gap=0.30`,
+  `adaptive_rescue_source_min_samples=3`,
+  `adaptive_rescue_source_min_stable_ticks=2`,
+  `adaptive_rescue_source_max_staleness_frames=40_000_000`,
+  `adaptive_rescue_bypass_elimination_burnin=False` (emergency bypass opt-in),
+  `adaptive_rescue_bypass_on_hard_collapse=True`
 - disables `bridge_curriculum_enable`, `bridge_probation_enable`,
   `same_tol_retention_enable`, `late_degradation_rescue_enable`,
   `late_floor_retention_gate_enable`, `pre_floor_peak_guard_enable`,

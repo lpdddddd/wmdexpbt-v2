@@ -201,6 +201,22 @@ def analyze(run_dir: Path, out_dir: Path, compares: dict[str, Path]) -> dict[str
         "adaptive_consolidation/curriculum_progress", "adaptive_consolidation/stage",
         "adaptive_consolidation/local_retention", "adaptive_consolidation/probation_active",
         "adaptive_consolidation/shrink_blocked", "adaptive_consolidation/hard_collapse_streak",
+        "adaptive_consolidation/hard_collapse_adaptive_only",
+        "adaptive_consolidation/hard_collapse_legacy_only",
+        "adaptive_consolidation/hard_collapse_both",
+        "adaptive_consolidation/rollback_target_source",
+        "adaptive_consolidation/rollback_log_gap",
+        "adaptive_consolidation/rollback_fallback_used",
+        "adaptive_consolidation/rollback_freeze_only_count",
+        "adaptive_consolidation/rescue_live_selected",
+        "adaptive_consolidation/rescue_archive_selected",
+        "adaptive_consolidation/rescue_ordinary_fallback_selected",
+        "adaptive_consolidation/rescue_no_source",
+        "adaptive_consolidation/rescue_burnin_blocked",
+        "adaptive_consolidation/rescue_burnin_bypassed",
+        "adaptive_consolidation/rescue_emergency_bypass",
+        "adaptive_consolidation/rescue_executed_count",
+        "adaptive_consolidation/rescue_quota_used",
     ]
     gate_stats = {k: _tb_series_stats(tb.get(k, [])) for k in gate_keys}
     summary["gate_and_retrieval"] = gate_stats
@@ -216,11 +232,17 @@ def analyze(run_dir: Path, out_dir: Path, compares: dict[str, Path]) -> dict[str
                 continue
             prob = data.get("probation", {})
             adaptive[p.stem] = {
+                "schema_version": int(data.get("schema_version", 0) or 0),
                 "probation_active": bool(prob.get("active", False)),
                 "probation_stable_ticks": int(prob.get("stable_ticks", 0)),
                 "hard_collapse_streak": int(prob.get("hard_collapse_streak", 0)),
                 "degradation_streak": int(data.get("degradation_streak", 0)),
                 "rescue_executed": int(data.get("rescue_executed", 0)),
+                "rescue_executed_for_lineage": int(
+                    data.get("rescue_executed_for_lineage", 0) or 0
+                ),
+                "last_update_frame": int(data.get("last_update_frame", -1) or -1),
+                "freeze_only_streak": int(data.get("freeze_only_streak", 0) or 0),
                 "retention_bands": len((data.get("retention", {}) or {}).get("states", {})),
             }
     summary["adaptive_precision"] = adaptive
@@ -228,10 +250,33 @@ def analyze(run_dir: Path, out_dir: Path, compares: dict[str, Path]) -> dict[str
     # Collapse / rescue events.
     safety = _read_jsonl(_metrics_dir(run_dir) / "curriculum_safety_events.jsonl")
     copy_events = _read_jsonl(_metrics_dir(run_dir) / "pbt_copy_events.jsonl")
+    rescue_types: dict[str, int] = {}
+    for e in copy_events:
+        et = str(e.get("event_type", ""))
+        if "rescue" in et or "adaptive" in et:
+            rescue_types[et] = rescue_types.get(et, 0) + 1
+    trigger_sources: dict[str, int] = {}
+    rollback_sources: dict[str, int] = {}
+    for e in safety + copy_events:
+        ts = e.get("adaptive_probation_hard_collapse_trigger_source") or e.get(
+            "hard_collapse_trigger_source"
+        )
+        if ts:
+            trigger_sources[str(ts)] = trigger_sources.get(str(ts), 0) + 1
+        rs = e.get("adaptive_rollback_target_source") or e.get("rollback_target_source")
+        if rs:
+            rollback_sources[str(rs)] = rollback_sources.get(str(rs), 0) + 1
     summary["events"] = {
         "curriculum_safety_events": len(safety),
         "pbt_copy_events": len(copy_events),
         "rescue_events": sum(1 for e in copy_events if "rescue" in str(e.get("event_type", ""))),
+        "rescue_event_types": rescue_types,
+        "hard_collapse_trigger_sources": trigger_sources,
+        "rollback_target_sources": rollback_sources,
+        "adaptive_executed": rescue_types.get("adaptive_degradation_rescue_executed", 0),
+        "adaptive_rolled_back": rescue_types.get(
+            "adaptive_degradation_rescue_rolled_back", 0
+        ),
     }
 
     # Sanity checks the reviewer asked about.

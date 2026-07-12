@@ -137,6 +137,44 @@ parser.add_argument("--adaptive_rescue_cooldown_frames", type=int, default=300_0
 parser.add_argument("--adaptive_rescue_max_per_lineage", type=int, default=1)
 parser.add_argument("--adaptive_rescue_require_source_control", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--adaptive_rescue_reject_collapse_source", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--adaptive_probation_rollback_max_log_gap", type=float, default=0.30)
+parser.add_argument("--adaptive_probation_freeze_only_max_ticks", type=int, default=3)
+parser.add_argument("--adaptive_rescue_source_min_samples", type=int, default=3)
+parser.add_argument("--adaptive_rescue_source_min_stable_ticks", type=int, default=2)
+parser.add_argument("--adaptive_rescue_source_max_staleness_frames", type=int, default=40_000_000)
+parser.add_argument(
+    "--adaptive_rescue_require_lineage_match_with_checkpoint",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument("--adaptive_rescue_archive_enable", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--adaptive_rescue_archive_max_age_frames", type=int, default=1_000_000_000)
+parser.add_argument(
+    "--adaptive_rescue_archive_require_retention",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument("--adaptive_rescue_archive_min_nsucc_mean", type=float, default=0.0)
+parser.add_argument(
+    "--adaptive_rescue_bypass_elimination_burnin",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+)
+parser.add_argument(
+    "--adaptive_rescue_bypass_on_hard_collapse",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument(
+    "--adaptive_rescue_min_frames_before_emergency_bypass",
+    type=int,
+    default=40_000_000,
+)
+parser.add_argument(
+    "--adaptive_rescue_emergency_require_archive_or_stable_source",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -8076,6 +8114,46 @@ def main():
             ),
             adaptive_rescue_reject_collapse_source=bool(
                 args_cli.adaptive_rescue_reject_collapse_source
+            ),
+            adaptive_probation_rollback_max_log_gap=float(
+                args_cli.adaptive_probation_rollback_max_log_gap
+            ),
+            adaptive_probation_freeze_only_max_ticks=int(
+                args_cli.adaptive_probation_freeze_only_max_ticks
+            ),
+            adaptive_rescue_source_min_samples=int(
+                args_cli.adaptive_rescue_source_min_samples
+            ),
+            adaptive_rescue_source_min_stable_ticks=int(
+                args_cli.adaptive_rescue_source_min_stable_ticks
+            ),
+            adaptive_rescue_source_max_staleness_frames=int(
+                args_cli.adaptive_rescue_source_max_staleness_frames
+            ),
+            adaptive_rescue_require_lineage_match_with_checkpoint=bool(
+                args_cli.adaptive_rescue_require_lineage_match_with_checkpoint
+            ),
+            adaptive_rescue_archive_enable=bool(args_cli.adaptive_rescue_archive_enable),
+            adaptive_rescue_archive_max_age_frames=int(
+                args_cli.adaptive_rescue_archive_max_age_frames
+            ),
+            adaptive_rescue_archive_require_retention=bool(
+                args_cli.adaptive_rescue_archive_require_retention
+            ),
+            adaptive_rescue_archive_min_nsucc_mean=float(
+                args_cli.adaptive_rescue_archive_min_nsucc_mean
+            ),
+            adaptive_rescue_bypass_elimination_burnin=bool(
+                args_cli.adaptive_rescue_bypass_elimination_burnin
+            ),
+            adaptive_rescue_bypass_on_hard_collapse=bool(
+                args_cli.adaptive_rescue_bypass_on_hard_collapse
+            ),
+            adaptive_rescue_min_frames_before_emergency_bypass=int(
+                args_cli.adaptive_rescue_min_frames_before_emergency_bypass
+            ),
+            adaptive_rescue_emergency_require_archive_or_stable_source=bool(
+                args_cli.adaptive_rescue_emergency_require_archive_or_stable_source
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
