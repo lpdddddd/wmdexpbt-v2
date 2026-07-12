@@ -162,12 +162,17 @@ inherits the generic `cser_dexpbt_conservative` substrate and:
   `adaptive_rescue_archive_min_nsucc_max=5.0`,
   `adaptive_rescue_archive_require_age=True`,
   `adaptive_rescue_archive_require_collapse_metadata=True`,
-  `adaptive_rescue_archive_require_quality_score=True`
-  (archive rescue fail-closed on incomplete metadata; ordinary fallback still
-  consumes adaptive quota/cooldown but is counted as `ordinary_fallback`)
+  `adaptive_rescue_archive_require_quality_score=True`,
+  `adaptive_rescue_archive_min_population_samples=2`,
+  `adaptive_rescue_archive_advantage_sigma_floor=1.0`,
+  `adaptive_rescue_archive_min_absolute_advantage=5.0`
+  (archive rescue fail-closed on incomplete metadata / insufficient population
+  stats; advantage never uses `inf`; ordinary fallback still consumes adaptive
+  quota/cooldown but is counted as `ordinary_fallback`)
 - adaptive bottom replacement uses `pbt_copy_allowed_for_adaptive_rescue_target`
-  (not the generic stuck gate); hard-collapse emergency bypass uses a per-tick
-  event-frame latch that survives streak reset
+  (not the generic stuck gate); hard collapse independently arms adaptive
+  rescue on the same tick; emergency bypass uses same-tick event-frame latch /
+  `adaptive_probation_hard_collapse_event_frame` (stale bool alone cannot arm)
 - disables `bridge_curriculum_enable`, `bridge_probation_enable`,
   `same_tol_retention_enable`, `late_degradation_rescue_enable`,
   `late_floor_retention_gate_enable`, `pre_floor_peak_guard_enable`,

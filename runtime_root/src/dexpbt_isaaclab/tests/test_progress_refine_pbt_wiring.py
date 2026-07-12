@@ -482,7 +482,7 @@ def test_adaptive_rescue_trigger_uses_adaptive_selector(tmp_path: Path):
         lineage_id="L1",
     )
     assert ready is True
-    assert reason == "ready"
+    assert reason == "retention_degradation_ready"
     assert obs._late_degradation_rescue_ready(
         2, tolerance=0.020, nsucc_mean=10.0, env_frames=30_000_000
     ) is False
@@ -1197,6 +1197,7 @@ def test_archive_invalid_metadata_fail_closed(tmp_path: Path):
         env_frames=50_000_000,
         target_tolerance=0.020,
         target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
     )
     assert decision["action"] == "skip"
     reason = str(decision.get("adaptive_rescue_reason", ""))
@@ -1405,6 +1406,9 @@ def test_emergency_burnin_bypass_on_hard_collapse(tmp_path: Path):
     _seed_adaptive(obs, tol=0.020, mean=5.0, frames=60_000_000, lineage="L1")
     state = obs._adaptive_precision_state(1)
     assert state is not None and state[1].hard_collapsed(state[0])
+
+    # Same-tick latch required for emergency bypass (stale streak alone is insufficient).
+    obs._adaptive_hard_collapse_event_frame[1] = int(env_frames)
 
     obs._frames_at_restart = env_frames - 50_000_000  # emergency frames ok
     restarts = {"n": 0}
@@ -1757,11 +1761,14 @@ def test_adaptive_hard_collapse_bypasses_generic_target_skill_delta_gate(tmp_pat
     assert allowed_a
     assert reason_a == "adaptive_hard_collapse"
 
-    # Latch + control flag: same-tick hard collapse after streak reset.
+    # Latch + control same-tick event frame (stale bool alone must not arm gates).
     obs._adaptive_hard_collapse_event_frame[1] = int(env_frames)
     write_curriculum_control(
         obs._curriculum_control_dir / "001.json",
-        CurriculumControlState(adaptive_probation_hard_collapse=True),
+        CurriculumControlState(
+            adaptive_probation_hard_collapse=True,
+            adaptive_probation_hard_collapse_event_frame=int(env_frames),
+        ),
     )
     # Force adaptive rescue mode so the adaptive target gate is used.
     obs._adaptive_degradation_rescue_ready = (  # type: ignore
@@ -1896,9 +1903,7 @@ def test_full_tick_hard_collapse_latch_survives_streak_reset(tmp_path: Path):
     assert int(state2[1].hard_collapse_streak) == 0
     assert not state2[1].hard_collapsed(state2[0])
     assert control.adaptive_probation_hard_collapse is True
-
-
-def test_full_tick_hard_collapse_emergency_burnin_bypass(tmp_path: Path):
+    assert int(control.adaptive_probation_hard_collapse_event_frame) == int(env_frames)
     from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import write_curriculum_control
 
     obs = _make_progress_observer(
@@ -2077,7 +2082,7 @@ def test_adaptive_archive_rejects_missing_age(tmp_path: Path):
     )
     assert decision["action"] == "skip"
     reason = str(decision.get("adaptive_rescue_reason", ""))
-    assert ("age" in reason) or ("save_frame" in reason)
+    assert "archive_age_missing" in reason
 
 
 def test_adaptive_archive_rejects_missing_collapse_metadata(tmp_path: Path):
@@ -2111,6 +2116,8 @@ def test_adaptive_archive_rejects_low_advantage(tmp_path: Path):
         num_policies=2,
         policy_idx=1,
         adaptive_rescue_min_source_advantage_sigma=1.0,
+        # Keep absolute floor low so this case isolates the sigma gate.
+        adaptive_rescue_archive_min_absolute_advantage=0.0,
     )
     synth = _archive_synth_base(tmp_path, nsucc_mean=11.0)
     obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
@@ -2288,3 +2295,861 @@ def test_ordinary_fallback_transaction_failure_restores_quota(
     assert after.get("last_rescue_frame", -(10**18)) == before.get(
         "last_rescue_frame", -(10**18)
     )
+
+
+# ---------------------------------------------------------------------------
+# Adaptive rescue safety hardening (archive age / advantage / HC arm / live)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_missing_age_rejected_when_required(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_require_age=True,
+    )
+    synth = _archive_synth_base(tmp_path)
+    del synth["env_frames"]
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
+    )
+    assert decision["action"] == "skip"
+    assert "archive_age_missing" in str(decision.get("adaptive_rescue_reason", ""))
+
+
+def test_archive_missing_age_allowed_when_not_required(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_require_age=False,
+        adaptive_rescue_min_source_advantage_sigma=0.5,
+        adaptive_rescue_archive_min_absolute_advantage=5.0,
+    )
+    synth = _archive_synth_base(tmp_path)
+    del synth["env_frames"]
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
+    )
+    assert decision["action"] == "copy"
+    assert decision.get("adaptive_archive_age_known") is False
+    assert int(decision.get("adaptive_archive_age_frames", 0)) == -1
+
+
+def test_archive_future_age_rejected_even_when_not_required(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_require_age=False,
+    )
+    synth = _archive_synth_base(tmp_path, env_frames=80_000_000)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
+    )
+    assert decision["action"] == "skip"
+    assert "archive_age_from_future" in str(decision.get("adaptive_rescue_reason", ""))
+
+
+def test_archive_too_old_rejected_even_when_not_required(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_require_age=False,
+        adaptive_rescue_archive_max_age_frames=1_000_000,
+    )
+    synth = _archive_synth_base(tmp_path, env_frames=1_000_000)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
+    )
+    assert decision["action"] == "skip"
+    assert "archive_too_old" in str(decision.get("adaptive_rescue_reason", ""))
+
+
+def test_archive_rejects_insufficient_population_samples(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_min_population_samples=2,
+    )
+    synth = _archive_synth_base(tmp_path)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0],
+    )
+    assert decision["action"] == "skip"
+    assert decision.get("adaptive_rescue_reason") == "archive_population_stats_insufficient"
+
+
+def test_archive_zero_variance_small_absolute_gap_rejected(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_min_absolute_advantage=5.0,
+        adaptive_rescue_archive_advantage_sigma_floor=1.0,
+        adaptive_rescue_min_source_advantage_sigma=1.0,
+    )
+    synth = _archive_synth_base(tmp_path, nsucc_mean=11.0)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[10.0, 10.0],
+    )
+    assert decision["action"] == "skip"
+    reason = str(decision.get("adaptive_rescue_reason", ""))
+    assert ("low_absolute_advantage" in reason) or ("low_advantage" in reason)
+
+
+def test_archive_zero_variance_large_gap_uses_sigma_floor(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_min_absolute_advantage=5.0,
+        adaptive_rescue_archive_advantage_sigma_floor=1.0,
+        adaptive_rescue_min_source_advantage_sigma=1.0,
+    )
+    synth = _archive_synth_base(tmp_path, nsucc_mean=20.0)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[10.0, 10.0],
+    )
+    assert decision["action"] == "copy"
+    assert float(decision.get("adaptive_population_nsucc_sigma", -1)) == 0.0
+    assert float(decision.get("adaptive_population_nsucc_effective_sigma", 0)) == 1.0
+    assert float(decision.get("adaptive_source_absolute_advantage", 0)) == 10.0
+    assert float(decision.get("adaptive_source_advantage_sigma", 0)) == 10.0
+
+
+def test_archive_advantage_never_inf(tmp_path: Path):
+    import math
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_min_absolute_advantage=0.0,
+        adaptive_rescue_archive_advantage_sigma_floor=1.0,
+        adaptive_rescue_min_source_advantage_sigma=0.0,
+    )
+    synth = _archive_synth_base(tmp_path, nsucc_mean=40.0)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[10.0, 10.0],
+    )
+    assert decision["action"] == "copy"
+    adv = float(decision.get("adaptive_source_advantage_sigma", float("nan")))
+    assert math.isfinite(adv)
+    assert adv != float("inf")
+
+
+def test_archive_complete_candidate_passes_both_advantage_gates(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_archive_min_absolute_advantage=5.0,
+        adaptive_rescue_archive_advantage_sigma_floor=1.0,
+        adaptive_rescue_min_source_advantage_sigma=1.0,
+    )
+    synth = _archive_synth_base(tmp_path, nsucc_mean=40.0)
+    obs._select_best_stable_recovery_source = lambda *_a, **_k: (synth, "ok")  # type: ignore
+    obs._select_best_floor_recovery_recovery_source = (  # type: ignore
+        lambda *_a, **_k: (None, "none")
+    )
+    obs._select_best_nsucc_recovery_source = lambda *_a, **_k: (None, "none")  # type: ignore
+    decision = obs._select_adaptive_archive_rescue_source(
+        env_frames=50_000_000,
+        target_tolerance=0.020,
+        target_nsucc_mean=10.0,
+        population_nsucc_means=[40.0, 10.0],
+    )
+    assert decision["action"] == "copy"
+    assert float(decision.get("adaptive_source_absolute_advantage", 0)) >= 5.0
+    assert float(decision.get("adaptive_source_advantage_sigma", 0)) >= 1.0
+    assert int(decision.get("adaptive_population_nsucc_sample_count", 0)) == 2
+
+
+def test_hard_collapse_control_event_frame_written(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import write_curriculum_control
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_probation_hard_collapse_mean=12.0,
+        adaptive_probation_hard_collapse_patience=2,
+    )
+    env_frames = 140_000_000
+    _seed_adaptive(obs, tol=0.022, mean=20.0, frames=10_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=18.0, frames=20_000_000, lineage="L1")
+    for f in (30_000_000, 40_000_000, 50_000_000):
+        _seed_adaptive(obs, tol=0.020, mean=5.0, frames=f, lineage="L1")
+    window = _seed_window(obs, tol=0.020, mean=5.0, frames=env_frames, n=2, lineage="L1")
+    obs._shrinks_since_rollback[1] = 1
+    obs._last_mastered_safe_tolerance[1] = 0.022
+    control = obs._build_curriculum_control_state(1, window, env_frames)
+    write_curriculum_control(obs._curriculum_control_dir / "001.json", control)
+    assert control.adaptive_probation_hard_collapse is True
+    assert int(control.adaptive_probation_hard_collapse_event_frame) == int(env_frames)
+
+
+def test_hard_collapse_event_frame_cleared_next_tick(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_probation_hard_collapse_mean=12.0,
+        adaptive_probation_hard_collapse_patience=2,
+    )
+    env_frames = 140_000_000
+    _seed_adaptive(obs, tol=0.022, mean=20.0, frames=10_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=18.0, frames=20_000_000, lineage="L1")
+    for f in (30_000_000, 40_000_000, 50_000_000):
+        _seed_adaptive(obs, tol=0.020, mean=5.0, frames=f, lineage="L1")
+    window = _seed_window(obs, tol=0.020, mean=5.0, frames=env_frames, n=2, lineage="L1")
+    obs._shrinks_since_rollback[1] = 1
+    obs._last_mastered_safe_tolerance[1] = 0.022
+    control = obs._build_curriculum_control_state(1, window, env_frames)
+    assert int(control.adaptive_probation_hard_collapse_event_frame) == int(env_frames)
+    # Next tick: streak already cleared → no HC → event_frame must be -1.
+    window2 = _seed_window(
+        obs, tol=0.022, mean=18.0, frames=env_frames + 10_000_000, n=2, lineage="L1"
+    )
+    control2 = obs._build_curriculum_control_state(1, window2, env_frames + 10_000_000)
+    assert int(control2.adaptive_probation_hard_collapse_event_frame) == -1
+    assert control2.adaptive_probation_hard_collapse is False
+
+
+def test_stale_hard_collapse_bool_cannot_trigger_rescue(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        WindowSample,
+        write_curriculum_control,
+    )
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=99,
+        adaptive_rescue_cooldown_frames=0,
+        adaptive_rescue_archive_enable=False,
+    )
+    env_frames = 100_000_000
+    # Stale bool from a previous tick, with event_frame cleared.
+    write_curriculum_control(
+        obs._curriculum_control_dir / "001.json",
+        CurriculumControlState(
+            adaptive_probation_hard_collapse=True,
+            adaptive_probation_hard_collapse_event_frame=-1,
+        ),
+    )
+    obs._adaptive_hard_collapse_event_frame[1] = -1
+    ready, reason = obs._adaptive_degradation_rescue_ready(
+        policy_idx=1,
+        tolerance=0.020,
+        nsucc_mean=10.0,
+        env_frames=env_frames,
+        lineage_id="L1",
+        hard_collapse_now=False,
+    )
+    assert ready is False
+    assert reason != "hard_collapse_ready"
+
+    # Ternary same-tick detection must also ignore stale bool.
+    cascade_calls = {"n": 0}
+
+    def _cascade(**_k):
+        cascade_calls["n"] += 1
+        return _skip_decision(adaptive_rescue_reason="no_compatible_source")
+
+    obs._select_adaptive_rescue_source_cascade = _cascade  # type: ignore
+    obs._late_degradation_rescue_ready = lambda *_a, **_k: False  # type: ignore
+    obs._maybe_save_best_policy = lambda *_a, **_k: None  # type: ignore
+    obs._select_source = lambda **_k: _skip_decision()  # type: ignore
+    obs.pbt_consolidation_cfg.enabled = False
+    ckpt = tmp_path / "x.pth"
+    ckpt.write_bytes(b"x")
+    population = {
+        0: {
+            "policy_idx": 0,
+            "frame": env_frames,
+            "frames_at_restart": 0,
+            "iteration": 1,
+            "nsucc_mean": 40.0,
+            "nsucc_max": 45.0,
+            "pbt_ranking_score": 40.0,
+            "objective": 40.0,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {"success_tolerance": 0.020, "frame_since_restart": env_frames},
+            "params": dict(_RESTART_PARAMS),
+        },
+        1: {
+            "policy_idx": 1,
+            "frame": env_frames,
+            "frames_at_restart": env_frames,
+            "iteration": 1,
+            "nsucc_mean": 5.0,
+            "nsucc_max": 8.0,
+            "pbt_ranking_score": 5.0,
+            "objective": 5.0,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {"success_tolerance": 0.020, "frame_since_restart": 0},
+            "params": dict(_RESTART_PARAMS),
+        },
+    }
+    for i in (0, 1):
+        w = obs._policy_window(i)
+        w.samples = [
+            WindowSample(
+                env_frames=env_frames,
+                nsucc_mean=float(population[i]["nsucc_mean"]),
+                nsucc_max=float(population[i]["nsucc_max"]),
+                success_tolerance=0.020,
+                pbt_iteration=1,
+                lineage_id="L1",
+            )
+        ]
+    scores = {0: 40.0, 1: 5.0}
+    obs._ternary_pbt([0, 1], scores, population, env_frames)
+    assert cascade_calls["n"] == 0
+
+
+def test_current_control_event_frame_arms_rescue(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
+        CurriculumControlState,
+        write_curriculum_control,
+    )
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=99,
+        adaptive_rescue_cooldown_frames=0,
+        adaptive_rescue_max_per_lineage=1,
+        adaptive_rescue_archive_enable=False,
+    )
+    env_frames = 100_000_000
+    write_curriculum_control(
+        obs._curriculum_control_dir / "001.json",
+        CurriculumControlState(
+            adaptive_probation_hard_collapse=True,
+            adaptive_probation_hard_collapse_event_frame=int(env_frames),
+        ),
+    )
+    ready, reason = obs._adaptive_degradation_rescue_ready(
+        policy_idx=1,
+        tolerance=0.020,
+        nsucc_mean=10.0,
+        env_frames=env_frames,
+        lineage_id="L1",
+        hard_collapse_now=True,
+    )
+    assert ready is True
+    assert reason == "hard_collapse_ready"
+
+
+def test_full_tick_hard_collapse_directly_enters_source_cascade(tmp_path: Path):
+    """Real order: adaptive update → build/write control → ternary → cascade.
+
+    Must NOT mock ``_adaptive_degradation_rescue_ready``.
+    """
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import write_curriculum_control
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=99,  # retention path not ready
+        adaptive_rescue_cooldown_frames=0,
+        adaptive_rescue_archive_enable=False,
+        adaptive_probation_hard_collapse_mean=12.0,
+        adaptive_probation_hard_collapse_patience=2,
+        pbt_min_frames_between_restarts=0,
+        adaptive_rescue_bypass_elimination_burnin=True,
+        adaptive_rescue_bypass_on_hard_collapse=True,
+        adaptive_rescue_min_frames_before_emergency_bypass=10,
+    )
+    ckpt = tmp_path / "src.pth"
+    ckpt.write_bytes(b"x")
+    env_frames = 100_000_000
+
+    _seed_adaptive(obs, tol=0.022, mean=20.0, frames=10_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=18.0, frames=20_000_000, lineage="L1")
+    for f in (30_000_000, 40_000_000, 50_000_000, 60_000_000):
+        _seed_adaptive(obs, tol=0.020, mean=5.0, frames=f, lineage="L1")
+
+    window = _seed_window(obs, tol=0.020, mean=5.0, frames=env_frames, n=2, lineage="L1")
+    obs._shrinks_since_rollback[1] = 1
+    obs._last_mastered_safe_tolerance[1] = 0.022
+    control = obs._build_curriculum_control_state(1, window, env_frames)
+    write_curriculum_control(obs._curriculum_control_dir / "001.json", control)
+    assert int(control.adaptive_probation_hard_collapse_event_frame) == int(env_frames)
+    assert int(obs._adaptive_hard_collapse_event_frame.get(1, -1)) == int(env_frames)
+
+    cascade_calls = {"n": 0, "kind": None}
+    decision = _copy_decision(
+        source_policy=0,
+        tier="adaptive_rescue_live",
+        checkpoint_type="live",
+        source_state={
+            "checkpoint": str(ckpt),
+            "curriculum": {"success_tolerance": 0.020},
+            "nsucc_mean": 40.0,
+            "params": dict(_RESTART_PARAMS),
+        },
+        adaptive_rescue_source_kind="live",
+    )
+
+    def _cascade(**_k):
+        cascade_calls["n"] += 1
+        cascade_calls["kind"] = "entered"
+        return decision
+
+    obs._select_adaptive_rescue_source_cascade = _cascade  # type: ignore
+    # Do not mock readiness — hard collapse must arm it.
+    obs._maybe_save_best_policy = lambda *_a, **_k: None  # type: ignore
+    obs.pbt_consolidation_cfg.enabled = False
+    obs.best_policy_workspace.mkdir(parents=True, exist_ok=True)
+    obs._frames_at_restart = env_frames - 50_000_000
+    restarts = {"n": 0}
+    obs._restart_process_with_new_params = (  # type: ignore
+        lambda *a, **k: restarts.__setitem__("n", restarts["n"] + 1) or True
+    )
+    population = {
+        0: {
+            "policy_idx": 0,
+            "frame": env_frames,
+            "frames_at_restart": 0,
+            "iteration": 5,
+            "nsucc_mean": 40.0,
+            "nsucc_max": 45.0,
+            "pbt_ranking_score": 40.0,
+            "objective": 40.0,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {
+                "success_tolerance": 0.020,
+                "frame_since_restart": env_frames,
+            },
+            "params": dict(_RESTART_PARAMS),
+        },
+        1: {
+            "policy_idx": 1,
+            "frame": env_frames,
+            "frames_at_restart": env_frames - 50_000_000,
+            "iteration": 5,
+            "nsucc_mean": 5.0,
+            "nsucc_max": 8.0,
+            "pbt_ranking_score": 5.0,
+            "objective": 5.0,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {"success_tolerance": 0.020, "frame_since_restart": 0},
+            "params": dict(_RESTART_PARAMS),
+        },
+    }
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+    for i in (0, 1):
+        w = obs._policy_window(i)
+        w.samples = [
+            WindowSample(
+                env_frames=env_frames,
+                nsucc_mean=float(population[i]["nsucc_mean"]),
+                nsucc_max=float(population[i]["nsucc_max"]),
+                success_tolerance=0.020,
+                pbt_iteration=1,
+                lineage_id="L1",
+            )
+        ]
+    with mock.patch(
+        "dexpbt_isaaclab.pbt.pbt_observer.pbt_copy_allowed_for_live_source",
+        return_value=(True, "ok"),
+    ):
+        obs._ternary_pbt([0, 1], {0: 40.0, 1: 5.0}, population, env_frames)
+    assert cascade_calls["n"] == 1
+    assert cascade_calls["kind"] == "entered"
+    # Cascade entry with patience=99 proves hard_collapse_ready armed rescue
+    # (retention path cannot be ready). Decision may overwrite last_reason.
+    assert restarts["n"] == 1
+
+
+def test_latest_healthy_source_is_classified_as_live():
+    from dexpbt_isaaclab.pbt.pbt_observer import _decision_uses_live_source
+
+    assert _decision_uses_live_source(
+        {"checkpoint_type": "latest_healthy", "tier": "usable_live"}
+    )
+    assert _decision_uses_live_source(
+        {"checkpoint_type": "latest_healthy", "tier": "strict_stable_live"}
+    )
+    assert _decision_uses_live_source({"checkpoint_type": "live", "tier": "strict_live"})
+    assert not _decision_uses_live_source(
+        {"checkpoint_type": "archive", "tier": "adaptive_rescue_best_nsucc_archive"}
+    )
+    assert not _decision_uses_live_source(
+        {
+            "checkpoint_type": "best_stable_archive",
+            "tier": "adaptive_rescue_best_stable_archive",
+        }
+    )
+
+
+def test_ordinary_fallback_latest_healthy_runs_source_skill_delta_gate(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=1,
+        adaptive_rescue_archive_enable=False,
+    )
+    ckpt = tmp_path / "s.pth"
+    ckpt.write_bytes(b"x")
+    env_frames = 80_000_000
+    decision = _copy_decision(
+        source_policy=0,
+        tier="usable_live",
+        checkpoint_type="latest_healthy",
+        source_state={
+            "checkpoint": str(ckpt),
+            "curriculum": {"success_tolerance": 0.020},
+            "nsucc_mean": 40.0,
+            "params": dict(_RESTART_PARAMS),
+        },
+        adaptive_rescue_source_kind="ordinary_fallback",
+        adaptive_rescue_fallback_to_ordinary=True,
+    )
+    gate_calls = {"n": 0}
+
+    def _gate(*_a, **_k):
+        gate_calls["n"] += 1
+        return False, "source_skill_delta_blocked"
+
+    _seed_adaptive(obs, tol=0.020, mean=30.0, frames=env_frames - 20_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=10.0, frames=env_frames - 10_000_000, lineage="L1")
+    obs.pbt_consolidation_cfg.enabled = False
+    obs._maybe_save_best_policy = lambda *_a, **_k: None  # type: ignore
+    obs._select_adaptive_rescue_source_cascade = lambda **_k: decision  # type: ignore
+    population = {}
+    for i in range(2):
+        mean = 10.0 if i == 1 else 40.0
+        population[i] = {
+            "policy_idx": i,
+            "frame": env_frames,
+            "frames_at_restart": 0,
+            "iteration": 5,
+            "nsucc_mean": mean,
+            "nsucc_max": mean + 5,
+            "pbt_ranking_score": mean,
+            "objective": mean,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {
+                "success_tolerance": 0.020,
+                "frame_since_restart": env_frames,
+            },
+            "params": dict(_RESTART_PARAMS),
+        }
+        w = obs._policy_window(i)
+        w.samples = [
+            WindowSample(
+                env_frames=env_frames,
+                nsucc_mean=mean,
+                nsucc_max=mean + 5,
+                success_tolerance=0.020,
+                pbt_iteration=1,
+                lineage_id="L1",
+            )
+        ]
+    with mock.patch(
+        "dexpbt_isaaclab.pbt.pbt_observer.pbt_copy_allowed_for_live_source",
+        side_effect=_gate,
+    ):
+        obs._ternary_pbt([0, 1], {0: 40.0, 1: 10.0}, population, env_frames)
+    assert gate_calls["n"] >= 1
+
+
+def test_ordinary_fallback_unstable_latest_healthy_is_blocked(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_control_plane import pbt_copy_allowed_for_live_source
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=1,
+        adaptive_rescue_archive_enable=False,
+        pbt_min_frames_between_restarts=0,
+    )
+    ckpt = tmp_path / "s.pth"
+    ckpt.write_bytes(b"x")
+    env_frames = 80_000_000
+    # Declining source: skill_delta not source-qualified.
+    _seed_skill_delta_seq(
+        obs, 0, seq=[24.0, 20.0, 16.0, 12.0, 8.0, 5.0], env_frames=env_frames
+    )
+    ok, reason = pbt_copy_allowed_for_live_source(
+        obs._policy_window(0), interval_steps=obs.interval_steps
+    )
+    assert not ok
+    assert "source_skill_delta" in reason
+
+    decision = _copy_decision(
+        source_policy=0,
+        tier="usable_live",
+        checkpoint_type="latest_healthy",
+        source_state={
+            "checkpoint": str(ckpt),
+            "curriculum": {"success_tolerance": 0.020},
+            "nsucc_mean": 5.0,
+            "params": dict(_RESTART_PARAMS),
+        },
+        adaptive_rescue_source_kind="ordinary_fallback",
+        adaptive_rescue_fallback_to_ordinary=True,
+    )
+    restarts = {"n": 0}
+    obs._restart_process_with_new_params = (  # type: ignore
+        lambda *a, **k: restarts.__setitem__("n", restarts["n"] + 1) or True
+    )
+    population = {}
+    for i in range(2):
+        mean = 5.0 if i == 1 else 5.0
+        population[i] = {
+            "policy_idx": i,
+            "frame": env_frames,
+            "frames_at_restart": 0,
+            "iteration": 5,
+            "nsucc_mean": mean,
+            "nsucc_max": mean + 5,
+            "pbt_ranking_score": 40.0 if i == 0 else 5.0,
+            "objective": 40.0 if i == 0 else 5.0,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {
+                "success_tolerance": 0.020,
+                "frame_since_restart": env_frames,
+            },
+            "params": dict(_RESTART_PARAMS),
+        }
+        if i == 1:
+            w = obs._policy_window(i)
+            w.samples = [
+                WindowSample(
+                    env_frames=env_frames,
+                    nsucc_mean=mean,
+                    nsucc_max=mean + 5,
+                    success_tolerance=0.020,
+                    pbt_iteration=1,
+                    lineage_id="L1",
+                )
+            ]
+    _seed_adaptive(obs, tol=0.020, mean=30.0, frames=env_frames - 20_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=5.0, frames=env_frames - 10_000_000, lineage="L1")
+    obs.pbt_consolidation_cfg.enabled = False
+    obs._maybe_save_best_policy = lambda *_a, **_k: None  # type: ignore
+    obs._select_adaptive_rescue_source_cascade = lambda **_k: decision  # type: ignore
+    obs._ternary_pbt([0, 1], {0: 40.0, 1: 5.0}, population, env_frames)
+    assert restarts["n"] == 0
+
+
+def test_ordinary_fallback_stable_latest_healthy_is_allowed(tmp_path: Path):
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=1,
+        adaptive_rescue_archive_enable=False,
+        pbt_min_frames_between_restarts=0,
+    )
+    ckpt = tmp_path / "s.pth"
+    ckpt.write_bytes(b"x")
+    env_frames = 80_000_000
+    # Mild positive skill_delta qualifies as a live source (>= STABLE_POS_EPS).
+    _seed_skill_delta_seq(
+        obs, 0, seq=[19.0, 19.2, 19.4, 19.6, 19.8, 20.0], env_frames=env_frames
+    )
+    decision = _copy_decision(
+        source_policy=0,
+        tier="usable_live",
+        checkpoint_type="latest_healthy",
+        source_state={
+            "checkpoint": str(ckpt),
+            "curriculum": {"success_tolerance": 0.020},
+            "nsucc_mean": 20.0,
+            "params": dict(_RESTART_PARAMS),
+        },
+        adaptive_rescue_source_kind="ordinary_fallback",
+        adaptive_rescue_fallback_to_ordinary=True,
+    )
+    restarts = {"n": 0}
+    obs._restart_process_with_new_params = (  # type: ignore
+        lambda *a, **k: restarts.__setitem__("n", restarts["n"] + 1) or True
+    )
+    _seed_adaptive(obs, tol=0.020, mean=30.0, frames=env_frames - 20_000_000, lineage="L1")
+    _seed_adaptive(obs, tol=0.020, mean=10.0, frames=env_frames - 10_000_000, lineage="L1")
+    obs.pbt_consolidation_cfg.enabled = False
+    obs._maybe_save_best_policy = lambda *_a, **_k: None  # type: ignore
+    obs._select_adaptive_rescue_source_cascade = lambda **_k: decision  # type: ignore
+    population = {}
+    for i in range(2):
+        mean = 10.0 if i == 1 else 20.0
+        population[i] = {
+            "policy_idx": i,
+            "frame": env_frames,
+            "frames_at_restart": 0 if i == 0 else env_frames,
+            "iteration": 5,
+            "nsucc_mean": mean,
+            "nsucc_max": mean + 5,
+            "pbt_ranking_score": mean,
+            "objective": mean,
+            "checkpoint": str(ckpt),
+            "lineage_id": "L1",
+            "curriculum": {
+                "success_tolerance": 0.020,
+                "frame_since_restart": env_frames,
+            },
+            "params": dict(_RESTART_PARAMS),
+        }
+        if i == 1:
+            w = obs._policy_window(i)
+            w.samples = [
+                WindowSample(
+                    env_frames=env_frames,
+                    nsucc_mean=mean,
+                    nsucc_max=mean + 5,
+                    success_tolerance=0.020,
+                    pbt_iteration=1,
+                    lineage_id="L1",
+                )
+            ]
+    with mock.patch(
+        "dexpbt_isaaclab.pbt.pbt_observer.pbt_copy_allowed_for_adaptive_rescue_target",
+        return_value=(True, "ok", 0.0),
+    ):
+        obs._ternary_pbt([0, 1], {0: 20.0, 1: 10.0}, population, env_frames)
+    assert restarts["n"] == 1
+
+
+def test_archive_source_does_not_run_live_skill_delta_gate(tmp_path: Path):
+    obs = _make_progress_observer(
+        tmp_path,
+        num_policies=2,
+        policy_idx=1,
+        adaptive_rescue_degradation_patience=1,
+        pbt_min_frames_between_restarts=0,
+        adaptive_rescue_bypass_elimination_burnin=True,
+        adaptive_rescue_bypass_on_hard_collapse=True,
+        adaptive_rescue_min_frames_before_emergency_bypass=10,
+    )
+    ckpt = tmp_path / "a.pth"
+    ckpt.write_bytes(b"x")
+    env_frames = 100_000_000
+    obs._adaptive_hard_collapse_event_frame[1] = int(env_frames)
+    decision = _copy_decision(
+        source_policy=0,
+        tier="adaptive_rescue_best_stable_archive",
+        checkpoint_type="best_stable_archive",
+        source_state={
+            "checkpoint": str(ckpt),
+            "curriculum": {"success_tolerance": 0.020},
+            "nsucc_mean": 40.0,
+            "params": dict(_RESTART_PARAMS),
+        },
+        adaptive_rescue_source_kind="archive",
+    )
+    gate_calls = {"n": 0}
+
+    def _gate(*_a, **_k):
+        gate_calls["n"] += 1
+        return False, "should_not_run"
+
+    restarts = {"n": 0}
+    obs._restart_process_with_new_params = (  # type: ignore
+        lambda *a, **k: restarts.__setitem__("n", restarts["n"] + 1) or True
+    )
+    with mock.patch(
+        "dexpbt_isaaclab.pbt.pbt_observer.pbt_copy_allowed_for_live_source",
+        side_effect=_gate,
+    ):
+        _drive_ternary_with_rescue(
+            obs,
+            tmp_path,
+            decision=decision,
+            env_frames=env_frames,
+            own_fsr=0,
+            seed_degradation=True,
+        )
+    assert gate_calls["n"] == 0
+    assert restarts["n"] == 1

@@ -172,6 +172,21 @@ parser.add_argument(
     default=True,
 )
 parser.add_argument(
+    "--adaptive_rescue_archive_min_population_samples",
+    type=int,
+    default=2,
+)
+parser.add_argument(
+    "--adaptive_rescue_archive_advantage_sigma_floor",
+    type=float,
+    default=1.0,
+)
+parser.add_argument(
+    "--adaptive_rescue_archive_min_absolute_advantage",
+    type=float,
+    default=5.0,
+)
+parser.add_argument(
     "--adaptive_rescue_bypass_elimination_burnin",
     action=argparse.BooleanOptionalAction,
     default=False,
@@ -8170,6 +8185,15 @@ def main():
             ),
             adaptive_rescue_archive_require_quality_score=bool(
                 args_cli.adaptive_rescue_archive_require_quality_score
+            ),
+            adaptive_rescue_archive_min_population_samples=int(
+                args_cli.adaptive_rescue_archive_min_population_samples
+            ),
+            adaptive_rescue_archive_advantage_sigma_floor=float(
+                args_cli.adaptive_rescue_archive_advantage_sigma_floor
+            ),
+            adaptive_rescue_archive_min_absolute_advantage=float(
+                args_cli.adaptive_rescue_archive_min_absolute_advantage
             ),
             adaptive_rescue_bypass_elimination_burnin=bool(
                 args_cli.adaptive_rescue_bypass_elimination_burnin

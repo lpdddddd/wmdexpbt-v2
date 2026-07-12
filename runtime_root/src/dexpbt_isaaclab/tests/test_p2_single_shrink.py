@@ -30,7 +30,10 @@ class P2SingleShrinkTest(unittest.TestCase):
 
     def test_consolidation_blocks_second_shrink(self):
         until = 50_000
-        blocked, _, _ = dexpbt_tolerance_curriculum_mastery(
+        # Mastery helper returns (tol, last_curriculum_update, did_shrink, reason).
+        # Semantic change from an earlier blocked-tuple layout: consolidation is
+        # signaled by did_shrink=False + reason="post_shrink_consolidation".
+        tol, lcu, did_shrink, reason = dexpbt_tolerance_curriculum_mastery(
             0,
             10_000,
             1,
@@ -41,8 +44,9 @@ class P2SingleShrinkTest(unittest.TestCase):
             allow_shrink=True,
             post_shrink_consolidation_until_restart_step=until,
         )
-        self.assertFalse(blocked[2])
-        self.assertEqual(blocked[3], "post_shrink_consolidation")
+        self.assertEqual(tol, 0.075)
+        self.assertFalse(did_shrink)
+        self.assertEqual(reason, "post_shrink_consolidation")
 
     def test_mark_shrink_consumed_sets_consolidation(self):
         write_curriculum_control(
@@ -94,7 +98,11 @@ class P2SingleShrinkTest(unittest.TestCase):
         assert ctrl is not None
         self.assertFalse(ctrl.shrink_token)
 
-        tol2, _ = apply_env_tolerance_curriculum(**kwargs)
+        # Second call must not shrink again: pass the post-shrink tolerance as
+        # the live env value (as production does). Token remains consumed.
+        kwargs_second = dict(kwargs)
+        kwargs_second["success_tolerance"] = tol1
+        tol2, _ = apply_env_tolerance_curriculum(**kwargs_second)
         self.assertAlmostEqual(tol2, tol1, places=6)
 
 

@@ -28,6 +28,9 @@ PROFILE_IDS: dict[str, int] = {
     # Strategy Zoo v1.3 elite-centered performance profiles.
     "elite_bank_actor_distill_fast": 10,
     "elite_bank_actor_distill_strong": 11,
+    # Strategy Zoo v1.4/v1.5 elite clip-validation profiles.
+    "elite_bank_actor_distill_fast_v2": 12,
+    "elite_bank_actor_distill_strong_v2": 13,
     # Strategy Zoo v1.7 Online Elite-AWR profiles.
     "elite_bank_actor_distill_fast_awr": 14,
     "wm_pbt_source_selector_awr": 15,
@@ -68,6 +71,12 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     ),
     "elite_bank_actor_distill_strong": (
         "Strong elite/archive actor distill for v1.3 performance runs (no MPPI)."
+    ),
+    "elite_bank_actor_distill_fast_v2": (
+        "v1.4/v1.5 clip-mode elite distill (fast) with diagnostic 0.06 guidance band."
+    ),
+    "elite_bank_actor_distill_strong_v2": (
+        "v1.4/v1.5 clip-mode elite distill (strong) with diagnostic 0.06 guidance band."
     ),
     "elite_bank_actor_distill_fast_awr": (
         "v1.3 fast elite distill + Online Elite-AWR (conservative lambda)."
@@ -613,6 +622,38 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG: dict[str, Any] = {
     "eir_residual_apply_to_rollout": False,
 }
 
+_ELITE_BANK_ACTOR_DISTILL_FAST_V2: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL_FAST,
+    "eir_actor_distill_large_delta_mode": "clip",
+    "eir_actor_distill_max_delta": 1.0,
+    "eir_actor_distill_target_delta_clip": 0.35,
+    "eir_actor_distill_min_margin": 0.0,
+    "eir_actor_distill_weight": 0.002,
+    "eir_actor_distill_loss_cap": 0.03,
+    "eir_residual_apply_to_rollout": False,
+    # Strategy Zoo v1.5 clip-validation: temporarily widen the guidance/bank band
+    # to 0.06 so the elite bank can fill (and teachers/soft-gate engage) before
+    # tol reaches the 0.04 floor. Diagnostic only; residual rollout stays OFF.
+    "eir_guidance_start_tol": 0.06,
+    "eir_guidance_bank_tol": 0.06,
+    "eir_guidance_apply_tol": 0.06,
+}
+
+_ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
+    **_ELITE_BANK_ACTOR_DISTILL_STRONG,
+    "eir_actor_distill_large_delta_mode": "clip",
+    "eir_actor_distill_max_delta": 1.0,
+    "eir_actor_distill_target_delta_clip": 0.50,
+    "eir_actor_distill_min_margin": 0.0,
+    "eir_actor_distill_weight": 0.003,
+    "eir_actor_distill_loss_cap": 0.03,
+    "eir_residual_apply_to_rollout": False,
+    # Strategy Zoo v1.5 clip-validation: same diagnostic widening as fast_v2.
+    "eir_guidance_start_tol": 0.06,
+    "eir_guidance_bank_tol": 0.06,
+    "eir_guidance_apply_tol": 0.06,
+}
+
 # Strategy Zoo v1.7 — v13 exact + Online Elite-AWR (conservative first-run lambdas).
 _ELITE_BANK_ACTOR_DISTILL_FAST_AWR: dict[str, Any] = {
     **_ELITE_BANK_ACTOR_DISTILL_FAST,
@@ -892,6 +933,9 @@ _CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
     "adaptive_rescue_archive_require_age": True,
     "adaptive_rescue_archive_require_collapse_metadata": True,
     "adaptive_rescue_archive_require_quality_score": True,
+    "adaptive_rescue_archive_min_population_samples": 2,
+    "adaptive_rescue_archive_advantage_sigma_floor": 1.0,
+    "adaptive_rescue_archive_min_absolute_advantage": 5.0,
     "adaptive_rescue_bypass_elimination_burnin": False,
     "adaptive_rescue_bypass_on_hard_collapse": True,
     "adaptive_rescue_min_frames_before_emergency_bypass": 40_000_000,
@@ -918,6 +962,8 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
     "elite_bank_actor_distill_fast": _ELITE_BANK_ACTOR_DISTILL_FAST,
     "elite_bank_actor_distill_strong": _ELITE_BANK_ACTOR_DISTILL_STRONG,
+    "elite_bank_actor_distill_fast_v2": _ELITE_BANK_ACTOR_DISTILL_FAST_V2,
+    "elite_bank_actor_distill_strong_v2": _ELITE_BANK_ACTOR_DISTILL_STRONG_V2,
     "elite_bank_actor_distill_fast_awr": _ELITE_BANK_ACTOR_DISTILL_FAST_AWR,
     "wm_pbt_source_selector_awr": _WM_PBT_SOURCE_SELECTOR_AWR,
     "elite_bank_actor_distill_awr": _ELITE_BANK_ACTOR_DISTILL_AWR,

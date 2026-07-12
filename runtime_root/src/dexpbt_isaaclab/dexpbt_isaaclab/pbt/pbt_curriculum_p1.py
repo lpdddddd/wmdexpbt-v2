@@ -314,6 +314,8 @@ class CurriculumControlState:
     adaptive_probation_ordinary_rollback_blocked: bool = False
     adaptive_probation_hard_collapse: bool = False
     adaptive_probation_hard_collapse_streak: int = 0
+    # Same-tick event frame for adaptive hard collapse (-1 = not this tick).
+    adaptive_probation_hard_collapse_event_frame: int = -1
     adaptive_probation_rollback_triggered: bool = False
     adaptive_probation_rollback_from_tol: float = 0.0
     adaptive_probation_rollback_to_tol: float = 0.0

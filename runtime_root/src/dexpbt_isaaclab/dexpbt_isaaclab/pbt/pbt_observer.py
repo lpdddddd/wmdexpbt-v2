@@ -271,6 +271,57 @@ def _get_raw_env(algo):
     return env
 
 
+
+def _decision_uses_live_source(decision: dict[str, Any]) -> bool:
+    """True when a PBT copy decision uses a live peer checkpoint.
+
+    Live sources include ``live`` and ``latest_healthy`` checkpoint types, plus
+    live-tier labels from ordinary and adaptive cascades. Archive tiers must
+    return False so they skip the live skill_delta gate.
+    """
+    if not isinstance(decision, dict):
+        return False
+    ckpt_type = str(decision.get("checkpoint_type", "") or "")
+    tier = str(decision.get("tier", "") or "")
+    live_types = {"live", "latest_healthy"}
+    live_tiers = {
+        "strict_live",
+        "strict_stable_live",
+        "usable_live",
+        "relaxed_live",
+        "late_rescue_live",
+        "adaptive_rescue_live",
+    }
+    archive_types = {
+        "archive",
+        "best_stable_archive",
+        "best_floor_recovery_archive",
+        "late_rescue_archive",
+    }
+    archive_tiers = {
+        "adaptive_rescue_archive",
+        "adaptive_rescue_best_stable_archive",
+        "adaptive_rescue_floor_recovery_archive",
+        "adaptive_rescue_best_nsucc_archive",
+        "late_rescue_archive",
+        "best_stable_archive",
+        "best_floor_recovery_archive",
+        "best_nsucc_archive",
+    }
+    if ckpt_type in archive_types or tier in archive_tiers:
+        return False
+    if ckpt_type in live_types or tier in live_tiers:
+        return True
+    # Adaptive / ordinary source_kind markers.
+    kind = str(decision.get("adaptive_rescue_source_kind", "") or "")
+    if kind == "live":
+        return True
+    if kind == "archive":
+        return False
+    return False
+
+
+
 class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     """rl_games observer implementing decentralized DexPBT with ternary split."""
 
@@ -666,6 +717,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         adaptive_rescue_archive_require_age: bool = True,
         adaptive_rescue_archive_require_collapse_metadata: bool = True,
         adaptive_rescue_archive_require_quality_score: bool = True,
+        adaptive_rescue_archive_min_population_samples: int = 2,
+        adaptive_rescue_archive_advantage_sigma_floor: float = 1.0,
+        adaptive_rescue_archive_min_absolute_advantage: float = 5.0,
         adaptive_rescue_bypass_elimination_burnin: bool = False,
         adaptive_rescue_bypass_on_hard_collapse: bool = True,
         adaptive_rescue_min_frames_before_emergency_bypass: int = 40_000_000,
@@ -1706,6 +1760,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 rescue_archive_require_quality_score=bool(
                     adaptive_rescue_archive_require_quality_score
                 ),
+                rescue_archive_min_population_samples=int(
+                    adaptive_rescue_archive_min_population_samples
+                ),
+                rescue_archive_advantage_sigma_floor=float(
+                    adaptive_rescue_archive_advantage_sigma_floor
+                ),
+                rescue_archive_min_absolute_advantage=float(
+                    adaptive_rescue_archive_min_absolute_advantage
+                ),
                 rescue_bypass_elimination_burnin=bool(
                     adaptive_rescue_bypass_elimination_burnin
                 ),
@@ -2267,8 +2330,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         nsucc_mean: float,
         env_frames: int,
         lineage_id: str,
+        hard_collapse_now: bool = False,
     ) -> tuple[bool, str]:
-        """Retention-conditioned adaptive rescue trigger (no legacy late rescue)."""
+        """Retention-conditioned adaptive rescue trigger (no legacy late rescue).
+
+        When ``hard_collapse_now`` is True, hard collapse independently arms
+        adaptive rescue without retention warmup / degradation patience, while
+        still respecting lineage quota and cooldown.
+        """
         from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
             evaluate_degradation_rescue,
         )
@@ -2280,21 +2349,49 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if not bool(cfg.rescue_enable):
             return False, "disabled"
         self._adaptive_reset_lineage_quota(policy_idx, lineage_id)
-        snap = tracker.snapshot(float(tolerance), min_samples=1)
         last_frame = int(self._adaptive_last_rescue_frame.get(policy_idx, -(10**18)))
         frames_since = int(env_frames) - last_frame
+        executed = int(self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0))
+        if int(executed) >= int(cfg.rescue_max_per_lineage):
+            reason = (
+                "hard_collapse_quota_exhausted"
+                if hard_collapse_now
+                else "quota_exhausted"
+            )
+            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
+            return False, str(reason)
+        if int(frames_since) < int(cfg.rescue_cooldown_frames):
+            reason = (
+                "hard_collapse_cooldown" if hard_collapse_now else "cooldown"
+            )
+            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
+            return False, str(reason)
+        if hard_collapse_now:
+            reason = "hard_collapse_ready"
+            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
+            return True, str(reason)
+        snap = tracker.snapshot(float(tolerance), min_samples=1)
         ready, reason = evaluate_degradation_rescue(
             tolerance=float(tolerance),
             nsucc_mean=float(nsucc_mean),
             same_level_retention=float(snap["retention"]),
             same_level_valid=bool(snap["valid"]),
             degradation_streak=int(self._adaptive_degradation_streak.get(policy_idx, 0)),
-            executed_this_lineage=int(
-                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
-            ),
+            executed_this_lineage=int(executed),
             frames_since_last_rescue=int(frames_since),
             cfg=cfg,
         )
+        if ready:
+            reason = "retention_degradation_ready"
+        elif str(reason) in {
+            "retention_invalid",
+            "retention_nonfinite",
+            "retention_ok",
+            "streak_below_patience",
+        }:
+            # Keep detailed diagnostic reasons for retention path; also expose
+            # a stable not-ready token for control-plane consumers.
+            reason = str(reason)
         self._adaptive_rescue_last_reason[policy_idx] = str(reason)
         return bool(ready), str(reason)
 
@@ -2544,12 +2641,24 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             for x in (population_nsucc_means or [])
             if isinstance(x, (int, float)) and math.isfinite(float(x))
         ]
+        min_pop_samples = int(cfg.rescue_archive_min_population_samples)
+        if len(means) < min_pop_samples:
+            empty["archive_reason"] = "archive_population_stats_insufficient"
+            empty["adaptive_rescue_reason"] = "archive_population_stats_insufficient"
+            empty["adaptive_population_nsucc_sample_count"] = int(len(means))
+            empty["adaptive_population_nsucc_sigma"] = 0.0
+            empty["adaptive_population_nsucc_effective_sigma"] = 0.0
+            empty["adaptive_source_absolute_advantage"] = 0.0
+            empty["adaptive_source_advantage_sigma"] = 0.0
+            return empty
         if len(means) >= 2:
             mu = sum(means) / float(len(means))
             var = sum((m - mu) ** 2 for m in means) / float(len(means) - 1)
             pop_sigma = math.sqrt(max(0.0, var))
         else:
             pop_sigma = 0.0
+        sigma_floor = float(cfg.rescue_archive_advantage_sigma_floor)
+        effective_sigma = max(float(pop_sigma), float(sigma_floor))
 
         tiers = (
             (
@@ -2678,23 +2787,37 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     reject_reasons.append(f"{tier_label}:retention_below_min")
                     continue
             age_frame = None
+            age_parse_failed = False
             for key in ("env_frames", "frame", "population_frame", "saved_frame"):
                 if key in synth:
                     try:
                         age_frame = int(synth.get(key))
                     except Exception:
                         age_frame = None
+                        age_parse_failed = True
                     break
-            if age_frame is None and bool(cfg.rescue_archive_require_age):
-                reject_reasons.append(f"{tier_label}:age_missing")
+            age_known = False
+            age_frames = -1
+            if age_parse_failed:
+                reject_reasons.append(f"{tier_label}:archive_age_nonfinite")
                 continue
             if age_frame is None:
-                reject_reasons.append(f"{tier_label}:save_frame_missing")
-                continue
-            age = int(env_frames) - int(age_frame)
-            if age < 0 or age > int(cfg.rescue_archive_max_age_frames):
-                reject_reasons.append(f"{tier_label}:archive_too_old")
-                continue
+                if bool(cfg.rescue_archive_require_age):
+                    reject_reasons.append(f"{tier_label}:archive_age_missing")
+                    continue
+                # require_age=False: skip age gate; do not invent age=0.
+                age_known = False
+                age_frames = -1
+            else:
+                age = int(env_frames) - int(age_frame)
+                if age < 0:
+                    reject_reasons.append(f"{tier_label}:archive_age_from_future")
+                    continue
+                if age > int(cfg.rescue_archive_max_age_frames):
+                    reject_reasons.append(f"{tier_label}:archive_too_old")
+                    continue
+                age_known = True
+                age_frames = int(age)
             has_collapse_meta = any(k in synth for k in collapse_keys)
             if bool(cfg.rescue_archive_require_collapse_metadata) and not has_collapse_meta:
                 reject_reasons.append(f"{tier_label}:collapse_metadata_missing")
@@ -2708,16 +2831,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             if bool(cfg.rescue_reject_collapse_source) and collapsed:
                 reject_reasons.append(f"{tier_label}:collapsed")
                 continue
-            # Same standardized advantage as live adaptive sources.
-            if pop_sigma > 1e-9:
-                adv_sigma = (float(s_mean) - float(target_nsucc_mean)) / float(pop_sigma)
-            else:
-                adv_sigma = (
-                    float("inf")
-                    if float(s_mean) > float(target_nsucc_mean)
-                    else 0.0
-                )
-            if adv_sigma < float(cfg.rescue_min_source_advantage_sigma):
+            absolute_advantage = float(s_mean) - float(target_nsucc_mean)
+            if absolute_advantage < float(cfg.rescue_archive_min_absolute_advantage):
+                reject_reasons.append(f"{tier_label}:low_absolute_advantage")
+                continue
+            adv_sigma = float(absolute_advantage) / float(effective_sigma)
+            if (not math.isfinite(adv_sigma)) or adv_sigma < float(
+                cfg.rescue_min_source_advantage_sigma
+            ):
                 reject_reasons.append(f"{tier_label}:low_advantage")
                 continue
             return {
@@ -2734,7 +2855,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "adaptive_rescue_reason": "selected_archive",
                 "adaptive_rescue_source_kind": "archive",
                 "adaptive_source_rank": -1,
-                "adaptive_source_advantage_sigma": float(min(adv_sigma, 1e6)),
+                "adaptive_source_advantage_sigma": float(adv_sigma),
+                "adaptive_source_absolute_advantage": float(absolute_advantage),
+                "adaptive_population_nsucc_sample_count": int(len(means)),
+                "adaptive_population_nsucc_sigma": float(pop_sigma),
+                "adaptive_population_nsucc_effective_sigma": float(effective_sigma),
+                "adaptive_archive_age_known": bool(age_known),
+                "adaptive_archive_age_frames": int(age_frames),
                 "adaptive_log_tolerance_gap": float(gap),
                 "adaptive_rescue_archive_tier": tier_label,
             }
@@ -4456,6 +4583,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             adaptive_probation_hard_collapse_streak=int(
                 adaptive_probation_hard_collapse_streak
             ),
+            adaptive_probation_hard_collapse_event_frame=(
+                int(env_frames) if adaptive_probation_hard_collapse else -1
+            ),
             adaptive_probation_rollback_triggered=bool(
                 adaptive_probation_rollback_triggered
             ),
@@ -4480,7 +4610,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             adaptive_rollback_target_source=str(adaptive_rollback_target_source),
             adaptive_rollback_log_gap=float(adaptive_rollback_log_gap),
             adaptive_rescue_ready=bool(
-                self._adaptive_rescue_last_reason.get(policy_idx, "") == "ready"
+                self._adaptive_rescue_last_reason.get(policy_idx, "")
+                in (
+                    "ready",
+                    "retention_degradation_ready",
+                    "hard_collapse_ready",
+                )
             ),
             adaptive_rescue_reason=str(
                 self._adaptive_rescue_last_reason.get(policy_idx, "")
@@ -9548,6 +9683,23 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 or ""
             )
             if self.adaptive_precision_enable:
+                latch_frame_for_ready = int(
+                    self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
+                )
+                ctrl_event_for_ready = -1
+                if own_ctrl_for_floor is not None:
+                    ctrl_event_for_ready = int(
+                        getattr(
+                            own_ctrl_for_floor,
+                            "adaptive_probation_hard_collapse_event_frame",
+                            -1,
+                        )
+                        or -1
+                    )
+                adaptive_hard_collapse_this_tick = bool(
+                    latch_frame_for_ready == int(env_frames)
+                    or ctrl_event_for_ready == int(env_frames)
+                )
                 adaptive_rescue, adaptive_rescue_reason = (
                     self._adaptive_degradation_rescue_ready(
                         policy_idx=self.policy_idx,
@@ -9555,6 +9707,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         nsucc_mean=own_rescue_nsucc,
                         env_frames=env_frames,
                         lineage_id=own_lineage,
+                        hard_collapse_now=adaptive_hard_collapse_this_tick,
                     )
                 )
             else:
@@ -9738,18 +9891,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 latch_frame = int(
                     self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
                 )
+                ctrl_event_frame = -1
+                if own_ctrl_for_floor is not None:
+                    ctrl_event_frame = int(
+                        getattr(
+                            own_ctrl_for_floor,
+                            "adaptive_probation_hard_collapse_event_frame",
+                            -1,
+                        )
+                        or -1
+                    )
+                # Same-tick only: latch or control event_frame == env_frames.
+                # Stale adaptive_probation_hard_collapse bool must not arm gates.
                 adaptive_hard_collapse_for_gate = bool(
                     latch_frame == int(env_frames)
-                    or (
-                        own_ctrl_for_floor is not None
-                        and bool(
-                            getattr(
-                                own_ctrl_for_floor,
-                                "adaptive_probation_hard_collapse",
-                                False,
-                            )
-                        )
-                    )
+                    or ctrl_event_frame == int(env_frames)
                 )
                 allowed, reason, d_self = pbt_copy_allowed_for_adaptive_rescue_target(
                     own_window,
@@ -9988,7 +10144,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._last_restart_type = 3  # skipped
                 return
 
-            if str(decision.get("checkpoint_type", "live")) == "live":
+            if _decision_uses_live_source(decision):
                 src_idx = int(decision["source_policy"])
                 src_ok, src_reason = pbt_copy_allowed_for_live_source(
                     self._policy_nsucc_windows.get(src_idx),
@@ -10089,21 +10245,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 latch_frame = int(
                     self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
                 )
-                ctrl_hc = bool(
-                    own_ctrl_for_floor is not None
-                    and bool(
+                ctrl_event_frame = -1
+                if own_ctrl_for_floor is not None:
+                    ctrl_event_frame = int(
                         getattr(
                             own_ctrl_for_floor,
-                            "adaptive_probation_hard_collapse",
-                            False,
+                            "adaptive_probation_hard_collapse_event_frame",
+                            -1,
                         )
+                        or -1
                     )
-                )
-                streak_hc = bool(aprob.active and aprob.hard_collapsed(adapt_cfg))
-                # Prefer per-tick latch / control persistence over streak (which
-                # may already have been cleared after rollback target selection).
+                # Same-tick event only. Stale bool / residual streak after
+                # rollback must not trigger emergency burn-in bypass.
                 adaptive_hard_collapse_active = bool(
-                    latch_frame == int(env_frames) or ctrl_hc or streak_hc
+                    latch_frame == int(env_frames)
+                    or ctrl_event_frame == int(env_frames)
                 )
             frames_since_restart = int(env_frames) - int(self._frames_at_restart)
             decision_source_is_stable = bool(

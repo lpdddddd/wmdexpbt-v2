@@ -98,6 +98,10 @@ class AdaptivePrecisionConfig:
     rescue_archive_require_age: bool = True
     rescue_archive_require_collapse_metadata: bool = True
     rescue_archive_require_quality_score: bool = True
+    # Archive advantage: never use inf when population variance is degenerate.
+    rescue_archive_min_population_samples: int = 2
+    rescue_archive_advantage_sigma_floor: float = 1.0
+    rescue_archive_min_absolute_advantage: float = 5.0
     # Emergency burn-in bypass (off by default for ordinary degradation).
     rescue_bypass_elimination_burnin: bool = False
     rescue_bypass_on_hard_collapse: bool = True
@@ -150,6 +154,12 @@ class AdaptivePrecisionConfig:
             raise ValueError("rescue_source_min_stable_ticks must be >= 0")
         if int(self.probation_freeze_only_max_ticks) < 0:
             raise ValueError("probation_freeze_only_max_ticks must be >= 0")
+        if int(self.rescue_archive_min_population_samples) < 1:
+            raise ValueError("rescue_archive_min_population_samples must be >= 1")
+        if not (float(self.rescue_archive_advantage_sigma_floor) > 0.0):
+            raise ValueError("rescue_archive_advantage_sigma_floor must be > 0")
+        if not (float(self.rescue_archive_min_absolute_advantage) >= 0.0):
+            raise ValueError("rescue_archive_min_absolute_advantage must be >= 0")
 
 
 def rescue_source_top_k(population_size: int, top_fraction: float) -> int:

@@ -12,6 +12,8 @@ COMMIT_SHORT="$(git -C /root/autodl-tmp/wmdexpbt rev-parse --short HEAD 2>/dev/n
 RUN_DIR="${RUNS_ROOT}/regrasping_pbt_wm_strategy_zoo_v17_3_awr_rescue_900m_smoke_${COMMIT_SHORT}_${DATE}"
 LOG="${RUN_DIR}/launch_master.log"
 PIDFILE="${RUN_DIR}/nohup.pid"
+MONITOR_LOG="${RUN_DIR}/verify_monitor.log"
+MONITOR_PIDFILE="${RUN_DIR}/verify_monitor.pid"
 
 cd "${RUNTIME_ROOT}" || exit 1
 COMMIT_SHA="$(git -C /root/autodl-tmp/wmdexpbt rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -108,15 +110,16 @@ awr_kl_gate_enable=false
 awr_broadcast_enabled=false
 awr_inherit_enabled=true
 note=v17.3 AWR rescue smoke: similarity fix, mean delta gate, collect_every=4, tighter caps.
-monitor=none
+monitor_script=results/monitor_v17_2_control_plane_2b_verify.py
+monitor_interval_s=600
 EOF
 
 cat > "${RUN_DIR}/LOGGING_HOOKS.txt" <<'EOF'
-Smoke hooks:
+Smoke hooks (observe-only):
 - training_curve_policy_XX.jsonl: env_frames, pbt_iteration, awr_*, rollout_builder_*
 - pbt_tick_debug_policy_XX.jsonl: PBT tick debug growth
 - dexpbt_8gpu_ws/metrics/pbt_copy_events.jsonl
-- train.log: fps total, frames
+- train.log: fps total (preferred frame source for monitor)
 EOF
 
 source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"
@@ -268,7 +271,16 @@ echo >> "${RUN_DIR}/LAUNCH_CMD.sh"
 nohup "${LAUNCH_CMD[@]}" >"$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 
+nohup python3 "${RESULTS_ROOT}/monitor_v17_2_control_plane_2b_verify.py" \
+  "$RUN_DIR" \
+  --loop \
+  --interval-s 600 \
+  --fail-fast \
+  >>"$MONITOR_LOG" 2>&1 &
+echo $! > "$MONITOR_PIDFILE"
+
 echo "launch_master pid=$(cat "$PIDFILE") log=$LOG"
+echo "verify_monitor pid=$(cat "$MONITOR_PIDFILE") log=$MONITOR_LOG"
 echo "run_dir=$RUN_DIR"
 echo "commit=${COMMIT_SHA}"
 echo "run_name=v17_3_awr_rescue_900m_smoke_${COMMIT_SHORT}"
