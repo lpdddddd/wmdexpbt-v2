@@ -88,6 +88,7 @@ def _state(
     pbt_ranking_score: float = 100.0,
     frame_since_restart: int = 200_000_000,
     frames_at_restart: int = 0,
+    checkpoint: str | None = None,
 ):
     return {
         "policy_idx": policy_idx,
@@ -99,7 +100,7 @@ def _state(
         "r_meta_raw": pbt_ranking_score,
         "nsucc_mean": nsucc_mean,
         "nsucc_max": nsucc_max,
-        "checkpoint": "/tmp/dummy.pth",
+        "checkpoint": checkpoint or "/tmp/dummy.pth",
         "curriculum": {
             "frame_since_restart": frame_since_restart,
             "mean_prev_episode_successes": nsucc_mean,
@@ -108,6 +109,61 @@ def _state(
         },
         "params": {},
     }
+
+
+def _seed_skill_delta_window(
+    obs,
+    policy_idx: int,
+    *,
+    nsucc_seq: list[float],
+    env_frames: int,
+    lineage: str = "same",
+    tol: float = 0.05,
+):
+    """Seed a contiguous same-lineage window for skill_delta gates."""
+    from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+    w = obs._policy_window(policy_idx)
+    w.samples = []
+    n = len(nsucc_seq)
+    step = int(obs.interval_steps)
+    for i, mean in enumerate(nsucc_seq):
+        w.samples.append(
+            WindowSample(
+                env_frames=int(env_frames) - (n - 1 - i) * step,
+                nsucc_mean=float(mean),
+                nsucc_max=float(mean) + 5.0,
+                success_tolerance=float(tol),
+                pbt_iteration=i,
+                lineage_id=lineage,
+            )
+        )
+    return w
+
+
+def _seed_bottom_skill_delta_for_ternary(
+    obs,
+    population: dict,
+    *,
+    env_frames: int,
+    target_idx: int,
+):
+    """Target stuck (nsucc<1, nonpositive delta); live sources stably improving."""
+    for idx, st in population.items():
+        mean = float(st.get("nsucc_mean", 0.0))
+        if int(idx) == int(target_idx):
+            # Flat zero → stuck + nonpositive delta.
+            _seed_skill_delta_window(
+                obs, idx, nsucc_seq=[0.0] * 6, env_frames=env_frames
+            )
+        elif mean > 0.0:
+            # Strictly increasing → stable positive skill_delta for live source.
+            seq = [max(0.0, mean - 1.0 + 0.2 * i) for i in range(6)]
+            _seed_skill_delta_window(obs, idx, nsucc_seq=seq, env_frames=env_frames)
+        else:
+            _seed_skill_delta_window(
+                obs, idx, nsucc_seq=[0.0] * 6, env_frames=env_frames
+            )
 
 
 def _write_archive_peak(
@@ -416,12 +472,14 @@ class TernaryPbtBottomBranchTieredTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.workspace = Path(self._tmp.name)
+        self.ckpt = self.workspace / "dummy.pth"
+        self.ckpt.write_text("dummy_ckpt_bytes")
 
     def _patched(self, obs):
         return patch.multiple(
             obs,
             _maybe_save_best_policy=lambda *a, **kw: None,
-            _restart_process_with_new_params=lambda *a, **kw: None,
+            _restart_process_with_new_params=lambda *a, **kw: True,
         )
 
     def _call_ternary(self, obs, population, env_frames):
@@ -440,14 +498,18 @@ class TernaryPbtBottomBranchTieredTest(unittest.TestCase):
 
     def test_strict_live_path_increments_cross_counter(self):
         obs = _make_observer(self.workspace, num_policies=3, policy_idx=2)
+        ck = str(self.ckpt)
         population = {
             0: _state(policy_idx=0, pbt_ranking_score=100.0,
-                      nsucc_mean=5.0, nsucc_max=25.0),
+                      nsucc_mean=5.0, nsucc_max=25.0, checkpoint=ck),
             1: _state(policy_idx=1, pbt_ranking_score=50.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
             2: _state(policy_idx=2, pbt_ranking_score=10.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
         }
+        _seed_bottom_skill_delta_for_ternary(
+            obs, population, env_frames=300_000_000, target_idx=2
+        )
         with self._patched(obs):
             self._call_ternary(obs, population, env_frames=300_000_000)
         self.assertEqual(obs._cross_restart_count, 1)
@@ -467,14 +529,18 @@ class TernaryPbtBottomBranchTieredTest(unittest.TestCase):
             nsucc_max=25.0,
         )
         obs = _make_observer(self.workspace, num_policies=3, policy_idx=2)
+        ck = str(self.ckpt)
         population = {
             0: _state(policy_idx=0, pbt_ranking_score=100.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
             1: _state(policy_idx=1, pbt_ranking_score=50.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
             2: _state(policy_idx=2, pbt_ranking_score=10.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
         }
+        _seed_bottom_skill_delta_for_ternary(
+            obs, population, env_frames=300_000_000, target_idx=2
+        )
         with self._patched(obs):
             self._call_ternary(obs, population, env_frames=300_000_000)
         self.assertEqual(obs._recovery_restart_count, 1)
@@ -488,14 +554,18 @@ class TernaryPbtBottomBranchTieredTest(unittest.TestCase):
 
     def test_l4_skip_does_not_increment_any_counter(self):
         obs = _make_observer(self.workspace, num_policies=3, policy_idx=2)
+        ck = str(self.ckpt)
         population = {
             0: _state(policy_idx=0, pbt_ranking_score=100.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
             1: _state(policy_idx=1, pbt_ranking_score=50.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
             2: _state(policy_idx=2, pbt_ranking_score=10.0,
-                      nsucc_mean=0.0, nsucc_max=0.0),
+                      nsucc_mean=0.0, nsucc_max=0.0, checkpoint=ck),
         }
+        _seed_bottom_skill_delta_for_ternary(
+            obs, population, env_frames=300_000_000, target_idx=2
+        )
         with self._patched(obs):
             self._call_ternary(obs, population, env_frames=300_000_000)
         self.assertEqual(obs._cross_restart_count, 0)

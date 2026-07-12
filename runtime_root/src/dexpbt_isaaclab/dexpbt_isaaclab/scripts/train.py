@@ -155,6 +155,22 @@ parser.add_argument(
     default=True,
 )
 parser.add_argument("--adaptive_rescue_archive_min_nsucc_mean", type=float, default=0.0)
+parser.add_argument("--adaptive_rescue_archive_min_nsucc_max", type=float, default=0.0)
+parser.add_argument(
+    "--adaptive_rescue_archive_require_age",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument(
+    "--adaptive_rescue_archive_require_collapse_metadata",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
+parser.add_argument(
+    "--adaptive_rescue_archive_require_quality_score",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+)
 parser.add_argument(
     "--adaptive_rescue_bypass_elimination_burnin",
     action=argparse.BooleanOptionalAction,
@@ -8142,6 +8158,18 @@ def main():
             ),
             adaptive_rescue_archive_min_nsucc_mean=float(
                 args_cli.adaptive_rescue_archive_min_nsucc_mean
+            ),
+            adaptive_rescue_archive_min_nsucc_max=float(
+                args_cli.adaptive_rescue_archive_min_nsucc_max
+            ),
+            adaptive_rescue_archive_require_age=bool(
+                args_cli.adaptive_rescue_archive_require_age
+            ),
+            adaptive_rescue_archive_require_collapse_metadata=bool(
+                args_cli.adaptive_rescue_archive_require_collapse_metadata
+            ),
+            adaptive_rescue_archive_require_quality_score=bool(
+                args_cli.adaptive_rescue_archive_require_quality_score
             ),
             adaptive_rescue_bypass_elimination_burnin=bool(
                 args_cli.adaptive_rescue_bypass_elimination_burnin

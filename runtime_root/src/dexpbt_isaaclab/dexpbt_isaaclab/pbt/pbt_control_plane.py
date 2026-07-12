@@ -475,6 +475,34 @@ def pbt_copy_allowed_for_target(
     return True, "ok", delta
 
 
+def pbt_copy_allowed_for_adaptive_rescue_target(
+    window: RollingNsuccWindow | None,
+    *,
+    interval_steps: int,
+    hard_collapse: bool = False,
+) -> tuple[bool, str, float | None]:
+    """Target gate for adaptive retention/hard-collapse rescue only.
+
+    Adaptive rescue is armed by retention degradation (or hard collapse), not by
+    the generic stuck gate (``nsucc_mean < 1``).  A worker that fell from a high
+    peak to a still-elevated mean must still be eligible for rescue.
+
+    Semantics (caller already passed retention/cooldown/quota triggers):
+    - hard collapse confirmed → allow source cascade
+    - skill_delta clearly improving (≥ ``SKILL_DELTA_IMPROVE_EPS``) → reject
+    - skill_delta ≤ 0, zero, or unavailable → allow (invalid delta does not
+      override valid retention-degradation evidence)
+    """
+    delta = skill_delta_for_policy(window, interval_steps=interval_steps)
+    if hard_collapse:
+        return True, "adaptive_hard_collapse", delta
+    if skill_delta_improving(delta):
+        return False, "skill_delta_improving", delta
+    if delta is None:
+        return True, "skill_delta_unavailable_ok", None
+    return True, "ok", delta
+
+
 def pbt_copy_allowed_for_live_source(
     window: RollingNsuccWindow | None,
     *,

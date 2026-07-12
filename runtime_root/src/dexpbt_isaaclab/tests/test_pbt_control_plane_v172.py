@@ -86,6 +86,47 @@ class TestSkillDeltaGating(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "source_skill_delta_invalid_or_unstable")
 
+    def test_adaptive_rescue_target_allows_unavailable_delta(self):
+        from dexpbt_isaaclab.pbt.pbt_control_plane import (
+            pbt_copy_allowed_for_adaptive_rescue_target,
+        )
+
+        window = RollingNsuccWindow(max_len=8)
+        ok, reason, delta = pbt_copy_allowed_for_adaptive_rescue_target(
+            window, interval_steps=20_000_000, hard_collapse=False
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "skill_delta_unavailable_ok")
+        self.assertIsNone(delta)
+
+    def test_adaptive_rescue_target_blocks_improving(self):
+        from dexpbt_isaaclab.pbt.pbt_control_plane import (
+            pbt_copy_allowed_for_adaptive_rescue_target,
+        )
+
+        window = RollingNsuccWindow(max_len=8)
+        for i in range(6):
+            window.append(self._sample(i * 20_000_000, float(i), "same"))
+        ok, reason, _ = pbt_copy_allowed_for_adaptive_rescue_target(
+            window, interval_steps=20_000_000, hard_collapse=False
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "skill_delta_improving")
+
+    def test_adaptive_rescue_hard_collapse_bypasses_improving(self):
+        from dexpbt_isaaclab.pbt.pbt_control_plane import (
+            pbt_copy_allowed_for_adaptive_rescue_target,
+        )
+
+        window = RollingNsuccWindow(max_len=8)
+        for i in range(6):
+            window.append(self._sample(i * 20_000_000, float(i), "same"))
+        ok, reason, _ = pbt_copy_allowed_for_adaptive_rescue_target(
+            window, interval_steps=20_000_000, hard_collapse=True
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "adaptive_hard_collapse")
+
 
 class TestClockDerivation(unittest.TestCase):
     def test_quantized_iteration(self):

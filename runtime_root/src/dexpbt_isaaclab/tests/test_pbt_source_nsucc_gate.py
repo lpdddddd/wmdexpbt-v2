@@ -211,9 +211,12 @@ class TernaryPbtNoSourceSkipsReplacementTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        self.workspace = Path(self._tmp.name)
+        self.ckpt = self.workspace / "dummy.pth"
+        self.ckpt.write_text("dummy")
         # Bottom-tier worker is the test subject (policy_3 / rank 3 of 4)
         self.obs = _make_observer(
-            Path(self._tmp.name), num_policies=4, policy_idx=3
+            self.workspace, num_policies=4, policy_idx=3
         )
         # `writer` is set in `after_init` by rl_games; in unit tests we
         # bypass that and just disable TB writes.
@@ -222,25 +225,53 @@ class TernaryPbtNoSourceSkipsReplacementTest(unittest.TestCase):
         # source-gate logic we want to exercise.
         self.obs.min_frames_between_restarts = 0
 
+    def _seed_skill_delta(self, obs, population, *, env_frames: int, target_idx: int):
+        from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import WindowSample
+
+        step = int(obs.interval_steps)
+        for idx, st in population.items():
+            mean = float(st.get("nsucc_mean", 0.0))
+            w = obs._policy_window(idx)
+            w.samples = []
+            if int(idx) == int(target_idx):
+                seq = [0.0] * 6
+            else:
+                # Live source gate needs stable positive skill_delta even when
+                # absolute nsucc is low (legacy fallback path).
+                seq = [0.2 * i for i in range(6)]
+            for i, m in enumerate(seq):
+                w.samples.append(
+                    WindowSample(
+                        env_frames=int(env_frames) - (5 - i) * step,
+                        nsucc_mean=float(m),
+                        nsucc_max=float(m) + 5.0,
+                        success_tolerance=0.05,
+                        pbt_iteration=i,
+                        lineage_id="same",
+                    )
+                )
+
     def _build_population_all_unhealthy(self) -> dict:
         """policy_0/1 high r_meta but nsucc=0.17 (collapse leaders);
         policy_2/3 fresh / no signal.
         """
+        ck = str(self.ckpt)
         return {
             0: _state(policy_idx=0, nsucc_mean=0.17, nsucc_max=2,
-                      r_meta_raw=0.94, pbt_ranking_score=0.94),
+                      r_meta_raw=0.94, pbt_ranking_score=0.94, checkpoint=ck),
             1: _state(policy_idx=1, nsucc_mean=0.00, nsucc_max=0,
-                      r_meta_raw=0.94, pbt_ranking_score=0.05),
+                      r_meta_raw=0.94, pbt_ranking_score=0.05, checkpoint=ck),
             2: _state(policy_idx=2, nsucc_mean=0.30, nsucc_max=3,
-                      r_meta_raw=0.10, pbt_ranking_score=0.10),
+                      r_meta_raw=0.10, pbt_ranking_score=0.10, checkpoint=ck),
             3: _state(policy_idx=3, nsucc_mean=0.00, nsucc_max=0,
                       r_meta_raw=0.00, pbt_ranking_score=0.00,
                       frame=55_000_000, frames_at_restart=50_000_000,
-                      frame_since_restart=5_000_000),
+                      frame_since_restart=5_000_000, checkpoint=ck),
         }
 
     def test_default_skips_replacement_no_restart(self):
         pop = self._build_population_all_unhealthy()
+        self._seed_skill_delta(self.obs, pop, env_frames=300_000_000, target_idx=3)
         sorted_pols = sorted(pop.keys(), key=lambda k: -pop[k]["objective"])
         objs = {k: pop[k]["objective"] for k in pop}
 
@@ -258,18 +289,19 @@ class TernaryPbtNoSourceSkipsReplacementTest(unittest.TestCase):
         behaviour where a bad source is re-admitted and replacement runs.
         """
         obs_legacy = _make_observer(
-            Path(self._tmp.name), num_policies=4, policy_idx=3,
+            self.workspace, num_policies=4, policy_idx=3,
             allow_low_nsucc_source_fallback=True,
         )
         obs_legacy.writer = None
         obs_legacy.min_frames_between_restarts = 0
 
         pop = self._build_population_all_unhealthy()
+        self._seed_skill_delta(obs_legacy, pop, env_frames=300_000_000, target_idx=3)
         sorted_pols = sorted(pop.keys(), key=lambda k: -pop[k]["objective"])
         objs = {k: pop[k]["objective"] for k in pop}
 
         with mock.patch.object(
-            obs_legacy, "_restart_process_with_new_params"
+            obs_legacy, "_restart_process_with_new_params", return_value=True
         ) as m_restart, mock.patch.object(
             obs_legacy, "_maybe_save_best_policy"
         ):
@@ -289,15 +321,22 @@ class TernaryPbtNoSourceSkipsReplacementTest(unittest.TestCase):
         pop = self._build_population_all_unhealthy()
         # Replace policy_0 (the original rank-1, collapsed) with a healthy
         # worker so the rank-1 candidate now passes the nsucc gate.
-        pop[0] = _state(policy_idx=0, nsucc_mean=2.5, nsucc_max=20,
-                        r_meta_raw=0.50, pbt_ranking_score=0.50)
+        pop[0] = _state(
+            policy_idx=0,
+            nsucc_mean=2.5,
+            nsucc_max=20,
+            r_meta_raw=0.50,
+            pbt_ranking_score=0.50,
+            checkpoint=str(self.ckpt),
+        )
+        self._seed_skill_delta(self.obs, pop, env_frames=300_000_000, target_idx=3)
         sorted_pols = sorted(pop.keys(), key=lambda k: -pop[k]["objective"])
         objs = {k: pop[k]["objective"] for k in pop}
         # Sanity: rank 1 should be policy_0 (highest ranking_score).
         self.assertEqual(sorted_pols[0], 0)
 
         with mock.patch.object(
-            self.obs, "_restart_process_with_new_params"
+            self.obs, "_restart_process_with_new_params", return_value=True
         ) as m_restart, mock.patch.object(
             self.obs, "_maybe_save_best_policy"
         ):

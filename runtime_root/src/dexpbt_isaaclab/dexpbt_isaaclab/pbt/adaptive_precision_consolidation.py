@@ -93,6 +93,11 @@ class AdaptivePrecisionConfig:
     rescue_archive_max_age_frames: int = 1_000_000_000
     rescue_archive_require_retention: bool = True
     rescue_archive_min_nsucc_mean: float = 0.0
+    # Fail-closed archive health gates (old archives missing fields are rejected).
+    rescue_archive_min_nsucc_max: float = 0.0
+    rescue_archive_require_age: bool = True
+    rescue_archive_require_collapse_metadata: bool = True
+    rescue_archive_require_quality_score: bool = True
     # Emergency burn-in bypass (off by default for ordinary degradation).
     rescue_bypass_elimination_burnin: bool = False
     rescue_bypass_on_hard_collapse: bool = True
