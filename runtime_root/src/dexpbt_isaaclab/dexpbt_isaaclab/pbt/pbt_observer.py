@@ -724,6 +724,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         adaptive_rescue_bypass_on_hard_collapse: bool = True,
         adaptive_rescue_min_frames_before_emergency_bypass: int = 40_000_000,
         adaptive_rescue_emergency_require_archive_or_stable_source: bool = True,
+        adaptive_lineage_diversity_enable: bool = False,
+        adaptive_min_distinct_lineages_exploration: int = 3,
+        adaptive_min_distinct_lineages_consolidation: int = 2,
+        adaptive_min_distinct_lineages_selection: int = 1,
+        adaptive_replacement_budget_exploration: int = 1,
+        adaptive_replacement_budget_consolidation: int = 1,
+        adaptive_replacement_budget_selection: int = 2,
+        adaptive_probation_stage_aware_enable: bool = False,
+        adaptive_probation_min_frames_exploration: int = 75_000_000,
+        adaptive_probation_min_frames_other: int = 100_000_000,
+        adaptive_probation_max_frames: int = 200_000_000,
+        adaptive_probation_min_stable_ticks_exploration: int = 2,
+        adaptive_probation_min_stable_ticks_other: int = 3,
+        adaptive_probation_early_exit_retention: float = 0.97,
+        adaptive_probation_normal_exit_retention: float = 0.92,
+        adaptive_probation_early_exit_nsucc_drop_frac: float = 0.15,
+        adaptive_rescue_source_freshness_mode: str = "hard_max",
+        adaptive_rescue_source_freshness_tau_frames: int = 80_000_000,
+        adaptive_rescue_source_hard_max_age_frames: int = 160_000_000,
         wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
@@ -1787,12 +1806,63 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 probation_freeze_only_max_ticks=int(
                     adaptive_probation_freeze_only_max_ticks
                 ),
+                lineage_diversity_enable=bool(adaptive_lineage_diversity_enable),
+                min_distinct_lineages_exploration=int(
+                    adaptive_min_distinct_lineages_exploration
+                ),
+                min_distinct_lineages_consolidation=int(
+                    adaptive_min_distinct_lineages_consolidation
+                ),
+                min_distinct_lineages_selection=int(
+                    adaptive_min_distinct_lineages_selection
+                ),
+                replacement_budget_exploration=int(
+                    adaptive_replacement_budget_exploration
+                ),
+                replacement_budget_consolidation=int(
+                    adaptive_replacement_budget_consolidation
+                ),
+                replacement_budget_selection=int(adaptive_replacement_budget_selection),
+                probation_stage_aware_enable=bool(
+                    adaptive_probation_stage_aware_enable
+                ),
+                probation_min_frames_exploration=int(
+                    adaptive_probation_min_frames_exploration
+                ),
+                probation_min_frames_other=int(adaptive_probation_min_frames_other),
+                probation_max_frames=int(adaptive_probation_max_frames),
+                probation_min_stable_ticks_exploration=int(
+                    adaptive_probation_min_stable_ticks_exploration
+                ),
+                probation_min_stable_ticks_other=int(
+                    adaptive_probation_min_stable_ticks_other
+                ),
+                probation_early_exit_retention=float(
+                    adaptive_probation_early_exit_retention
+                ),
+                probation_normal_exit_retention=float(
+                    adaptive_probation_normal_exit_retention
+                ),
+                probation_early_exit_nsucc_drop_frac=float(
+                    adaptive_probation_early_exit_nsucc_drop_frac
+                ),
+                rescue_source_freshness_mode=str(adaptive_rescue_source_freshness_mode),
+                rescue_source_freshness_tau_frames=int(
+                    adaptive_rescue_source_freshness_tau_frames
+                ),
+                rescue_source_hard_max_age_frames=int(
+                    adaptive_rescue_source_hard_max_age_frames
+                ),
             )
         except Exception as _apc_exc:
-            if str(getattr(self, "wm_strategy_profile_name", "") or "") == "cser_dexpbt_progress_refine":
+            _prof = str(getattr(self, "wm_strategy_profile_name", "") or "")
+            if _prof in (
+                "cser_dexpbt_progress_refine",
+                "cser_dexpbt_readiness_adaptive",
+            ):
                 raise RuntimeError(
                     "AdaptivePrecisionConfig construction failed for formal "
-                    f"profile cser_dexpbt_progress_refine: {_apc_exc}"
+                    f"profile {_prof}: {_apc_exc}"
                 ) from _apc_exc
             print(f"[adaptive-precision] config build failed (disabled): {_apc_exc}")
             self._adaptive_precision_cfg = None
@@ -1815,6 +1885,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._adaptive_last_audit: dict[int, dict[str, Any]] = {}
         self._adaptive_freeze_only_streak: dict[int, int] = {}
         self._adaptive_rollback_freeze_only_count: dict[int, int] = {}
+        self._adaptive_probation_timeout: dict[int, bool] = {}
+        self._adaptive_probation_timeout_reason: dict[int, str] = {}
+        self._adaptive_ordinary_replacements_this_tick: int = 0
+        self._adaptive_diversity_blocked_count: int = 0
+        self._adaptive_replacement_budget_blocked_count: int = 0
+        self._last_adaptive_diversity_blocked: bool = False
+        self._last_adaptive_distinct_lineage_count: int = 0
+        self._last_adaptive_min_distinct_lineages: int = 0
+        self._last_adaptive_replacement_budget: int = 0
+        self._last_adaptive_replacement_budget_used: int = 0
         self._adaptive_hard_collapse_trigger_source: dict[int, str] = {}
         # Per-tick hard-collapse latch: frame at which adaptive hard collapse was
         # confirmed in `_build_curriculum_control_state`. Survives streak reset so
@@ -1938,7 +2018,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         return d / f"{int(policy_idx):03d}.json"
 
     def _adaptive_precision_required(self) -> bool:
-        return str(self.wm_strategy_profile_name or "") == "cser_dexpbt_progress_refine"
+        return str(self.wm_strategy_profile_name or "") in (
+            "cser_dexpbt_progress_refine",
+            "cser_dexpbt_readiness_adaptive",
+        )
 
     def _adaptive_precision_state(
         self,
@@ -2273,7 +2356,23 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             frame=int(env_frames),
             cfg=cfg,
         )
-        probation.maybe_exit(frame=int(env_frames), cfg=cfg)
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_stage as _resolve_stage,
+        )
+
+        stage_name = _resolve_stage(float(c), cfg)
+        if bool(getattr(cfg, "probation_stage_aware_enable", False)):
+            exit_kind, exit_reason = probation.evaluate_exit(
+                frame=int(env_frames), stage=str(stage_name), cfg=cfg
+            )
+            if exit_kind in ("early_exit", "normal_exit"):
+                probation.active = False
+            elif exit_kind == "max_frames_timeout":
+                # Arm the same rollback/freeze path as hard-collapse.
+                self._adaptive_probation_timeout[pidx] = True
+                self._adaptive_probation_timeout_reason[pidx] = str(exit_reason)
+        else:
+            probation.maybe_exit(frame=int(env_frames), cfg=cfg)
 
         # Degradation streak feeds retention-conditioned rescue.
         if retention < float(cfg.rescue_retention_threshold):
@@ -2315,6 +2414,26 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 (
                     "adaptive_consolidation/rescue_quota_used",
                     float(self._adaptive_rescue_executed_for_lineage.get(pidx, 0)),
+                ),
+                (
+                    "adaptive_consolidation/distinct_lineage_count",
+                    float(self._last_adaptive_distinct_lineage_count),
+                ),
+                (
+                    "adaptive_consolidation/min_distinct_lineages",
+                    float(self._last_adaptive_min_distinct_lineages),
+                ),
+                (
+                    "adaptive_consolidation/replacement_budget",
+                    float(self._last_adaptive_replacement_budget),
+                ),
+                (
+                    "adaptive_consolidation/replacement_budget_used",
+                    float(self._last_adaptive_replacement_budget_used),
+                ),
+                (
+                    "adaptive_consolidation/diversity_blocked",
+                    1.0 if self._last_adaptive_diversity_blocked else 0.0,
                 ),
             ):
                 try:
@@ -2545,6 +2664,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "ranking_score": s_rank,
                     "has_control": bool(has_control),
                     "collapsed": bool(collapsed),
+                    "source_age_frames": max(
+                        0,
+                        int(env_frames)
+                        - int(raw_side.get("last_update_frame", env_frames) or env_frames),
+                    ),
                 }
             )
         if math.isfinite(float(target_nsucc_mean)):
@@ -2961,6 +3085,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._shrink_issued_this_window = {
                 i: False for i in range(self.num_policies)
             }
+            self._adaptive_ordinary_replacements_this_tick = 0
+            self._last_adaptive_diversity_blocked = False
         self._curriculum_control_dir.mkdir(parents=True, exist_ok=True)
         for policy_idx in range(self.num_policies):
             state = population.get(policy_idx)
@@ -3478,10 +3604,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             _aprob = None
             if adaptive_state is not None:
                 _acfg, _aprob, _atrack = adaptive_state
+                timeout_armed = bool(
+                    self._adaptive_probation_timeout.pop(policy_idx, False)
+                )
                 if (
                     _aprob.active
                     and _acfg.probation_allow_hard_collapse_rollback
-                    and _aprob.hard_collapsed(_acfg)
+                    and (
+                        _aprob.hard_collapsed(_acfg)
+                        or timeout_armed
+                    )
                 ):
                     adaptive_hard_collapse_now = True
                     adaptive_probation_hard_collapse = True
@@ -3492,6 +3624,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._adaptive_hard_collapse_event_frame[int(policy_idx)] = int(
                         env_frames
                     )
+                    if timeout_armed:
+                        bridge_probation_rollback_reason = str(
+                            self._adaptive_probation_timeout_reason.pop(
+                                policy_idx, "probation_max_frames"
+                            )
+                        )
             legacy_hard_collapse_now = bool(hard_collapse_detected)
             if bridge_probation_hard_collapse:
                 adaptive_probation_hard_collapse_trigger_source = "bridge"
@@ -10171,6 +10309,105 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_policy = int(decision["source_policy"])
             source_state = decision["source_state"]
             assert source_state is not None
+
+            # Profile 23: stage-aware lineage diversity + ordinary replacement budget.
+            # Hard-collapse / adaptive rescue may bypass the diversity guard.
+            _ap_cfg = getattr(self, "_adaptive_precision_cfg", None)
+            _is_ordinary_bottom = (
+                str(tier) == "bottom"
+                and not bool(adaptive_rescue)
+                and not bool(late_rescue)
+                and not str(tier_label).startswith("adaptive_rescue")
+            )
+            if (
+                _ap_cfg is not None
+                and bool(getattr(_ap_cfg, "enabled", False))
+                and _is_ordinary_bottom
+            ):
+                from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+                    copy_would_drop_below_min_lineages,
+                    count_distinct_lineages,
+                    resolve_stage as _rs,
+                    stage_min_distinct_lineages,
+                    stage_replacement_budget,
+                )
+
+                c_prog = float(self._adaptive_curriculum_progress or 0.0)
+                stage_name = _rs(c_prog, _ap_cfg)
+                budget = int(stage_replacement_budget(stage_name, _ap_cfg))
+                used = int(self._adaptive_ordinary_replacements_this_tick)
+                self._last_adaptive_replacement_budget = budget
+                self._last_adaptive_replacement_budget_used = used
+                lineages: dict[int, str] = {}
+                for pi in range(int(self.num_policies)):
+                    st = population.get(pi) or {}
+                    lin = str(st.get("lineage_id") or "")
+                    if not lin:
+                        lin = str(self._adaptive_lineage_id.get(pi, "") or "")
+                    lineages[int(pi)] = lin
+                distinct = count_distinct_lineages(list(lineages.values()))
+                min_distinct = int(stage_min_distinct_lineages(stage_name, _ap_cfg))
+                self._last_adaptive_distinct_lineage_count = distinct
+                self._last_adaptive_min_distinct_lineages = min_distinct
+                if used >= budget:
+                    self._adaptive_replacement_budget_blocked_count += 1
+                    print(
+                        f"Policy {self.policy_idx}: skip restart "
+                        f"(replacement_budget stage={stage_name} used={used}>={budget})"
+                    )
+                    if self.writer is not None:
+                        self.writer.add_scalar(
+                            "adaptive_consolidation/replacement_budget",
+                            float(budget),
+                            env_frames,
+                        )
+                        self.writer.add_scalar(
+                            "adaptive_consolidation/replacement_budget_used",
+                            float(used),
+                            env_frames,
+                        )
+                    self._last_restart_type = 3
+                    return
+                if bool(getattr(_ap_cfg, "lineage_diversity_enable", False)):
+                    src_lin = str(
+                        (source_state.get("lineage_id") if source_state else None)
+                        or lineages.get(int(source_policy), "")
+                        or ""
+                    )
+                    if copy_would_drop_below_min_lineages(
+                        lineages,
+                        int(self.policy_idx),
+                        src_lin,
+                        min_distinct,
+                    ):
+                        self._last_adaptive_diversity_blocked = True
+                        self._adaptive_diversity_blocked_count += 1
+                        print(
+                            f"Policy {self.policy_idx}: skip restart "
+                            f"(diversity_blocked min={min_distinct} distinct={distinct})"
+                        )
+                        if self.writer is not None:
+                            self.writer.add_scalar(
+                                "adaptive_consolidation/diversity_blocked",
+                                1.0,
+                                env_frames,
+                            )
+                            self.writer.add_scalar(
+                                "adaptive_consolidation/distinct_lineage_count",
+                                float(distinct),
+                                env_frames,
+                            )
+                            self.writer.add_scalar(
+                                "adaptive_consolidation/min_distinct_lineages",
+                                float(min_distinct),
+                                env_frames,
+                            )
+                        self._last_restart_type = 3
+                        return
+                # Reserve budget slot for this ordinary restart attempt.
+                self._adaptive_ordinary_replacements_this_tick = used + 1
+                self._last_adaptive_replacement_budget_used = used + 1
+
             if rescue_mode == "legacy":
                 source_tol = float(
                     (source_state.get("curriculum") or {}).get(
@@ -11265,6 +11502,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             _wm_cal = getattr(eir_bridge, "wm_calibration_state", None)
             if isinstance(_wm_cal, dict) and _wm_cal:
                 algo_state["wm_calibration_state"] = dict(_wm_cal)
+            _ra_st = getattr(eir_bridge, "readiness_adaptive_state", None)
+            if _ra_st is not None:
+                if isinstance(_ra_st, dict):
+                    algo_state["readiness_adaptive_state"] = dict(_ra_st)
+                elif hasattr(_ra_st, "to_dict"):
+                    algo_state["readiness_adaptive_state"] = _ra_st.to_dict()
         awr_bridge = getattr(self.algo, "_awr_bridge", None)
         sidecar_saved_path: Path | None = None
         if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:

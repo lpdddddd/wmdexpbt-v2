@@ -908,6 +908,10 @@ class EIRBridge:
     # Progress-conditioned refinement telemetry.
     progress_refine_cfg: Any = None
     last_progress_refine: dict = field(default_factory=dict)
+    # Profile 23 readiness-adaptive control (defaults OFF / inert).
+    readiness_adaptive_cfg: Any = None
+    readiness_adaptive_state: Any = None
+    last_readiness_adaptive: dict = field(default_factory=dict)
     last_bank_metrics: dict = field(default_factory=dict)
     last_bank_update_diagnostics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
@@ -1266,12 +1270,25 @@ def _compute_snippet_distill_loss_progress(
         select_retrieval_rows,
         teacher_confidence,
     )
+    from dataclasses import replace as _dc_replace
 
     pcfg = bridge.progress_refine_cfg
     sd_cfg = bridge.snippet_distill_cfg
     bank = bridge.snippet_bank
     dev, dtype = feat.device, feat.dtype
     zero = feat.new_zeros(())
+
+    # Profile-23 readiness adaptive (optional; default OFF keeps Profile-22 path).
+    ra_cfg = getattr(bridge, "readiness_adaptive_cfg", None)
+    ra_enabled = bool(
+        ra_cfg is not None and getattr(ra_cfg, "readiness_adaptive_enable", False)
+    )
+    ra_state = getattr(bridge, "readiness_adaptive_state", None)
+    time_ramp_override = None
+    active_budget_override = None
+    readiness_weight_override = None  # when set, replaces sd_cfg.weight entirely
+    force_alpha_wm_zero = False
+    graduated_alpha = None
 
     def _slice(name: str) -> Optional[torch.Tensor]:
         t = getattr(cache, name, None)
@@ -1299,6 +1316,129 @@ def _compute_snippet_distill_loss_progress(
     feat_r = feat.detach()[risky]
     R = int(feat_r.shape[0])
 
+    if ra_enabled:
+        from .readiness_adaptive import (
+            PHASE_CALIBRATED_REFINEMENT,
+            PHASE_PRIORITY_BOOTSTRAP,
+            PHASE_WARMUP,
+            ReadinessAdaptiveState,
+            accumulate_ready_frames,
+            bank_readiness,
+            bank_size_readiness,
+            coverage_readiness,
+            dynamic_active_budget,
+            dynamic_max_log_gap,
+            dynamic_soft_scale,
+            ess_and_scale,
+            evaluate_bank_ready_windows,
+            phase_lambda,
+            refinement_ramp,
+            select_shadow_indices,
+            sync_phase,
+            telemetry as readiness_telemetry,
+            update_coverage_ema,
+        )
+
+        if ra_state is None:
+            ra_state = ReadinessAdaptiveState()
+            bridge.readiness_adaptive_state = ra_state
+        elif isinstance(ra_state, dict):
+            ra_state = ReadinessAdaptiveState.from_dict(ra_state)
+            bridge.readiness_adaptive_state = ra_state
+
+        bank_size = float(getattr(bank, "size", 0) or 0) if bank is not None else 0.0
+        r_size = bank_size_readiness(
+            bank_size,
+            float(ra_cfg.readiness_bank_size_low),
+            float(ra_cfg.readiness_bank_size_full),
+        )
+        r_cov = coverage_readiness(
+            float(ra_state.coverage_ema), float(ra_cfg.readiness_coverage_target)
+        )
+        r_bank = bank_readiness(r_size, r_cov)
+        ra_state.last_bank_size_readiness = float(r_size)
+        ra_state.last_coverage_readiness = float(r_cov)
+        ra_state.last_bank_readiness = float(r_bank)
+        ra_state = accumulate_ready_frames(ra_state, frames=int(frames), cfg=ra_cfg)
+
+        # Periodic readiness windows (all phases). Shadow coverage only in WARMUP.
+        readiness_eval_due = (
+            int(frames) - int(ra_state.last_readiness_eval_frame)
+            >= int(ra_cfg.readiness_eval_interval_frames)
+        )
+        if readiness_eval_due:
+            if int(ra_state.phase) == PHASE_WARMUP:
+                hist_m = hist.float() > 0.5
+                if lifted is not None:
+                    eligible = hist_m & (lifted.float() > 0.5)
+                else:
+                    eligible = hist_m
+                shadow_idx = select_shadow_indices(
+                    eligible,
+                    float(ra_cfg.readiness_shadow_retrieval_fraction),
+                )
+                coverage_obs = 0.0
+                if (
+                    bank is not None
+                    and int(getattr(bank, "size", 0) or 0) > 0
+                    and int(shadow_idx.numel()) > 0
+                ):
+                    res = bank.retrieve_candidates_batched(
+                        feat_r[shadow_idx],
+                        query_tolerance=tol_r[shadow_idx],
+                        normalized_error=norm_err[shadow_idx],
+                        recent_progress=recent[shadow_idx],
+                        k=int(getattr(sd_cfg, "topk", 8)),
+                    )
+                    coverage_obs = float(res.valid_mask.float().mean().item())
+                ra_state.coverage_ema = update_coverage_ema(
+                    float(ra_state.coverage_ema),
+                    float(coverage_obs),
+                    float(ra_cfg.readiness_coverage_ema_beta),
+                )
+                r_cov = coverage_readiness(
+                    float(ra_state.coverage_ema),
+                    float(ra_cfg.readiness_coverage_target),
+                )
+                r_bank = bank_readiness(r_size, r_cov)
+                ra_state.last_coverage_readiness = float(r_cov)
+                ra_state.last_bank_readiness = float(r_bank)
+            ra_state = evaluate_bank_ready_windows(
+                ra_state, frames=int(frames), r_bank=float(r_bank), cfg=ra_cfg
+            )
+        ra_state = sync_phase(ra_state)
+        bridge.readiness_adaptive_state = ra_state
+
+        if int(ra_state.phase) == PHASE_WARMUP:
+            # Shadow / coverage only; no WM, no distill loss.
+            bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
+            bridge.last_snippet_distill_loss = 0.0
+            bridge.last_progress_refine = {
+                "progress_refine/fallback_frac": 0.0,
+                "progress_refine/gate_mean": 0.0,
+                "progress_refine/active_frac": 0.0,
+            }
+            return zero
+
+        # Phase 1 / 2: readiness-driven ramp + dynamic budget.
+        r_refine = refinement_ramp(
+            int(ra_state.ready_accumulated_frames),
+            int(ra_cfg.readiness_ramp_frames),
+            float(r_bank),
+        )
+        ra_state.last_refinement_ramp = float(r_refine)
+        time_ramp_override = float(r_refine)
+        active_budget_override = float(dynamic_active_budget(r_refine))
+        ra_state.last_active_budget = float(active_budget_override)
+        ra_state.last_max_log_gap = float(dynamic_max_log_gap(r_bank))
+        ra_state.last_soft_scale = float(dynamic_soft_scale(r_bank))
+        if int(ra_state.phase) == PHASE_PRIORITY_BOOTSTRAP:
+            force_alpha_wm_zero = True
+        elif int(ra_state.phase) == PHASE_CALIBRATED_REFINEMENT:
+            graduated_alpha = float(ra_state.last_alpha_effective)
+        readiness_weight_override = True  # signal ESS path below
+        bridge.readiness_adaptive_state = ra_state
+
     gate_res = compute_refinement_gate(
         normalized_error=norm_err,
         recent_progress=recent,
@@ -1307,9 +1447,24 @@ def _compute_snippet_distill_loss_progress(
         frames=int(frames),
         cfg=pcfg,
         lifted=lifted,
+        time_ramp_override=time_ramp_override,
     )
     gate = gate_res.gate.to(dtype)
-    retr_mask, budget_frac = select_retrieval_rows(gate, pcfg)
+    retr_mask, budget_frac = select_retrieval_rows(
+        gate, pcfg, max_active_fraction=active_budget_override
+    )
+
+    # Temporarily tighten bank tolerance soft gates under readiness (save/restore).
+    _bank_gap_restore = None
+    _bank_soft_restore = None
+    if ra_enabled and bank is not None and hasattr(bank, "cfg"):
+        _bcfg = bank.cfg
+        if hasattr(_bcfg, "tolerance_max_log_gap"):
+            _bank_gap_restore = float(_bcfg.tolerance_max_log_gap)
+            _bcfg.tolerance_max_log_gap = float(ra_state.last_max_log_gap)
+        if hasattr(_bcfg, "tolerance_log_soft_scale"):
+            _bank_soft_restore = float(_bcfg.tolerance_log_soft_scale)
+            _bcfg.tolerance_log_soft_scale = float(ra_state.last_soft_scale)
 
     a2c = _get_a2c_network(bridge.agent_ref)
 
@@ -1370,6 +1525,10 @@ def _compute_snippet_distill_loss_progress(
             wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
             alpha_wm=_alpha_wm_from_bridge(bridge),
         )
+        if force_alpha_wm_zero:
+            alpha_wm = 0.0
+        elif graduated_alpha is not None:
+            alpha_wm = float(graduated_alpha)
         rerank_cfg = bridge.snippet_wm_rerank_cfg
         rerank_diag: dict[str, float] = {
             "snippet_wm_rerank/changed_frac": 0.0,
@@ -1503,14 +1662,68 @@ def _compute_snippet_distill_loss_progress(
 
     # Continuous row weight w = gate * teacher_confidence * retrieval_valid.
     row_weight = gate * conf * retrieval_valid
+    loss_sd_cfg = sd_cfg
+    if ra_enabled and readiness_weight_override:
+        from .readiness_adaptive import (
+            ess_and_scale,
+            phase_lambda,
+            telemetry as readiness_telemetry,
+        )
+
+        ess, ess_scale, ess_skip = ess_and_scale(
+            row_weight,
+            float(ra_cfg.readiness_ess_target),
+            float(ra_cfg.readiness_ess_min_for_update),
+        )
+        lam = float(phase_lambda(int(ra_state.phase), ra_cfg))
+        ra_state.last_ess = float(ess)
+        ra_state.last_ess_scale = float(ess_scale)
+        ra_state.last_ess_update_skipped = bool(ess_skip)
+        ra_state.last_lambda_effective = float(lam) * float(ess_scale)
+        if ess_skip or lam <= 0.0:
+            if _bank_gap_restore is not None:
+                bank.cfg.tolerance_max_log_gap = _bank_gap_restore
+            if _bank_soft_restore is not None:
+                bank.cfg.tolerance_log_soft_scale = _bank_soft_restore
+            ra_state.last_unscaled_distill_loss = 0.0
+            ra_state.last_scaled_distill_loss = 0.0
+            bridge.readiness_adaptive_state = ra_state
+            bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
+            bridge.last_snippet_distill_loss = 0.0
+            bridge.last_progress_refine = {
+                "progress_refine/gate_mean": float(gate.float().mean().item()) if R else 0.0,
+                "progress_refine/active_frac": 0.0,
+                "progress_refine/retrieval_budget_frac": float(budget_frac),
+                "progress_refine/fallback_frac": 0.0,
+                "progress_refine/loss": 0.0,
+            }
+            return zero
+        # weight override = lambda * ess_scale ONLY (do not also multiply cfg.weight)
+        loss_sd_cfg = _dc_replace(sd_cfg, weight=float(lam) * float(ess_scale))
+
     loss, stats = compute_snippet_distill_loss(
         mu_fn=_mu_fn,
         feat_start=feat_r,
         teacher_first_action=teacher_first,
-        cfg=sd_cfg,
+        cfg=loss_sd_cfg,
         row_weight=row_weight,
         min_gate=float(pcfg.min_gate_for_retrieval),
     )
+
+    if ra_enabled:
+        if _bank_gap_restore is not None:
+            bank.cfg.tolerance_max_log_gap = _bank_gap_restore
+        if _bank_soft_restore is not None:
+            bank.cfg.tolerance_log_soft_scale = _bank_soft_restore
+        from .readiness_adaptive import telemetry as readiness_telemetry
+
+        scaled = float(stats.get("snippet_distill/loss", 0.0))
+        w_eff = float(getattr(loss_sd_cfg, "weight", 0.0) or 0.0)
+        unscaled = (scaled / w_eff) if w_eff > 1e-12 else 0.0
+        ra_state.last_scaled_distill_loss = scaled
+        ra_state.last_unscaled_distill_loss = float(unscaled)
+        bridge.readiness_adaptive_state = ra_state
+        bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
 
     valid_r = float(retrieval_valid.mean().item()) if R else 0.0
     fallback_frac = float(fallback_rows) / float(max(int(sel_idx.numel()), 1))

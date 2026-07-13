@@ -43,6 +43,8 @@ PROFILE_IDS: dict[str, int] = {
     "cser_dexpbt_2cm_bridge": 21,
     # Progress-Conditioned CSER-DexPBT — generalized, curriculum-agnostic method.
     "cser_dexpbt_progress_refine": 22,
+    # Readiness-Adaptive CSER-DexPBT — bank-readiness / WM-graduation control.
+    "cser_dexpbt_readiness_adaptive": 23,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -112,6 +114,7 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "tolerance-conditioned retrieval, and adaptive curriculum-aware "
         "population consolidation."
     ),
+    "cser_dexpbt_readiness_adaptive": "Readiness-Adaptive CSER-DexPBT",
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -136,6 +139,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "cser_dexpbt_conservative": "unified",
     "cser_dexpbt_2cm_bridge": "unified",
     "cser_dexpbt_progress_refine": "unified",
+    "cser_dexpbt_readiness_adaptive": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -159,6 +163,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "cser_dexpbt": 1.0,
     "cser_dexpbt_conservative": 1.0,
     "cser_dexpbt_progress_refine": 1.0,
+    "cser_dexpbt_readiness_adaptive": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -949,6 +954,73 @@ _CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
     "eir_mppi_mode": "off",
 }
 
+_CSER_DEXPBT_READINESS_ADAPTIVE: dict[str, Any] = {
+    **_CSER_DEXPBT_PROGRESS_REFINE,
+    # readiness
+    "readiness_adaptive_enable": True,
+    "readiness_min_frames": 100_000_000,
+    "readiness_bank_size_low": 1000,
+    "readiness_bank_size_full": 3000,
+    "readiness_coverage_target": 0.20,
+    "readiness_coverage_ema_beta": 0.9,
+    "readiness_enter_threshold": 0.50,
+    "readiness_exit_threshold": 0.20,
+    "readiness_required_windows": 2,
+    "readiness_ramp_frames": 150_000_000,
+    "readiness_eval_interval_frames": 10_000_000,
+    "readiness_shadow_retrieval_fraction": 0.05,
+    # disable fixed 300M start/ramp for progress refine — readiness drives ramp via override
+    "progress_refinement_start_after_frames": 0,
+    "progress_refinement_ramp_frames": 1,  # ramp replaced by r_refine override when readiness on
+    # WM graduation
+    "wm_graduation_enable": True,
+    "wm_graduation_required_passes": 2,
+    "wm_graduation_early_until_frames": 500_000_000,
+    "wm_graduation_early_eval_interval_frames": 25_000_000,
+    "wm_graduation_late_eval_interval_frames": 50_000_000,
+    "wm_graduation_early_beta_up": 0.7,
+    "wm_graduation_late_beta_up": 0.9,
+    "wm_graduation_beta_down": 0.5,
+    "wm_graduation_early_alpha_cap": 0.5,
+    "wm_graduation_late_alpha_cap": 1.0,
+    "wm_graduation_min_valid_prediction_frac": 0.90,
+    # ESS distill
+    "readiness_bootstrap_distill_weight": 0.001,
+    "readiness_calibrated_distill_weight": 0.0015,
+    "readiness_ess_target": 128.0,
+    "readiness_ess_min_for_update": 8.0,
+    # Adaptive PBT accelerate
+    "adaptive_consolidation_stage_consolidation_progress": 0.45,
+    "adaptive_consolidation_stage_selection_progress": 0.80,
+    "adaptive_lineage_diversity_enable": True,
+    "adaptive_min_distinct_lineages_exploration": 3,
+    "adaptive_min_distinct_lineages_consolidation": 2,
+    "adaptive_min_distinct_lineages_selection": 1,
+    "adaptive_replacement_budget_exploration": 1,
+    "adaptive_replacement_budget_consolidation": 1,
+    "adaptive_replacement_budget_selection": 2,
+    "adaptive_probation_stage_aware_enable": True,
+    "adaptive_probation_min_frames_exploration": 75_000_000,
+    "adaptive_probation_min_frames_other": 100_000_000,
+    "adaptive_probation_max_frames": 200_000_000,
+    "adaptive_probation_min_stable_ticks_exploration": 2,
+    "adaptive_probation_min_stable_ticks_other": 3,
+    "adaptive_probation_early_exit_retention": 0.97,
+    "adaptive_probation_normal_exit_retention": 0.92,
+    # also set legacy probation fields to exploration defaults for safety
+    "adaptive_probation_min_frames": 75_000_000,
+    "adaptive_probation_min_stable_ticks": 2,
+    "adaptive_probation_min_same_level_retention": 0.92,
+    "adaptive_rescue_degradation_patience": 2,
+    "adaptive_rescue_cooldown_frames": 150_000_000,
+    "adaptive_rescue_max_per_lineage": 1,
+    "adaptive_rescue_source_freshness_mode": "exp_decay",
+    "adaptive_rescue_source_freshness_tau_frames": 80_000_000,
+    "adaptive_rescue_source_hard_max_age_frames": 160_000_000,
+    # Keep max_staleness aligned with hard max for peer sidecar gate
+    "adaptive_rescue_source_max_staleness_frames": 160_000_000,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -973,6 +1045,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
     "cser_dexpbt_2cm_bridge": _CSER_DEXPBT_2CM_BRIDGE,
     "cser_dexpbt_progress_refine": _CSER_DEXPBT_PROGRESS_REFINE,
+    "cser_dexpbt_readiness_adaptive": _CSER_DEXPBT_READINESS_ADAPTIVE,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

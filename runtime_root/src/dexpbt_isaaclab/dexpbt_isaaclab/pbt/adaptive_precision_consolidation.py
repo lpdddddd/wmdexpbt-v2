@@ -110,6 +110,34 @@ class AdaptivePrecisionConfig:
     # Probation rollback target selection.
     probation_rollback_max_log_gap: float = 0.30
     probation_freeze_only_max_ticks: int = 3
+
+    # Stage-aware lineage diversity + replacement budget (Profile 23).
+    lineage_diversity_enable: bool = False
+    min_distinct_lineages_exploration: int = 3
+    min_distinct_lineages_consolidation: int = 2
+    min_distinct_lineages_selection: int = 1
+    replacement_budget_exploration: int = 1
+    replacement_budget_consolidation: int = 1
+    replacement_budget_selection: int = 2
+
+    # Stage-aware probation (Profile 23); when probation_stage_aware_enable=False
+    # use legacy probation_min_frames / probation_min_stable_ticks fields.
+    probation_stage_aware_enable: bool = False
+    probation_min_frames_exploration: int = 75_000_000
+    probation_min_frames_other: int = 100_000_000
+    probation_max_frames: int = 200_000_000
+    probation_min_stable_ticks_exploration: int = 2
+    probation_min_stable_ticks_other: int = 3
+    probation_early_exit_retention: float = 0.97
+    probation_normal_exit_retention: float = 0.92
+    # Track nsucc drop: significant drop blocks early exit.
+    probation_early_exit_nsucc_drop_frac: float = 0.15
+
+    # Rescue freshness soft decay (Profile 23).
+    rescue_source_freshness_mode: str = "hard_max"  # "hard_max" | "exp_decay"
+    rescue_source_freshness_tau_frames: int = 80_000_000
+    rescue_source_hard_max_age_frames: int = 160_000_000
+
     # Internal: when True, derive top_fraction from rescue_population_quantile.
     _derive_top_fraction_from_quantile: bool = False
 
@@ -160,6 +188,134 @@ class AdaptivePrecisionConfig:
             raise ValueError("rescue_archive_advantage_sigma_floor must be > 0")
         if not (float(self.rescue_archive_min_absolute_advantage) >= 0.0):
             raise ValueError("rescue_archive_min_absolute_advantage must be >= 0")
+        mode = str(self.rescue_source_freshness_mode or "hard_max").strip().lower()
+        if mode not in ("hard_max", "exp_decay"):
+            raise ValueError(
+                "rescue_source_freshness_mode must be 'hard_max' or 'exp_decay', "
+                f"got {self.rescue_source_freshness_mode!r}"
+            )
+        self.rescue_source_freshness_mode = mode
+        if int(self.rescue_source_freshness_tau_frames) <= 0:
+            raise ValueError("rescue_source_freshness_tau_frames must be > 0")
+        if int(self.rescue_source_hard_max_age_frames) < 0:
+            raise ValueError("rescue_source_hard_max_age_frames must be >= 0")
+        for name in (
+            "probation_early_exit_retention",
+            "probation_normal_exit_retention",
+            "probation_early_exit_nsucc_drop_frac",
+        ):
+            v = float(getattr(self, name))
+            if not (0.0 <= v <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1]")
+        for name in (
+            "min_distinct_lineages_exploration",
+            "min_distinct_lineages_consolidation",
+            "min_distinct_lineages_selection",
+            "replacement_budget_exploration",
+            "replacement_budget_consolidation",
+            "replacement_budget_selection",
+            "probation_min_frames_exploration",
+            "probation_min_frames_other",
+            "probation_max_frames",
+            "probation_min_stable_ticks_exploration",
+            "probation_min_stable_ticks_other",
+        ):
+            if int(getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be >= 0")
+
+
+def stage_min_distinct_lineages(stage: str, cfg: AdaptivePrecisionConfig) -> int:
+    """Minimum distinct lineages required for ordinary copy at ``stage``."""
+    s = str(stage)
+    if s == STAGE_EXPLORATION:
+        return int(cfg.min_distinct_lineages_exploration)
+    if s == STAGE_CONSOLIDATION:
+        return int(cfg.min_distinct_lineages_consolidation)
+    return int(cfg.min_distinct_lineages_selection)
+
+
+def stage_replacement_budget(stage: str, cfg: AdaptivePrecisionConfig) -> int:
+    """Ordinary bottom-restart replacement budget for ``stage`` (per tick)."""
+    s = str(stage)
+    if s == STAGE_EXPLORATION:
+        return int(cfg.replacement_budget_exploration)
+    if s == STAGE_CONSOLIDATION:
+        return int(cfg.replacement_budget_consolidation)
+    return int(cfg.replacement_budget_selection)
+
+
+def count_distinct_lineages(lineage_ids: list[str]) -> int:
+    """Count non-empty distinct lineage ids."""
+    return len({str(x) for x in lineage_ids if str(x)})
+
+
+def copy_would_drop_below_min_lineages(
+    lineages_by_policy: dict[int, str],
+    target_idx: int,
+    source_lineage: str,
+    min_distinct: int,
+) -> bool:
+    """Return True if copying ``source_lineage`` onto ``target_idx`` drops diversity.
+
+    After the copy, the target adopts ``source_lineage``.  Empty lineage strings
+    are ignored in the distinct count.
+    """
+    projected = {int(k): str(v) for k, v in lineages_by_policy.items()}
+    projected[int(target_idx)] = str(source_lineage)
+    return count_distinct_lineages(list(projected.values())) < int(min_distinct)
+
+
+def source_freshness_weight(
+    age_frames: int, cfg: AdaptivePrecisionConfig
+) -> tuple[bool, float, str]:
+    """Evaluate rescue-source age under hard_max or exp_decay freshness mode.
+
+    Returns ``(ok, weight, reason)``.  Rejected sources have ``ok=False`` and
+    ``weight=0``.  Accepted hard_max sources keep weight 1.0; exp_decay sources
+    get ``exp(-age / tau)``.
+    """
+    age = max(0, int(age_frames))
+    mode = str(cfg.rescue_source_freshness_mode or "hard_max")
+    if mode == "exp_decay":
+        hard_max = int(cfg.rescue_source_hard_max_age_frames)
+        if age > hard_max:
+            return False, 0.0, "source_adaptive_state_stale"
+        tau = max(1, int(cfg.rescue_source_freshness_tau_frames))
+        w = math.exp(-float(age) / float(tau))
+        if not math.isfinite(w):
+            return False, 0.0, "source_adaptive_state_nonfinite"
+        return True, float(w), "ok_exp_decay"
+    # hard_max (legacy): reject past max_staleness; weight stays 1 when ok.
+    if age > int(cfg.rescue_source_max_staleness_frames):
+        return False, 0.0, "source_adaptive_state_stale"
+    return True, 1.0, "ok"
+
+
+def probation_requirements_for_stage(
+    stage: str, cfg: AdaptivePrecisionConfig
+) -> tuple[int, int, float, float]:
+    """Return ``(min_frames, min_stable_ticks, early_ret, normal_ret)`` for stage."""
+    if not bool(cfg.probation_stage_aware_enable):
+        return (
+            int(cfg.probation_min_frames),
+            int(cfg.probation_min_stable_ticks),
+            float(cfg.probation_min_same_level_retention),
+            float(cfg.probation_min_same_level_retention),
+        )
+    s = str(stage)
+    if s == STAGE_EXPLORATION:
+        return (
+            int(cfg.probation_min_frames_exploration),
+            int(cfg.probation_min_stable_ticks_exploration),
+            float(cfg.probation_early_exit_retention),
+            float(cfg.probation_normal_exit_retention),
+        )
+    return (
+        int(cfg.probation_min_frames_other),
+        int(cfg.probation_min_stable_ticks_other),
+        float(cfg.probation_early_exit_retention),
+        float(cfg.probation_normal_exit_retention),
+    )
 
 
 def rescue_source_top_k(population_size: int, top_fraction: float) -> int:
@@ -409,7 +565,61 @@ class ProbationState:
     def hard_collapsed(self, cfg: AdaptivePrecisionConfig) -> bool:
         return self.hard_collapse_streak >= int(cfg.probation_hard_collapse_patience)
 
+    def evaluate_exit(
+        self,
+        *,
+        frame: int,
+        stage: str,
+        cfg: AdaptivePrecisionConfig,
+    ) -> tuple[str, str]:
+        """Stage-aware probation exit decision for Profile 23.
+
+        Returns ``(kind, reason)`` where kind is one of
+        ``early_exit`` / ``normal_exit`` / ``max_frames_timeout`` / ``continue``.
+        Does not mutate ``active``; the caller clears or rolls back.
+        """
+        if not self.active:
+            return "continue", "inactive"
+        frames_in = int(frame) - int(self.entry_frame)
+        if frames_in < 0:
+            frames_in = 0
+        min_frames, min_stable, early_ret, normal_ret = probation_requirements_for_stage(
+            stage, cfg
+        )
+        # Timeout takes priority when still active past max frames.
+        if frames_in >= int(cfg.probation_max_frames):
+            return "max_frames_timeout", "probation_max_frames"
+
+        hard = self.hard_collapsed(cfg)
+        peak = float(self.peak_nsucc_mean)
+        cur = float(self.current_nsucc_mean)
+        nsucc_drop_block = False
+        if peak > 0.0:
+            drop_floor = peak * (1.0 - float(cfg.probation_early_exit_nsucc_drop_frac))
+            if cur < drop_floor:
+                nsucc_drop_block = True
+
+        # Early exit: exploration min frames (or stage min when not exploration),
+        # high retention, stable ticks, no hard collapse, no significant nsucc drop.
+        early_min = int(cfg.probation_min_frames_exploration)
+        if frames_in >= early_min and not hard and not nsucc_drop_block:
+            if (
+                float(self.same_level_retention) >= float(early_ret)
+                and int(self.stable_ticks) >= int(min_stable)
+            ):
+                return "early_exit", "probation_early_exit"
+
+        # Normal exit: stage min frames + normal retention + stable ticks.
+        if frames_in >= int(min_frames):
+            if int(self.stable_ticks) < int(min_stable):
+                return "continue", "probation_min_stable_ticks"
+            if float(self.same_level_retention) < float(normal_ret):
+                return "continue", "probation_low_retention"
+            return "normal_exit", "probation_normal_exit"
+        return "continue", "probation_min_frames"
+
     def maybe_exit(self, *, frame: int, cfg: AdaptivePrecisionConfig) -> None:
+        """Legacy Profile-22 exit: clear active when ``can_shrink`` is satisfied."""
         ok, _ = self.can_shrink(frame=frame, cfg=cfg)
         if ok:
             self.active = False
@@ -541,6 +751,12 @@ def select_rescue_source(
             cfg.rescue_max_log_tol_gap
         ):
             continue
+        freshness_w = 1.0
+        if "source_age_frames" in cand or str(cfg.rescue_source_freshness_mode) == "exp_decay":
+            age = int(cand.get("source_age_frames", 0) or 0)
+            ok_f, freshness_w, _fr = source_freshness_weight(age, cfg)
+            if not ok_f:
+                continue
         if rank_cut_value is not None and s_mean < rank_cut_value - 1e-12:
             continue
         # Source advantage normalized by population spread.
@@ -554,9 +770,11 @@ def select_rescue_source(
             rank = int(list(sorted_population).index(idx))
         else:
             rank = sum(1 for m in sorted_means if m > s_mean)
-        # Prefer the highest ranking-score compatible source.
-        if s_rank_score > best_score:
-            best_score = s_rank_score
+        # Prefer the highest ranking-score compatible source (freshness-weighted
+        # under exp_decay; hard_max leaves weight=1 so behaviour is unchanged).
+        weighted_score = float(s_rank_score) * float(freshness_w)
+        if weighted_score > best_score:
+            best_score = weighted_score
             best = RescueDecision(
                 eligible=True,
                 reason="selected",
@@ -744,7 +962,13 @@ def evaluate_sidecar_freshness(
     pop_frame = int(population_frame)
     if pop_frame < last_update:
         return False, "source_adaptive_state_stale"
-    if pop_frame - last_update > int(cfg.rescue_source_max_staleness_frames):
+    age = pop_frame - last_update
+    mode = str(cfg.rescue_source_freshness_mode or "hard_max")
+    if mode == "exp_decay":
+        ok_f, _w, reason_f = source_freshness_weight(age, cfg)
+        if not ok_f:
+            return False, reason_f
+    elif age > int(cfg.rescue_source_max_staleness_frames):
         return False, "source_adaptive_state_stale"
     if cfg.rescue_require_lineage_match_with_checkpoint:
         side_lin = str(sidecar.get("last_update_lineage_id", "") or "")
@@ -760,6 +984,8 @@ def evaluate_sidecar_freshness(
             1, int(interval_steps)
         ):
             return False, "source_adaptive_state_stale"
+    if mode == "exp_decay":
+        return True, "ok_exp_decay"
     return True, "ok"
 
 

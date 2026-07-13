@@ -306,12 +306,16 @@ def compute_refinement_gate(
     frames: int,
     cfg: ProgressRefinementConfig,
     lifted: Optional[torch.Tensor] = None,
+    time_ramp_override: float | None = None,
 ) -> RefinementGateResult:
     """Compute the row-wise refinement gate ``g_t`` and its components.
 
     All inputs are ``[B]`` tensors (already row-aligned to the live minibatch).
     Outputs are finite, shape ``[B]``, and (for the gate/components) in ``[0, 1]``.
     The gate is detached from environment labels when ``cfg.detach_gate`` is set.
+
+    When ``time_ramp_override`` is provided it replaces the frame-based
+    ``time_ramp`` (Profile 23 readiness-driven ramp).
     """
     device = normalized_error.device
     B = int(normalized_error.shape[0])
@@ -337,7 +341,10 @@ def compute_refinement_gate(
         q_osc = torch.zeros(B, device=device)
     q_local = local_difficulty(q_stall, q_osc)
 
-    ramp = time_ramp(int(frames), cfg.start_after_frames, cfg.ramp_frames)
+    if time_ramp_override is not None:
+        ramp = float(min(1.0, max(0.0, float(time_ramp_override))))
+    else:
+        ramp = time_ramp(int(frames), cfg.start_after_frames, cfg.ramp_frames)
 
     if cfg.only_lifted:
         if lifted is None:
@@ -373,7 +380,9 @@ def compute_refinement_gate(
 
 
 def select_retrieval_rows(
-    gate: torch.Tensor, cfg: ProgressRefinementConfig
+    gate: torch.Tensor,
+    cfg: ProgressRefinementConfig,
+    max_active_fraction: float | None = None,
 ) -> tuple[torch.Tensor, float]:
     """Return a boolean retrieval mask ``[B]`` and the selected budget fraction.
 
@@ -381,6 +390,9 @@ def select_retrieval_rows(
     set is then capped by ``max_active_fraction`` (of ``B``) and ``max_active_rows``
     (0 = unlimited), keeping the highest-gate rows.  Budget selection only limits
     which rows perform retrieval; it never mutates the gate statistics.
+
+    When ``max_active_fraction`` is provided it overrides ``cfg.max_active_fraction``
+    (Profile 23 readiness-adaptive active budget).
     """
     B = int(gate.shape[0])
     if B == 0:
@@ -390,9 +402,14 @@ def select_retrieval_rows(
     if n_eligible == 0:
         return torch.zeros(B, dtype=torch.bool, device=gate.device), 0.0
 
+    frac = (
+        float(max_active_fraction)
+        if max_active_fraction is not None
+        else float(cfg.max_active_fraction)
+    )
     budget = n_eligible
-    frac_cap = int(float(cfg.max_active_fraction) * B) if cfg.max_active_fraction < 1.0 else B
-    if cfg.max_active_fraction < 1.0:
+    frac_cap = int(frac * B) if frac < 1.0 else B
+    if frac < 1.0:
         budget = min(budget, max(1, frac_cap))
     if int(cfg.max_active_rows) > 0:
         budget = min(budget, int(cfg.max_active_rows))

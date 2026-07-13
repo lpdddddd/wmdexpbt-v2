@@ -206,6 +206,57 @@ parser.add_argument(
     action=argparse.BooleanOptionalAction,
     default=True,
 )
+
+# ---------------------------------------------------------------------------
+# Readiness-Adaptive CSER-DexPBT (cser_dexpbt_readiness_adaptive / Profile 23).
+# Defaults OFF so Profile 22 and all earlier profiles remain unchanged.
+# ---------------------------------------------------------------------------
+parser.add_argument("--readiness_adaptive_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--readiness_min_frames", type=int, default=100_000_000)
+parser.add_argument("--readiness_bank_size_low", type=int, default=1000)
+parser.add_argument("--readiness_bank_size_full", type=int, default=3000)
+parser.add_argument("--readiness_coverage_target", type=float, default=0.20)
+parser.add_argument("--readiness_coverage_ema_beta", type=float, default=0.9)
+parser.add_argument("--readiness_enter_threshold", type=float, default=0.50)
+parser.add_argument("--readiness_exit_threshold", type=float, default=0.20)
+parser.add_argument("--readiness_required_windows", type=int, default=2)
+parser.add_argument("--readiness_ramp_frames", type=int, default=150_000_000)
+parser.add_argument("--readiness_eval_interval_frames", type=int, default=10_000_000)
+parser.add_argument("--readiness_shadow_retrieval_fraction", type=float, default=0.05)
+parser.add_argument("--wm_graduation_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--wm_graduation_required_passes", type=int, default=2)
+parser.add_argument("--wm_graduation_early_until_frames", type=int, default=500_000_000)
+parser.add_argument("--wm_graduation_early_eval_interval_frames", type=int, default=25_000_000)
+parser.add_argument("--wm_graduation_late_eval_interval_frames", type=int, default=50_000_000)
+parser.add_argument("--wm_graduation_early_beta_up", type=float, default=0.7)
+parser.add_argument("--wm_graduation_late_beta_up", type=float, default=0.9)
+parser.add_argument("--wm_graduation_beta_down", type=float, default=0.5)
+parser.add_argument("--wm_graduation_early_alpha_cap", type=float, default=0.5)
+parser.add_argument("--wm_graduation_late_alpha_cap", type=float, default=1.0)
+parser.add_argument("--wm_graduation_min_valid_prediction_frac", type=float, default=0.90)
+parser.add_argument("--readiness_bootstrap_distill_weight", type=float, default=0.001)
+parser.add_argument("--readiness_calibrated_distill_weight", type=float, default=0.0015)
+parser.add_argument("--readiness_ess_target", type=float, default=128.0)
+parser.add_argument("--readiness_ess_min_for_update", type=float, default=8.0)
+parser.add_argument("--adaptive_lineage_diversity_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--adaptive_min_distinct_lineages_exploration", type=int, default=3)
+parser.add_argument("--adaptive_min_distinct_lineages_consolidation", type=int, default=2)
+parser.add_argument("--adaptive_min_distinct_lineages_selection", type=int, default=1)
+parser.add_argument("--adaptive_replacement_budget_exploration", type=int, default=1)
+parser.add_argument("--adaptive_replacement_budget_consolidation", type=int, default=1)
+parser.add_argument("--adaptive_replacement_budget_selection", type=int, default=2)
+parser.add_argument("--adaptive_probation_stage_aware_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument("--adaptive_probation_min_frames_exploration", type=int, default=75_000_000)
+parser.add_argument("--adaptive_probation_min_frames_other", type=int, default=100_000_000)
+parser.add_argument("--adaptive_probation_max_frames", type=int, default=200_000_000)
+parser.add_argument("--adaptive_probation_min_stable_ticks_exploration", type=int, default=2)
+parser.add_argument("--adaptive_probation_min_stable_ticks_other", type=int, default=3)
+parser.add_argument("--adaptive_probation_early_exit_retention", type=float, default=0.97)
+parser.add_argument("--adaptive_probation_normal_exit_retention", type=float, default=0.92)
+parser.add_argument("--adaptive_probation_early_exit_nsucc_drop_frac", type=float, default=0.15)
+parser.add_argument("--adaptive_rescue_source_freshness_mode", type=str, default="hard_max", choices=["hard_max", "exp_decay"])
+parser.add_argument("--adaptive_rescue_source_freshness_tau_frames", type=int, default=80_000_000)
+parser.add_argument("--adaptive_rescue_source_hard_max_age_frames", type=int, default=160_000_000)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -1764,6 +1815,7 @@ parser.add_argument(
         "cser_dexpbt_conservative",
         "cser_dexpbt_2cm_bridge",
         "cser_dexpbt_progress_refine",
+        "cser_dexpbt_readiness_adaptive",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -3976,6 +4028,28 @@ def _patch_actor_train_for_seq_wm(
                     _cal_state = WMCalibrationState.from_dict(
                         _cal_state if isinstance(_cal_state, dict) else {}
                     )
+                # Dynamic cal eval interval under graduation (before eval gate).
+                if bool(getattr(seq_wm_trainer, "_wm_graduation_enable", False)):
+                    _ev_cfg = getattr(_wm_cal_ev, "cfg", None)
+                    if _ev_cfg is not None:
+                        if int(frames) < int(
+                            getattr(seq_wm_trainer, "_wm_graduation_early_until_frames", 0)
+                        ):
+                            _ev_cfg.eval_interval_frames = int(
+                                getattr(
+                                    seq_wm_trainer,
+                                    "_wm_graduation_early_eval_interval_frames",
+                                    25_000_000,
+                                )
+                            )
+                        else:
+                            _ev_cfg.eval_interval_frames = int(
+                                getattr(
+                                    seq_wm_trainer,
+                                    "_wm_graduation_late_eval_interval_frames",
+                                    50_000_000,
+                                )
+                            )
                 _cal_state = seq_wm_trainer.run_wm_calibration_eval(
                     experience_buffer=actor.experience_buffer,
                     frames=frames,
@@ -3986,6 +4060,61 @@ def _patch_actor_train_for_seq_wm(
                     last_d_hat=last_d_hat,
                     last_success_count=last_success_count,
                 )
+                # Profile 23: WM graduation overrides alpha_wm; force 0 in phase 1.
+                _ra_cfg = getattr(_eir_bridge_cal, "readiness_adaptive_cfg", None) or getattr(
+                    seq_wm_trainer, "_readiness_adaptive_cfg", None
+                )
+                _ra_st = getattr(_eir_bridge_cal, "readiness_adaptive_state", None) or getattr(
+                    seq_wm_trainer, "_readiness_adaptive_state", None
+                )
+                if (
+                    _ra_cfg is not None
+                    and bool(getattr(_ra_cfg, "wm_graduation_enable", False))
+                    and _ra_st is not None
+                ):
+                    from dexpbt_isaaclab.world_model.readiness_adaptive import (
+                        PHASE_PRIORITY_BOOTSTRAP,
+                        ReadinessAdaptiveState,
+                        apply_wm_graduation,
+                        sync_phase,
+                    )
+
+                    if isinstance(_ra_st, dict):
+                        _ra_st = ReadinessAdaptiveState.from_dict(_ra_st)
+                    _metrics = dict(getattr(_cal_state, "last_metrics", {}) or {})
+                    # Only advance graduation when a calibration eval ran this step.
+                    if int(getattr(_cal_state, "last_eval_frame", -1)) == int(frames):
+                        _eval_valid = float(_metrics.get("wm_cal/eval_valid", 1.0)) > 0.5
+                        _fail_id = float(_metrics.get("wm_cal/failure_reason_id", 0.0))
+                        if not _eval_valid and _fail_id >= 1.0:
+                            # Structural codes are typically >=1 missing-head style.
+                            _mode = (
+                                "structural"
+                                if _fail_id in (1.0, 2.0, 3.0, 4.0, 5.0)
+                                else "insufficient"
+                            )
+                        elif float(_metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5:
+                            _mode = "valid"
+                        else:
+                            _mode = "metric_fail"
+                        _r_bank = float(
+                            getattr(_ra_st, "last_bank_readiness", 0.0) or 0.0
+                        )
+                        _ra_st, _alpha_eff = apply_wm_graduation(
+                            _ra_st,
+                            frames=int(frames),
+                            metrics=_metrics,
+                            mode=_mode,
+                            cfg=_ra_cfg,
+                            r_bank=_r_bank,
+                        )
+                        _ra_st = sync_phase(_ra_st)
+                        if int(_ra_st.phase) == PHASE_PRIORITY_BOOTSTRAP:
+                            _alpha_eff = 0.0
+                            _ra_st.last_alpha_effective = 0.0
+                        _cal_state.alpha_wm = float(_alpha_eff)
+                        _eir_bridge_cal.readiness_adaptive_state = _ra_st
+                        seq_wm_trainer._readiness_adaptive_state = _ra_st
                 _eir_bridge_cal.wm_calibration_state = _cal_state.to_dict()
 
             # ---- ensemble member training (MPPI scoring ensemble only) ----
@@ -4346,6 +4475,13 @@ def _patch_actor_train_for_seq_wm(
                     _pr = getattr(xb, "last_progress_refine", None)
                     if isinstance(_pr, dict) and _pr:
                         for k, v in _pr.items():
+                            try:
+                                tb_writer.add_scalar(str(k), float(v), frames)
+                            except Exception:
+                                pass
+                    _ra = getattr(xb, "last_readiness_adaptive", None)
+                    if isinstance(_ra, dict) and _ra:
+                        for k, v in _ra.items():
                             try:
                                 tb_writer.add_scalar(str(k), float(v), frames)
                             except Exception:
@@ -5025,6 +5161,17 @@ def _wm_safe_restore(
         if isinstance(wcs, dict):
             eir_bridge.wm_calibration_state = wcs
             print(f"[WM-cal] restore: alpha_wm={wcs.get('alpha_wm', 0.0)}")
+        ras = ckpt.get("readiness_adaptive_state")
+        if isinstance(ras, dict):
+            from dexpbt_isaaclab.world_model.readiness_adaptive import (
+                ReadinessAdaptiveState,
+            )
+
+            eir_bridge.readiness_adaptive_state = ReadinessAdaptiveState.from_dict(ras)
+            print(
+                f"[readiness] restore: phase="
+                f"{getattr(eir_bridge.readiness_adaptive_state, 'phase', 0)}"
+            )
 
     awr_bridge = getattr(agent, "_awr_bridge", None)
     if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
@@ -5945,6 +6092,12 @@ class _WmEnabledRunner(Runner):
                 )
                 eir_bridge.progress_refine_cfg = getattr(
                     self.seq_wm_trainer, "_progress_refine_cfg", None
+                )
+                eir_bridge.readiness_adaptive_cfg = getattr(
+                    self.seq_wm_trainer, "_readiness_adaptive_cfg", None
+                )
+                eir_bridge.readiness_adaptive_state = getattr(
+                    self.seq_wm_trainer, "_readiness_adaptive_state", None
                 )
                 eir_bridge.wm_calibration_enable = (
                     getattr(self.seq_wm_trainer, "_wm_calibration_evaluator", None)
@@ -7072,6 +7225,69 @@ def main():
             min_teacher_confidence=float(args_cli.progress_refinement_min_teacher_confidence),
             detach_gate=bool(args_cli.progress_refinement_detach_gate),
         )
+        from dexpbt_isaaclab.world_model.readiness_adaptive import (
+            ReadinessAdaptiveConfig,
+            ReadinessAdaptiveState,
+        )
+
+        readiness_adaptive_cfg = ReadinessAdaptiveConfig(
+            readiness_adaptive_enable=bool(args_cli.readiness_adaptive_enable),
+            readiness_min_frames=int(args_cli.readiness_min_frames),
+            readiness_bank_size_low=int(args_cli.readiness_bank_size_low),
+            readiness_bank_size_full=int(args_cli.readiness_bank_size_full),
+            readiness_coverage_target=float(args_cli.readiness_coverage_target),
+            readiness_coverage_ema_beta=float(args_cli.readiness_coverage_ema_beta),
+            readiness_enter_threshold=float(args_cli.readiness_enter_threshold),
+            readiness_exit_threshold=float(args_cli.readiness_exit_threshold),
+            readiness_required_windows=int(args_cli.readiness_required_windows),
+            readiness_ramp_frames=int(args_cli.readiness_ramp_frames),
+            readiness_eval_interval_frames=int(args_cli.readiness_eval_interval_frames),
+            readiness_shadow_retrieval_fraction=float(
+                args_cli.readiness_shadow_retrieval_fraction
+            ),
+            wm_graduation_enable=bool(args_cli.wm_graduation_enable),
+            wm_graduation_required_passes=int(args_cli.wm_graduation_required_passes),
+            wm_graduation_early_until_frames=int(args_cli.wm_graduation_early_until_frames),
+            wm_graduation_early_eval_interval_frames=int(
+                args_cli.wm_graduation_early_eval_interval_frames
+            ),
+            wm_graduation_late_eval_interval_frames=int(
+                args_cli.wm_graduation_late_eval_interval_frames
+            ),
+            wm_graduation_early_beta_up=float(args_cli.wm_graduation_early_beta_up),
+            wm_graduation_late_beta_up=float(args_cli.wm_graduation_late_beta_up),
+            wm_graduation_beta_down=float(args_cli.wm_graduation_beta_down),
+            wm_graduation_early_alpha_cap=float(args_cli.wm_graduation_early_alpha_cap),
+            wm_graduation_late_alpha_cap=float(args_cli.wm_graduation_late_alpha_cap),
+            wm_graduation_min_valid_prediction_frac=float(
+                args_cli.wm_graduation_min_valid_prediction_frac
+            ),
+            readiness_bootstrap_distill_weight=float(
+                args_cli.readiness_bootstrap_distill_weight
+            ),
+            readiness_calibrated_distill_weight=float(
+                args_cli.readiness_calibrated_distill_weight
+            ),
+            readiness_ess_target=float(args_cli.readiness_ess_target),
+            readiness_ess_min_for_update=float(args_cli.readiness_ess_min_for_update),
+        )
+        readiness_adaptive_state = ReadinessAdaptiveState()
+        # Dynamic cal eval interval when WM graduation is enabled.
+        if bool(args_cli.wm_graduation_enable):
+            _early_until = int(args_cli.wm_graduation_early_until_frames)
+            # Interval is applied dynamically in the train loop via evaluator.cfg.
+            seq_wm_trainer._wm_graduation_enable = True
+            seq_wm_trainer._wm_graduation_early_until_frames = _early_until
+            seq_wm_trainer._wm_graduation_early_eval_interval_frames = int(
+                args_cli.wm_graduation_early_eval_interval_frames
+            )
+            seq_wm_trainer._wm_graduation_late_eval_interval_frames = int(
+                args_cli.wm_graduation_late_eval_interval_frames
+            )
+        else:
+            seq_wm_trainer._wm_graduation_enable = False
+        seq_wm_trainer._readiness_adaptive_cfg = readiness_adaptive_cfg
+        seq_wm_trainer._readiness_adaptive_state = readiness_adaptive_state
         seq_wm_trainer._eir_cfg = eir_cfg
         seq_wm_trainer._eir_scorer_cfg = eir_scorer_cfg
         seq_wm_trainer._eir_bank_cfg = eir_bank_cfg
@@ -8239,6 +8455,61 @@ def main():
             ),
             adaptive_rescue_emergency_require_archive_or_stable_source=bool(
                 args_cli.adaptive_rescue_emergency_require_archive_or_stable_source
+            ),
+            adaptive_lineage_diversity_enable=bool(
+                args_cli.adaptive_lineage_diversity_enable
+            ),
+            adaptive_min_distinct_lineages_exploration=int(
+                args_cli.adaptive_min_distinct_lineages_exploration
+            ),
+            adaptive_min_distinct_lineages_consolidation=int(
+                args_cli.adaptive_min_distinct_lineages_consolidation
+            ),
+            adaptive_min_distinct_lineages_selection=int(
+                args_cli.adaptive_min_distinct_lineages_selection
+            ),
+            adaptive_replacement_budget_exploration=int(
+                args_cli.adaptive_replacement_budget_exploration
+            ),
+            adaptive_replacement_budget_consolidation=int(
+                args_cli.adaptive_replacement_budget_consolidation
+            ),
+            adaptive_replacement_budget_selection=int(
+                args_cli.adaptive_replacement_budget_selection
+            ),
+            adaptive_probation_stage_aware_enable=bool(
+                args_cli.adaptive_probation_stage_aware_enable
+            ),
+            adaptive_probation_min_frames_exploration=int(
+                args_cli.adaptive_probation_min_frames_exploration
+            ),
+            adaptive_probation_min_frames_other=int(
+                args_cli.adaptive_probation_min_frames_other
+            ),
+            adaptive_probation_max_frames=int(args_cli.adaptive_probation_max_frames),
+            adaptive_probation_min_stable_ticks_exploration=int(
+                args_cli.adaptive_probation_min_stable_ticks_exploration
+            ),
+            adaptive_probation_min_stable_ticks_other=int(
+                args_cli.adaptive_probation_min_stable_ticks_other
+            ),
+            adaptive_probation_early_exit_retention=float(
+                args_cli.adaptive_probation_early_exit_retention
+            ),
+            adaptive_probation_normal_exit_retention=float(
+                args_cli.adaptive_probation_normal_exit_retention
+            ),
+            adaptive_probation_early_exit_nsucc_drop_frac=float(
+                args_cli.adaptive_probation_early_exit_nsucc_drop_frac
+            ),
+            adaptive_rescue_source_freshness_mode=str(
+                args_cli.adaptive_rescue_source_freshness_mode
+            ),
+            adaptive_rescue_source_freshness_tau_frames=int(
+                args_cli.adaptive_rescue_source_freshness_tau_frames
+            ),
+            adaptive_rescue_source_hard_max_age_frames=int(
+                args_cli.adaptive_rescue_source_hard_max_age_frames
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
