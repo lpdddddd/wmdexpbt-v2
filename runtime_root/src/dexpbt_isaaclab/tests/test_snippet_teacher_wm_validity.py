@@ -1,0 +1,374 @@
+"""Tests for WM validity + teacher-confidence/score alignment."""
+
+from __future__ import annotations
+
+import unittest
+
+import torch
+import torch.nn as nn
+
+from dexpbt_isaaclab.world_model.elite_snippet_bank import (
+    EliteSnippetBank,
+    EliteSnippetBankConfig,
+)
+from dexpbt_isaaclab.world_model.elite_snippet_builder import SnippetBatch
+from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
+    ProgressRefinementConfig,
+    teacher_confidence,
+)
+from dexpbt_isaaclab.world_model.snippet_distill import SnippetDistillConfig
+from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
+    SnippetWMRerankConfig,
+    score_snippet_candidates,
+    wm_head_probs_for_candidates,
+)
+
+
+def _snippet_batch(tols, *, feat_dim=8, action_dim=3, horizon=4, norm_err=None):
+    n = len(tols)
+    if norm_err is None:
+        norm_err = [0.5] * n
+    return SnippetBatch(
+        feat_start=torch.randn(n, feat_dim),
+        actions=torch.randn(n, horizon, action_dim).clamp(-1, 1),
+        d_hat=torch.full((n,), 0.02),
+        success_tol=torch.tensor([float(t) for t in tols]),
+        lifted=torch.ones(n),
+        picked=torch.zeros(n),
+        dropped=torch.zeros(n),
+        closest_d_hat=torch.full((n,), 0.01),
+        success_h=torch.ones(n),
+        improve_h=torch.ones(n),
+        drop_h=torch.zeros(n),
+        recovery_label=torch.ones(n),
+        s0=torch.ones(n),
+        s1=torch.ones(n),
+        i0=torch.ones(n),
+        d0=torch.zeros(n),
+        d1=torch.zeros(n),
+        normalized_error=torch.tensor([float(x) for x in norm_err]),
+        recent_progress=torch.zeros(n),
+        oscillation=torch.full((n,), 0.1),
+        progress_history_valid=torch.ones(n),
+        normalized_improvement=torch.full((n,), 0.5),
+    )
+
+
+def _bank(**over) -> EliteSnippetBank:
+    cfg = EliteSnippetBankConfig(
+        enabled=True,
+        feature_dim=8,
+        action_dim=3,
+        horizon=4,
+        horizons=(4, 8),
+        min_priority=0.0,
+        **over,
+    )
+    return EliteSnippetBank(cfg)
+
+
+class _A2C(nn.Module):
+    def __init__(self, f=8, a=3):
+        super().__init__()
+        self.mu = nn.Linear(f, a)
+
+
+class _Inner:
+    def __init__(self, a2c):
+        self.a2c_network = a2c
+
+
+class _Model:
+    def __init__(self, a2c):
+        self.model = _Inner(a2c)
+
+
+class _Agent:
+    def __init__(self, a2c):
+        self.model = _Model(a2c)
+
+
+class _FakeBridge:
+    def __init__(self, bank, sd_cfg, pr_cfg, a2c, *, rerank_cfg=None, predict_fn=None):
+        self.snippet_bank = bank
+        self.snippet_distill_cfg = sd_cfg
+        self.progress_refine_cfg = pr_cfg
+        self.snippet_wm_rerank_cfg = rerank_cfg
+        self.wm_calibration_enable = bool(rerank_cfg is not None)
+        self.wm_calibration_state = {"alpha_wm": 1.0} if rerank_cfg is not None else None
+        self.agent_ref = _Agent(a2c)
+        self.rssm_belief_cache = None
+        self.rssm_belief_provider = None
+        self.rssm_predict_fn = predict_fn
+        self.capture = None
+        self.last_progress_refine = {}
+        self.last_snippet_distill_loss = 0.0
+        self.last_snippet_distill_active_frac = 0.0
+        self.last_snippet_wm_rerank_changed_frac = 0.0
+        self.last_snippet_wm_rerank_wm_term_mean = 0.0
+        self.last_snippet_wm_rerank_valid_frac = 0.0
+        self.last_snippet_wm_rerank_fallback_frac = 0.0
+        self.last_snippet_wm_rerank_predict_error_count = 0.0
+        self.last_snippet_retrieval_valid = 0.0
+        self.last_snippet_no_tolerance_compatible = 0.0
+        self.last_actor_distill_fallback_reason = ""
+
+
+class _FakeBeliefCache:
+    def __init__(self, belief: torch.Tensor):
+        self.valid = True
+        self._belief = belief
+
+    def slice_rows(self, start: int, end: int):
+        return self._belief[start:end]
+
+
+class _FakeCache:
+    pass
+
+
+class TestScoreAlignment(unittest.TestCase):
+    def test_best_idx_confidence_share_candidate_score(self):
+        cfg = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0, w_delta=0.0)
+        pri = torch.tensor([[1.0, 5.0, 2.0]])
+        p_rec = torch.tensor([[0.9, 0.1, 0.2]])
+        best_idx, cand_score, _ = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=torch.zeros(1, 3),
+            p_drop=torch.zeros(1, 3),
+            uncertainty=torch.zeros(1, 3),
+            action_delta=torch.zeros(1, 3),
+            alpha_wm=1.0,
+            cfg=cfg,
+            wm_valid_mask=torch.ones(1, 3, dtype=torch.bool),
+        )
+        ar = torch.arange(1)
+        score_selected = cand_score[ar, best_idx]
+        self.assertAlmostEqual(
+            float(score_selected.item()), float(cand_score.max(dim=1).values.item()), places=5
+        )
+        self.assertEqual(int(best_idx.item()), int(cand_score.argmax(dim=1).item()))
+
+    def test_wm_rerank_low_base_priority_uses_selected_score(self):
+        """WM can pick a low-priority candidate; confidence must use that score."""
+        cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.0)
+        pri = torch.tensor([[10.0, 1.0, 2.0]])  # priority prefers idx 0
+        p_rec = torch.tensor([[0.0, 1.0, 0.0]])  # WM prefers idx 1
+        best_idx, cand_score, diag = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=torch.zeros(1, 3),
+            p_drop=torch.zeros(1, 3),
+            uncertainty=torch.zeros(1, 3),
+            action_delta=torch.zeros(1, 3),
+            alpha_wm=1.0,
+            cfg=cfg,
+            wm_valid_mask=torch.ones(1, 3, dtype=torch.bool),
+        )
+        self.assertEqual(int(best_idx.item()), 1)
+        self.assertGreater(diag["snippet_wm_rerank/changed_frac"], 0.0)
+        score_selected = cand_score[0, best_idx]
+        conf, _ = teacher_confidence(
+            score_best=score_selected,
+            score_actor=cand_score[0, torch.tensor([0])],
+            cfg=ProgressRefinementConfig(teacher_margin_temperature=0.05),
+        )
+        self.assertTrue(torch.isfinite(conf).all())
+        self.assertNotAlmostEqual(float(score_selected.item()), float(pri.max().item()), places=5)
+
+
+class TestWMValidity(unittest.TestCase):
+    def test_predict_fn_none_invalid_mask(self):
+        acts = torch.randn(2, 3, 4)
+        belief = torch.randn(2, 5)
+        p_rec, p_succ, p_drop, unc, valid, diag = wm_head_probs_for_candidates(
+            belief_flat=belief, cand_first_actions=acts, predict_fn=None
+        )
+        self.assertFalse(bool(valid.any()))
+        self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 1.0)
+        self.assertTrue(torch.equal(unc, torch.zeros_like(unc)))
+
+        best_idx, cand_score, score_diag = score_snippet_candidates(
+            priority=torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]]),
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=torch.zeros(2, 3),
+            alpha_wm=1.0,
+            cfg=SnippetWMRerankConfig(enabled=True),
+            wm_valid_mask=valid,
+        )
+        self.assertTrue(torch.equal(best_idx, torch.tensor([1, 2])))
+        self.assertEqual(score_diag["snippet_wm_rerank/fallback_frac"], 1.0)
+        self.assertTrue(torch.equal(cand_score, torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]])))
+
+    def test_predict_exception_no_crash_priority_fallback(self):
+        acts = torch.randn(1, 2, 3)
+        belief = torch.randn(1, 4)
+
+        def _boom(_b, _a):
+            raise RuntimeError("wm down")
+
+        p_rec, p_succ, p_drop, unc, valid, diag = wm_head_probs_for_candidates(
+            belief_flat=belief, cand_first_actions=acts, predict_fn=_boom
+        )
+        self.assertEqual(diag["snippet_wm_rerank/predict_error_count"], 1.0)
+        self.assertFalse(bool(valid.any()))
+        self.assertTrue(torch.equal(unc, torch.zeros_like(unc)))
+        best_idx, _, score_diag = score_snippet_candidates(
+            priority=torch.tensor([[2.0, 9.0]]),
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=torch.zeros(1, 2),
+            alpha_wm=1.0,
+            cfg=SnippetWMRerankConfig(enabled=True, w_unc=1.0),
+            wm_valid_mask=valid,
+        )
+        self.assertEqual(int(best_idx.item()), 1)
+        self.assertEqual(score_diag["snippet_wm_rerank/changed_frac"], 0.0)
+
+    def test_nan_inf_candidates_invalid(self):
+        acts = torch.randn(1, 3, 2)
+        belief = torch.randn(1, 3)
+
+        def _bad(_b, _a):
+            return {
+                "recovery_logits": torch.tensor([10.0, float("nan"), 0.0]),
+                "horizon_logits": {
+                    1: {
+                        "success": torch.tensor([0.0, 0.0, 0.0]),
+                        "drop": torch.tensor([0.0, 0.0, float("nan")]),
+                    }
+                },
+            }
+
+        _p_rec, _p_succ, _p_drop, _unc, valid, diag = wm_head_probs_for_candidates(
+            belief_flat=belief, cand_first_actions=acts, predict_fn=_bad
+        )
+        self.assertFalse(bool(valid[0, 1]))
+        self.assertFalse(bool(valid[0, 2]))
+        self.assertTrue(bool(valid[0, 0]))
+        self.assertGreater(diag["snippet_wm_rerank/fallback_frac"], 0.0)
+
+    def test_partial_row_valid_mixed(self):
+        cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.0)
+        # Row0: flat priority so WM can flip to idx0; Row1: invalid WM -> priority idx0.
+        pri = torch.tensor([[1.0, 1.0, 1.0], [9.0, 1.0, 2.0]])
+        p_rec = torch.tensor([[0.9, 0.1, 0.1], [0.1, 0.9, 0.1]])
+        valid = torch.tensor([[True, True, True], [False, False, False]])
+        best_idx, cand_score, diag = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=torch.zeros(2, 3),
+            p_drop=torch.zeros(2, 3),
+            uncertainty=torch.zeros(2, 3),
+            action_delta=torch.zeros(2, 3),
+            alpha_wm=1.0,
+            cfg=cfg,
+            wm_valid_mask=valid,
+        )
+        self.assertEqual(int(best_idx[0].item()), 0)
+        self.assertEqual(int(best_idx[1].item()), 0)
+        self.assertAlmostEqual(diag["snippet_wm_rerank/valid_frac"], 0.5, places=5)
+        self.assertTrue(torch.equal(cand_score[1], pri[1]))
+
+
+class TestProgressRuntimeWM(unittest.TestCase):
+    def _run(self, *, predict_fn, belief=None, a2c=None):
+        from dexpbt_isaaclab.world_model.eir_mpc import _compute_snippet_distill_loss_progress
+
+        a2c = a2c or _A2C()
+        bank = _bank(
+            tolerance_compatibility_mode="log_relative",
+            tolerance_max_log_gap=0.3,
+            progress_priority_weight=0.5,
+        )
+        bank.update_from_builder_batch(_snippet_batch([0.02, 0.021, 0.019]), frame=1)
+        sd = SnippetDistillConfig(enabled=True, weight=1.0, topk=4, loss_cap=0.0)
+        pr = ProgressRefinementConfig(
+            enabled=True,
+            history_steps=1,
+            start_after_frames=0,
+            ramp_frames=0,
+            only_lifted=False,
+            min_gate_for_retrieval=0.0,
+        )
+        rerank = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0)
+        bridge = _FakeBridge(bank, sd, pr, a2c, rerank_cfg=rerank, predict_fn=predict_fn)
+        R = 4
+        if belief is not None:
+            bridge.rssm_belief_cache = _FakeBeliefCache(belief)
+        cache = _FakeCache()
+        cache.success_tol_flat = torch.full((R,), 0.02)
+        cache.lifted_flat = torch.ones(R)
+        cache.normalized_error_flat = torch.tensor([0.2, 0.5, 0.3, 0.25])
+        cache.recent_progress_flat = torch.zeros(R)
+        cache.oscillation_flat = torch.full((R,), 0.2)
+        cache.progress_history_valid_flat = torch.ones(R)
+        feat = torch.randn(R, 8)
+        risky = torch.ones(R, dtype=torch.bool)
+        loss = _compute_snippet_distill_loss_progress(
+            bridge,
+            eir_cfg=None,
+            cache=cache,
+            feat=feat,
+            risky=risky,
+            frames=10**9,
+            start=0,
+            end=R,
+        )
+        return loss, bridge
+
+    def test_predict_none_runtime_fallback_finite(self):
+        loss, bridge = self._run(predict_fn=None, belief=torch.randn(4, 5))
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/valid_frac"], 0.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_frac"], 1.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 1.0)
+
+    def test_predict_exception_runtime_finite(self):
+        def _boom(_b, _a):
+            raise RuntimeError("boom")
+
+        loss, bridge = self._run(predict_fn=_boom, belief=torch.randn(4, 5))
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/predict_error_count"], 1.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_frac"], 1.0)
+
+    def test_belief_missing_no_feat_substitute(self):
+        def _ok(belief_rep, cand_flat):
+            n = belief_rep.shape[0]
+            return {
+                "recovery_logits": torch.zeros(n),
+                "horizon_logits": {
+                    1: {"success": torch.zeros(n), "drop": torch.zeros(n)},
+                },
+            }
+
+        loss, bridge = self._run(predict_fn=_ok, belief=None)
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/valid_frac"], 0.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 2.0)
+
+    def test_bf16_actor_fp32_snippet_with_wm_fallback(self):
+        class _Bf16A2C(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._lin = nn.Linear(8, 3)
+
+            def mu(self, f):
+                return self._lin(f.float()).to(dtype=torch.bfloat16)
+
+        loss, bridge = self._run(
+            predict_fn=None, belief=torch.randn(4, 5), a2c=_Bf16A2C()
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertIn("progress_refine/teacher_margin_mean", bridge.last_progress_refine)
+
+
+if __name__ == "__main__":
+    unittest.main()

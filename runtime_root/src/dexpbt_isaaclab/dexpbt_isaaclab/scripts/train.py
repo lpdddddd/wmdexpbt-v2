@@ -4325,6 +4325,15 @@ def _patch_actor_train_for_seq_wm(
                         "snippet_wm_rerank/wm_term_mean": float(
                             xb.last_snippet_wm_rerank_wm_term_mean
                         ),
+                        "snippet_wm_rerank/valid_frac": float(
+                            getattr(xb, "last_snippet_wm_rerank_valid_frac", 0.0)
+                        ),
+                        "snippet_wm_rerank/fallback_frac": float(
+                            getattr(xb, "last_snippet_wm_rerank_fallback_frac", 0.0)
+                        ),
+                        "snippet_wm_rerank/predict_error_count": float(
+                            getattr(xb, "last_snippet_wm_rerank_predict_error_count", 0.0)
+                        ),
                     }
                     for k, v in _snippet_scalars.items():
                         try:

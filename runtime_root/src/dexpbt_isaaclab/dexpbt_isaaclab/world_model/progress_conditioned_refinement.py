@@ -415,21 +415,32 @@ def teacher_confidence(
     wm_uncertainty: Optional[torch.Tensor] = None,
     alpha_wm: float = 0.0,
     retrieval_valid: Optional[torch.Tensor] = None,
+    wm_valid: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Continuous teacher confidence ``c_teacher = c_margin * c_wm``.
 
     ``c_margin = sigmoid((S_best - S_actor) / T_m)`` rewards candidates that beat
-    the live actor.  ``c_wm = 1 - alpha_wm * clip(uncertainty, 0, 1)`` folds in
-    calibrated world-model uncertainty; when the WM is unavailable / not yet
-    calibrated (``alpha_wm <= 0`` or ``wm_uncertainty is None``) it is exactly 1,
-    so the snippet path stays open on real rollout labels.  Rows whose retrieval
-    is invalid receive confidence 0.
+    the live actor. ``score_best`` must be the score of the *selected* teacher
+    (same ``candidate_score`` / ``best_idx`` used for selection), not an
+    independent ``max`` over a different score family.
+
+    ``c_wm = 1 - alpha_wm * clip(uncertainty, 0, 1)`` folds in calibrated
+    world-model uncertainty; when the WM is unavailable / not yet calibrated
+    (``alpha_wm <= 0``, ``wm_uncertainty is None``, or ``wm_valid`` is false) it
+    is exactly 1 (neutral), so invalid WM never looks like uncertainty=0
+    high confidence. Rows whose retrieval is invalid receive confidence 0.
     """
     margin = (score_best - score_actor) / max(float(cfg.teacher_margin_temperature), 1e-9)
     c_margin = torch.sigmoid(margin)
     if wm_uncertainty is not None and float(alpha_wm) > 0.0:
         u = wm_uncertainty.float().clamp(0.0, 1.0)
         c_wm = 1.0 - float(alpha_wm) * u
+        if wm_valid is not None:
+            c_wm = torch.where(
+                wm_valid.to(device=c_wm.device, dtype=torch.bool),
+                c_wm,
+                torch.ones_like(c_wm),
+            )
     else:
         c_wm = torch.ones_like(c_margin)
     c = (c_margin * c_wm).clamp(0.0, 1.0)
