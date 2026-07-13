@@ -447,6 +447,7 @@ PROGRESS_REFINE_TB_SCALAR_NAMES: tuple[str, ...] = (
     "progress_refine/oscillation_mean",
     "progress_refine/teacher_confidence_mean",
     "progress_refine/teacher_margin_mean",
+    "progress_refine/teacher_score_margin_mean",
     "progress_refine/retrieval_valid_frac",
     "progress_refine/retrieval_budget_frac",
     "progress_refine/effective_sample_size",

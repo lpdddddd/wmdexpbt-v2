@@ -59,7 +59,9 @@ def score_snippet_candidates(
     - ``row_prediction_valid = wm_valid_mask.all(dim=1)``
     - ``row_wm_active = row_prediction_valid & (cfg.enabled and alpha_wm > 0)``
     - Active rows use ``pr_norm + alpha * wm_term - w_delta * action_delta``
-    - Inactive rows use raw ``priority`` (no action_delta penalty)
+    - Fallback rows use ``pr_norm`` only (no WM term / action_delta). Ranking
+      matches raw ``priority.argmax`` under non-degenerate inputs, while the
+      score scale stays comparable to WM-active rows for teacher confidence.
 
     Invariant: ``best_idx == candidate_score.argmax(dim=1)``.
     """
@@ -83,20 +85,26 @@ def score_snippet_candidates(
     row_prediction_valid = candidate_wm_valid.all(dim=1)
     row_wm_active = row_prediction_valid & wm_globally_active
 
-    pr_min = priority.min(dim=1, keepdim=True).values
-    pr_max = priority.max(dim=1, keepdim=True).values
-    pr_norm = (priority - pr_min) / (pr_max - pr_min + 1e-6)
+    # Normalize in fp32 for stable margins under AMP (bf16 priority / scores).
+    pri_f = priority.float()
+    pr_min = pri_f.min(dim=1, keepdim=True).values
+    pr_max = pri_f.max(dim=1, keepdim=True).values
+    pr_norm = (pri_f - pr_min) / (pr_max - pr_min + 1e-6)
     wm_term = (
-        float(cfg.w_rec) * p_recovery
-        + float(cfg.w_success) * p_success
-        - float(cfg.w_drop) * p_drop
-        - float(cfg.w_unc) * uncertainty
+        float(cfg.w_rec) * p_recovery.float()
+        + float(cfg.w_success) * p_success.float()
+        - float(cfg.w_drop) * p_drop.float()
+        - float(cfg.w_unc) * uncertainty.float()
     )
     wm_term = wm_term.clamp(-float(cfg.score_cap), float(cfg.score_cap))
 
-    wm_total_score = pr_norm + alpha * wm_term - float(cfg.w_delta) * action_delta
-    # Single score tensor for both selection and confidence.
-    candidate_score = torch.where(row_wm_active[:, None], wm_total_score.to(dtype=dtype), priority)
+    wm_total_score = pr_norm + alpha * wm_term - float(cfg.w_delta) * action_delta.float()
+    # Single score tensor for both selection and confidence (comparable scale).
+    candidate_score = torch.where(
+        row_wm_active[:, None],
+        wm_total_score.to(dtype=dtype),
+        pr_norm.to(dtype=dtype),
+    )
     best_idx = candidate_score.argmax(dim=1)
     priority_best = priority.argmax(dim=1)
 

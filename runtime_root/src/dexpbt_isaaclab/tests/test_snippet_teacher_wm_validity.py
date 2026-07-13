@@ -202,9 +202,13 @@ class TestWMValidity(unittest.TestCase):
             cfg=SnippetWMRerankConfig(enabled=True),
             wm_valid_mask=valid,
         )
-        self.assertTrue(torch.equal(best_idx, torch.tensor([1, 2])))
+        pri = torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]])
+        self.assertTrue(torch.equal(best_idx, pri.argmax(dim=1)))
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
         self.assertEqual(score_diag["snippet_wm_rerank/fallback_frac"], 1.0)
-        self.assertTrue(torch.equal(cand_score, torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]])))
+        self.assertTrue(torch.isfinite(cand_score).all())
+        self.assertTrue(bool((cand_score >= -1e-5).all().item()))
+        self.assertTrue(bool((cand_score <= 1.0 + 1e-5).all().item()))
 
     def test_predict_exception_no_crash_priority_fallback(self):
         acts = torch.randn(1, 2, 3)
@@ -255,8 +259,9 @@ class TestWMValidity(unittest.TestCase):
         self.assertFalse(bool(valid[0, 2]))
         self.assertTrue(bool(valid[0, 0]))
         self.assertAlmostEqual(float(unc[0, 1].item()), 1.0, places=5)
+        pri = torch.tensor([[1.0, 8.0, 2.0]])
         best_idx, cand_score, score_diag = score_snippet_candidates(
-            priority=torch.tensor([[1.0, 8.0, 2.0]]),
+            priority=pri,
             p_recovery=p_rec,
             p_success=p_succ,
             p_drop=p_drop,
@@ -267,7 +272,9 @@ class TestWMValidity(unittest.TestCase):
             wm_valid_mask=valid,
         )
         self.assertEqual(int(best_idx.item()), 1)
-        self.assertTrue(torch.equal(cand_score, torch.tensor([[1.0, 8.0, 2.0]])))
+        self.assertTrue(torch.equal(best_idx, pri.argmax(dim=1)))
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
+        self.assertTrue(torch.isfinite(cand_score).all())
         self.assertEqual(score_diag["snippet_wm_rerank/row_active_frac"], 0.0)
         self.assertGreater(diag["snippet_wm_rerank/fallback_frac"], 0.0)
 
@@ -290,7 +297,11 @@ class TestWMValidity(unittest.TestCase):
         self.assertEqual(int(best_idx[0].item()), 0)
         self.assertEqual(int(best_idx[1].item()), 0)
         self.assertAlmostEqual(diag["snippet_wm_rerank/row_active_frac"], 0.5, places=5)
-        self.assertTrue(torch.equal(cand_score[1], pri[1]))
+        self.assertTrue(torch.equal(best_idx[1:2], pri[1:2].argmax(dim=1)))
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
+        self.assertTrue(torch.isfinite(cand_score[1]).all())
+        self.assertTrue(bool((cand_score[1] >= -1e-5).all().item()))
+        self.assertTrue(bool((cand_score[1] <= 1.0 + 1e-5).all().item()))
 
 
 class TestProgressRuntimeWM(unittest.TestCase):

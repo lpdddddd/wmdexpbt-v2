@@ -1343,7 +1343,8 @@ def _compute_snippet_distill_loss_progress(
         mu_sel = mu_r[sel_idx]  # [n, A]
         action_delta = ((cand_first - mu_sel[:, None, :]) ** 2).sum(dim=-1)  # [n, k]
 
-        # Default (no WM / WM inactive): priority selection AND priority scores.
+        # Default (no WM / WM inactive): normalized-priority selection scores
+        # (ranking matches raw priority; scale matches WM-active rows).
         candidate_score = pri
         best_idx = pri.argmax(dim=1)
         unc = None
@@ -1407,10 +1408,21 @@ def _compute_snippet_distill_loss_progress(
                 )
                 wm_row_active = row_prediction_valid & (float(alpha_wm) > 0.0)
             else:
-                # Uncalibrated / alpha=0: do not call WM; keep raw priority.
+                # Uncalibrated / alpha=0: do not call WM predict; still score via
+                # normalized priority so confidence scale matches WM-active rows.
+                best_idx, candidate_score, score_diag = score_snippet_candidates(
+                    priority=pri,
+                    p_recovery=torch.zeros_like(pri),
+                    p_success=torch.zeros_like(pri),
+                    p_drop=torch.zeros_like(pri),
+                    uncertainty=torch.ones_like(pri),
+                    action_delta=action_delta,
+                    alpha_wm=0.0,
+                    cfg=rerank_cfg,
+                    wm_valid_mask=None,
+                )
+                rerank_diag.update(score_diag)
                 rerank_diag["snippet_wm_rerank/fallback_reason_id"] = 11.0
-                rerank_diag["snippet_wm_rerank/row_fallback_frac"] = 1.0
-                rerank_diag["snippet_wm_rerank/fallback_frac"] = 1.0
             rerank_changed_frac = float(
                 rerank_diag.get(
                     "snippet_wm_rerank/changed_frac_overall",
@@ -1479,6 +1491,7 @@ def _compute_snippet_distill_loss_progress(
     selected_score_mean = 0.0
     actor_proxy_score_mean = 0.0
     teacher_margin_mean = 0.0
+    teacher_score_margin_mean = 0.0
     wm_valid_frac = float(
         rerank_diag.get(
             "snippet_wm_rerank/row_active_frac",
@@ -1499,6 +1512,7 @@ def _compute_snippet_distill_loss_progress(
         selected_score_mean = float(score_selected.float().mean().item())
         actor_proxy_score_mean = float(score_actor_proxy.float().mean().item())
         teacher_margin_mean = float(c_diag.get("teacher_margin_mean", 0.0))
+        teacher_score_margin_mean = float(c_diag.get("teacher_score_margin_mean", 0.0))
     bridge.last_snippet_wm_rerank_valid_frac = wm_valid_frac
     bridge.last_snippet_wm_rerank_fallback_frac = wm_fallback_frac
     bridge.last_snippet_wm_rerank_predict_error_count = wm_predict_errors
@@ -1521,6 +1535,7 @@ def _compute_snippet_distill_loss_progress(
         "progress_refine/oscillation_mean": float(osc.float().mean().item()) if R else 0.0,
         "progress_refine/teacher_confidence_mean": float(conf.float().mean().item()) if R else 0.0,
         "progress_refine/teacher_margin_mean": float(teacher_margin_mean),
+        "progress_refine/teacher_score_margin_mean": float(teacher_score_margin_mean),
         "progress_refine/retrieval_valid_frac": valid_r,
         "progress_refine/retrieval_budget_frac": float(budget_frac),
         "progress_refine/effective_sample_size": float(

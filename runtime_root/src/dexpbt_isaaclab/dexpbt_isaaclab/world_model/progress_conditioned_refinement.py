@@ -419,19 +419,27 @@ def teacher_confidence(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Continuous teacher confidence ``c_teacher = c_margin * c_wm``.
 
-    ``c_margin = sigmoid((S_best - S_actor) / T_m)`` rewards candidates that beat
-    the live actor. ``score_best`` must be the score of the *selected* teacher
-    (same ``candidate_score`` / ``best_idx`` used for selection), not an
-    independent ``max`` over a different score family.
+    Zero-centered margin confidence:
+    ``c_margin = 2 * sigmoid(max(S_best - S_actor, 0) / T_m) - 1``, so a tie
+    (margin 0) maps to confidence 0 rather than 0.5. ``score_best`` must be the
+    score of the *selected* teacher (same ``candidate_score`` / ``best_idx``
+    used for selection).
 
     ``c_wm = 1 - alpha_wm * clip(uncertainty, 0, 1)`` folds in calibrated
     world-model uncertainty; when the WM is unavailable / not yet calibrated
     (``alpha_wm <= 0``, ``wm_uncertainty is None``, or ``wm_valid`` is false) it
     is exactly 1 (neutral), so invalid WM never looks like uncertainty=0
-    high confidence. Rows whose retrieval is invalid receive confidence 0.
+    high confidence. Values below ``min_teacher_confidence`` are hard-gated to
+    0. Rows whose retrieval is invalid receive confidence 0.
     """
-    margin = (score_best - score_actor) / max(float(cfg.teacher_margin_temperature), 1e-9)
-    c_margin = torch.sigmoid(margin)
+    raw_margin = (score_best.float() - score_actor.float()).clamp_min(0.0)
+    c_margin = (
+        2.0
+        * torch.sigmoid(
+            raw_margin / max(float(cfg.teacher_margin_temperature), 1e-9)
+        )
+        - 1.0
+    ).clamp(0.0, 1.0)
     if wm_uncertainty is not None and float(alpha_wm) > 0.0:
         u = wm_uncertainty.float().clamp(0.0, 1.0)
         c_wm = 1.0 - float(alpha_wm) * u
@@ -444,16 +452,19 @@ def teacher_confidence(
     else:
         c_wm = torch.ones_like(c_margin)
     c = (c_margin * c_wm).clamp(0.0, 1.0)
+    min_c = float(cfg.min_teacher_confidence)
+    if min_c > 0.0:
+        c = torch.where(c >= min_c, c, torch.zeros_like(c))
     if retrieval_valid is not None:
         rv = (retrieval_valid.float() > 0.5).float()
         c = c * rv
     c, _ = _sanitize(c)
     diag = {
         "teacher_margin_mean": float(c_margin.mean().item()) if c.numel() else 0.0,
+        "teacher_score_margin_mean": float(raw_margin.mean().item()) if c.numel() else 0.0,
         "teacher_confidence_mean": float(c.mean().item()) if c.numel() else 0.0,
     }
     return c, diag
-
 
 def weighted_effective_sample_size(weight: torch.Tensor) -> float:
     """Kish effective sample size: ``(sum w)^2 / sum w^2``."""

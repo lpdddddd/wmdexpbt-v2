@@ -6,6 +6,10 @@ import unittest
 
 import torch
 
+from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
+    ProgressRefinementConfig,
+    teacher_confidence,
+)
 from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
     SnippetWMRerankConfig,
     effective_alpha_wm,
@@ -16,6 +20,15 @@ from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
 
 def _score(**kw):
     return score_snippet_candidates(**kw)
+
+
+def _assert_fallback_norm(testcase, best_idx, cand_score, pri):
+    """Fallback uses pr_norm: same ranking as raw priority, finite normalized scores."""
+    testcase.assertTrue(torch.equal(best_idx, pri.argmax(dim=1)))
+    testcase.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
+    testcase.assertTrue(torch.isfinite(cand_score).all())
+    testcase.assertTrue(bool((cand_score >= -1e-5).all().item()))
+    testcase.assertTrue(bool((cand_score <= 1.0 + 1e-5).all().item()))
 
 
 class TestSnippetWMReranker(unittest.TestCase):
@@ -37,9 +50,8 @@ class TestSnippetWMReranker(unittest.TestCase):
         self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
 
     def test_partial_valid_row_falls_back_to_priority(self):
-        """Invalid candidate has highest priority; row must still use raw priority."""
+        """Invalid candidate has highest priority; row must still use priority ranking."""
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.0)
-        # Invalid idx0 has highest priority; WM would prefer valid idx1.
         pri = torch.tensor([[10.0, 1.0, 2.0]])
         p_rec = torch.tensor([[0.0, 1.0, 0.0]])
         valid = torch.tensor([[False, True, True]])
@@ -54,8 +66,8 @@ class TestSnippetWMReranker(unittest.TestCase):
             cfg=cfg,
             wm_valid_mask=valid,
         )
-        self.assertEqual(int(best_idx.item()), 0)  # raw priority
-        self.assertTrue(torch.equal(cand_score, pri))
+        _assert_fallback_norm(self, best_idx, cand_score, pri)
+        self.assertEqual(int(best_idx.item()), 0)
         self.assertEqual(diag["snippet_wm_rerank/row_active_frac"], 0.0)
         self.assertEqual(diag["snippet_wm_rerank/changed_frac"], 0.0)
         self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 12.0)
@@ -65,7 +77,6 @@ class TestSnippetWMReranker(unittest.TestCase):
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.05)
         pri = torch.tensor([[1.0, 5.0, 2.0]])
         p_rec = torch.tensor([[0.9, 0.1, 0.1]])
-        # Invalid idx0 is closest to actor (delta=0); valid rows would prefer WM on 0.
         action_delta = torch.tensor([[0.0, 4.0, 3.0]])
         valid = torch.tensor([[False, True, True]])
         best_idx, cand_score, _ = _score(
@@ -79,21 +90,19 @@ class TestSnippetWMReranker(unittest.TestCase):
             cfg=cfg,
             wm_valid_mask=valid,
         )
-        # Fail-closed => raw priority selection (idx1), not WM/action_delta.
+        _assert_fallback_norm(self, best_idx, cand_score, pri)
         self.assertEqual(int(best_idx.item()), 1)
-        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
         ar = torch.arange(1)
         score_selected = cand_score[ar, best_idx]
         actor_like_idx = action_delta.argmin(dim=1)
         score_actor_proxy = cand_score[ar, actor_like_idx]
-        # Both from the same candidate_score family (raw priority).
-        self.assertAlmostEqual(float(score_selected.item()), float(pri[0, 1].item()), places=5)
-        self.assertAlmostEqual(float(score_actor_proxy.item()), float(pri[0, 0].item()), places=5)
+        # Same candidate_score family (normalized priority).
+        self.assertAlmostEqual(float(score_selected.item()), 1.0, places=5)
+        self.assertAlmostEqual(float(score_actor_proxy.item()), 0.0, places=5)
 
     def test_alpha_zero_ignores_action_delta(self):
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=1.0, w_delta=10.0, score_cap=1.0)
         pri = torch.tensor([[1.0, 5.0, 2.0]])
-        # Huge action_delta on the priority winner would flip selection if WM path ran.
         action_delta = torch.tensor([[0.0, 100.0, 0.0]])
         best_idx, cand_score, diag = _score(
             priority=pri,
@@ -106,11 +115,67 @@ class TestSnippetWMReranker(unittest.TestCase):
             cfg=cfg,
             wm_valid_mask=torch.ones(1, 3, dtype=torch.bool),
         )
+        _assert_fallback_norm(self, best_idx, cand_score, pri)
         self.assertEqual(int(best_idx.item()), 1)
-        self.assertTrue(torch.equal(cand_score, pri))
         self.assertEqual(diag["snippet_wm_rerank/changed_frac"], 0.0)
         self.assertEqual(diag["snippet_wm_rerank/wm_term_mean"], 0.0)
         self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 11.0)
+
+    def test_fallback_affine_priority_confidence_invariant(self):
+        """Positive affine transform of priority leaves fallback confidence unchanged."""
+        cfg = SnippetWMRerankConfig(enabled=True)
+        pri = torch.tensor([[1.0, 5.0, 2.0]])
+        pri_aff = 3.0 * pri + 7.0
+        action_delta = torch.tensor([[0.5, 0.0, 0.2]])  # actor-like = idx1 (also best)
+        zeros = torch.zeros(1, 3)
+        kwargs = dict(
+            p_recovery=zeros,
+            p_success=zeros,
+            p_drop=zeros,
+            uncertainty=torch.ones(1, 3),
+            action_delta=action_delta,
+            alpha_wm=0.0,
+            cfg=cfg,
+            wm_valid_mask=torch.ones(1, 3, dtype=torch.bool),
+        )
+        best_a, score_a, _ = _score(priority=pri, **kwargs)
+        best_b, score_b, _ = _score(priority=pri_aff, **kwargs)
+        self.assertTrue(torch.equal(best_a, best_b))
+        self.assertTrue(torch.allclose(score_a, score_b, atol=1e-5))
+        ar = torch.arange(1)
+        conf_cfg = ProgressRefinementConfig(
+            enabled=True, min_teacher_confidence=0.0, teacher_margin_temperature=0.05
+        )
+        # Force a non-zero margin: actor proxy = lowest priority cand.
+        actor_idx = torch.tensor([0])
+        c_a, _ = teacher_confidence(
+            score_best=score_a[ar, best_a],
+            score_actor=score_a[ar, actor_idx],
+            cfg=conf_cfg,
+        )
+        c_b, _ = teacher_confidence(
+            score_best=score_b[ar, best_b],
+            score_actor=score_b[ar, actor_idx],
+            cfg=conf_cfg,
+        )
+        self.assertAlmostEqual(float(c_a.item()), float(c_b.item()), places=5)
+
+    def test_constant_priority_finite(self):
+        cfg = SnippetWMRerankConfig(enabled=True)
+        pri = torch.tensor([[3.0, 3.0, 3.0]])
+        best_idx, cand_score, _ = _score(
+            priority=pri,
+            p_recovery=torch.zeros(1, 3),
+            p_success=torch.zeros(1, 3),
+            p_drop=torch.zeros(1, 3),
+            uncertainty=torch.ones(1, 3),
+            action_delta=torch.zeros(1, 3),
+            alpha_wm=0.0,
+            cfg=cfg,
+        )
+        self.assertTrue(torch.isfinite(cand_score).all())
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
+        self.assertTrue(torch.allclose(cand_score, torch.zeros(1, 3), atol=1e-5))
 
     def test_calibration_disabled_effective_alpha_zero(self):
         self.assertEqual(effective_alpha_wm(wm_calibration_enable=False, alpha_wm=0.9), 0.0)
@@ -129,8 +194,8 @@ class TestSnippetWMReranker(unittest.TestCase):
             cfg=cfg,
             wm_valid_mask=torch.ones(1, 2, dtype=torch.bool),
         )
+        _assert_fallback_norm(self, best_idx, cand_score, pri)
         self.assertEqual(int(best_idx.item()), 0)
-        self.assertTrue(torch.equal(cand_score, pri))
         self.assertEqual(diag["snippet_wm_rerank/row_active_frac"], 0.0)
 
     def test_alpha_positive_can_change(self):
@@ -171,7 +236,9 @@ class TestSnippetWMReranker(unittest.TestCase):
         )
         self.assertEqual(int(best_idx[0].item()), 0)  # WM active
         self.assertEqual(int(best_idx[1].item()), 0)  # priority fallback
-        self.assertTrue(torch.equal(cand_score[1], pri[1]))
+        self.assertTrue(torch.equal(best_idx[1:2], pri[1:2].argmax(dim=1)))
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
+        self.assertTrue(torch.isfinite(cand_score[1]).all())
         self.assertAlmostEqual(diag["snippet_wm_rerank/row_active_frac"], 0.5, places=5)
         self.assertAlmostEqual(diag["snippet_wm_rerank/row_fallback_frac"], 0.5, places=5)
 
@@ -245,9 +312,9 @@ class TestWMHeadProbsValidity(unittest.TestCase):
         self.assertFalse(bool(valid[0, 1]))
         self.assertTrue(bool(valid[0, 0]))
         self.assertAlmostEqual(float(unc[0, 1].item()), 1.0, places=5)
-        # Scoring fail-closes the whole row.
+        pri = torch.tensor([[1.0, 9.0, 2.0]])
         best_idx, cand_score, score_diag = score_snippet_candidates(
-            priority=torch.tensor([[1.0, 9.0, 2.0]]),
+            priority=pri,
             p_recovery=p_rec,
             p_success=p_succ,
             p_drop=p_drop,
@@ -257,8 +324,8 @@ class TestWMHeadProbsValidity(unittest.TestCase):
             cfg=SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0),
             wm_valid_mask=valid,
         )
+        _assert_fallback_norm(self, best_idx, cand_score, pri)
         self.assertEqual(int(best_idx.item()), 1)
-        self.assertTrue(torch.equal(cand_score, torch.tensor([[1.0, 9.0, 2.0]])))
         self.assertEqual(score_diag["snippet_wm_rerank/row_active_frac"], 0.0)
         self.assertGreater(diag["snippet_wm_rerank/fallback_frac"], 0.0)
 

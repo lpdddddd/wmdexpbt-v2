@@ -261,7 +261,7 @@ class TestRetrieval(unittest.TestCase):
 
 class TestTeacherConfidence(unittest.TestCase):
     def test_10_wm_unavailable_fallback_priority(self):
-        cfg = ProgressRefinementConfig(enabled=True)
+        cfg = ProgressRefinementConfig(enabled=True, min_teacher_confidence=0.0)
         c, _ = teacher_confidence(
             score_best=torch.tensor([2.0]),
             score_actor=torch.tensor([0.0]),
@@ -270,11 +270,11 @@ class TestTeacherConfidence(unittest.TestCase):
             alpha_wm=0.0,
             retrieval_valid=torch.tensor([1.0]),
         )
-        # WM unavailable -> c_wm == 1 -> confidence == margin sigmoid > 0 (path open).
+        # WM unavailable -> c_wm == 1; large margin -> centered confidence near 1.
         self.assertGreater(float(c), 0.5)
 
     def test_11_wm_nonfinite_safe(self):
-        cfg = ProgressRefinementConfig(enabled=True)
+        cfg = ProgressRefinementConfig(enabled=True, min_teacher_confidence=0.0)
         unc = torch.tensor([float("nan")])
         c, _ = teacher_confidence(
             score_best=torch.tensor([1.0]),
@@ -285,6 +285,88 @@ class TestTeacherConfidence(unittest.TestCase):
             retrieval_valid=torch.tensor([1.0]),
         )
         self.assertTrue(torch.isfinite(c).all())
+
+    def test_tie_margin_confidence_zero(self):
+        cfg = ProgressRefinementConfig(enabled=True, min_teacher_confidence=0.0)
+        c, diag = teacher_confidence(
+            score_best=torch.tensor([1.0, 0.5]),
+            score_actor=torch.tensor([1.0, 0.5]),
+            cfg=cfg,
+            retrieval_valid=torch.ones(2),
+        )
+        self.assertTrue(torch.allclose(c, torch.zeros(2), atol=1e-6))
+        self.assertAlmostEqual(diag["teacher_score_margin_mean"], 0.0, places=6)
+
+    def test_margin_monotone_toward_one(self):
+        cfg = ProgressRefinementConfig(
+            enabled=True, min_teacher_confidence=0.0, teacher_margin_temperature=0.2
+        )
+        margins = [0.0, 0.05, 0.2, 1.0, 5.0]
+        confs = []
+        for m in margins:
+            c, _ = teacher_confidence(
+                score_best=torch.tensor([float(m)]),
+                score_actor=torch.tensor([0.0]),
+                cfg=cfg,
+                retrieval_valid=torch.tensor([1.0]),
+            )
+            confs.append(float(c.item()))
+        for a, b in zip(confs, confs[1:]):
+            self.assertLessEqual(a, b + 1e-6)
+        self.assertAlmostEqual(confs[0], 0.0, places=6)
+        self.assertGreater(confs[-1], 0.95)
+
+    def test_min_teacher_confidence_hard_gate(self):
+        cfg = ProgressRefinementConfig(
+            enabled=True, min_teacher_confidence=0.4, teacher_margin_temperature=1.0
+        )
+        # Small positive margin -> centered c_margin < 0.4 -> gated to 0.
+        c_small, _ = teacher_confidence(
+            score_best=torch.tensor([0.05]),
+            score_actor=torch.tensor([0.0]),
+            cfg=cfg,
+            retrieval_valid=torch.tensor([1.0]),
+        )
+        self.assertAlmostEqual(float(c_small.item()), 0.0, places=6)
+        # Large margin survives the gate.
+        c_large, _ = teacher_confidence(
+            score_best=torch.tensor([5.0]),
+            score_actor=torch.tensor([0.0]),
+            cfg=cfg,
+            retrieval_valid=torch.tensor([1.0]),
+        )
+        self.assertGreater(float(c_large.item()), 0.4)
+
+    def test_retrieval_invalid_zero(self):
+        cfg = ProgressRefinementConfig(enabled=True, min_teacher_confidence=0.0)
+        c, _ = teacher_confidence(
+            score_best=torch.tensor([2.0]),
+            score_actor=torch.tensor([0.0]),
+            cfg=cfg,
+            retrieval_valid=torch.tensor([0.0]),
+        )
+        self.assertAlmostEqual(float(c.item()), 0.0, places=6)
+
+    def test_wm_invalid_uncertainty_neutral(self):
+        cfg = ProgressRefinementConfig(enabled=True, min_teacher_confidence=0.0)
+        c_invalid, _ = teacher_confidence(
+            score_best=torch.tensor([1.0]),
+            score_actor=torch.tensor([0.0]),
+            cfg=cfg,
+            wm_uncertainty=torch.tensor([1.0]),
+            alpha_wm=1.0,
+            wm_valid=torch.tensor([False]),
+            retrieval_valid=torch.tensor([1.0]),
+        )
+        c_neutral, _ = teacher_confidence(
+            score_best=torch.tensor([1.0]),
+            score_actor=torch.tensor([0.0]),
+            cfg=cfg,
+            wm_uncertainty=None,
+            alpha_wm=0.0,
+            retrieval_valid=torch.tensor([1.0]),
+        )
+        self.assertAlmostEqual(float(c_invalid.item()), float(c_neutral.item()), places=5)
 
 
 class TestBankSchema(unittest.TestCase):
