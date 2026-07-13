@@ -589,49 +589,61 @@ def apply_wm_graduation(
         else float(cfg.wm_graduation_late_alpha_cap)
     )
 
+    try:
+        ema_prev_raw = float(state.wm_ema_raw)
+    except (TypeError, ValueError):
+        ema_prev_raw = float("nan")
+    ema_prev_valid = math.isfinite(ema_prev_raw) and 0.0 <= ema_prev_raw <= 1.0
+    ema_prev_safe = float(ema_prev_raw) if ema_prev_valid else 0.0
+
+    try:
+        r_bank_raw = float(r_bank)
+    except (TypeError, ValueError):
+        r_bank_raw = float("nan")
+    r_bank_valid = math.isfinite(r_bank_raw) and 0.0 <= r_bank_raw <= 1.0
+    r_bank_safe = float(r_bank_raw) if r_bank_valid else 0.0
+
+    def _decay_ema_on_fail() -> None:
+        if ema_prev_valid:
+            state.wm_ema_raw = beta_down * ema_prev_safe
+            if not math.isfinite(float(state.wm_ema_raw)):
+                state.wm_ema_raw = 0.0
+        else:
+            state.wm_ema_raw = 0.0
+
     if mode_norm == "structural":
         state.wm_pass_streak = 0
         state.wm_ema_raw = 0.0
         state.wm_graduated = False
     elif mode_norm in ("insufficient", "metric_fail"):
         state.wm_pass_streak = 0
-        ema_prev = float(state.wm_ema_raw)
-        if not math.isfinite(ema_prev):
-            ema_prev = 0.0
-        state.wm_ema_raw = beta_down * ema_prev
-        if not math.isfinite(float(state.wm_ema_raw)):
-            state.wm_ema_raw = 0.0
+        _decay_ema_on_fail()
         state.wm_graduated = False
     elif mode_norm == "valid":
         vpf = _valid_prediction_frac(metrics)
         eval_ok = float(metrics.get("wm_cal/eval_valid", 0.0)) > 0.5
         cal_pass = float(metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5
         raw, raw_ok = _graduation_raw(metrics)
-        ema_prev = float(state.wm_ema_raw)
-        if not math.isfinite(ema_prev):
-            ema_prev = 0.0
-        r_bank_f = float(r_bank)
-        if not (
+        pass_ok = (
             eval_ok
             and cal_pass
             and vpf >= float(cfg.wm_graduation_min_valid_prediction_frac)
             and raw_ok
-            and math.isfinite(ema_prev)
-            and math.isfinite(r_bank_f)
-        ):
-            state.wm_pass_streak = 0
-            state.wm_ema_raw = beta_down * ema_prev
-            if not math.isfinite(float(state.wm_ema_raw)):
-                state.wm_ema_raw = 0.0
-        else:
-            r_bank_f = _clip(r_bank_f, 0.0, 1.0)
-            state.wm_pass_streak = int(state.wm_pass_streak) + 1
-            state.wm_ema_raw = beta_up * ema_prev + (1.0 - beta_up) * float(raw)
-            if not math.isfinite(float(state.wm_ema_raw)):
-                state.wm_ema_raw = 0.0
-        state.wm_graduated = int(state.wm_pass_streak) >= int(
-            cfg.wm_graduation_required_passes
+            and ema_prev_valid
+            and r_bank_valid
         )
+        if not pass_ok:
+            state.wm_pass_streak = 0
+            state.wm_graduated = False
+            _decay_ema_on_fail()
+        else:
+            state.wm_pass_streak = int(state.wm_pass_streak) + 1
+            state.wm_ema_raw = beta_up * ema_prev_safe + (1.0 - beta_up) * float(raw)
+            if not math.isfinite(float(state.wm_ema_raw)):
+                state.wm_ema_raw = 0.0
+            state.wm_graduated = int(state.wm_pass_streak) >= int(
+                cfg.wm_graduation_required_passes
+            )
     else:
         raise ValueError(
             f"apply_wm_graduation mode must be valid|insufficient|structural|metric_fail, "
@@ -648,16 +660,9 @@ def apply_wm_graduation(
     if not math.isfinite(ema):
         ema = 0.0
         state.wm_ema_raw = 0.0
-    try:
-        r_bank_f = float(r_bank)
-    except (TypeError, ValueError):
-        r_bank_f = 0.0
-    if not math.isfinite(r_bank_f):
-        r_bank_f = 0.0
-    else:
-        r_bank_f = _clip(r_bank_f, 0.0, 1.0)
-    if state.wm_graduated:
-        alpha_effective = _clip(ema, 0.0, alpha_cap) * r_bank_f
+    # Defensive output clamp only — never promotes an illegal pass.
+    if state.wm_graduated and r_bank_valid:
+        alpha_effective = _clip(ema, 0.0, alpha_cap) * r_bank_safe
     else:
         alpha_effective = 0.0
     if not math.isfinite(alpha_effective):

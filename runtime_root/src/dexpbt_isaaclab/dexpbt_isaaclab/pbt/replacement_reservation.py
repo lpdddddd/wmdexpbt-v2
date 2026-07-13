@@ -26,7 +26,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
     STAGE_CONSOLIDATION,
@@ -43,7 +43,6 @@ ALLOWED_STAGES: frozenset[str] = frozenset(
     {STAGE_EXPLORATION, STAGE_CONSOLIDATION, STAGE_SELECTION}
 )
 
-
 def normalize_stage(stage: str) -> str:
     """Whitelist stage names; raise on anything else."""
     s = str(stage or "").strip().lower()
@@ -54,10 +53,8 @@ def normalize_stage(stage: str) -> str:
         )
     return s
 
-
 def _now_wall() -> float:
     return float(time.time())
-
 
 @dataclass
 class ReservationHandle:
@@ -72,14 +69,12 @@ class ReservationHandle:
     source_lineage: str = ""
     lease_timeout_s: float = DEFAULT_RESERVATION_TIMEOUT_S
 
-
 @dataclass
 class ReservationResult:
     ok: bool
     reason: str = ""
     handle: Optional[ReservationHandle] = None
     telemetry: dict[str, float] = field(default_factory=dict)
-
 
 @dataclass
 class FinalizeResult:
@@ -88,6 +83,13 @@ class FinalizeResult:
     status: str = ""  # committed | released | reconciled | failed | already_*
     telemetry: dict[str, float] = field(default_factory=dict)
 
+@dataclass
+class ReservationLeaseStatus:
+    """Mutable lease status filled by ``reservation_lease`` (never raises over body)."""
+
+    heartbeat_ok: bool = True
+    heartbeat_error: str = ""
+    thread_stopped: bool = True
 
 def projected_lineages_after_copies(
     base_lineages: Mapping[int, str],
@@ -110,13 +112,11 @@ def projected_lineages_after_copies(
         projected[int(proposed_target)] = str(proposed_source_lineage)
     return projected
 
-
 def lineages_incomplete(lineages: Mapping[int, str], num_policies: int) -> bool:
     for i in range(int(num_policies)):
         if not str(lineages.get(i, "") or "").strip():
             return True
     return False
-
 
 class PopulationReplacementLedger:
     """Flock-serialized per-(tick, stage) ordinary replacement ledger."""
@@ -157,6 +157,8 @@ class PopulationReplacementLedger:
             "blocked_lineage_missing": 0,
             "commit_failed": 0,
             "reconciled": 0,
+            "budget_overrun": False,
+            "budget_overrun_count": 0,
         }
 
     def _validate_immutable(
@@ -318,6 +320,12 @@ class PopulationReplacementLedger:
             ),
             "adaptive_consolidation/replacement_reconciled": float(
                 state.get("reconciled", 0) or 0
+            ),
+            "adaptive_consolidation/replacement_budget_overrun_reconciled": float(
+                state.get("budget_overrun_count", 0) or 0
+            ),
+            "adaptive_consolidation/replacement_budget_overrun": float(
+                1.0 if state.get("budget_overrun") else 0.0
             ),
         }
 
@@ -596,7 +604,9 @@ class PopulationReplacementLedger:
             if mismatch:
                 return FinalizeResult(ok=False, reason=mismatch, status="failed")
             now = _now_wall()
-            self._expire_stale(state, now_wall=now)
+            exp_err = self._expire_stale(state, now_wall=now)
+            if exp_err:
+                return FinalizeResult(ok=False, reason=exp_err, status="failed")
             rid = str(handle.reservation_id)
             rec = (state.get("reservations") or {}).get(rid)
             if not isinstance(rec, dict):
@@ -622,16 +632,28 @@ class PopulationReplacementLedger:
                     status="committed",
                     telemetry=self.telemetry_from_state(state),
                 )
+            budget = int(state.get("budget", 0) or 0)
+            existing_committed = len(list(state.get("committed") or []))
+            would_exceed = (existing_committed + 1) > budget
             added = self._append_committed_idempotent(state, rec, rid)
             rec["status"] = "committed"
             rec["reconciled_wall"] = float(now)
+            reason = "already_committed"
             if added:
                 state["reconciled"] = int(state.get("reconciled", 0) or 0) + 1
                 state["commit_failed"] = int(state.get("commit_failed", 0) or 0) + 1
+                if would_exceed:
+                    state["budget_overrun"] = True
+                    state["budget_overrun_count"] = int(
+                        state.get("budget_overrun_count", 0) or 0
+                    ) + 1
+                    reason = "reconciled_budget_overrun"
+                else:
+                    reason = "reconciled"
             self._save_unlocked(json_path, state)
             return FinalizeResult(
                 ok=True,
-                reason="reconciled" if added else "already_committed",
+                reason=reason,
                 status="committed",
                 telemetry=self.telemetry_from_state(state),
             )
@@ -656,7 +678,9 @@ class PopulationReplacementLedger:
             if mismatch:
                 return FinalizeResult(ok=False, reason=mismatch, status="failed")
             now = _now_wall()
-            self._expire_stale(state, now_wall=now)
+            exp_err = self._expire_stale(state, now_wall=now)
+            if exp_err:
+                return FinalizeResult(ok=False, reason=exp_err, status="failed")
             rid = str(handle.reservation_id)
             rec = (state.get("reservations") or {}).get(rid)
             if not isinstance(rec, dict):
@@ -711,7 +735,12 @@ class PopulationReplacementLedger:
                     "adaptive_consolidation/ledger_error": 1.0,
                 }
             now = _now_wall()
-            self._expire_stale(state, now_wall=now)
+            exp_err = self._expire_stale(state, now_wall=now)
+            if exp_err:
+                return {
+                    "adaptive_consolidation/ledger_error": 1.0,
+                    "adaptive_consolidation/ledger_error_reason_wall_clock": 1.0,
+                }
             bypassed = state.setdefault("bypassed", [])
             for item in bypassed:
                 if (
@@ -741,7 +770,13 @@ class PopulationReplacementLedger:
             state, err = self._load_or_create(json_path, tick_id, st, budget)
             if state is None:
                 return {"adaptive_consolidation/ledger_error": 1.0}
-            self._expire_stale(state, now_wall=_now_wall())
+            exp_err = self._expire_stale(state, now_wall=_now_wall())
+            if exp_err:
+                # Read-only fail-closed: do not persist mutated expiry state.
+                return {
+                    "adaptive_consolidation/ledger_error": 1.0,
+                    "adaptive_consolidation/ledger_error_reason_wall_clock": 1.0,
+                }
             return self.telemetry_from_state(state)
 
         return self._with_lock(int(tick_id), st, _body)
@@ -752,13 +787,25 @@ class PopulationReplacementLedger:
         handle: ReservationHandle,
         *,
         heartbeat_interval_s: float | None = None,
-    ) -> Iterator[None]:
-        """Periodic renew while restart runs; always stops the heartbeat thread."""
-        interval = float(
-            heartbeat_interval_s
-            if heartbeat_interval_s is not None
-            else min(self.heartbeat_interval_s, max(0.05, handle.lease_timeout_s / 4.0))
+        status: ReservationLeaseStatus | None = None,
+    ) -> Iterator[ReservationLeaseStatus]:
+        """Periodic renew while restart runs; never raises over a body exception."""
+        lease_status = status if status is not None else ReservationLeaseStatus()
+        lease_timeout = float(
+            handle.lease_timeout_s
+            if handle.lease_timeout_s is not None
+            else self.reservation_timeout_s
         )
+        if heartbeat_interval_s is not None:
+            interval = float(heartbeat_interval_s)
+        else:
+            interval = float(
+                min(self.heartbeat_interval_s, max(0.05, lease_timeout / 4.0))
+            )
+        if not math.isfinite(interval) or interval <= 0.0:
+            interval = max(0.05, lease_timeout / 4.0)
+        if interval >= lease_timeout:
+            interval = max(0.01, lease_timeout / 4.0)
         stop = threading.Event()
         errors: list[str] = []
 
@@ -778,12 +825,73 @@ class PopulationReplacementLedger:
         )
         th.start()
         try:
-            yield
+            yield lease_status
         finally:
             stop.set()
             th.join(timeout=max(1.0, interval * 2.0))
+            if th.is_alive():
+                lease_status.thread_stopped = False
+                lease_status.heartbeat_ok = False
+                if not lease_status.heartbeat_error:
+                    lease_status.heartbeat_error = "heartbeat_thread_stop_failed"
+            else:
+                lease_status.thread_stopped = True
             if errors:
-                # Surface heartbeat failure without silencing the original exception.
-                raise RuntimeError(
-                    f"reservation heartbeat failed: {errors[-1]}"
+                lease_status.heartbeat_ok = False
+                if not lease_status.heartbeat_error:
+                    lease_status.heartbeat_error = str(errors[-1])
+            # Intentionally do not raise here: preserves body exceptions.
+
+    def run_restart_with_reservation(
+        self,
+        handle: ReservationHandle,
+        restart_fn: Callable[[], bool],
+        *,
+        heartbeat_interval_s: float | None = None,
+    ) -> tuple[bool, ReservationLeaseStatus, FinalizeResult, Exception | None]:
+        """Lease → restart → checked commit/reconcile/release.
+
+        Always finalizes the reservation. Returns
+        ``(restart_ok, lease_status, finalize_result, restart_exc)``.
+        Caller should re-raise ``restart_exc`` after consuming telemetry if set.
+        Heartbeat failures never replace a body exception.
+        """
+        restart_ok = False
+        restart_exc: Exception | None = None
+        lease_status = ReservationLeaseStatus()
+        try:
+            with self.reservation_lease(
+                handle,
+                heartbeat_interval_s=heartbeat_interval_s,
+                status=lease_status,
+            ):
+                restart_ok = bool(restart_fn())
+        except Exception as exc:
+            restart_exc = exc
+            restart_ok = False
+
+        if restart_ok:
+            fr = self.commit(handle)
+            if not fr.ok:
+                fr = self.reconcile_commit(handle)
+            if not lease_status.heartbeat_ok:
+                tele = dict(fr.telemetry or {})
+                tele["adaptive_consolidation/replacement_lease_heartbeat_failed"] = 1.0
+                fr = FinalizeResult(
+                    ok=fr.ok,
+                    reason=fr.reason,
+                    status=fr.status,
+                    telemetry=tele,
                 )
+        else:
+            fr = self.release(handle)
+            if not fr.ok and not lease_status.heartbeat_ok:
+                tele = dict(fr.telemetry or {})
+                tele["adaptive_consolidation/replacement_lease_heartbeat_failed"] = 1.0
+                fr = FinalizeResult(
+                    ok=fr.ok,
+                    reason=fr.reason,
+                    status=fr.status,
+                    telemetry=tele,
+                )
+        return bool(restart_ok), lease_status, fr, restart_exc

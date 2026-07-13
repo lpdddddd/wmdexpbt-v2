@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 STAGE_EXPLORATION = "exploration"
 STAGE_CONSOLIDATION = "consolidation"
@@ -1022,4 +1022,95 @@ def evaluate_sidecar_freshness(
     return True, "ok"
 
 
+def _parse_nonneg_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        return None
+    if iv < 0:
+        return None
+    return iv
+
+
 ADAPTIVE_SIDECAR_SCHEMA_VERSION = 2
+
+
+def resolve_peer_lineage_for_reservation(
+    *,
+    population_state: Mapping[str, Any] | None,
+    sidecar: Mapping[str, Any] | None,
+    interval_steps: int,
+    cfg: AdaptivePrecisionConfig,
+) -> tuple[str, str]:
+    """Resolve one peer's lineage for population reservation.
+
+    Priority: population authoritative lineage → freshness-valid sidecar → missing.
+
+    Returns ``(lineage_id, reason)`` where empty lineage_id means fail-closed missing.
+    Reasons are diagnostic (never collapsed to a single opaque label).
+    """
+    st = population_state if isinstance(population_state, Mapping) else {}
+    pop_lin = str(st.get("lineage_id") or "").strip()
+    if pop_lin:
+        return pop_lin, "lineage_population_ok"
+
+    peer_frame = _parse_nonneg_int(st.get("frame"))
+    if peer_frame is None:
+        peer_frame = _parse_nonneg_int(st.get("env_frames"))
+    if peer_frame is None:
+        return "", "lineage_peer_frame_missing"
+
+    peer_checkpoint_frame = _parse_nonneg_int(st.get("checkpoint_frame"))
+    # Population snapshots use ``frame`` / ``population_frame``, not checkpoint_frame.
+    # Only pass checkpoint_frame when that explicit field exists.
+
+    if not isinstance(sidecar, Mapping):
+        return "", "lineage_population_missing"
+
+    side_lin = str(sidecar.get("adaptive_lineage_id") or "").strip()
+    last_lin = str(sidecar.get("last_update_lineage_id") or "").strip()
+    if not side_lin or not last_lin:
+        return "", "lineage_population_missing"
+    if side_lin != last_lin:
+        return "", "lineage_sidecar_mismatch"
+
+    try:
+        schema = int(sidecar.get("schema_version", -1))
+    except (TypeError, ValueError):
+        return "", "lineage_sidecar_schema_error"
+    if schema != int(ADAPTIVE_SIDECAR_SCHEMA_VERSION):
+        return "", "lineage_sidecar_schema_error"
+
+    try:
+        last_update = int(sidecar.get("last_update_frame", -(10**18)))
+    except (TypeError, ValueError):
+        return "", "lineage_sidecar_schema_error"
+    if last_update > int(peer_frame):
+        return "", "lineage_sidecar_future"
+
+    fresh_ok, fresh_reason = evaluate_sidecar_freshness(
+        sidecar=dict(sidecar),
+        population_frame=int(peer_frame),
+        population_lineage_id=side_lin,
+        checkpoint_frame=peer_checkpoint_frame,
+        interval_steps=int(interval_steps),
+        cfg=cfg,
+        require_freshness_fields=True,
+    )
+    if not fresh_ok:
+        reason = str(fresh_reason or "")
+        if reason in (
+            "source_adaptive_sidecar_schema_error",
+            "source_adaptive_state_nonfinite",
+            "source_sidecar_freshness_unknown",
+        ):
+            return "", "lineage_sidecar_schema_error"
+        if reason == "source_adaptive_lineage_mismatch":
+            return "", "lineage_sidecar_mismatch"
+        if "stale" in reason or reason.endswith("_stale"):
+            return "", "lineage_sidecar_stale"
+        return "", "lineage_sidecar_stale"
+
+    return side_lin, "lineage_sidecar_ok"

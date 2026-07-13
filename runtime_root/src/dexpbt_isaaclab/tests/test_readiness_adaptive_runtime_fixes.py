@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import multiprocessing as mp
+import os
 import re
 import tempfile
 import threading
@@ -27,6 +28,7 @@ from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
 from dexpbt_isaaclab.pbt.replacement_reservation import (
     PopulationReplacementLedger,
     ReservationHandle,
+    ReservationLeaseStatus,
 )
 from dexpbt_isaaclab.world_model.eir_mpc import _temporary_bank_tolerance_cfg
 from dexpbt_isaaclab.world_model.readiness_adaptive import (
@@ -584,7 +586,7 @@ class TestCalibrationFailureClassification(unittest.TestCase):
             self.assertFalse(ok, bad)
             self.assertEqual(raw, 0.0)
 
-    def test_r_bank_illegal_alpha_clamped(self):
+    def test_r_bank_illegal_rejects_pass(self):
         cfg = _ra_cfg(wm_graduation_required_passes=1)
         metrics = {
             "wm_cal/eval_valid": 1.0,
@@ -592,8 +594,8 @@ class TestCalibrationFailureClassification(unittest.TestCase):
             "wm_cal/valid_prediction_frac": 1.0,
             "wm_cal/raw_gate": 1.0,
         }
-        for r_bank in (float("nan"), -1.0, 2.0):
-            st = ReadinessAdaptiveState()
+        for r_bank in (float("nan"), float("inf"), float("-inf"), -0.1, 1.1, -1.0, 2.0):
+            st = ReadinessAdaptiveState(wm_ema_raw=0.5)
             st, alpha = apply_wm_graduation(
                 st,
                 frames=100,
@@ -602,9 +604,75 @@ class TestCalibrationFailureClassification(unittest.TestCase):
                 cfg=cfg,
                 r_bank=r_bank,
             )
-            self.assertTrue(math.isfinite(alpha))
-            self.assertGreaterEqual(alpha, 0.0)
-            self.assertLessEqual(alpha, float(cfg.wm_graduation_early_alpha_cap))
+            self.assertEqual(st.wm_pass_streak, 0, r_bank)
+            self.assertFalse(st.wm_graduated, r_bank)
+            self.assertEqual(alpha, 0.0, r_bank)
+
+    def test_r_bank_boundaries_legal(self):
+        cfg = _ra_cfg(wm_graduation_required_passes=2)
+        metrics = {
+            "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
+            "wm_cal/valid_prediction_frac": 1.0,
+            "wm_cal/raw_gate": 1.0,
+        }
+        for r_bank in (0.0, 1.0):
+            st = ReadinessAdaptiveState(wm_ema_raw=0.0)
+            st, _ = apply_wm_graduation(
+                st,
+                frames=100,
+                metrics=metrics,
+                mode="valid",
+                cfg=cfg,
+                r_bank=r_bank,
+            )
+            self.assertEqual(st.wm_pass_streak, 1, r_bank)
+            self.assertFalse(st.wm_graduated, r_bank)
+
+    def test_illegal_ema_no_streak(self):
+        cfg = _ra_cfg(wm_graduation_required_passes=1)
+        metrics = {
+            "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
+            "wm_cal/valid_prediction_frac": 1.0,
+            "wm_cal/raw_gate": 1.0,
+        }
+        for ema in (float("nan"), float("inf"), float("-inf"), -0.1, 1.1):
+            st = ReadinessAdaptiveState(wm_ema_raw=ema)
+            st, alpha = apply_wm_graduation(
+                st,
+                frames=100,
+                metrics=metrics,
+                mode="valid",
+                cfg=cfg,
+                r_bank=1.0,
+            )
+            self.assertEqual(st.wm_pass_streak, 0, ema)
+            self.assertFalse(st.wm_graduated, ema)
+            self.assertEqual(st.wm_ema_raw, 0.0, ema)
+            self.assertEqual(alpha, 0.0, ema)
+
+    def test_two_legal_passes_graduate(self):
+        cfg = _ra_cfg(wm_graduation_required_passes=2)
+        metrics = {
+            "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
+            "wm_cal/valid_prediction_frac": 1.0,
+            "wm_cal/raw_gate": 1.0,
+        }
+        st = ReadinessAdaptiveState(wm_ema_raw=0.0)
+        st, a1 = apply_wm_graduation(
+            st, frames=100, metrics=metrics, mode="valid", cfg=cfg, r_bank=1.0
+        )
+        self.assertEqual(st.wm_pass_streak, 1)
+        self.assertFalse(st.wm_graduated)
+        self.assertEqual(a1, 0.0)
+        st, a2 = apply_wm_graduation(
+            st, frames=100, metrics=metrics, mode="valid", cfg=cfg, r_bank=1.0
+        )
+        self.assertEqual(st.wm_pass_streak, 2)
+        self.assertTrue(st.wm_graduated)
+        self.assertGreater(a2, 0.0)
 
 
 class TestValidPredictionFracFailClosed(unittest.TestCase):
@@ -752,6 +820,261 @@ class TestFreshnessNegativeScore(unittest.TestCase):
         )
         self.assertTrue(decision.eligible)
         self.assertEqual(decision.source_idx, 0)
+
+
+class TestPeerLineageResolve(unittest.TestCase):
+    def _cfg(self):
+        return AdaptivePrecisionConfig(
+            enabled=True,
+            rescue_source_max_staleness_frames=50,
+            rescue_source_freshness_mode="hard_max",
+            rescue_require_lineage_match_with_checkpoint=True,
+        )
+
+    def _side(self, *, frame: int, lin: str = "L1", schema: int = 2):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            ADAPTIVE_SIDECAR_SCHEMA_VERSION,
+        )
+
+        return {
+            "schema_version": int(schema if schema is not None else ADAPTIVE_SIDECAR_SCHEMA_VERSION),
+            "adaptive_lineage_id": lin,
+            "last_update_lineage_id": lin,
+            "last_update_frame": int(frame),
+            "last_checkpoint_frame": int(frame),
+        }
+
+    def test_population_lineage_preferred(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={"lineage_id": "POP", "frame": 10},
+            sidecar=self._side(frame=10, lin="SIDE"),
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "POP")
+        self.assertEqual(reason, "lineage_population_ok")
+
+    def test_peer_frame_not_target_frame(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        # Sidecar stale vs target(1000) but fresh vs peer(20).
+        side = self._side(frame=15, lin="PEER")
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={"frame": 20},  # peer frame
+            sidecar=side,
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "PEER")
+        self.assertEqual(reason, "lineage_sidecar_ok")
+
+    def test_sidecar_future_rejected(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={"frame": 10},
+            sidecar=self._side(frame=50),
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "")
+        self.assertEqual(reason, "lineage_sidecar_future")
+
+    def test_peer_frame_missing(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={},
+            sidecar=self._side(frame=10),
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "")
+        self.assertEqual(reason, "lineage_peer_frame_missing")
+
+    def test_lineage_mismatch(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        side = self._side(frame=10, lin="A")
+        side["last_update_lineage_id"] = "B"
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={"frame": 20},
+            sidecar=side,
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "")
+        self.assertEqual(reason, "lineage_sidecar_mismatch")
+
+    def test_stale_sidecar(self):
+        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+            resolve_peer_lineage_for_reservation,
+        )
+
+        lin, reason = resolve_peer_lineage_for_reservation(
+            population_state={"frame": 200},
+            sidecar=self._side(frame=10),
+            interval_steps=1,
+            cfg=self._cfg(),
+        )
+        self.assertEqual(lin, "")
+        self.assertEqual(reason, "lineage_sidecar_stale")
+
+
+class TestReservationLeaseExceptionSafety(unittest.TestCase):
+    def _reserve(self, tmp, **over):
+        ledger = PopulationReplacementLedger(
+            tmp, reservation_timeout_s=0.5, heartbeat_interval_s=0.05
+        )
+        r = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=1, budget=1, min_distinct=1, **over))
+        self.assertTrue(r.ok, r.reason)
+        return ledger, r.handle
+
+    def test_body_valueerror_preserved_over_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def boom():
+                raise ValueError("restart-body")
+
+            ok, status, fr, exc = ledger.run_restart_with_reservation(handle, boom)
+            self.assertFalse(ok)
+            self.assertIsInstance(exc, ValueError)
+            self.assertEqual(str(exc), "restart-body")
+            self.assertTrue(fr.ok)
+            self.assertEqual(fr.reason, "released")
+
+    def test_body_oserror_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def boom():
+                raise OSError("disk")
+
+            ok, status, fr, exc = ledger.run_restart_with_reservation(handle, boom)
+            self.assertFalse(ok)
+            self.assertIsInstance(exc, OSError)
+            self.assertEqual(fr.reason, "released")
+
+    def test_false_restart_releases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            ok, status, fr, exc = ledger.run_restart_with_reservation(
+                handle, lambda: False
+            )
+            self.assertFalse(ok)
+            self.assertIsNone(exc)
+            self.assertEqual(fr.reason, "released")
+            self.assertTrue(status.thread_stopped)
+
+    def test_success_commits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            ok, status, fr, exc = ledger.run_restart_with_reservation(
+                handle, lambda: True
+            )
+            self.assertTrue(ok)
+            self.assertIsNone(exc)
+            self.assertEqual(fr.reason, "committed")
+            self.assertTrue(status.heartbeat_ok)
+
+    def test_reconcile_budget_overrun_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp, reservation_timeout_s=0.05)
+            # Fill budget via commit of first reservation.
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r1.ok)
+            self.assertTrue(ledger.commit(r1.handle).ok)
+            # Second reservation expires then reconcile beyond budget.
+            r2 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            # Budget exhausted — force reconstruct via reconcile of a forged expired handle
+            # by manually creating a reserved-then-expired slot is hard; instead
+            # reconcile a handle whose reservation was never on the ledger after
+            # reconstructing from handle with budget already full.
+            fake = ReservationHandle(
+                tick_id=1,
+                stage=STAGE_EXPLORATION,
+                reservation_id="deadbeef",
+                owner_policy=0,
+                owner_pid=os.getpid(),
+                owner_token="tok",
+                target=2,
+                source=0,
+                source_lineage="A",
+                lease_timeout_s=0.05,
+            )
+            # Need matching owner fields in reconstructed reservation — reconcile
+            # reconstructs from handle when missing.
+            fr1 = ledger.reconcile_commit(fake)
+            self.assertTrue(fr1.ok)
+            self.assertEqual(fr1.reason, "reconciled_budget_overrun")
+            self.assertEqual(
+                fr1.telemetry.get(
+                    "adaptive_consolidation/replacement_budget_overrun_reconciled"
+                ),
+                1.0,
+            )
+            fr2 = ledger.reconcile_commit(fake)
+            self.assertEqual(fr2.reason, "already_committed")
+            self.assertEqual(
+                fr2.telemetry.get(
+                    "adaptive_consolidation/replacement_budget_overrun_reconciled"
+                ),
+                1.0,
+            )
+
+    def test_lease_status_no_raise_on_body_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            status = ReservationLeaseStatus()
+            with self.assertRaises(RuntimeError):
+                with ledger.reservation_lease(handle, status=status):
+                    raise RuntimeError("body")
+            # Context exited without replacing body error; status may note heartbeat.
+            self.assertTrue(status.thread_stopped)
+
+
+class TestObserverRestartOrchestration(unittest.TestCase):
+    def test_observer_helper_releases_on_oserror(self):
+        # Import method without importing full observer module (rl_games dep).
+        import importlib.util
+
+        # Exercise ledger orchestration path used by observer helper.
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r.ok)
+
+            def boom():
+                raise OSError("boom")
+
+            ok, status, fr, exc = ledger.run_restart_with_reservation(r.handle, boom)
+            self.assertFalse(ok)
+            self.assertIsInstance(exc, OSError)
+            self.assertEqual(fr.reason, "released")
+            # Reservation no longer holds budget.
+            r2 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r2.ok, r2.reason)
 
 
 if __name__ == "__main__":
