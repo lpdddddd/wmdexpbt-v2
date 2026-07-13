@@ -57,7 +57,7 @@ num_envs=${NUM_ENVS}
 gpus=${DEXPBT_GPUS}
 target_population_frames=${TARGET_FRAMES}
 max_iterations=${MAX_ITER}
-readiness_adaptivement=on
+readiness_adaptive=on
 consolidation_schedule_mode=curriculum_progress
 note=Smoke validation of the full readiness_adaptive path; not a formal experiment.
 EOF
@@ -92,8 +92,8 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt_consolidation_schedule_mode curriculum_progress \
   --adaptive_precision_consolidation_enable \
   --adaptive_rescue_enable \
-  --readiness_adaptivement_start_after_frames 40000000 \
-  --readiness_adaptivement_ramp_frames 40000000 \
+  --readiness_min_frames 40000000 \
+  --readiness_ramp_frames 40000000 \
   --no-pbt_wm_profile_copy_enable \
   --no-awr_enable \
   --no-eir_residual_apply_to_rollout \

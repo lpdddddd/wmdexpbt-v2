@@ -15,8 +15,9 @@ comes from elite / archive memory rather than Gaussian noise.
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import torch
 import torch.nn.functional as F
@@ -1230,6 +1231,35 @@ def _belief_for_risky_rows(
     return None
 
 
+@contextmanager
+def _temporary_bank_tolerance_cfg(
+    bank: Any,
+    *,
+    max_log_gap: float,
+    soft_scale: float,
+) -> Iterator[None]:
+    """Temporarily override bank log-relative tolerance knobs; always restore."""
+    if bank is None or not hasattr(bank, "cfg"):
+        yield
+        return
+    cfg = bank.cfg
+    gap_restore = None
+    soft_restore = None
+    try:
+        if hasattr(cfg, "tolerance_max_log_gap"):
+            gap_restore = float(cfg.tolerance_max_log_gap)
+            cfg.tolerance_max_log_gap = float(max_log_gap)
+        if hasattr(cfg, "tolerance_log_soft_scale"):
+            soft_restore = float(cfg.tolerance_log_soft_scale)
+            cfg.tolerance_log_soft_scale = float(soft_scale)
+        yield
+    finally:
+        if gap_restore is not None:
+            cfg.tolerance_max_log_gap = float(gap_restore)
+        if soft_restore is not None:
+            cfg.tolerance_log_soft_scale = float(soft_restore)
+
+
 def _alpha_wm_from_bridge(bridge: EIRBridge) -> float:
     st = getattr(bridge, "wm_calibration_state", None)
     if isinstance(st, dict):
@@ -1383,6 +1413,7 @@ def _compute_snippet_distill_loss_progress(
                     and int(getattr(bank, "size", 0) or 0) > 0
                     and int(shadow_idx.numel()) > 0
                 ):
+                    # Shadow uses current bank cfg; no readiness tol override needed.
                     res = bank.retrieve_candidates_batched(
                         feat_r[shadow_idx],
                         query_tolerance=tol_r[shadow_idx],
@@ -1454,17 +1485,17 @@ def _compute_snippet_distill_loss_progress(
         gate, pcfg, max_active_fraction=active_budget_override
     )
 
-    # Temporarily tighten bank tolerance soft gates under readiness (save/restore).
-    _bank_gap_restore = None
-    _bank_soft_restore = None
-    if ra_enabled and bank is not None and hasattr(bank, "cfg"):
-        _bcfg = bank.cfg
-        if hasattr(_bcfg, "tolerance_max_log_gap"):
-            _bank_gap_restore = float(_bcfg.tolerance_max_log_gap)
-            _bcfg.tolerance_max_log_gap = float(ra_state.last_max_log_gap)
-        if hasattr(_bcfg, "tolerance_log_soft_scale"):
-            _bank_soft_restore = float(_bcfg.tolerance_log_soft_scale)
-            _bcfg.tolerance_log_soft_scale = float(ra_state.last_soft_scale)
+    # Bank log-gap/soft-scale overrides apply only for the retrieve call and are
+    # always restored via context manager (including on exceptions).
+    _bank_tol_cm = (
+        _temporary_bank_tolerance_cfg(
+            bank,
+            max_log_gap=float(ra_state.last_max_log_gap),
+            soft_scale=float(ra_state.last_soft_scale),
+        )
+        if ra_enabled and bank is not None
+        else nullcontext()
+    )
 
     a2c = _get_a2c_network(bridge.agent_ref)
 
@@ -1491,13 +1522,14 @@ def _compute_snippet_distill_loss_progress(
     nonfinite_candidate_row_frac = 0.0
     nonfinite_candidate_row_count = 0
     if int(sel_idx.numel()) > 0:
-        res = bank.retrieve_candidates_batched(
-            feat_r[sel_idx],
-            query_tolerance=tol_r[sel_idx],
-            normalized_error=norm_err[sel_idx],
-            recent_progress=recent[sel_idx],
-            k=int(getattr(sd_cfg, "topk", 8)),
-        )
+        with _bank_tol_cm:
+            res = bank.retrieve_candidates_batched(
+                feat_r[sel_idx],
+                query_tolerance=tol_r[sel_idx],
+                normalized_error=norm_err[sel_idx],
+                recent_progress=recent[sel_idx],
+                k=int(getattr(sd_cfg, "topk", 8)),
+            )
         retr_diag = dict(res.diagnostics)
         cand_first = res.actions[:, :, 0, :]  # [n, k, A]
         pri = res.priority  # [n, k]
@@ -1681,10 +1713,6 @@ def _compute_snippet_distill_loss_progress(
         ra_state.last_ess_update_skipped = bool(ess_skip)
         ra_state.last_lambda_effective = float(lam) * float(ess_scale)
         if ess_skip or lam <= 0.0:
-            if _bank_gap_restore is not None:
-                bank.cfg.tolerance_max_log_gap = _bank_gap_restore
-            if _bank_soft_restore is not None:
-                bank.cfg.tolerance_log_soft_scale = _bank_soft_restore
             ra_state.last_unscaled_distill_loss = 0.0
             ra_state.last_scaled_distill_loss = 0.0
             bridge.readiness_adaptive_state = ra_state
@@ -1711,10 +1739,6 @@ def _compute_snippet_distill_loss_progress(
     )
 
     if ra_enabled:
-        if _bank_gap_restore is not None:
-            bank.cfg.tolerance_max_log_gap = _bank_gap_restore
-        if _bank_soft_restore is not None:
-            bank.cfg.tolerance_log_soft_scale = _bank_soft_restore
         from .readiness_adaptive import telemetry as readiness_telemetry
 
         scaled = float(stats.get("snippet_distill/loss", 0.0))

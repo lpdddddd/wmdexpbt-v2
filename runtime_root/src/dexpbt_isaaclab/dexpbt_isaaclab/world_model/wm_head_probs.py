@@ -25,6 +25,50 @@ FAILURE_MISSING_TARGET_SOURCE = 7.0
 FAILURE_INVALID_PARTITION = 8.0
 FAILURE_INSUFFICIENT_HELDOUT_SAMPLES = 9.0
 
+# Authoritative graduation-mode classification for Profile 23 readiness.
+STRUCTURAL_FAILURE_IDS: frozenset[float] = frozenset(
+    {
+        FAILURE_MISSING_HEAD,
+        FAILURE_SHAPE_MISMATCH,
+        FAILURE_NONFINITE,
+        FAILURE_HORIZON_MISMATCH,
+        FAILURE_PREDICT_EXCEPTION,
+    }
+)
+INSUFFICIENT_FAILURE_IDS: frozenset[float] = frozenset(
+    {
+        FAILURE_INSUFFICIENT_SAMPLES,
+        FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
+        FAILURE_MISSING_TARGET_SOURCE,
+        FAILURE_INVALID_PARTITION,
+    }
+)
+
+
+def graduation_outcome_mode(
+    *,
+    eval_valid: bool,
+    failure_reason_id: float,
+    calibration_pass: bool,
+) -> str:
+    """Map calibration validity / failure id to a graduation outcome mode.
+
+    Returns one of ``structural`` / ``insufficient`` / ``valid`` / ``metric_fail``.
+    """
+    if not bool(eval_valid):
+        fid = float(failure_reason_id)
+        if fid in STRUCTURAL_FAILURE_IDS:
+            return "structural"
+        if fid in INSUFFICIENT_FAILURE_IDS:
+            return "insufficient"
+        # Unknown non-OK failure: fail closed as structural.
+        if fid >= 1.0:
+            return "structural"
+        return "metric_fail"
+    if bool(calibration_pass):
+        return "valid"
+    return "metric_fail"
+
 
 def binary_head_uncertainty(prob: torch.Tensor) -> torch.Tensor:
     """Uncertainty in ``[0, 1]``: high when probability is near 0.5."""

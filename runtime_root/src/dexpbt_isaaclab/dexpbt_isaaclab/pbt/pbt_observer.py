@@ -9802,6 +9802,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 hard_collapse=own_hard_collapse_signal,
             )
 
+        _pending_replacement_reservation_id = None
+        _pending_replacement_tick_id = None
+        _replacement_ledger = None
+
         if tier == "bottom":
             own_window_for_rescue = self._policy_window(self.policy_idx)
             own_rescue_nsucc = float(
@@ -10310,103 +10314,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_state = decision["source_state"]
             assert source_state is not None
 
-            # Profile 23: stage-aware lineage diversity + ordinary replacement budget.
-            # Hard-collapse / adaptive rescue may bypass the diversity guard.
-            _ap_cfg = getattr(self, "_adaptive_precision_cfg", None)
-            _is_ordinary_bottom = (
-                str(tier) == "bottom"
-                and not bool(adaptive_rescue)
-                and not bool(late_rescue)
-                and not str(tier_label).startswith("adaptive_rescue")
-            )
-            if (
-                _ap_cfg is not None
-                and bool(getattr(_ap_cfg, "enabled", False))
-                and _is_ordinary_bottom
-            ):
-                from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-                    copy_would_drop_below_min_lineages,
-                    count_distinct_lineages,
-                    resolve_stage as _rs,
-                    stage_min_distinct_lineages,
-                    stage_replacement_budget,
-                )
-
-                c_prog = float(self._adaptive_curriculum_progress or 0.0)
-                stage_name = _rs(c_prog, _ap_cfg)
-                budget = int(stage_replacement_budget(stage_name, _ap_cfg))
-                used = int(self._adaptive_ordinary_replacements_this_tick)
-                self._last_adaptive_replacement_budget = budget
-                self._last_adaptive_replacement_budget_used = used
-                lineages: dict[int, str] = {}
-                for pi in range(int(self.num_policies)):
-                    st = population.get(pi) or {}
-                    lin = str(st.get("lineage_id") or "")
-                    if not lin:
-                        lin = str(self._adaptive_lineage_id.get(pi, "") or "")
-                    lineages[int(pi)] = lin
-                distinct = count_distinct_lineages(list(lineages.values()))
-                min_distinct = int(stage_min_distinct_lineages(stage_name, _ap_cfg))
-                self._last_adaptive_distinct_lineage_count = distinct
-                self._last_adaptive_min_distinct_lineages = min_distinct
-                if used >= budget:
-                    self._adaptive_replacement_budget_blocked_count += 1
-                    print(
-                        f"Policy {self.policy_idx}: skip restart "
-                        f"(replacement_budget stage={stage_name} used={used}>={budget})"
-                    )
-                    if self.writer is not None:
-                        self.writer.add_scalar(
-                            "adaptive_consolidation/replacement_budget",
-                            float(budget),
-                            env_frames,
-                        )
-                        self.writer.add_scalar(
-                            "adaptive_consolidation/replacement_budget_used",
-                            float(used),
-                            env_frames,
-                        )
-                    self._last_restart_type = 3
-                    return
-                if bool(getattr(_ap_cfg, "lineage_diversity_enable", False)):
-                    src_lin = str(
-                        (source_state.get("lineage_id") if source_state else None)
-                        or lineages.get(int(source_policy), "")
-                        or ""
-                    )
-                    if copy_would_drop_below_min_lineages(
-                        lineages,
-                        int(self.policy_idx),
-                        src_lin,
-                        min_distinct,
-                    ):
-                        self._last_adaptive_diversity_blocked = True
-                        self._adaptive_diversity_blocked_count += 1
-                        print(
-                            f"Policy {self.policy_idx}: skip restart "
-                            f"(diversity_blocked min={min_distinct} distinct={distinct})"
-                        )
-                        if self.writer is not None:
-                            self.writer.add_scalar(
-                                "adaptive_consolidation/diversity_blocked",
-                                1.0,
-                                env_frames,
-                            )
-                            self.writer.add_scalar(
-                                "adaptive_consolidation/distinct_lineage_count",
-                                float(distinct),
-                                env_frames,
-                            )
-                            self.writer.add_scalar(
-                                "adaptive_consolidation/min_distinct_lineages",
-                                float(min_distinct),
-                                env_frames,
-                            )
-                        self._last_restart_type = 3
-                        return
-                # Reserve budget slot for this ordinary restart attempt.
-                self._adaptive_ordinary_replacements_this_tick = used + 1
-                self._last_adaptive_replacement_budget_used = used + 1
+            # Population-level reservation is initialized in the outer ternary scope.
+            # Local abort gates below may still return without consuming budget.
 
             if rescue_mode == "legacy":
                 source_tol = float(
@@ -10725,6 +10634,118 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
             if tier_label in self._source_tier_counts:
                 self._source_tier_counts[tier_label] += 1
+
+            # Profile 23: population-level ordinary replacement reservation + lineage
+            # diversity in one flock-serialized transaction (after local abort gates).
+            _ap_cfg = getattr(self, "_adaptive_precision_cfg", None)
+            _is_ordinary_bottom = (
+                str(tier) == "bottom"
+                and not bool(adaptive_rescue)
+                and not bool(late_rescue)
+                and not str(tier_label).startswith("adaptive_rescue")
+            )
+            _hard_collapse_bypass = bool(adaptive_hard_collapse_for_gate)
+            if (
+                _ap_cfg is not None
+                and bool(getattr(_ap_cfg, "enabled", False))
+                and (
+                    bool(getattr(_ap_cfg, "lineage_diversity_enable", False))
+                    or _is_ordinary_bottom
+                )
+            ):
+                from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
+                    count_distinct_lineages,
+                    resolve_stage as _rs,
+                    stage_min_distinct_lineages,
+                    stage_replacement_budget,
+                )
+                from dexpbt_isaaclab.pbt.replacement_reservation import (
+                    PopulationReplacementLedger,
+                )
+
+                c_prog = float(self._adaptive_curriculum_progress or 0.0)
+                stage_name = _rs(c_prog, _ap_cfg)
+                budget = int(stage_replacement_budget(stage_name, _ap_cfg))
+                min_distinct = int(stage_min_distinct_lineages(stage_name, _ap_cfg))
+                tick_id = int(getattr(self, "pbt_iteration", 0) or 0)
+                lineages: dict[int, str] = {}
+                for pi in range(int(self.num_policies)):
+                    st = population.get(pi) or {}
+                    lin = str(st.get("lineage_id") or "")
+                    if not lin:
+                        side = self._adaptive_read_sidecar_raw(pi) or {}
+                        lin = str(side.get("adaptive_lineage_id") or "")
+                    if not lin:
+                        lin = str(self._adaptive_lineage_id.get(pi, "") or "")
+                    lineages[int(pi)] = lin
+                self._last_adaptive_replacement_budget = budget
+                self._last_adaptive_distinct_lineage_count = count_distinct_lineages(
+                    list(lineages.values())
+                )
+                self._last_adaptive_min_distinct_lineages = min_distinct
+                _replacement_ledger = PopulationReplacementLedger(self.workspace)
+                if _is_ordinary_bottom and not _hard_collapse_bypass:
+                    src_lin = str(
+                        (source_state.get("lineage_id") if source_state else None)
+                        or lineages.get(int(source_policy), "")
+                        or ""
+                    )
+                    resv = _replacement_ledger.try_reserve_ordinary(
+                        tick_id=tick_id,
+                        stage=stage_name,
+                        budget=budget,
+                        min_distinct_lineages=min_distinct,
+                        population_lineages=lineages,
+                        num_policies=int(self.num_policies),
+                        target_idx=int(self.policy_idx),
+                        source_idx=int(source_policy),
+                        source_lineage=src_lin,
+                        owner_policy=int(self.policy_idx),
+                    )
+                    for k, v in (resv.telemetry or {}).items():
+                        if self.writer is not None:
+                            try:
+                                self.writer.add_scalar(str(k), float(v), env_frames)
+                            except Exception:
+                                pass
+                    self._last_adaptive_replacement_budget_used = float(
+                        (resv.telemetry or {}).get(
+                            "adaptive_consolidation/replacement_budget_used", 0.0
+                        )
+                    )
+                    if not resv.ok:
+                        if resv.reason == "diversity_blocked":
+                            self._last_adaptive_diversity_blocked = True
+                            self._adaptive_diversity_blocked_count += 1
+                        else:
+                            self._adaptive_replacement_budget_blocked_count += 1
+                        print(
+                            f"Policy {self.policy_idx}: skip restart "
+                            f"(population_reservation:{resv.reason})"
+                        )
+                        self._last_restart_type = 3
+                        return
+                    _pending_replacement_reservation_id = str(resv.reservation_id)
+                    _pending_replacement_tick_id = int(tick_id)
+                elif bool(adaptive_rescue) or _hard_collapse_bypass:
+                    bypass_reason = (
+                        "adaptive_rescue"
+                        if adaptive_rescue
+                        else "hard_collapse_rescue"
+                    )
+                    tele = _replacement_ledger.record_bypass(
+                        tick_id=tick_id,
+                        stage=stage_name,
+                        budget=budget,
+                        target_idx=int(self.policy_idx),
+                        reason=bypass_reason,
+                    )
+                    if self.writer is not None:
+                        for k, v in tele.items():
+                            try:
+                                self.writer.add_scalar(str(k), float(v), env_frames)
+                            except Exception:
+                                pass
 
             # Snapshot before recovery / adaptive kind accounting so a failed
             # restart rolls back quota, cooldown, and selected counters.
@@ -11154,6 +11175,22 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             runtime_snap=restart_txn_snap,
             source_safe_apply=source_safe_apply,
         )
+        if _pending_replacement_reservation_id and _replacement_ledger is not None:
+            try:
+                if restart_ok:
+                    _replacement_ledger.commit(
+                        int(_pending_replacement_tick_id or 0),
+                        str(_pending_replacement_reservation_id),
+                    )
+                else:
+                    _replacement_ledger.release(
+                        int(_pending_replacement_tick_id or 0),
+                        str(_pending_replacement_reservation_id),
+                    )
+            except Exception as _resv_exc:
+                print(
+                    f"[adaptive-replacement] reservation finalize failed: {_resv_exc}"
+                )
         if not restart_ok:
             if late_rescue:
                 self._late_rescue_blocked_count[self.policy_idx] = (

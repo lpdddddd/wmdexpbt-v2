@@ -132,7 +132,12 @@ class TestPhaseAndAlpha(unittest.TestCase):
         st, alpha = apply_wm_graduation(
             st,
             frames=100,
-            metrics={"wm_cal/eval_valid": 1.0, "wm_cal/raw_gate": 1.0},
+            metrics={
+                "wm_cal/eval_valid": 1.0,
+                "wm_cal/calibration_pass": 1.0,
+                "wm_cal/valid_prediction_frac": 1.0,
+                "wm_cal/raw_gate": 1.0,
+            },
             mode="valid",
             cfg=cfg,
             r_bank=1.0,
@@ -147,6 +152,7 @@ class TestPhaseAndAlpha(unittest.TestCase):
         st = ReadinessAdaptiveState()
         metrics = {
             "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
             "wm_cal/valid_prediction_frac": 0.95,
             "wm_cal/raw_gate": 0.8,
         }
@@ -167,6 +173,7 @@ class TestPhaseAndAlpha(unittest.TestCase):
         st = ReadinessAdaptiveState(wm_pass_streak=1, wm_ema_raw=0.0)
         metrics = {
             "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
             "wm_cal/valid_prediction_frac": 1.0,
             "wm_cal/raw_gate": 1.0,
         }

@@ -529,11 +529,21 @@ def _graduation_raw(metrics: Mapping[str, Any]) -> float:
 
 
 def _valid_prediction_frac(metrics: Mapping[str, Any]) -> float:
+    """Fail-closed valid-prediction fraction. Missing / nonfinite → 0.0."""
+    raw = None
     if "wm_cal/valid_prediction_frac" in metrics:
-        return float(metrics["wm_cal/valid_prediction_frac"])
-    if "wm_cal/row_prediction_valid_frac" in metrics:
-        return float(metrics["wm_cal/row_prediction_valid_frac"])
-    return 1.0  # caller may have already enforced; default permissive
+        raw = metrics["wm_cal/valid_prediction_frac"]
+    elif "wm_cal/row_prediction_valid_frac" in metrics:
+        raw = metrics["wm_cal/row_prediction_valid_frac"]
+    if raw is None:
+        return 0.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v):
+        return 0.0
+    return float(min(1.0, max(0.0, v)))
 
 
 def apply_wm_graduation(
@@ -571,24 +581,40 @@ def apply_wm_graduation(
         state.wm_graduated = False
     elif mode_norm in ("insufficient", "metric_fail"):
         state.wm_pass_streak = 0
-        state.wm_ema_raw = beta_down * float(state.wm_ema_raw)
+        ema_prev = float(state.wm_ema_raw)
+        if not math.isfinite(ema_prev):
+            ema_prev = 0.0
+        state.wm_ema_raw = beta_down * ema_prev
+        if not math.isfinite(float(state.wm_ema_raw)):
+            state.wm_ema_raw = 0.0
         state.wm_graduated = False
     elif mode_norm == "valid":
-        # Caller-prechecked pass; still respect min valid-prediction frac when present.
         vpf = _valid_prediction_frac(metrics)
-        eval_ok = float(metrics.get("wm_cal/eval_valid", 1.0)) > 0.5
+        eval_ok = float(metrics.get("wm_cal/eval_valid", 0.0)) > 0.5
+        cal_pass = float(metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5
         if (
             eval_ok
+            and cal_pass
             and vpf >= float(cfg.wm_graduation_min_valid_prediction_frac)
         ):
             raw = _graduation_raw(metrics)
+            if not math.isfinite(float(raw)):
+                raw = 0.0
+            ema_prev = float(state.wm_ema_raw)
+            if not math.isfinite(ema_prev):
+                ema_prev = 0.0
             state.wm_pass_streak = int(state.wm_pass_streak) + 1
-            state.wm_ema_raw = beta_up * float(state.wm_ema_raw) + (1.0 - beta_up) * float(
-                raw
-            )
+            state.wm_ema_raw = beta_up * ema_prev + (1.0 - beta_up) * float(raw)
+            if not math.isfinite(float(state.wm_ema_raw)):
+                state.wm_ema_raw = 0.0
         else:
             state.wm_pass_streak = 0
-            state.wm_ema_raw = beta_down * float(state.wm_ema_raw)
+            ema_prev = float(state.wm_ema_raw)
+            if not math.isfinite(ema_prev):
+                ema_prev = 0.0
+            state.wm_ema_raw = beta_down * ema_prev
+            if not math.isfinite(float(state.wm_ema_raw)):
+                state.wm_ema_raw = 0.0
         state.wm_graduated = int(state.wm_pass_streak) >= int(
             cfg.wm_graduation_required_passes
         )
@@ -605,9 +631,17 @@ def apply_wm_graduation(
         )
 
     ema = float(state.wm_ema_raw)
+    if not math.isfinite(ema):
+        ema = 0.0
+        state.wm_ema_raw = 0.0
+    r_bank_f = float(r_bank)
+    if not math.isfinite(r_bank_f):
+        r_bank_f = 0.0
     if state.wm_graduated:
-        alpha_effective = _clip(ema, 0.0, alpha_cap) * float(r_bank)
+        alpha_effective = _clip(ema, 0.0, alpha_cap) * r_bank_f
     else:
+        alpha_effective = 0.0
+    if not math.isfinite(alpha_effective):
         alpha_effective = 0.0
 
     # Phase-1 force-off: not graduated ⇒ alpha stays 0 (already).

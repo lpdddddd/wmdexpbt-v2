@@ -4084,19 +4084,27 @@ def _patch_actor_train_for_seq_wm(
                     _metrics = dict(getattr(_cal_state, "last_metrics", {}) or {})
                     # Only advance graduation when a calibration eval ran this step.
                     if int(getattr(_cal_state, "last_eval_frame", -1)) == int(frames):
-                        _eval_valid = float(_metrics.get("wm_cal/eval_valid", 1.0)) > 0.5
+                        from dexpbt_isaaclab.world_model.wm_head_probs import (
+                            graduation_outcome_mode,
+                        )
+
+                        _eval_valid = float(_metrics.get("wm_cal/eval_valid", 0.0)) > 0.5
                         _fail_id = float(_metrics.get("wm_cal/failure_reason_id", 0.0))
-                        if not _eval_valid and _fail_id >= 1.0:
-                            # Structural codes are typically >=1 missing-head style.
-                            _mode = (
-                                "structural"
-                                if _fail_id in (1.0, 2.0, 3.0, 4.0, 5.0)
-                                else "insufficient"
+                        _cal_pass = float(_metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5
+                        # Prefer authoritative outcome_mode when present.
+                        _mode = str(_metrics.get("wm_cal/outcome_mode", "") or "").strip()
+                        if _mode not in (
+                            "structural",
+                            "insufficient",
+                            "valid",
+                            "metric_fail",
+                        ):
+                            _mode = graduation_outcome_mode(
+                                eval_valid=_eval_valid,
+                                failure_reason_id=_fail_id,
+                                calibration_pass=_cal_pass,
                             )
-                        elif float(_metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5:
-                            _mode = "valid"
-                        else:
-                            _mode = "metric_fail"
+                        _metrics["wm_cal/outcome_mode"] = str(_mode)
                         _r_bank = float(
                             getattr(_ra_st, "last_bank_readiness", 0.0) or 0.0
                         )

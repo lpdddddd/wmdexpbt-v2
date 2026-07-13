@@ -272,7 +272,8 @@ def source_freshness_weight(
 
     Returns ``(ok, weight, reason)``.  Rejected sources have ``ok=False`` and
     ``weight=0``.  Accepted hard_max sources keep weight 1.0; exp_decay sources
-    get ``exp(-age / tau)``.
+    get ``exp(-age / tau)`` (diagnostic only — ranking uses
+    :func:`freshness_adjusted_ranking_score`).
     """
     age = max(0, int(age_frames))
     mode = str(cfg.rescue_source_freshness_mode or "hard_max")
@@ -289,6 +290,36 @@ def source_freshness_weight(
     if age > int(cfg.rescue_source_max_staleness_frames):
         return False, 0.0, "source_adaptive_state_stale"
     return True, 1.0, "ok"
+
+
+def freshness_adjusted_ranking_score(
+    ranking_score: float,
+    age_frames: int,
+    cfg: AdaptivePrecisionConfig,
+) -> tuple[bool, float, str]:
+    """Age-adjusted ranking that never prefers older sources for any score sign.
+
+    Under ``hard_max``, the raw ranking score is unchanged (when age is accepted).
+    Under ``exp_decay``, an additive penalty ``age / tau`` is subtracted so that
+    equal scores always prefer the fresher source even when ``ranking_score < 0``
+    (multiplicative ``score * exp(-age/tau)`` would reverse the order for
+    negatives).
+    """
+    score = _finite(ranking_score, float("nan"))
+    if not math.isfinite(score):
+        return False, float("-inf"), "ranking_score_nonfinite"
+    ok, _weight, reason = source_freshness_weight(age_frames, cfg)
+    if not ok:
+        return False, float("-inf"), reason
+    mode = str(cfg.rescue_source_freshness_mode or "hard_max")
+    if mode != "exp_decay":
+        return True, float(score), reason
+    age = max(0, int(age_frames))
+    tau = max(1, int(cfg.rescue_source_freshness_tau_frames))
+    adjusted = float(score) - (float(age) / float(tau))
+    if not math.isfinite(adjusted):
+        return False, float("-inf"), "source_adaptive_state_nonfinite"
+    return True, float(adjusted), reason
 
 
 def probation_requirements_for_stage(
@@ -751,12 +782,15 @@ def select_rescue_source(
             cfg.rescue_max_log_tol_gap
         ):
             continue
-        freshness_w = 1.0
+        age = int(cand.get("source_age_frames", 0) or 0)
         if "source_age_frames" in cand or str(cfg.rescue_source_freshness_mode) == "exp_decay":
-            age = int(cand.get("source_age_frames", 0) or 0)
-            ok_f, freshness_w, _fr = source_freshness_weight(age, cfg)
+            ok_f, adjusted_score, _fr = freshness_adjusted_ranking_score(
+                s_rank_score, age, cfg
+            )
             if not ok_f:
                 continue
+        else:
+            adjusted_score = float(s_rank_score)
         if rank_cut_value is not None and s_mean < rank_cut_value - 1e-12:
             continue
         # Source advantage normalized by population spread.
@@ -770,11 +804,10 @@ def select_rescue_source(
             rank = int(list(sorted_population).index(idx))
         else:
             rank = sum(1 for m in sorted_means if m > s_mean)
-        # Prefer the highest ranking-score compatible source (freshness-weighted
-        # under exp_decay; hard_max leaves weight=1 so behaviour is unchanged).
-        weighted_score = float(s_rank_score) * float(freshness_w)
-        if weighted_score > best_score:
-            best_score = weighted_score
+        # Prefer the highest age-adjusted ranking score. Additive freshness
+        # penalty keeps "fresher is better" for both positive and negative scores.
+        if adjusted_score > best_score:
+            best_score = adjusted_score
             best = RescueDecision(
                 eligible=True,
                 reason="selected",

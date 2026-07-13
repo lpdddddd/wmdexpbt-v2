@@ -190,6 +190,8 @@ def apply_calibration_outcome(
         else:
             metrics.setdefault("wm_cal/failure_reason_id", FAILURE_MISSING_HEAD)
         metrics["wm_cal/eval_valid"] = 0.0
+        metrics["wm_cal/valid_prediction_frac"] = 0.0
+        metrics["wm_cal/outcome_mode"] = "structural"
     elif mode_norm in ("insufficient", "insufficient_heldout"):
         raw = 0.0
         ema = float(cfg.ema_beta) * float(state.ema_raw) + (1.0 - float(cfg.ema_beta)) * raw
@@ -213,6 +215,10 @@ def apply_calibration_outcome(
         else:
             metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_SAMPLES
         metrics["wm_cal/eval_valid"] = 0.0
+        metrics["wm_cal/valid_prediction_frac"] = float(
+            metrics.get("wm_cal/valid_prediction_frac", 0.0) or 0.0
+        )
+        metrics["wm_cal/outcome_mode"] = "insufficient"
     state.last_eval_frame = int(frames)
     state.last_metrics = dict(metrics)
     return state
@@ -270,6 +276,7 @@ class WMCalibrationEvaluator:
                 "wm_cal/eval_samples": 0.0,
                 "wm_cal/eval_valid": 0.0,
                 "wm_cal/batch_invalid": 1.0,
+                "wm_cal/valid_prediction_frac": 0.0,
                 "wm_cal/failure_reason_id": float(reason),
             }
             out.update(extra)
@@ -362,6 +369,7 @@ class WMCalibrationEvaluator:
             "wm_cal/eval_samples": float(n),
             "wm_cal/eval_valid": 1.0,
             "wm_cal/batch_invalid": 0.0,
+            "wm_cal/valid_prediction_frac": 1.0,
             "wm_cal/failure_reason_id": FAILURE_OK,
         }
 
@@ -407,4 +415,8 @@ class WMCalibrationEvaluator:
         metrics["wm_cal/gate_combined_rank"] = float(gate_rank)
         metrics["wm_cal/eval_valid"] = 1.0
         metrics["wm_cal/failure_reason_id"] = FAILURE_OK
+        metrics.setdefault("wm_cal/valid_prediction_frac", 1.0)
+        metrics["wm_cal/outcome_mode"] = (
+            "valid" if state.calibration_pass else "metric_fail"
+        )
         return state
