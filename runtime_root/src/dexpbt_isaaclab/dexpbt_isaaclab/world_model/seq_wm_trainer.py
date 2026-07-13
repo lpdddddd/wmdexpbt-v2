@@ -704,7 +704,6 @@ class SeqWMTrainer:
         ):
             return state
 
-        from .wm_calibration_evaluator import apply_calibration_outcome
         from .wm_calibration_metrics import (
             build_wm_calibration_targets,
             extract_wm_calibration_predictions,
@@ -718,6 +717,7 @@ class SeqWMTrainer:
             FAILURE_NONFINITE,
             FAILURE_PREDICT_EXCEPTION,
             FAILURE_SHAPE_MISMATCH,
+            apply_calibration_failure,
             normalize_horizon_steps,
         )
         from .wm_heldout_partition import build_env_partition_masks
@@ -745,14 +745,12 @@ class SeqWMTrainer:
 
         if use_frac > 0.0 and not part.valid:
             metrics = dict(part_diag)
-            metrics["wm_cal/failure_reason_id"] = FAILURE_INVALID_PARTITION
             metrics["wm_cal/n_samples"] = 0.0
-            return apply_calibration_outcome(
+            return apply_calibration_failure(
                 state,
                 cfg=cfg,
                 frames=int(frames),
                 metrics=metrics,
-                mode="structural",
                 failure_reason_id=FAILURE_INVALID_PARTITION,
             )
 
@@ -785,18 +783,16 @@ class SeqWMTrainer:
                 partition_worker_rank=rank,
             ).to(self.device)
         except ValueError as exc:
-            # Mask shape / empty held-out selection — structural invalid partition.
+            # Mask shape / empty held-out selection — invalid partition.
             metrics = dict(part_diag)
             metrics["wm_cal/sample_error"] = 1.0
-            metrics["wm_cal/failure_reason_id"] = FAILURE_INVALID_PARTITION
             metrics["wm_cal/n_samples"] = 0.0
             _ = exc
-            return apply_calibration_outcome(
+            return apply_calibration_failure(
                 state,
                 cfg=cfg,
                 frames=int(frames),
                 metrics=metrics,
-                mode="structural",
                 failure_reason_id=FAILURE_INVALID_PARTITION,
             )
 
@@ -810,13 +806,11 @@ class SeqWMTrainer:
             part_diag["wm_cal/heldout_candidate_count"] = float(e_cpu.numel())
             if leak > 0:
                 metrics = dict(part_diag)
-                metrics["wm_cal/failure_reason_id"] = FAILURE_INVALID_PARTITION
-                return apply_calibration_outcome(
+                return apply_calibration_failure(
                     state,
                     cfg=cfg,
                     frames=int(frames),
                     metrics=metrics,
-                    mode="structural",
                     failure_reason_id=FAILURE_INVALID_PARTITION,
                 )
         elif env_ids is not None:
@@ -860,9 +854,12 @@ class SeqWMTrainer:
         if float(tol_diag.get("wm_cal/missing_target_source", 0.0)) > 0.5:
             metrics = dict(tol_diag)
             metrics["wm_cal/n_samples"] = 0.0
-            metrics["wm_cal/failure_reason_id"] = FAILURE_MISSING_TARGET_SOURCE
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=FAILURE_MISSING_TARGET_SOURCE,
             )
 
         target_eval_mask = targets["eval_mask"]
@@ -874,13 +871,11 @@ class SeqWMTrainer:
             metrics = dict(tol_diag)
             metrics["wm_cal/n_samples"] = float(target_eval_count)
             metrics["wm_cal/insufficient_heldout_samples"] = 1.0
-            metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_HELDOUT_SAMPLES
-            return apply_calibration_outcome(
+            return apply_calibration_failure(
                 state,
                 cfg=cfg,
                 frames=int(frames),
                 metrics=metrics,
-                mode="insufficient_heldout",
                 failure_reason_id=FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
             )
 
@@ -888,13 +883,15 @@ class SeqWMTrainer:
         if encode_fn is None:
             metrics = {
                 "wm_cal/missing_head": 1.0,
-                "wm_cal/failure_reason_id": FAILURE_MISSING_HEAD,
                 "wm_cal/target_eval_count": float(target_eval_count),
             }
             metrics.update(tol_diag)
-            metrics["wm_cal/failure_reason_id"] = FAILURE_MISSING_HEAD
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=FAILURE_MISSING_HEAD,
             )
 
         was_training = bool(self.model.training)
@@ -935,9 +932,12 @@ class SeqWMTrainer:
                     else FAILURE_MISSING_HEAD,
                 )
             )
-            metrics["wm_cal/failure_reason_id"] = reason
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=reason,
             )
 
         pred_valid = preds["valid_mask"].bool().reshape(-1)
@@ -946,9 +946,12 @@ class SeqWMTrainer:
             metrics.update(pred_diag)
             metrics["wm_cal/shape_mismatch"] = 1.0
             metrics["wm_cal/target_eval_count"] = float(target_eval_count)
-            metrics["wm_cal/failure_reason_id"] = FAILURE_SHAPE_MISMATCH
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=FAILURE_SHAPE_MISMATCH,
             )
 
         final_eval_mask = target_eval_mask & pred_valid
@@ -972,19 +975,20 @@ class SeqWMTrainer:
             metrics.update(base_telem)
             if use_frac > 0.0:
                 metrics["wm_cal/insufficient_heldout_samples"] = 1.0
-                metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_HELDOUT_SAMPLES
-                return apply_calibration_outcome(
+                return apply_calibration_failure(
                     state,
                     cfg=cfg,
                     frames=int(frames),
                     metrics=metrics,
-                    mode="insufficient_heldout",
                     failure_reason_id=FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
                 )
             metrics["wm_cal/insufficient_samples"] = 1.0
-            metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_SAMPLES
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="insufficient"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=FAILURE_INSUFFICIENT_SAMPLES,
             )
 
         idx_list = idx.tolist()
@@ -1014,9 +1018,12 @@ class SeqWMTrainer:
             metrics.update(tol_diag)
             metrics.update(pred_diag)
             metrics.update(base_telem)
-            metrics["wm_cal/failure_reason_id"] = reason
-            return apply_calibration_outcome(
-                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            return apply_calibration_failure(
+                state,
+                cfg=cfg,
+                frames=int(frames),
+                metrics=metrics,
+                failure_reason_id=reason,
             )
         metrics.update(tol_diag)
         metrics.update(pred_diag)

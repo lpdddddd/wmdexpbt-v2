@@ -1887,7 +1887,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._adaptive_rollback_freeze_only_count: dict[int, int] = {}
         self._adaptive_probation_timeout: dict[int, bool] = {}
         self._adaptive_probation_timeout_reason: dict[int, str] = {}
-        self._adaptive_ordinary_replacements_this_tick: int = 0
         self._adaptive_diversity_blocked_count: int = 0
         self._adaptive_replacement_budget_blocked_count: int = 0
         self._last_adaptive_diversity_blocked: bool = False
@@ -3085,7 +3084,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._shrink_issued_this_window = {
                 i: False for i in range(self.num_policies)
             }
-            self._adaptive_ordinary_replacements_this_tick = 0
             self._last_adaptive_diversity_blocked = False
         self._curriculum_control_dir.mkdir(parents=True, exist_ok=True)
         for policy_idx in range(self.num_policies):
@@ -9802,8 +9800,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 hard_collapse=own_hard_collapse_signal,
             )
 
-        _pending_replacement_reservation_id = None
-        _pending_replacement_tick_id = None
+        _pending_replacement_handle = None
         _replacement_ledger = None
 
         if tier == "bottom":
@@ -10655,6 +10652,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             ):
                 from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
                     count_distinct_lineages,
+                    evaluate_sidecar_freshness,
                     resolve_stage as _rs,
                     stage_min_distinct_lineages,
                     stage_replacement_budget,
@@ -10673,10 +10671,24 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     st = population.get(pi) or {}
                     lin = str(st.get("lineage_id") or "")
                     if not lin:
-                        side = self._adaptive_read_sidecar_raw(pi) or {}
-                        lin = str(side.get("adaptive_lineage_id") or "")
-                    if not lin:
-                        lin = str(self._adaptive_lineage_id.get(pi, "") or "")
+                        side = self._adaptive_read_sidecar_raw(pi)
+                        if isinstance(side, dict):
+                            side_lin = str(side.get("adaptive_lineage_id") or "")
+                            last_lin = str(side.get("last_update_lineage_id") or "")
+                            lineage_ok = True
+                            if side_lin and last_lin and side_lin != last_lin:
+                                lineage_ok = False
+                            if (
+                                lineage_ok
+                                and side_lin
+                                and evaluate_sidecar_freshness(
+                                    sidecar=side,
+                                    population_frame=int(env_frames),
+                                    population_lineage_id=side_lin,
+                                    cfg=_ap_cfg,
+                                )[0]
+                            ):
+                                lin = side_lin
                     lineages[int(pi)] = lin
                 self._last_adaptive_replacement_budget = budget
                 self._last_adaptive_distinct_lineage_count = count_distinct_lineages(
@@ -10725,14 +10737,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         )
                         self._last_restart_type = 3
                         return
-                    _pending_replacement_reservation_id = str(resv.reservation_id)
-                    _pending_replacement_tick_id = int(tick_id)
-                elif bool(adaptive_rescue) or _hard_collapse_bypass:
-                    bypass_reason = (
-                        "adaptive_rescue"
-                        if adaptive_rescue
-                        else "hard_collapse_rescue"
-                    )
+                    _pending_replacement_handle = resv.handle
+                elif (
+                    bool(adaptive_rescue)
+                    or bool(late_rescue)
+                    or _hard_collapse_bypass
+                ):
+                    if adaptive_rescue:
+                        bypass_reason = "adaptive_rescue"
+                    elif late_rescue:
+                        bypass_reason = "late_rescue"
+                    else:
+                        bypass_reason = "hard_collapse_rescue"
                     tele = _replacement_ledger.record_bypass(
                         tick_id=tick_id,
                         stage=stage_name,
@@ -11160,37 +11176,174 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         # Transaction owner is `_restart_process_with_new_params`. Caller only
         # reacts to the boolean; do NOT restore/cleanup/emit rollback here.
-        restart_ok = self._restart_process_with_new_params(
-            new_params,
-            checkpoint_to_load,
-            source_policy,
-            env_frames,
-            tier,
-            source_curriculum=source_curriculum,
-            source_weight_age_frame=source_weight_age,
-            late_rescue=bool(late_rescue),
-            late_rescue_decision=decision if late_rescue else None,
-            adaptive_rescue=bool(adaptive_rescue),
-            adaptive_rescue_decision=decision if adaptive_rescue else None,
-            runtime_snap=restart_txn_snap,
-            source_safe_apply=source_safe_apply,
-        )
-        if _pending_replacement_reservation_id and _replacement_ledger is not None:
+        if _pending_replacement_handle is not None and _replacement_ledger is not None:
+            # Heartbeat may raise after the restart body returns; always finalize
+            # from the observed restart_ok so successful restarts are never dropped.
+            restart_ok = False
+            _lease_hb_err: Exception | None = None
+            try:
+                with _replacement_ledger.reservation_lease(
+                    _pending_replacement_handle
+                ):
+                    restart_ok = self._restart_process_with_new_params(
+                        new_params,
+                        checkpoint_to_load,
+                        source_policy,
+                        env_frames,
+                        tier,
+                        source_curriculum=source_curriculum,
+                        source_weight_age_frame=source_weight_age,
+                        late_rescue=bool(late_rescue),
+                        late_rescue_decision=decision if late_rescue else None,
+                        adaptive_rescue=bool(adaptive_rescue),
+                        adaptive_rescue_decision=decision if adaptive_rescue else None,
+                        runtime_snap=restart_txn_snap,
+                        source_safe_apply=source_safe_apply,
+                    )
+            except RuntimeError as _hb_exc:
+                _lease_hb_err = _hb_exc
+                print(
+                    f"[adaptive-replacement] reservation lease/heartbeat error: "
+                    f"{_hb_exc}"
+                )
+                self._safe_write_pbt_copy_event(
+                    {
+                        "event_type": "replacement_lease_heartbeat_failed",
+                        "reason": str(_hb_exc),
+                        "reservation_id": str(
+                            _pending_replacement_handle.reservation_id
+                        ),
+                        "tick_id": int(_pending_replacement_handle.tick_id),
+                        "stage": str(_pending_replacement_handle.stage),
+                        "restart_ok": bool(restart_ok),
+                        "env_frames": int(env_frames),
+                    }
+                )
             try:
                 if restart_ok:
-                    _replacement_ledger.commit(
-                        int(_pending_replacement_tick_id or 0),
-                        str(_pending_replacement_reservation_id),
-                    )
+                    fr = _replacement_ledger.commit(_pending_replacement_handle)
+                    if not fr.ok:
+                        print(
+                            f"[adaptive-replacement] CRITICAL commit failed "
+                            f"after successful restart "
+                            f"(reason={fr.reason}); reconciling"
+                        )
+                        self._safe_write_pbt_copy_event(
+                            {
+                                "event_type": "replacement_commit_failed",
+                                "reason": str(fr.reason),
+                                "reservation_id": str(
+                                    _pending_replacement_handle.reservation_id
+                                ),
+                                "tick_id": int(_pending_replacement_handle.tick_id),
+                                "stage": str(_pending_replacement_handle.stage),
+                                "env_frames": int(env_frames),
+                            }
+                        )
+                        fr2 = _replacement_ledger.reconcile_commit(
+                            _pending_replacement_handle
+                        )
+                        if self.writer is not None:
+                            for k, v in (fr2.telemetry or {}).items():
+                                try:
+                                    self.writer.add_scalar(
+                                        str(k), float(v), env_frames
+                                    )
+                                except Exception:
+                                    pass
+                            try:
+                                self.writer.add_scalar(
+                                    "adaptive_consolidation/replacement_commit_failed",
+                                    float(
+                                        (fr2.telemetry or {}).get(
+                                            "adaptive_consolidation/replacement_commit_failed",
+                                            1.0,
+                                        )
+                                    ),
+                                    env_frames,
+                                )
+                                self.writer.add_scalar(
+                                    "adaptive_consolidation/replacement_reconciled",
+                                    float(
+                                        (fr2.telemetry or {}).get(
+                                            "adaptive_consolidation/replacement_reconciled",
+                                            1.0 if fr2.ok else 0.0,
+                                        )
+                                    ),
+                                    env_frames,
+                                )
+                            except Exception:
+                                pass
+                        self._safe_write_pbt_copy_event(
+                            {
+                                "event_type": "replacement_reconciled",
+                                "ok": bool(fr2.ok),
+                                "reason": str(fr2.reason),
+                                "reservation_id": str(
+                                    _pending_replacement_handle.reservation_id
+                                ),
+                                "tick_id": int(_pending_replacement_handle.tick_id),
+                                "stage": str(_pending_replacement_handle.stage),
+                                "env_frames": int(env_frames),
+                            }
+                        )
+                    elif self.writer is not None:
+                        for k, v in (fr.telemetry or {}).items():
+                            try:
+                                self.writer.add_scalar(
+                                    str(k), float(v), env_frames
+                                )
+                            except Exception:
+                                pass
                 else:
-                    _replacement_ledger.release(
-                        int(_pending_replacement_tick_id or 0),
-                        str(_pending_replacement_reservation_id),
-                    )
+                    fr = _replacement_ledger.release(_pending_replacement_handle)
+                    if not fr.ok:
+                        print(
+                            f"[adaptive-replacement] release failed after "
+                            f"restart failure (reason={fr.reason})"
+                        )
+                        self._safe_write_pbt_copy_event(
+                            {
+                                "event_type": "replacement_release_failed",
+                                "reason": str(fr.reason),
+                                "reservation_id": str(
+                                    _pending_replacement_handle.reservation_id
+                                ),
+                                "tick_id": int(
+                                    _pending_replacement_handle.tick_id
+                                ),
+                                "stage": str(_pending_replacement_handle.stage),
+                                "env_frames": int(env_frames),
+                            }
+                        )
+                    if self.writer is not None:
+                        for k, v in (fr.telemetry or {}).items():
+                            try:
+                                self.writer.add_scalar(
+                                    str(k), float(v), env_frames
+                                )
+                            except Exception:
+                                pass
             except Exception as _resv_exc:
                 print(
                     f"[adaptive-replacement] reservation finalize failed: {_resv_exc}"
                 )
+        else:
+            restart_ok = self._restart_process_with_new_params(
+                new_params,
+                checkpoint_to_load,
+                source_policy,
+                env_frames,
+                tier,
+                source_curriculum=source_curriculum,
+                source_weight_age_frame=source_weight_age,
+                late_rescue=bool(late_rescue),
+                late_rescue_decision=decision if late_rescue else None,
+                adaptive_rescue=bool(adaptive_rescue),
+                adaptive_rescue_decision=decision if adaptive_rescue else None,
+                runtime_snap=restart_txn_snap,
+                source_safe_apply=source_safe_apply,
+            )
         if not restart_ok:
             if late_rescue:
                 self._late_rescue_blocked_count[self.policy_idx] = (

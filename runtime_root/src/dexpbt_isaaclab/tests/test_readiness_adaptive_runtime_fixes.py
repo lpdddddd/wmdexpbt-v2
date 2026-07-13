@@ -6,6 +6,7 @@ and freshness ranking — not shallow mocks of the call sites.
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import re
 import tempfile
@@ -23,17 +24,23 @@ from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
     freshness_adjusted_ranking_score,
     select_rescue_source,
 )
-from dexpbt_isaaclab.pbt.replacement_reservation import PopulationReplacementLedger
+from dexpbt_isaaclab.pbt.replacement_reservation import (
+    PopulationReplacementLedger,
+    ReservationHandle,
+)
 from dexpbt_isaaclab.world_model.eir_mpc import _temporary_bank_tolerance_cfg
 from dexpbt_isaaclab.world_model.readiness_adaptive import (
     ReadinessAdaptiveConfig,
     ReadinessAdaptiveState,
+    _graduation_raw,
     _valid_prediction_frac,
     apply_wm_graduation,
 )
 from dexpbt_isaaclab.world_model.wm_head_probs import (
     FAILURE_INSUFFICIENT_SAMPLES,
+    FAILURE_INVALID_PARTITION,
     FAILURE_PREDICT_EXCEPTION,
+    apply_calibration_failure,
     graduation_outcome_mode,
 )
 
@@ -55,7 +62,7 @@ _LINEAGES_ABC = {0: "A", 1: "B", 2: "C"}
 
 
 def _ra_cfg(**over) -> ReadinessAdaptiveConfig:
-    return ReadinessAdaptiveConfig(
+    base = dict(
         readiness_adaptive_enable=True,
         readiness_min_frames=100,
         readiness_required_windows=2,
@@ -66,8 +73,9 @@ def _ra_cfg(**over) -> ReadinessAdaptiveConfig:
         wm_graduation_required_passes=2,
         wm_graduation_early_until_frames=500,
         wm_graduation_min_valid_prediction_frac=0.90,
-        **over,
     )
+    base.update(over)
+    return ReadinessAdaptiveConfig(**base)
 
 
 def _train_arg_dests() -> set[str]:
@@ -148,7 +156,8 @@ def _mp_try_reserve(workspace: str, target_idx: int, budget: int, min_distinct: 
     res = ledger.try_reserve_ordinary(**_reserve_kwargs(
         target_idx=target_idx, budget=budget, min_distinct=min_distinct
     ))
-    q.put((bool(res.ok), str(res.reason), str(res.reservation_id)))
+    rid = res.handle.reservation_id if res.handle is not None else ""
+    q.put((bool(res.ok), str(res.reason), str(rid)))
 
 
 class TestSmokeLauncherCliParse(unittest.TestCase):
@@ -275,10 +284,12 @@ class TestReservationReleaseTimeout(unittest.TestCase):
             ledger = PopulationReplacementLedger(tmp, reservation_timeout_s=300.0)
             r1 = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=1, budget=1, min_distinct=1))
             self.assertTrue(r1.ok, r1.reason)
+            self.assertIsNotNone(r1.handle)
             r2 = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=2, budget=1, min_distinct=1))
             self.assertFalse(r2.ok)
             self.assertEqual(r2.reason, "replacement_budget_exhausted")
-            self.assertTrue(ledger.release(1, r1.reservation_id))
+            fr = ledger.release(r1.handle)
+            self.assertTrue(fr.ok, fr.reason)
             r3 = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=2, budget=1, min_distinct=1))
             self.assertTrue(r3.ok, r3.reason)
 
@@ -291,7 +302,162 @@ class TestReservationReleaseTimeout(unittest.TestCase):
             # New try_reserve expires stale entries before budget check.
             r2 = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=2, budget=1, min_distinct=1))
             self.assertTrue(r2.ok, r2.reason)
-            self.assertNotEqual(r1.reservation_id, r2.reservation_id)
+            self.assertNotEqual(
+                r1.handle.reservation_id, r2.handle.reservation_id
+            )
+
+
+class TestLedgerHandleApi(unittest.TestCase):
+    def test_same_tick_different_stage_different_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r_exp = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(
+                    target_idx=1, budget=1, min_distinct=1, stage=STAGE_EXPLORATION
+                )
+            )
+            r_con = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(
+                    target_idx=1, budget=1, min_distinct=1, stage=STAGE_CONSOLIDATION
+                )
+            )
+            self.assertTrue(r_exp.ok, r_exp.reason)
+            self.assertTrue(r_con.ok, r_con.reason)
+            p_exp = Path(tmp) / "adaptive_replacement" / f"tick_1_{STAGE_EXPLORATION}.json"
+            p_con = Path(tmp) / "adaptive_replacement" / f"tick_1_{STAGE_CONSOLIDATION}.json"
+            self.assertTrue(p_exp.is_file())
+            self.assertTrue(p_con.is_file())
+            self.assertNotEqual(p_exp, p_con)
+
+    def test_budget_mismatch_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=2, min_distinct=1)
+            )
+            self.assertTrue(r1.ok, r1.reason)
+            r2 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            self.assertFalse(r2.ok)
+            self.assertEqual(r2.reason, "ledger_budget_mismatch")
+
+    def test_corrupt_json_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            path = Path(tmp) / "adaptive_replacement" / f"tick_1_{STAGE_EXPLORATION}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{not-json")
+            r = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertFalse(r.ok)
+            self.assertEqual(r.reason, "ledger_corrupt")
+
+    def test_wrong_stage_commit_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(
+                    target_idx=1, budget=1, min_distinct=1, stage=STAGE_EXPLORATION
+                )
+            )
+            self.assertTrue(r1.ok, r1.reason)
+            bad = ReservationHandle(
+                tick_id=r1.handle.tick_id,
+                stage=STAGE_CONSOLIDATION,
+                reservation_id=r1.handle.reservation_id,
+                owner_policy=r1.handle.owner_policy,
+                owner_pid=r1.handle.owner_pid,
+                owner_token=r1.handle.owner_token,
+                target=r1.handle.target,
+                source=r1.handle.source,
+                source_lineage=r1.handle.source_lineage,
+                lease_timeout_s=r1.handle.lease_timeout_s,
+            )
+            fr = ledger.commit(bad)
+            self.assertFalse(fr.ok)
+            self.assertIn(fr.reason, ("ledger_missing", "ledger_stage_mismatch"))
+
+    def test_heartbeat_prevents_expire_under_short_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(
+                tmp, reservation_timeout_s=0.2, heartbeat_interval_s=0.05
+            )
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r1.ok, r1.reason)
+            with ledger.reservation_lease(r1.handle, heartbeat_interval_s=0.05):
+                time.sleep(0.45)
+            # Still reserved (not expired) → budget still held.
+            r2 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            self.assertFalse(r2.ok)
+            self.assertEqual(r2.reason, "replacement_budget_exhausted")
+            fr = ledger.commit(r1.handle)
+            self.assertTrue(fr.ok, fr.reason)
+
+    def test_non_owner_renew_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r1.ok, r1.reason)
+            bad = ReservationHandle(
+                tick_id=r1.handle.tick_id,
+                stage=r1.handle.stage,
+                reservation_id=r1.handle.reservation_id,
+                owner_policy=r1.handle.owner_policy,
+                owner_pid=r1.handle.owner_pid,
+                owner_token="not-the-owner-token",
+                target=r1.handle.target,
+                source=r1.handle.source,
+                source_lineage=r1.handle.source_lineage,
+                lease_timeout_s=r1.handle.lease_timeout_s,
+            )
+            fr = ledger.renew(bad)
+            self.assertFalse(fr.ok)
+            self.assertEqual(fr.reason, "owner_mismatch")
+
+    def test_reconcile_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp, reservation_timeout_s=0.1)
+            r1 = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r1.ok, r1.reason)
+            time.sleep(0.2)
+            # Expire via another reserve attempt on same file.
+            _ = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            fr1 = ledger.reconcile_commit(r1.handle)
+            self.assertTrue(fr1.ok, fr1.reason)
+            fr2 = ledger.reconcile_commit(r1.handle)
+            self.assertTrue(fr2.ok, fr2.reason)
+            self.assertEqual(fr2.reason, "already_committed")
+
+    def test_late_rescue_bypass_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            tele = ledger.record_bypass(
+                tick_id=1,
+                stage=STAGE_EXPLORATION,
+                budget=1,
+                target_idx=2,
+                reason="late_rescue",
+            )
+            self.assertGreaterEqual(
+                float(tele.get("adaptive_consolidation/replacement_budget_bypassed", 0.0)),
+                1.0,
+            )
+            path = Path(tmp) / "adaptive_replacement" / f"tick_1_{STAGE_EXPLORATION}.json"
+            data = __import__("json").loads(path.read_text())
+            reasons = [str(x.get("reason")) for x in data.get("bypassed", [])]
+            self.assertIn("late_rescue", reasons)
 
 
 class TestCalibrationFailureClassification(unittest.TestCase):
@@ -312,6 +478,36 @@ class TestCalibrationFailureClassification(unittest.TestCase):
             ),
             "structural",
         )
+        self.assertEqual(
+            graduation_outcome_mode(
+                eval_valid=False,
+                failure_reason_id=FAILURE_INVALID_PARTITION,
+                calibration_pass=False,
+            ),
+            "insufficient",
+        )
+
+    def test_invalid_partition_apply_calibration_failure_insufficient(self):
+        from dexpbt_isaaclab.world_model.wm_calibration_evaluator import (
+            WMCalibrationConfig,
+            WMCalibrationState,
+        )
+
+        cfg = WMCalibrationConfig(enabled=True, ema_beta=0.5)
+        st = WMCalibrationState(alpha_wm=0.7, ema_raw=0.7)
+        st = apply_calibration_failure(
+            st,
+            cfg=cfg,
+            frames=10,
+            metrics={},
+            failure_reason_id=FAILURE_INVALID_PARTITION,
+        )
+        self.assertEqual(st.last_metrics["wm_cal/outcome_mode"], "insufficient")
+        self.assertEqual(
+            st.last_metrics["wm_cal/failure_reason_id"], FAILURE_INVALID_PARTITION
+        )
+        self.assertLess(st.ema_raw, 0.7)
+        self.assertFalse(st.calibration_pass)
 
     def test_apply_wm_graduation_insufficient_beta_down_structural_zeros(self):
         cfg = _ra_cfg(wm_graduation_beta_down=0.5)
@@ -346,6 +542,69 @@ class TestCalibrationFailureClassification(unittest.TestCase):
         self.assertEqual(st_str.wm_pass_streak, 0)
         self.assertEqual(alpha_str, 0.0)
         self.assertFalse(st_str.wm_graduated)
+
+    def test_nan_raw_gate_no_streak(self):
+        cfg = _ra_cfg()
+        st = ReadinessAdaptiveState()
+        st, _ = apply_wm_graduation(
+            st,
+            frames=100,
+            metrics={
+                "wm_cal/eval_valid": 1.0,
+                "wm_cal/calibration_pass": 1.0,
+                "wm_cal/valid_prediction_frac": 1.0,
+                "wm_cal/raw_gate": float("nan"),
+            },
+            mode="valid",
+            cfg=cfg,
+            r_bank=1.0,
+        )
+        self.assertEqual(st.wm_pass_streak, 0)
+        raw, ok = _graduation_raw({"wm_cal/raw_gate": float("nan")})
+        self.assertFalse(ok)
+        self.assertEqual(raw, 0.0)
+        # calibration_pass alone is not enough for a valid raw.
+        raw2, ok2 = _graduation_raw({"wm_cal/calibration_pass": 1.0})
+        self.assertFalse(ok2)
+
+    def test_single_gate_nan_invalid_raw(self):
+        raw, ok = _graduation_raw(
+            {
+                "wm_cal/gate_recovery_auc": 1.0,
+                "wm_cal/gate_recovery_ece": float("nan"),
+                "wm_cal/gate_combined_rank": 1.0,
+            }
+        )
+        self.assertFalse(ok)
+        self.assertEqual(raw, 0.0)
+
+    def test_raw_gate_out_of_range_invalid(self):
+        for bad in (-0.1, 1.1, float("inf"), float("-inf")):
+            raw, ok = _graduation_raw({"wm_cal/raw_gate": bad})
+            self.assertFalse(ok, bad)
+            self.assertEqual(raw, 0.0)
+
+    def test_r_bank_illegal_alpha_clamped(self):
+        cfg = _ra_cfg(wm_graduation_required_passes=1)
+        metrics = {
+            "wm_cal/eval_valid": 1.0,
+            "wm_cal/calibration_pass": 1.0,
+            "wm_cal/valid_prediction_frac": 1.0,
+            "wm_cal/raw_gate": 1.0,
+        }
+        for r_bank in (float("nan"), -1.0, 2.0):
+            st = ReadinessAdaptiveState()
+            st, alpha = apply_wm_graduation(
+                st,
+                frames=100,
+                metrics=metrics,
+                mode="valid",
+                cfg=cfg,
+                r_bank=r_bank,
+            )
+            self.assertTrue(math.isfinite(alpha))
+            self.assertGreaterEqual(alpha, 0.0)
+            self.assertLessEqual(alpha, float(cfg.wm_graduation_early_alpha_cap))
 
 
 class TestValidPredictionFracFailClosed(unittest.TestCase):

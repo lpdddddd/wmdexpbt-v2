@@ -509,23 +509,37 @@ def sync_phase(
     return state
 
 
-def _graduation_raw(metrics: Mapping[str, Any]) -> float:
+def _graduation_raw(metrics: Mapping[str, Any]) -> tuple[float, bool]:
+    """Return ``(raw_value, valid)``. Missing / nonfinite / out-of-range → invalid."""
+
+    def _finite_unit(v: Any) -> tuple[float, bool]:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0, False
+        if not math.isfinite(f):
+            return 0.0, False
+        if f < 0.0 or f > 1.0:
+            return 0.0, False
+        return float(f), True
+
     if "wm_cal/raw_gate" in metrics:
-        return float(metrics["wm_cal/raw_gate"])
+        return _finite_unit(metrics["wm_cal/raw_gate"])
     gate_keys = (
         "wm_cal/gate_recovery_auc",
         "wm_cal/gate_recovery_ece",
         "wm_cal/gate_combined_rank",
     )
     if all(k in metrics for k in gate_keys):
-        return (
-            float(metrics["wm_cal/gate_recovery_auc"])
-            * float(metrics["wm_cal/gate_recovery_ece"])
-            * float(metrics["wm_cal/gate_combined_rank"])
-        )
-    if "wm_cal/calibration_pass" in metrics:
-        return float(metrics["wm_cal/calibration_pass"])
-    return 0.0
+        vals: list[float] = []
+        for k in gate_keys:
+            f, ok = _finite_unit(metrics[k])
+            if not ok:
+                return 0.0, False
+            vals.append(f)
+        return float(vals[0] * vals[1] * vals[2]), True
+    # calibration_pass alone is NOT enough to form a valid raw gate.
+    return 0.0, False
 
 
 def _valid_prediction_frac(metrics: Mapping[str, Any]) -> float:
@@ -592,27 +606,27 @@ def apply_wm_graduation(
         vpf = _valid_prediction_frac(metrics)
         eval_ok = float(metrics.get("wm_cal/eval_valid", 0.0)) > 0.5
         cal_pass = float(metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5
-        if (
+        raw, raw_ok = _graduation_raw(metrics)
+        ema_prev = float(state.wm_ema_raw)
+        if not math.isfinite(ema_prev):
+            ema_prev = 0.0
+        r_bank_f = float(r_bank)
+        if not (
             eval_ok
             and cal_pass
             and vpf >= float(cfg.wm_graduation_min_valid_prediction_frac)
+            and raw_ok
+            and math.isfinite(ema_prev)
+            and math.isfinite(r_bank_f)
         ):
-            raw = _graduation_raw(metrics)
-            if not math.isfinite(float(raw)):
-                raw = 0.0
-            ema_prev = float(state.wm_ema_raw)
-            if not math.isfinite(ema_prev):
-                ema_prev = 0.0
-            state.wm_pass_streak = int(state.wm_pass_streak) + 1
-            state.wm_ema_raw = beta_up * ema_prev + (1.0 - beta_up) * float(raw)
+            state.wm_pass_streak = 0
+            state.wm_ema_raw = beta_down * ema_prev
             if not math.isfinite(float(state.wm_ema_raw)):
                 state.wm_ema_raw = 0.0
         else:
-            state.wm_pass_streak = 0
-            ema_prev = float(state.wm_ema_raw)
-            if not math.isfinite(ema_prev):
-                ema_prev = 0.0
-            state.wm_ema_raw = beta_down * ema_prev
+            r_bank_f = _clip(r_bank_f, 0.0, 1.0)
+            state.wm_pass_streak = int(state.wm_pass_streak) + 1
+            state.wm_ema_raw = beta_up * ema_prev + (1.0 - beta_up) * float(raw)
             if not math.isfinite(float(state.wm_ema_raw)):
                 state.wm_ema_raw = 0.0
         state.wm_graduated = int(state.wm_pass_streak) >= int(
@@ -634,15 +648,21 @@ def apply_wm_graduation(
     if not math.isfinite(ema):
         ema = 0.0
         state.wm_ema_raw = 0.0
-    r_bank_f = float(r_bank)
+    try:
+        r_bank_f = float(r_bank)
+    except (TypeError, ValueError):
+        r_bank_f = 0.0
     if not math.isfinite(r_bank_f):
         r_bank_f = 0.0
+    else:
+        r_bank_f = _clip(r_bank_f, 0.0, 1.0)
     if state.wm_graduated:
         alpha_effective = _clip(ema, 0.0, alpha_cap) * r_bank_f
     else:
         alpha_effective = 0.0
     if not math.isfinite(alpha_effective):
         alpha_effective = 0.0
+    alpha_effective = _clip(float(alpha_effective), 0.0, float(alpha_cap))
 
     # Phase-1 force-off: not graduated ⇒ alpha stays 0 (already).
     state.last_alpha_cap = float(alpha_cap)

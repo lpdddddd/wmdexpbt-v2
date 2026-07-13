@@ -70,6 +70,37 @@ def graduation_outcome_mode(
     return "metric_fail"
 
 
+def apply_calibration_failure(
+    state: Any,
+    *,
+    cfg: Any,
+    frames: int,
+    metrics: dict[str, Any],
+    failure_reason_id: float,
+) -> Any:
+    """Unify calibration failure → graduation outcome mode + evaluator apply."""
+    from .wm_calibration_evaluator import apply_calibration_outcome
+
+    mode = graduation_outcome_mode(
+        eval_valid=False,
+        failure_reason_id=float(failure_reason_id),
+        calibration_pass=False,
+    )
+    metrics = dict(metrics)
+    metrics["wm_cal/failure_reason_id"] = float(failure_reason_id)
+    metrics["wm_cal/outcome_mode"] = mode
+    metrics["wm_cal/eval_valid"] = 0.0
+    metrics.setdefault("wm_cal/valid_prediction_frac", 0.0)
+    return apply_calibration_outcome(
+        state,
+        cfg=cfg,
+        frames=frames,
+        metrics=metrics,
+        mode=mode,
+        failure_reason_id=float(failure_reason_id),
+    )
+
+
 def binary_head_uncertainty(prob: torch.Tensor) -> torch.Tensor:
     """Uncertainty in ``[0, 1]``: high when probability is near 0.5."""
     return (1.0 - (prob.float() - 0.5).abs() * 2.0).clamp(0.0, 1.0)
