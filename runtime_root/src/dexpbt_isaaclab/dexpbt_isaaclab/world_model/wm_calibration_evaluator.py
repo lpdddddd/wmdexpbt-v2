@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import math
+
 import torch
 
 from .wm_calibration_metrics import (
@@ -29,6 +31,7 @@ class WMCalibrationConfig:
     enabled: bool = False
     eval_interval_frames: int = 50_000_000
     min_samples: int = 512
+    # Reserved: replay held-out partition is NOT applied yet.
     heldout_fraction: float = 0.2
     alpha_min: float = 0.0
     alpha_max: float = 1.0
@@ -88,19 +91,46 @@ class WMCalibrationState:
         return st
 
 
-def _as_cpu_float1d(values: Any) -> torch.Tensor:
-    """Detach to CPU float1d without Tensor truthiness."""
+def _as_cpu_float1d(values: Any) -> tuple[torch.Tensor, bool]:
+    """Detach to CPU float1d. Returns ``(tensor, ok)``; never raises on bad input."""
+    empty = torch.empty(0, dtype=torch.float32)
     if values is None:
-        return torch.empty(0, dtype=torch.float32)
-    if isinstance(values, torch.Tensor):
-        return values.detach().float().reshape(-1).cpu()
+        return empty, False
     try:
+        if isinstance(values, torch.Tensor):
+            t = values.detach().float().reshape(-1).cpu()
+            if int(t.numel()) == 0:
+                return empty, False
+            if not bool(torch.isfinite(t).all()):
+                return empty, False
+            return t, True
         seq = list(values)
-    except TypeError:
-        return torch.empty(0, dtype=torch.float32)
-    if len(seq) == 0:
-        return torch.empty(0, dtype=torch.float32)
-    return torch.tensor([float(v) for v in seq], dtype=torch.float32)
+        if len(seq) == 0:
+            return empty, False
+        out: list[float] = []
+        for v in seq:
+            if isinstance(v, (str, bytes, bytearray)):
+                return empty, False
+            if isinstance(v, bool):
+                # bool is int subclass; allow as 0/1 label.
+                out.append(float(v))
+                continue
+            if isinstance(v, (int, float)):
+                fv = float(v)
+                if not math.isfinite(fv):
+                    return empty, False
+                out.append(fv)
+                continue
+            # Reject nested objects / tensors-in-list mixed types.
+            if isinstance(v, torch.Tensor):
+                if v.numel() != 1 or not bool(torch.isfinite(v.float()).all()):
+                    return empty, False
+                out.append(float(v.detach().float().reshape(-1)[0].item()))
+                continue
+            return empty, False
+        return torch.tensor(out, dtype=torch.float32), True
+    except (TypeError, ValueError, RuntimeError):
+        return empty, False
 
 
 def apply_calibration_outcome(
@@ -115,10 +145,11 @@ def apply_calibration_outcome(
     mode_norm = str(mode or "").strip().lower()
     metrics = dict(metrics)
     if mode_norm == "structural":
-        state.alpha_wm = float(cfg.alpha_min)
+        # Unconditional hard zero — ignore alpha_min so stale trust cannot linger.
+        state.alpha_wm = 0.0
         state.ema_raw = 0.0
         state.calibration_pass = False
-        metrics["wm_cal/alpha_wm"] = float(state.alpha_wm)
+        metrics["wm_cal/alpha_wm"] = 0.0
         metrics["wm_cal/calibration_pass"] = 0.0
         metrics.setdefault("wm_cal/failure_reason_id", FAILURE_MISSING_HEAD)
         metrics["wm_cal/eval_valid"] = 0.0
@@ -133,7 +164,8 @@ def apply_calibration_outcome(
         metrics["wm_cal/alpha_wm"] = float(alpha)
         metrics["wm_cal/calibration_pass"] = 0.0
         metrics["wm_cal/insufficient_samples"] = 1.0
-        metrics.setdefault("wm_cal/failure_reason_id", FAILURE_INSUFFICIENT_SAMPLES)
+        # Always authoritative — do not keep pred_diag's OK=0 via setdefault.
+        metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_SAMPLES
         metrics["wm_cal/eval_valid"] = 0.0
     state.last_eval_frame = int(frames)
     state.last_metrics = dict(metrics)
@@ -163,8 +195,6 @@ class WMCalibrationEvaluator:
             "y_drop",
             "uncertainty",
         )
-        tensors = {k: _as_cpu_float1d(batch.get(k)) for k in required}
-        n = int(tensors["p_recovery"].numel())
 
         def _invalid(reason: float, **extra: float) -> dict[str, float]:
             out = {
@@ -183,7 +213,7 @@ class WMCalibrationEvaluator:
                 "wm_cal/rank_corr": 0.0,
                 "wm_cal/combined_score_mean": 0.0,
                 "wm_cal/realized_utility_mean": 0.0,
-                "wm_cal/n_samples": float(n),
+                "wm_cal/n_samples": 0.0,
                 "wm_cal/recovery_pos_rate": 0.0,
                 "wm_cal/drop_pos_rate": 0.0,
                 "wm_cal/success_pos_rate": 0.0,
@@ -191,7 +221,7 @@ class WMCalibrationEvaluator:
                 "wm_cal/missing_head": float(batch.get("missing_head", 0.0) or 0.0),
                 "wm_cal/AUC_recovery": 0.0,
                 "wm_cal/ECE": 1.0,
-                "wm_cal/eval_samples": float(n),
+                "wm_cal/eval_samples": 0.0,
                 "wm_cal/eval_valid": 0.0,
                 "wm_cal/batch_invalid": 1.0,
                 "wm_cal/failure_reason_id": float(reason),
@@ -199,13 +229,21 @@ class WMCalibrationEvaluator:
             out.update(extra)
             return out
 
+        tensors: dict[str, torch.Tensor] = {}
+        for k in required:
+            t, ok = _as_cpu_float1d(batch.get(k))
+            if not ok:
+                return _invalid(FAILURE_NONFINITE, **{"wm_cal/invalid_input": 1.0})
+            tensors[k] = t
+        n = int(tensors["p_recovery"].numel())
+
         if n <= 0:
             return _invalid(FAILURE_MISSING_HEAD)
         if any(int(tensors[k].numel()) != n for k in required):
-            return _invalid(FAILURE_SHAPE_MISMATCH, **{"wm_cal/shape_mismatch": 1.0})
+            return _invalid(FAILURE_SHAPE_MISMATCH, **{"wm_cal/shape_mismatch": 1.0, "wm_cal/n_samples": float(n)})
         stacked = torch.stack([tensors[k] for k in required], dim=0)
         if not bool(torch.isfinite(stacked).all()):
-            return _invalid(FAILURE_NONFINITE, **{"wm_cal/nonfinite_prediction": 1.0})
+            return _invalid(FAILURE_NONFINITE, **{"wm_cal/nonfinite_prediction": 1.0, "wm_cal/n_samples": float(n)})
 
         p_rec_t = tensors["p_recovery"]
         p_succ_t = tensors["p_success"]

@@ -273,72 +273,18 @@ def resolve_calibration_horizon(
     return min(steps)
 
 
-def _horizon_labels(
-    batch: SequenceBatch,
-    *,
-    horizon: int,
-    improve_margin: float,
-    d_hat: torch.Tensor,
-    tol: torch.Tensor,
-    valid: torch.Tensor,
-    seg: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Labels for one horizon H: success / drop / improve / future_ok / min_future.
-
-    Success: min d_hat over reachable steps in 1..H reaches tolerance.
-    Drop: any drop/failure/done/worsen within the window.
-    future_ok: the full horizon endpoint H is in-segment and valid (samples that
-    lack H steps of future are excluded from this horizon's mask).
-    """
-    t_len, b_len = batch.T, batch.B
-    device = d_hat.device
-    dtype = torch.float32
-    h_steps = max(1, int(horizon))
-    min_future = d_hat.clone()
-    future_ok = torch.zeros(t_len, b_len, device=device, dtype=dtype)
-    y_drop = torch.zeros(t_len, b_len, device=device, dtype=dtype)
-    if h_steps >= t_len:
-        return (
-            torch.zeros_like(d_hat, dtype=dtype),
-            y_drop,
-            torch.zeros_like(d_hat, dtype=dtype),
-            future_ok,
-            min_future,
-        )
-
-    for h in range(1, h_steps + 1):
-        same_seg = seg[h:, :] == seg[:-h, :]
-        step_ok = (valid[h:, :] > 0.5) & (valid[:-h, :] > 0.5) & same_seg
-        min_future[:-h, :] = torch.where(
-            step_ok,
-            torch.minimum(min_future[:-h, :], d_hat[h:, :]),
-            min_future[:-h, :],
-        )
-        if batch.dropped is not None:
-            drop_h = (batch.dropped[h:, :] > 0.5) & step_ok
-            y_drop[:-h, :] = torch.where(drop_h, torch.ones_like(y_drop[:-h, :]), y_drop[:-h, :])
-        if batch.failure is not None:
-            fail_h = (batch.failure[h:, :] > 0.5) & step_ok
-            y_drop[:-h, :] = torch.where(fail_h, torch.ones_like(y_drop[:-h, :]), y_drop[:-h, :])
-        done_h = (batch.done[h:, :] > 0.5) & step_ok
-        y_drop[:-h, :] = torch.where(done_h, torch.ones_like(y_drop[:-h, :]), y_drop[:-h, :])
-        worsen = (d_hat[h:, :] > d_hat[:-h, :] + float(improve_margin)) & step_ok
-        y_drop[:-h, :] = torch.where(worsen, torch.ones_like(y_drop[:-h, :]), y_drop[:-h, :])
-        if h == h_steps:
-            future_ok[:-h, :] = step_ok.float()
-
-    y_success = ((min_future <= tol) & (future_ok > 0.5)).float()
-    y_improve = (((d_hat - min_future) >= float(improve_margin)) & (future_ok > 0.5)).float()
-    return y_success, y_drop, y_improve, future_ok, min_future
-
-
 def build_wm_calibration_targets(
     batch: SequenceBatch,
     *,
-    horizon: int | None = None,
     horizon_steps: tuple[int, ...] | list[int] | None = None,
+    recovery_horizon: int,
     improve_margin: float,
+    recovery_d_hat_tol_min_steps: int = 0,
     floor_tol_threshold: float,
+    recovery_shadow_tol_threshold: float | None = None,
+    # Legacy unused kwargs kept for call-site compat (eval_tol filters dropped;
+    # recovery floor mask is the authoritative stage gate).
+    horizon: int | None = None,
     eval_tol_mode: str = "hybrid",
     eval_tol_threshold: float = 0.05,
     eval_tol_quantile: float = 0.5,
@@ -346,19 +292,37 @@ def build_wm_calibration_targets(
     eval_tol_cap: float = 0.06,
     eval_tol_min_samples_for_stats: int = 32,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
-    """Build flat calibration labels aligned with ``belief.reshape(T * B, -1)``.
+    """Build flat calibration labels from the **same** training target builders.
 
     Horizon semantics
     -----------------
-    - ``horizon_steps``: configured WM success/drop horizons (same as runtime).
-    - ``y_success`` / ``y_drop``: mean of per-horizon labels (matches mean probs).
-    - ``y_recovery`` / ``y_improve``: primary calibration horizon only
-      (``resolve_calibration_horizon`` / legacy ``horizon``), matching the
-      single recovery head (not horizon-averaged).
-    - ``eval_mask``: tolerance filter AND intersection of per-horizon
-      ``future_ok`` (longest horizon without future data excludes the sample).
+    - ``y_success`` / ``y_drop``: mean over configured ``horizon_steps`` of
+      ``build_horizon_success_target`` / ``build_horizon_drop_target``
+      (identical to RSSM head training labels, then averaged like runtime probs).
+    - ``y_recovery`` / recovery mask: ``build_recovery_target_soft_or`` with
+      ``recovery_horizon`` (not the primary success horizon). Drop does **not**
+      clear recovery positives; done / d_hat-worsen are **not** drop labels.
+    - ``eval_mask``: intersection of all horizon valid masks AND recovery mask.
+      Prediction validity is applied later by the trainer.
+    - Missing required target sources → empty eval_mask +
+      ``wm_cal/missing_target_source=1`` (fail-closed; no fake all-zero labels).
+
+    Note: ``heldout_fraction`` on the evaluator config is reserved / not applied
+    here (no replay held-out partition in this pass).
     """
-    from .wm_head_probs import normalize_horizon_steps
+    from .wm_head_probs import (
+        FAILURE_MISSING_TARGET_SOURCE,
+        normalize_horizon_steps,
+    )
+    from .wm_head_targets import (
+        build_horizon_drop_target,
+        build_horizon_success_target,
+        build_horizon_valid_mask,
+        build_recovery_target_soft_or,
+        has_horizon_drop_sources,
+        has_horizon_success_sources,
+        has_recovery_sources,
+    )
 
     t_len, b_len = batch.T, batch.B
     device = batch.device
@@ -371,96 +335,92 @@ def build_wm_calibration_targets(
         "y_success": z.clone(),
         "y_drop": z.clone(),
         "y_improve": z.clone(),
+        "recovery_mask": torch.zeros(n_flat, device=device, dtype=torch.bool),
     }
-    empty_diag = {"wm_cal/eval_tol_threshold": float(floor_tol_threshold)}
-    if batch.d_hat is None:
-        return empty_targets, empty_diag
+    # heldout_fraction is intentionally unused (reserved config).
+    _ = (eval_tol_mode, eval_tol_threshold, eval_tol_quantile, eval_tol_margin,
+         eval_tol_cap, eval_tol_min_samples_for_stats, horizon)
 
     if horizon_steps is None:
-        if horizon is None:
-            steps = normalize_horizon_steps((4, 8))
-        else:
-            steps = normalize_horizon_steps((int(horizon),))
+        steps = normalize_horizon_steps((4, 8))
     else:
         steps = normalize_horizon_steps(horizon_steps)
-    primary = int(horizon) if horizon is not None else resolve_calibration_horizon(steps, default=4)
-    if primary not in steps:
-        # Keep primary for recovery even if not in success/drop average set.
-        pass
 
-    d_hat = batch.d_hat
-    tol = batch.success_tolerance_seq
-    if tol is None:
-        tol = torch.full((t_len, b_len), float(floor_tol_threshold), device=device, dtype=d_hat.dtype)
-    valid = batch.valid_mask
-    if valid is None:
-        valid = torch.ones(t_len, b_len, device=device, dtype=d_hat.dtype)
-    seg = batch.segment_id
-    if seg is None:
-        seg = torch.zeros(t_len, b_len, device=device, dtype=torch.long)
+    diag: dict[str, float] = {
+        "wm_cal/eval_tol_threshold": float(floor_tol_threshold),
+        "wm_cal/horizon_count": float(len(steps)),
+        "wm_cal/recovery_horizon": float(max(1, int(recovery_horizon))),
+        "wm_cal/heldout_fraction_enabled": 0.0,
+        "wm_cal/missing_target_source": 0.0,
+        "wm_cal/failure_reason_id": 0.0,
+    }
+
+    if not has_horizon_success_sources(batch):
+        diag["wm_cal/missing_target_source"] = 1.0
+        diag["wm_cal/failure_reason_id"] = FAILURE_MISSING_TARGET_SOURCE
+        diag["wm_cal/missing_success_source"] = 1.0
+        return empty_targets, diag
+    if not has_horizon_drop_sources(batch):
+        diag["wm_cal/missing_target_source"] = 1.0
+        diag["wm_cal/failure_reason_id"] = FAILURE_MISSING_TARGET_SOURCE
+        diag["wm_cal/missing_drop_source"] = 1.0
+        return empty_targets, diag
+    if not has_recovery_sources(batch):
+        diag["wm_cal/missing_target_source"] = 1.0
+        diag["wm_cal/failure_reason_id"] = FAILURE_MISSING_TARGET_SOURCE
+        diag["wm_cal/missing_recovery_source"] = 1.0
+        return empty_targets, diag
 
     succ_stack = []
     drop_stack = []
-    future_stack = []
+    mask_stack = []
     for h in steps:
-        y_s, y_d, _y_i, f_ok, _mf = _horizon_labels(
-            batch,
-            horizon=h,
-            improve_margin=improve_margin,
-            d_hat=d_hat,
-            tol=tol,
-            valid=valid,
-            seg=seg,
-        )
-        succ_stack.append(y_s)
-        drop_stack.append(y_d)
-        future_stack.append(f_ok)
+        succ_stack.append(build_horizon_success_target(batch, h).float())
+        drop_stack.append(build_horizon_drop_target(batch, h).float())
+        mask_stack.append(build_horizon_valid_mask(batch, h).float())
 
     y_success = torch.stack(succ_stack, dim=0).mean(dim=0)
     y_drop = torch.stack(drop_stack, dim=0).mean(dim=0)
-    # Intersection: sample valid for combined calibration only if every horizon ok.
-    future_ok_all = torch.stack(future_stack, dim=0).amin(dim=0)
+    horizon_mask_all = torch.stack(mask_stack, dim=0).amin(dim=0)
 
-    y_s_p, y_d_p, y_improve, future_ok_p, _ = _horizon_labels(
+    shadow = (
+        float(floor_tol_threshold)
+        if recovery_shadow_tol_threshold is None
+        else float(recovery_shadow_tol_threshold)
+    )
+    y_recovery, recovery_mask_f = build_recovery_target_soft_or(
         batch,
-        horizon=primary,
-        improve_margin=improve_margin,
-        d_hat=d_hat,
-        tol=tol,
-        valid=valid,
-        seg=seg,
+        horizon=int(max(1, recovery_horizon)),
+        d_hat_margin=float(improve_margin),
+        d_hat_tol_min_steps=int(recovery_d_hat_tol_min_steps),
+        floor_tol_threshold=shadow,
     )
-    y_recovery = ((y_s_p > 0.5) | (y_improve > 0.5)) & (y_d_p < 0.5)
-    y_recovery = y_recovery.float()
+    # Diagnostic only: d_hat margin component (not used for alpha gates).
+    y_improve = torch.zeros_like(y_recovery)
+    if batch.d_hat is not None:
+        h_rec = int(max(1, recovery_horizon))
+        for t in range(t_len):
+            t_end = min(t_len - 1, t + h_rec - 1)
+            y_improve[t] = (
+                (batch.d_hat[t] - batch.d_hat[t_end]) >= float(improve_margin)
+            ).to(y_improve.dtype)
 
-    eval_tol, tol_diag = resolve_wm_calibration_eval_tol(
-        tol,
-        valid=valid,
-        future_ok=future_ok_all,
-        floor_tol_threshold=float(floor_tol_threshold),
-        mode=str(eval_tol_mode),
-        fixed_eval_tol=float(eval_tol_threshold),
-        quantile=float(eval_tol_quantile),
-        margin=float(eval_tol_margin),
-        cap=float(eval_tol_cap),
-        min_samples_for_stats=int(eval_tol_min_samples_for_stats),
-    )
-    eval_mask = (tol <= float(eval_tol)) & (future_ok_all > 0.5)
-    tol_diag["wm_cal/eval_mask_frac"] = float(eval_mask.float().mean().item())
-    tol_diag["wm_cal/primary_horizon"] = float(primary)
-    tol_diag["wm_cal/horizon_count"] = float(len(steps))
+    eval_mask = (horizon_mask_all > 0.5) & (recovery_mask_f > 0.5)
+    diag["wm_cal/eval_mask_frac"] = float(eval_mask.float().mean().item())
+    diag["wm_cal/recovery_mask_frac"] = float((recovery_mask_f > 0.5).float().mean().item())
 
     def _flat(x: torch.Tensor) -> torch.Tensor:
         return x.reshape(t_len * b_len)
 
     targets = {
         "eval_mask": _flat(eval_mask).bool(),
-        "y_recovery": _flat(y_recovery),
-        "y_success": _flat(y_success),
-        "y_drop": _flat(y_drop),
-        "y_improve": _flat(y_improve),
+        "y_recovery": _flat(y_recovery.float()),
+        "y_success": _flat(y_success.float()),
+        "y_drop": _flat(y_drop.float()),
+        "y_improve": _flat(y_improve.float()),
+        "recovery_mask": _flat(recovery_mask_f > 0.5).bool(),
     }
-    return targets, tol_diag
+    return targets, diag
 
 
 def extract_wm_calibration_predictions(
@@ -501,8 +461,9 @@ def extract_wm_calibration_predictions(
     try:
         preds = heads.predict_transition(belief_flat, action_flat)
     except Exception:
-        diag["wm_cal/missing_head"] = 1.0
-        diag["wm_cal/failure_reason_id"] = FAILURE_MISSING_HEAD
+        from .wm_head_probs import FAILURE_PREDICT_EXCEPTION
+        diag["wm_cal/predict_exception"] = 1.0
+        diag["wm_cal/failure_reason_id"] = FAILURE_PREDICT_EXCEPTION
         return None, diag
 
     n = int(belief_flat.shape[0]) if isinstance(belief_flat, torch.Tensor) else None

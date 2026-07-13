@@ -822,77 +822,25 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
     def _build_horizon_valid_mask(
         batch: SequenceBatch, horizon: int
     ) -> torch.Tensor:
-        """Return mask (T, B) where target is computable inside the window.
+        from .wm_head_targets import build_horizon_valid_mask
 
-        For step t we need the next ``horizon`` steps (t+1..t+H) to lie in
-        the same segment_id (no done crossing) and inside the window. The
-        mask is the elementwise product of:
-          * batch.valid_mask[t]
-          * (1 - done[t])  # done at t means episode ended; no future
-          * cumulative product of (1 - done[t..t+H-1]) over the horizon
-          * 1 if (t + H) < T else 0
-        """
-        T, B = batch.T, batch.B
-        device = batch.device
-        h = max(1, int(horizon))
-        not_done = (1.0 - batch.done.float())
-        in_seg = batch.valid_mask.float()
-        ok = batch.valid_mask.new_zeros(T, B)
-        for t in range(T):
-            if t + h >= T:
-                continue
-            window = not_done[t : t + h]  # (h, B)
-            seg = in_seg[t]
-            ok[t] = seg * window.prod(dim=0)
-        return ok
+        return build_horizon_valid_mask(batch, horizon)
 
     @staticmethod
     def _build_horizon_success_target(
         batch: SequenceBatch, horizon: int
     ) -> torch.Tensor:
-        """Return float (T, B): 1.0 if success_count strictly increases over [t, t+H]."""
-        T, B = batch.T, batch.B
-        device = batch.device
-        h = max(1, int(horizon))
-        sc = batch.success_count
-        nsc = batch.next_success_count
-        if sc is None or nsc is None:
-            return torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
-        # Use next_success_count[t+H-1] as the "after H steps" counter.
-        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
-        for t in range(T):
-            t_end = min(T - 1, t + h - 1)
-            inc = (nsc[t_end] - sc[t]).clamp_min(0)
-            target[t] = (inc > 0.5).to(target.dtype)
-        return target
+        from .wm_head_targets import build_horizon_success_target
+
+        return build_horizon_success_target(batch, horizon)
 
     @staticmethod
     def _build_horizon_drop_target(
         batch: SequenceBatch, horizon: int
     ) -> torch.Tensor:
-        """Return float (T, B): 1.0 if any drop/failure within [t, t+H-1]."""
-        T, B = batch.T, batch.B
-        device = batch.device
-        h = max(1, int(horizon))
-        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
-        if batch.failure is None and batch.dropped is None:
-            return target
-        fail_seq = batch.failure if batch.failure is not None else None
-        drop_seq = batch.dropped if batch.dropped is not None else None
-        for t in range(T):
-            t_end = min(T, t + h)
-            window_fail = (
-                fail_seq[t:t_end].sum(dim=0)
-                if fail_seq is not None
-                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
-            )
-            window_drop = (
-                drop_seq[t:t_end].sum(dim=0)
-                if drop_seq is not None
-                else torch.zeros(B, device=device, dtype=batch.obs.dtype)
-            )
-            target[t] = ((window_fail + window_drop) > 0.5).to(target.dtype)
-        return target
+        from .wm_head_targets import build_horizon_drop_target
+
+        return build_horizon_drop_target(batch, horizon)
 
     def _build_recovery_target_soft_or(
         self,
@@ -903,59 +851,15 @@ class RSSMLiteWorldModel(SequenceWorldModelBase):
         d_hat_tol_min_steps: int,
         floor_tol_threshold: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Soft-OR recovery target (Item 6 of user constraints).
+        from .wm_head_targets import build_recovery_target_soft_or
 
-        target[t,b] = 1 if ANY of:
-          * success_count strictly increases over horizon
-          * d_hat improves by ``d_hat_margin`` (i.e. d_hat[t] - d_hat[t+H-1] >= margin)
-          * d_hat <= success_tolerance for >= ``d_hat_tol_min_steps`` of the
-            next horizon valid steps
-        Drop / failure are NOT a hard AND on positives; they are recorded
-        only via the drop-risk head separately. Recovery loss is masked to
-        floor stage: success_tolerance <= floor_tol_threshold.
-        """
-        T, B = batch.T, batch.B
-        device = batch.device
-        h = max(1, int(horizon))
-        target = torch.zeros(T, B, device=device, dtype=batch.obs.dtype)
-
-        success_inc = self._build_horizon_success_target(batch, h)
-        target = torch.maximum(target, success_inc)
-
-        if batch.d_hat is not None:
-            for t in range(T):
-                t_end = min(T - 1, t + h - 1)
-                margin_ok = (batch.d_hat[t] - batch.d_hat[t_end]) >= float(
-                    d_hat_margin
-                )
-                target[t] = torch.maximum(
-                    target[t], margin_ok.to(target.dtype)
-                )
-
-        if (
-            batch.d_hat is not None
-            and batch.success_tolerance_seq is not None
-            and int(d_hat_tol_min_steps) > 0
-        ):
-            for t in range(T):
-                t_end = min(T, t + h)
-                tol_seg = batch.success_tolerance_seq[t:t_end]
-                d_seg = batch.d_hat[t:t_end]
-                under_tol = (d_seg <= tol_seg).float().sum(dim=0)
-                target[t] = torch.maximum(
-                    target[t],
-                    (under_tol >= float(d_hat_tol_min_steps)).to(target.dtype),
-                )
-
-        # Mask: only learn recovery at floor stage AND when target is
-        # well-defined inside the window (no done crossing).
-        valid_h = self._build_horizon_valid_mask(batch, h)
-        mask = valid_h
-        if batch.success_tolerance_seq is not None:
-            tol_at_t = batch.success_tolerance_seq
-            in_floor = (tol_at_t <= float(floor_tol_threshold)).to(mask.dtype)
-            mask = mask * in_floor
-        return target, mask
+        return build_recovery_target_soft_or(
+            batch,
+            horizon=horizon,
+            d_hat_margin=d_hat_margin,
+            d_hat_tol_min_steps=d_hat_tol_min_steps,
+            floor_tol_threshold=floor_tol_threshold,
+        )
 
     # ------------------------------------------------------------------
     # EIR-MPC (Phase: full H-step MPPI): prior-only latent rollout API.

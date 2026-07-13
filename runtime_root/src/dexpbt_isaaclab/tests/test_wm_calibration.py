@@ -31,6 +31,7 @@ def _seq_batch(
     d_improve: float = 0.01,
     tol: float = 0.015,
     done_at: int | None = None,
+    success_inc_at: int | None = None,
 ) -> SequenceBatch:
     d_hat = torch.full((t, b), float(d0))
     if d_improve > 0:
@@ -44,6 +45,10 @@ def _seq_batch(
     valid = torch.ones(t, b)
     if done_at is not None:
         valid[done_at + 1 :, :] = 0.0
+    sc = torch.zeros(t, b)
+    nsc = torch.zeros(t, b)
+    if success_inc_at is not None and 0 <= success_inc_at < t:
+        nsc[success_inc_at:, :] = 1.0
     return SequenceBatch(
         obs=torch.zeros(t, b, 4),
         action=torch.zeros(t, b, 3),
@@ -57,7 +62,21 @@ def _seq_batch(
         segment_id=seg,
         dropped=torch.zeros(t, b),
         failure=torch.zeros(t, b),
+        success_count=sc,
+        next_success_count=nsc,
     )
+
+
+def _cal_kwargs(**extra):
+    base = dict(
+        horizon_steps=(4,),
+        recovery_horizon=4,
+        improve_margin=0.005,
+        floor_tol_threshold=0.02,
+        recovery_shadow_tol_threshold=0.05,
+    )
+    base.update(extra)
+    return base
 
 
 class _FakeHeads:
@@ -115,26 +134,20 @@ class TestWMCalibration(unittest.TestCase):
         self.assertLessEqual(st.alpha_wm, 0.5)
 
     def test_recovery_label_positive_case(self):
-        batch = _seq_batch(d0=0.03, d_improve=0.015, tol=0.015)
-        tgt, _diag = build_wm_calibration_targets(
-            batch, horizon=4, improve_margin=0.005, floor_tol_threshold=0.02
-        )
+        batch = _seq_batch(d0=0.03, d_improve=0.015, tol=0.015, success_inc_at=2)
+        tgt, _diag = build_wm_calibration_targets(batch, **_cal_kwargs())
         pos = tgt["y_recovery"][tgt["eval_mask"]]
         self.assertGreater(float(pos.max().item()), 0.5)
 
     def test_drop_label_negative_case(self):
         batch = _seq_batch(d0=0.03, d_improve=0.015, tol=0.015)
-        tgt, _diag = build_wm_calibration_targets(
-            batch, horizon=4, improve_margin=0.005, floor_tol_threshold=0.02
-        )
+        tgt, _diag = build_wm_calibration_targets(batch, **_cal_kwargs())
         drops = tgt["y_drop"][tgt["eval_mask"]]
         self.assertLessEqual(float(drops.max().item()), 0.0)
 
     def test_done_boundary_excludes_future(self):
         batch = _seq_batch(d0=0.03, d_improve=0.02, tol=0.015, done_at=0)
-        tgt, _diag = build_wm_calibration_targets(
-            batch, horizon=4, improve_margin=0.005, floor_tol_threshold=0.02
-        )
+        tgt, _diag = build_wm_calibration_targets(batch, **_cal_kwargs())
         self.assertFalse(bool(tgt["eval_mask"][0].item()))
 
     def test_insufficient_samples_do_not_update_alpha(self):
@@ -176,38 +189,28 @@ class TestWMCalibration(unittest.TestCase):
     def test_pos_rate_not_constant_one(self):
         batch = _seq_batch(d0=0.03, d_improve=0.0, tol=0.015)
         tgt, _diag = build_wm_calibration_targets(
-            batch, horizon=4, improve_margin=0.05, floor_tol_threshold=0.02
+            batch, **_cal_kwargs(improve_margin=0.05)
         )
         y = tgt["y_recovery"][tgt["eval_mask"]].tolist()
         if y:
             rates = [float(v) for v in y]
             self.assertFalse(all(v > 0.5 for v in rates) and len(set(rates)) == 1)
 
-    def test_legacy_floor_mask_empty_for_mid_stage_tol(self):
-        batch = _seq_batch(d0=0.05, d_improve=0.01, tol=0.038)
+    def test_recovery_shadow_excludes_above_shadow_tol(self):
+        # tol above shadow => recovery mask empty (training-aligned floor gate).
+        batch = _seq_batch(d0=0.05, d_improve=0.01, tol=0.06)
         tgt, diag = build_wm_calibration_targets(
-            batch,
-            horizon=4,
-            improve_margin=0.005,
-            floor_tol_threshold=0.02,
-            eval_tol_mode="fixed",
-            eval_tol_threshold=0.02,
+            batch, **_cal_kwargs(floor_tol_threshold=0.02, recovery_shadow_tol_threshold=0.04)
         )
         self.assertEqual(int(tgt["eval_mask"].sum().item()), 0)
-        self.assertAlmostEqual(diag["wm_cal/eval_tol_threshold"], 0.02)
+        self.assertEqual(int(tgt["recovery_mask"].sum().item()), 0)
 
-    def test_hybrid_covers_mid_stage_tol(self):
-        batch = _seq_batch(d0=0.05, d_improve=0.01, tol=0.038)
+    def test_recovery_shadow_covers_mid_tol(self):
+        batch = _seq_batch(d0=0.05, d_improve=0.02, tol=0.038, success_inc_at=3)
         tgt, diag = build_wm_calibration_targets(
-            batch,
-            horizon=4,
-            improve_margin=0.005,
-            floor_tol_threshold=0.02,
-            eval_tol_mode="hybrid",
-            eval_tol_threshold=0.05,
-            eval_tol_cap=0.06,
+            batch, **_cal_kwargs(floor_tol_threshold=0.02, recovery_shadow_tol_threshold=0.05)
         )
-        self.assertGreaterEqual(diag["wm_cal/eval_tol_threshold"], 0.038)
+        self.assertGreater(int(tgt["recovery_mask"].sum().item()), 0)
         self.assertGreater(int(tgt["eval_mask"].sum().item()), 0)
 
     def test_adaptive_respects_cap(self):
@@ -624,20 +627,13 @@ class TestWMCalibration(unittest.TestCase):
 
     def test_horizon_intersection_mask(self):
         # T=10 so H=8 is reachable for early rows only; intersection with H=4
-        # still requires H=8 future.
-        batch = _seq_batch(t=10, b=1, d0=0.05, d_improve=0.01, tol=0.015)
+        # still requires H=8 future (training horizon valid mask).
+        batch = _seq_batch(t=10, b=1, d0=0.05, d_improve=0.02, tol=0.015, success_inc_at=1)
         tgt, diag = build_wm_calibration_targets(
             batch,
-            horizon=4,
-            horizon_steps=(4, 8),
-            improve_margin=0.005,
-            floor_tol_threshold=0.02,
-            eval_tol_mode="hybrid",
-            eval_tol_threshold=0.05,
-            eval_tol_cap=0.06,
+            **_cal_kwargs(horizon_steps=(4, 8), recovery_horizon=4),
         )
         self.assertEqual(diag["wm_cal/horizon_count"], 2.0)
-        # Only timesteps with full 8-step future can be in eval_mask.
         self.assertLessEqual(int(tgt["eval_mask"].sum().item()), 2)
 
 
