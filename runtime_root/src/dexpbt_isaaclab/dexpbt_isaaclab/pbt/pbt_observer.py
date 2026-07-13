@@ -11224,16 +11224,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     )
                 )
 
-            restart_ok, _lease_status, _fr, _restart_exc = (
-                self._run_restart_with_reservation(
-                    ledger=_replacement_ledger,
-                    handle=_pending_replacement_handle,
-                    restart_fn=_restart_body,
-                    env_frames=int(env_frames),
-                )
+            result = self._run_restart_with_reservation(
+                ledger=_replacement_ledger,
+                handle=_pending_replacement_handle,
+                restart_fn=_restart_body,
+                env_frames=int(env_frames),
             )
-            if _restart_exc is not None:
-                raise _restart_exc
+            restart_ok = bool(result.restart_ok)
+            if bool(result.applied_but_unrecorded):
+                self._adaptive_ledger_unhealthy_this_tick = True
+            if result.restart_exception is not None:
+                raise result.restart_exception
         else:
             restart_ok = self._restart_process_with_new_params(
                 new_params,
@@ -11289,93 +11290,28 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         Priority: preserve body exception > finalize release/commit > heartbeat
         telemetry. Heartbeat never replaces a restart exception.
         """
-        restart_ok, lease_status, fr, restart_exc = ledger.run_restart_with_reservation(
+        from dexpbt_isaaclab.pbt.replacement_reservation import (
+            run_observer_restart_with_reservation,
+        )
+
+        def _add_scalar(name: str, value: float, frame: int) -> None:
+            if self.writer is None:
+                return
+            try:
+                self.writer.add_scalar(str(name), float(value), int(frame))
+            except Exception:
+                pass
+
+        return run_observer_restart_with_reservation(
+            ledger,
             handle,
             restart_fn,
+            env_frames=int(env_frames),
+            write_event=self._safe_write_pbt_copy_event,
+            add_scalar=_add_scalar,
             heartbeat_interval_s=heartbeat_interval_s,
+            critical_log=print,
         )
-        try:
-            if not lease_status.heartbeat_ok:
-                print(
-                    f"[adaptive-replacement] reservation lease/heartbeat error: "
-                    f"{lease_status.heartbeat_error}"
-                )
-                self._safe_write_pbt_copy_event(
-                    {
-                        "event_type": "replacement_lease_heartbeat_failed",
-                        "reason": str(lease_status.heartbeat_error),
-                        "reservation_id": str(handle.reservation_id),
-                        "tick_id": int(handle.tick_id),
-                        "stage": str(handle.stage),
-                        "restart_ok": bool(restart_ok),
-                        "thread_stopped": bool(lease_status.thread_stopped),
-                        "env_frames": int(env_frames),
-                    }
-                )
-            if restart_ok:
-                if fr.reason in ("reconciled", "reconciled_budget_overrun") or (
-                    not fr.ok
-                ):
-                    # commit path already reconciled inside helper when needed;
-                    # surface critical events when reconcile/overrun happened.
-                    if str(fr.reason).startswith("reconciled") or str(fr.reason) == (
-                        "reconciled_budget_overrun"
-                    ):
-                        self._safe_write_pbt_copy_event(
-                            {
-                                "event_type": "replacement_commit_failed",
-                                "reason": "commit_then_reconcile",
-                                "reservation_id": str(handle.reservation_id),
-                                "tick_id": int(handle.tick_id),
-                                "stage": str(handle.stage),
-                                "env_frames": int(env_frames),
-                            }
-                        )
-                        self._safe_write_pbt_copy_event(
-                            {
-                                "event_type": "replacement_reconciled",
-                                "ok": bool(fr.ok),
-                                "reason": str(fr.reason),
-                                "reservation_id": str(handle.reservation_id),
-                                "tick_id": int(handle.tick_id),
-                                "stage": str(handle.stage),
-                                "env_frames": int(env_frames),
-                            }
-                        )
-                if self.writer is not None:
-                    for k, v in (fr.telemetry or {}).items():
-                        try:
-                            self.writer.add_scalar(str(k), float(v), int(env_frames))
-                        except Exception:
-                            pass
-            else:
-                if not fr.ok:
-                    print(
-                        f"[adaptive-replacement] release failed after "
-                        f"restart failure (reason={fr.reason})"
-                    )
-                    self._safe_write_pbt_copy_event(
-                        {
-                            "event_type": "replacement_release_failed",
-                            "reason": str(fr.reason),
-                            "reservation_id": str(handle.reservation_id),
-                            "tick_id": int(handle.tick_id),
-                            "stage": str(handle.stage),
-                            "env_frames": int(env_frames),
-                        }
-                    )
-                if self.writer is not None:
-                    for k, v in (fr.telemetry or {}).items():
-                        try:
-                            self.writer.add_scalar(str(k), float(v), int(env_frames))
-                        except Exception:
-                            pass
-        except Exception as _tele_exc:
-            print(
-                f"[adaptive-replacement] reservation finalize telemetry failed: "
-                f"{_tele_exc}"
-            )
-        return restart_ok, lease_status, fr, restart_exc
 
     def _policy_run_dir(self) -> Path:
         """Supervisor RUN_DIR for this worker: ``.../policy_XX``."""

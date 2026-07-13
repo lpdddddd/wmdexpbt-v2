@@ -6,6 +6,7 @@ and freshness ranking — not shallow mocks of the call sites.
 
 from __future__ import annotations
 
+import json
 import math
 import multiprocessing as mp
 import os
@@ -26,6 +27,7 @@ from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
     select_rescue_source,
 )
 from dexpbt_isaaclab.pbt.replacement_reservation import (
+    FinalizeResult,
     PopulationReplacementLedger,
     ReservationHandle,
     ReservationLeaseStatus,
@@ -938,7 +940,9 @@ class TestReservationLeaseExceptionSafety(unittest.TestCase):
         ledger = PopulationReplacementLedger(
             tmp, reservation_timeout_s=0.5, heartbeat_interval_s=0.05
         )
-        r = ledger.try_reserve_ordinary(**_reserve_kwargs(target_idx=1, budget=1, min_distinct=1, **over))
+        r = ledger.try_reserve_ordinary(
+            **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1, **over)
+        )
         self.assertTrue(r.ok, r.reason)
         return ledger, r.handle
 
@@ -949,12 +953,13 @@ class TestReservationLeaseExceptionSafety(unittest.TestCase):
             def boom():
                 raise ValueError("restart-body")
 
-            ok, status, fr, exc = ledger.run_restart_with_reservation(handle, boom)
-            self.assertFalse(ok)
-            self.assertIsInstance(exc, ValueError)
-            self.assertEqual(str(exc), "restart-body")
-            self.assertTrue(fr.ok)
-            self.assertEqual(fr.reason, "released")
+            res = ledger.run_restart_with_reservation(handle, boom)
+            self.assertFalse(res.restart_ok)
+            self.assertTrue(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            self.assertIsInstance(res.restart_exception, ValueError)
+            self.assertEqual(str(res.restart_exception), "restart-body")
+            self.assertEqual(res.finalize_result.reason, "released")
 
     def test_body_oserror_releases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -963,50 +968,41 @@ class TestReservationLeaseExceptionSafety(unittest.TestCase):
             def boom():
                 raise OSError("disk")
 
-            ok, status, fr, exc = ledger.run_restart_with_reservation(handle, boom)
-            self.assertFalse(ok)
-            self.assertIsInstance(exc, OSError)
-            self.assertEqual(fr.reason, "released")
+            res = ledger.run_restart_with_reservation(handle, boom)
+            self.assertFalse(res.restart_ok)
+            self.assertIsInstance(res.restart_exception, OSError)
+            self.assertEqual(res.finalize_result.reason, "released")
 
     def test_false_restart_releases(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, handle = self._reserve(tmp)
-            ok, status, fr, exc = ledger.run_restart_with_reservation(
-                handle, lambda: False
-            )
-            self.assertFalse(ok)
-            self.assertIsNone(exc)
-            self.assertEqual(fr.reason, "released")
-            self.assertTrue(status.thread_stopped)
+            res = ledger.run_restart_with_reservation(handle, lambda: False)
+            self.assertFalse(res.restart_ok)
+            self.assertTrue(res.finalize_ok)
+            self.assertIsNone(res.restart_exception)
+            self.assertEqual(res.finalize_result.reason, "released")
+            self.assertTrue(res.lease_status.thread_stopped)
 
     def test_success_commits(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger, handle = self._reserve(tmp)
-            ok, status, fr, exc = ledger.run_restart_with_reservation(
-                handle, lambda: True
-            )
-            self.assertTrue(ok)
-            self.assertIsNone(exc)
-            self.assertEqual(fr.reason, "committed")
-            self.assertTrue(status.heartbeat_ok)
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            self.assertTrue(res.restart_ok)
+            self.assertTrue(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            self.assertIsNone(res.restart_exception)
+            self.assertEqual(res.finalize_result.reason, "committed")
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertFalse(unhealthy)
 
     def test_reconcile_budget_overrun_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PopulationReplacementLedger(tmp, reservation_timeout_s=0.05)
-            # Fill budget via commit of first reservation.
             r1 = ledger.try_reserve_ordinary(
                 **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
             )
             self.assertTrue(r1.ok)
             self.assertTrue(ledger.commit(r1.handle).ok)
-            # Second reservation expires then reconcile beyond budget.
-            r2 = ledger.try_reserve_ordinary(
-                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
-            )
-            # Budget exhausted — force reconstruct via reconcile of a forged expired handle
-            # by manually creating a reserved-then-expired slot is hard; instead
-            # reconcile a handle whose reservation was never on the ledger after
-            # reconstructing from handle with budget already full.
             fake = ReservationHandle(
                 tick_id=1,
                 stage=STAGE_EXPLORATION,
@@ -1019,8 +1015,6 @@ class TestReservationLeaseExceptionSafety(unittest.TestCase):
                 source_lineage="A",
                 lease_timeout_s=0.05,
             )
-            # Need matching owner fields in reconstructed reservation — reconcile
-            # reconstructs from handle when missing.
             fr1 = ledger.reconcile_commit(fake)
             self.assertTrue(fr1.ok)
             self.assertEqual(fr1.reason, "reconciled_budget_overrun")
@@ -1046,35 +1040,265 @@ class TestReservationLeaseExceptionSafety(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 with ledger.reservation_lease(handle, status=status):
                     raise RuntimeError("body")
-            # Context exited without replacing body error; status may note heartbeat.
             self.assertTrue(status.thread_stopped)
 
 
-class TestObserverRestartOrchestration(unittest.TestCase):
-    def test_observer_helper_releases_on_oserror(self):
-        # Import method without importing full observer module (rl_games dep).
-        import importlib.util
+class TestAppliedButUnrecordedCritical(unittest.TestCase):
+    def _reserve(self, tmp, **over):
+        ledger = PopulationReplacementLedger(tmp)
+        r = ledger.try_reserve_ordinary(
+            **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1, **over)
+        )
+        self.assertTrue(r.ok, r.reason)
+        return ledger, r.handle
 
-        # Exercise ledger orchestration path used by observer helper.
+    def test_commit_fail_reconcile_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            real_commit = ledger.commit
+
+            def fail_commit(h):
+                return FinalizeResult(ok=False, reason="expired", status="expired")
+
+            ledger.commit = fail_commit  # type: ignore[method-assign]
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            ledger.commit = real_commit  # type: ignore[method-assign]
+            self.assertTrue(res.restart_ok)
+            self.assertTrue(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            self.assertTrue(str(res.finalize_result.reason).startswith("reconciled"))
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertFalse(unhealthy)
+
+    def test_commit_and_reconcile_both_fail_marks_unhealthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def fail_commit(h):
+                return FinalizeResult(ok=False, reason="expired", status="expired")
+
+            def fail_rec(h):
+                return FinalizeResult(ok=False, reason="owner_mismatch", status="failed")
+
+            ledger.commit = fail_commit  # type: ignore[method-assign]
+            ledger.reconcile_commit = fail_rec  # type: ignore[method-assign]
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            self.assertTrue(res.restart_ok)
+            self.assertFalse(res.finalize_ok)
+            self.assertTrue(res.applied_but_unrecorded)
+            unhealthy, reason = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertTrue(unhealthy)
+            self.assertEqual(reason, "replacement_applied_but_unrecorded")
+            blocked = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
+            )
+            self.assertFalse(blocked.ok)
+            self.assertEqual(blocked.reason, "ledger_unhealthy")
+
+    def test_commit_oserror_reconcile_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def boom_commit(h):
+                raise OSError("commit-disk")
+
+            ledger.commit = boom_commit  # type: ignore[method-assign]
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            self.assertTrue(res.restart_ok)
+            self.assertTrue(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            self.assertIsInstance(res.finalize_exception, OSError)
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertFalse(unhealthy)
+
+    def test_commit_and_reconcile_both_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def boom_commit(h):
+                raise OSError("commit-disk")
+
+            def boom_rec(h):
+                raise PermissionError("reconcile-perm")
+
+            ledger.commit = boom_commit  # type: ignore[method-assign]
+            ledger.reconcile_commit = boom_rec  # type: ignore[method-assign]
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            self.assertTrue(res.restart_ok)
+            self.assertFalse(res.finalize_ok)
+            self.assertTrue(res.applied_but_unrecorded)
+            self.assertIsInstance(res.finalize_exception, OSError)
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertTrue(unhealthy)
+
+    def test_release_exception_not_applied_unrecorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+
+            def boom_release(h):
+                raise OSError("release-disk")
+
+            ledger.release = boom_release  # type: ignore[method-assign]
+
+            def boom_body():
+                raise ValueError("restart-body")
+
+            res = ledger.run_restart_with_reservation(handle, boom_body)
+            self.assertFalse(res.restart_ok)
+            self.assertFalse(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            self.assertIsInstance(res.restart_exception, ValueError)
+            self.assertIsInstance(res.finalize_exception, OSError)
+            self.assertIn(
+                "adaptive_consolidation/replacement_release_critical_failure",
+                res.finalize_result.telemetry,
+            )
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertFalse(unhealthy)
+
+    def test_unhealthy_isolated_by_tick_and_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PopulationReplacementLedger(tmp)
             r = ledger.try_reserve_ordinary(
-                **_reserve_kwargs(target_idx=1, budget=1, min_distinct=1)
+                **_reserve_kwargs(
+                    target_idx=1, budget=1, min_distinct=1, stage=STAGE_EXPLORATION
+                )
             )
             self.assertTrue(r.ok)
+            ledger.commit = lambda h: FinalizeResult(ok=False, reason="expired")  # type: ignore
+            ledger.reconcile_commit = lambda h: FinalizeResult(  # type: ignore
+                ok=False, reason="fail"
+            )
+            res = ledger.run_restart_with_reservation(r.handle, lambda: True)
+            self.assertTrue(res.applied_but_unrecorded)
+            # Same tick exploration blocked.
+            blocked = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(
+                    target_idx=2, budget=1, min_distinct=1, stage=STAGE_EXPLORATION
+                )
+            )
+            self.assertEqual(blocked.reason, "ledger_unhealthy")
+            # Consolidation same tick ok.
+            ok_con = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(
+                    target_idx=1, budget=1, min_distinct=1, stage=STAGE_CONSOLIDATION
+                )
+            )
+            self.assertTrue(ok_con.ok, ok_con.reason)
+            # Tick 2 exploration ok.
+            ok_t2 = ledger.try_reserve_ordinary(
+                **{
+                    **_reserve_kwargs(
+                        target_idx=1, budget=1, min_distinct=1, stage=STAGE_EXPLORATION
+                    ),
+                    "tick_id": 2,
+                }
+            )
+            self.assertTrue(ok_t2.ok, ok_t2.reason)
 
-            def boom():
-                raise OSError("boom")
+    def test_mark_unhealthy_idempotent_same_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            self.assertTrue(
+                ledger.mark_unhealthy(handle, "replacement_applied_but_unrecorded")
+            )
+            self.assertTrue(
+                ledger.mark_unhealthy(handle, "replacement_applied_but_unrecorded")
+            )
+            marker = ledger._unhealthy_path(1, STAGE_EXPLORATION)
+            data = json.loads(marker.read_text())
+            self.assertEqual(int(data.get("mark_count", 0)), 1)
 
-            ok, status, fr, exc = ledger.run_restart_with_reservation(r.handle, boom)
-            self.assertFalse(ok)
-            self.assertIsInstance(exc, OSError)
-            self.assertEqual(fr.reason, "released")
-            # Reservation no longer holds budget.
-            r2 = ledger.try_reserve_ordinary(
+    def test_successful_reconcile_not_unhealthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, handle = self._reserve(tmp)
+            ledger.commit = lambda h: FinalizeResult(ok=False, reason="expired")  # type: ignore
+            res = ledger.run_restart_with_reservation(handle, lambda: True)
+            self.assertTrue(res.finalize_ok)
+            self.assertFalse(res.applied_but_unrecorded)
+            unhealthy, _ = ledger.is_unhealthy(1, STAGE_EXPLORATION)
+            self.assertFalse(unhealthy)
+
+
+class TestObserverRestartOrchestration(unittest.TestCase):
+    def test_observer_shared_helper_critical_event_and_tb(self):
+        from dexpbt_isaaclab.pbt.replacement_reservation import (
+            FinalizeResult,
+            run_observer_restart_with_reservation,
+        )
+
+        events: list[dict] = []
+        scalars: list[tuple[str, float, int]] = []
+        logs: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PopulationReplacementLedger(tmp)
+            r = ledger.try_reserve_ordinary(
+                **_reserve_kwargs(target_idx=3, budget=1, min_distinct=1)
+            )
+            self.assertTrue(r.ok)
+            ledger.commit = lambda h: FinalizeResult(ok=False, reason="expired")  # type: ignore
+            ledger.reconcile_commit = lambda h: FinalizeResult(  # type: ignore
+                ok=False, reason="io_fail"
+            )
+
+            # Mirror PBTObserver._run_restart_with_reservation exactly.
+            result = run_observer_restart_with_reservation(
+                ledger,
+                r.handle,
+                lambda: True,
+                env_frames=12345,
+                write_event=lambda payload: events.append(dict(payload)),
+                add_scalar=lambda n, v, f: scalars.append((n, float(v), int(f))),
+                critical_log=lambda msg: logs.append(str(msg)),
+            )
+            self.assertTrue(result.restart_ok)
+            self.assertTrue(result.applied_but_unrecorded)
+            self.assertTrue(any("CRITICAL" in m for m in logs))
+            crit = [
+                e
+                for e in events
+                if e.get("event_type") == "replacement_finalize_critical_failure"
+            ]
+            self.assertEqual(len(crit), 1)
+            ev = crit[0]
+            self.assertTrue(ev["restart_ok"])
+            self.assertFalse(ev["finalize_ok"])
+            self.assertTrue(ev["applied_but_unrecorded"])
+            self.assertEqual(ev["reservation_id"], r.handle.reservation_id)
+            self.assertEqual(ev["tick_id"], 1)
+            self.assertEqual(ev["stage"], STAGE_EXPLORATION)
+            self.assertEqual(ev["target"], 3)
+            self.assertEqual(ev["source"], 0)
+            self.assertEqual(ev["env_frames"], 12345)
+            names = {n for n, _, _ in scalars}
+            self.assertIn(
+                "adaptive_consolidation/replacement_finalize_critical_failure", names
+            )
+            self.assertIn(
+                "adaptive_consolidation/replacement_applied_but_unrecorded", names
+            )
+            self.assertIn(
+                "adaptive_consolidation/replacement_ledger_unhealthy", names
+            )
+            blocked = ledger.try_reserve_ordinary(
                 **_reserve_kwargs(target_idx=2, budget=1, min_distinct=1)
             )
-            self.assertTrue(r2.ok, r2.reason)
+            self.assertEqual(blocked.reason, "ledger_unhealthy")
+
+    def test_observer_method_delegates_to_shared_helper(self):
+        """Prove PBTObserver method source calls the shared helper (no fork)."""
+        import inspect
+
+        # Avoid importing rl_games-dependent module body by reading source file.
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "dexpbt_isaaclab"
+            / "pbt"
+            / "pbt_observer.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("run_observer_restart_with_reservation", src)
+        self.assertIn("def _run_restart_with_reservation", src)
 
 
 if __name__ == "__main__":

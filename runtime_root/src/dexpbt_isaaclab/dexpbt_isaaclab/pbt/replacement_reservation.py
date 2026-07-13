@@ -91,6 +91,25 @@ class ReservationLeaseStatus:
     heartbeat_error: str = ""
     thread_stopped: bool = True
 
+
+@dataclass
+class RestartReservationResult:
+    """Outcome of lease → restart → commit/reconcile/release."""
+
+    restart_ok: bool = False
+    finalize_ok: bool = False
+    applied_but_unrecorded: bool = False
+    lease_status: ReservationLeaseStatus = field(default_factory=ReservationLeaseStatus)
+    finalize_result: FinalizeResult = field(
+        default_factory=lambda: FinalizeResult(ok=False, reason="not_run")
+    )
+    restart_exception: Exception | None = None
+    finalize_exception: Exception | None = None
+    commit_reason: str = ""
+    reconcile_reason: str = ""
+    release_reason: str = ""
+
+
 def projected_lineages_after_copies(
     base_lineages: Mapping[int, str],
     *,
@@ -143,6 +162,10 @@ class PopulationReplacementLedger:
             self.dir / f"tick_{tick}_{st}.lock",
         )
 
+    def _unhealthy_path(self, tick_id: int, stage: str) -> Path:
+        st = normalize_stage(stage)
+        return self.dir / f"tick_{int(tick_id)}_{st}.unhealthy.json"
+
     def _empty_state(self, tick_id: int, stage: str, budget: int) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -159,6 +182,9 @@ class PopulationReplacementLedger:
             "reconciled": 0,
             "budget_overrun": False,
             "budget_overrun_count": 0,
+            "finalize_critical_failure": 0,
+            "release_critical_failure": 0,
+            "applied_but_unrecorded": 0,
         }
 
     def _validate_immutable(
@@ -327,6 +353,18 @@ class PopulationReplacementLedger:
             "adaptive_consolidation/replacement_budget_overrun": float(
                 1.0 if state.get("budget_overrun") else 0.0
             ),
+            "adaptive_consolidation/replacement_finalize_critical_failure": float(
+                state.get("finalize_critical_failure", 0) or 0
+            ),
+            "adaptive_consolidation/replacement_applied_but_unrecorded": float(
+                state.get("applied_but_unrecorded", 0) or 0
+            ),
+            "adaptive_consolidation/replacement_release_critical_failure": float(
+                state.get("release_critical_failure", 0) or 0
+            ),
+            "adaptive_consolidation/replacement_ledger_unhealthy": float(
+                1.0 if state.get("unhealthy") else 0.0
+            ),
         }
 
     def try_reserve_ordinary(
@@ -347,6 +385,17 @@ class PopulationReplacementLedger:
         st = normalize_stage(stage)
 
         def _body(json_path: Path) -> ReservationResult:
+            unhealthy, unhealthy_reason = self._read_unhealthy_unlocked(tick_id, st)
+            if unhealthy:
+                tele = {
+                    "adaptive_consolidation/replacement_ledger_unhealthy": 1.0,
+                    "adaptive_consolidation/replacement_finalize_critical_failure": 1.0,
+                }
+                return ReservationResult(
+                    ok=False,
+                    reason="ledger_unhealthy",
+                    telemetry=tele,
+                )
             state, err = self._load_or_create(json_path, tick_id, st, budget)
             if state is None:
                 return ReservationResult(ok=False, reason=err or "ledger_corrupt")
@@ -728,27 +777,41 @@ class PopulationReplacementLedger:
         reason_n = str(reason or "unknown")
 
         def _body(json_path: Path) -> dict[str, float]:
+            unhealthy, _ureason = self._read_unhealthy_unlocked(tick_id, st)
             state, err = self._load_or_create(json_path, tick_id, st, budget)
             if state is None:
-                return {
+                tele = {
                     "adaptive_consolidation/replacement_budget_bypassed": 0.0,
                     "adaptive_consolidation/ledger_error": 1.0,
                 }
+                if unhealthy:
+                    tele["adaptive_consolidation/replacement_ledger_unhealthy"] = 1.0
+                return tele
             now = _now_wall()
             exp_err = self._expire_stale(state, now_wall=now)
             if exp_err:
-                return {
+                tele = {
                     "adaptive_consolidation/ledger_error": 1.0,
                     "adaptive_consolidation/ledger_error_reason_wall_clock": 1.0,
                 }
+                if unhealthy:
+                    tele["adaptive_consolidation/replacement_ledger_unhealthy"] = 1.0
+                return tele
             bypassed = state.setdefault("bypassed", [])
+
+            def _tele() -> dict[str, float]:
+                out = self.telemetry_from_state(state)
+                if unhealthy:
+                    out["adaptive_consolidation/replacement_ledger_unhealthy"] = 1.0
+                return out
+
             for item in bypassed:
                 if (
                     isinstance(item, dict)
                     and int(item.get("target", -1)) == int(target_idx)
                     and str(item.get("reason", "")) == reason_n
                 ):
-                    return self.telemetry_from_state(state)
+                    return _tele()
             bypassed.append(
                 {
                     "target": int(target_idx),
@@ -757,7 +820,7 @@ class PopulationReplacementLedger:
                 }
             )
             self._save_unlocked(json_path, state)
-            return self.telemetry_from_state(state)
+            return _tele()
 
         return self._with_lock(int(tick_id), st, _body)
 
@@ -842,56 +905,432 @@ class PopulationReplacementLedger:
                     lease_status.heartbeat_error = str(errors[-1])
             # Intentionally do not raise here: preserves body exceptions.
 
+    def _read_unhealthy_unlocked(
+        self, tick_id: int, stage: str
+    ) -> tuple[bool, str]:
+        path = self._unhealthy_path(tick_id, stage)
+        if not path.exists():
+            return False, ""
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            # Corrupt unhealthy marker: fail-closed as unhealthy.
+            return True, "unhealthy_marker_corrupt"
+        if not isinstance(data, dict):
+            return True, "unhealthy_marker_corrupt"
+        if bool(data.get("unhealthy")):
+            return True, str(data.get("unhealthy_reason") or "ledger_unhealthy")
+        return False, ""
+
+    def is_unhealthy(self, tick_id: int, stage: str) -> tuple[bool, str]:
+        st = normalize_stage(stage)
+
+        def _body(_json_path: Path) -> tuple[bool, str]:
+            return self._read_unhealthy_unlocked(tick_id, st)
+
+        return self._with_lock(int(tick_id), st, _body)
+
+    def mark_unhealthy(
+        self,
+        handle: ReservationHandle,
+        reason: str,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Idempotently mark ``(tick, stage)`` ledger unhealthy under flock."""
+        st = normalize_stage(handle.stage)
+        reason_n = str(reason or "replacement_applied_but_unrecorded")
+        diag = dict(diagnostics or {})
+
+        def _body(json_path: Path) -> bool:
+            marker = self._unhealthy_path(handle.tick_id, st)
+            existing = None
+            if marker.exists():
+                try:
+                    existing = json.loads(marker.read_text())
+                except Exception:
+                    existing = None
+            if (
+                isinstance(existing, dict)
+                and bool(existing.get("unhealthy"))
+                and str(existing.get("unhealthy_reservation_id", ""))
+                == str(handle.reservation_id)
+            ):
+                # Idempotent for the same reservation.
+                return True
+            already = isinstance(existing, dict) and bool(existing.get("unhealthy"))
+            payload = {
+                "unhealthy": True,
+                "unhealthy_reason": reason_n,
+                "unhealthy_target": int(handle.target),
+                "unhealthy_source": int(handle.source),
+                "unhealthy_reservation_id": str(handle.reservation_id),
+                "unhealthy_wall": float(_now_wall()),
+                "mark_count": int(
+                    (existing or {}).get("mark_count", 0) or 0
+                )
+                + (0 if already and str(existing.get("unhealthy_reservation_id", "")) == str(handle.reservation_id) else 1),
+                "diagnostics": diag,
+            }
+            if already and str(existing.get("unhealthy_reservation_id", "")) != str(
+                handle.reservation_id
+            ):
+                # Keep first unhealthy latched; do not overwrite identity, bump count once.
+                payload = dict(existing)
+                payload["mark_count"] = int(existing.get("mark_count", 1) or 1)
+                payload["diagnostics"] = {
+                    **dict(existing.get("diagnostics") or {}),
+                    "additional_unrecorded": diag,
+                }
+            tmp = marker.with_suffix(marker.suffix + f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, default=str))
+            tmp.replace(marker)
+            # Best-effort annotate ledger JSON when readable.
+            try:
+                if json_path.exists():
+                    state = json.loads(json_path.read_text())
+                    if isinstance(state, dict):
+                        if not bool(state.get("unhealthy")):
+                            state["unhealthy"] = True
+                            state["unhealthy_reason"] = reason_n
+                            state["finalize_critical_failure"] = int(
+                                state.get("finalize_critical_failure", 0) or 0
+                            ) + (0 if already else 1)
+                            state["applied_but_unrecorded"] = int(
+                                state.get("applied_but_unrecorded", 0) or 0
+                            ) + (0 if already else 1)
+                            self._save_unlocked(json_path, state)
+            except Exception:
+                pass
+            return True
+
+        return self._with_lock(int(handle.tick_id), st, _body)
+
     def run_restart_with_reservation(
         self,
         handle: ReservationHandle,
         restart_fn: Callable[[], bool],
         *,
         heartbeat_interval_s: float | None = None,
-    ) -> tuple[bool, ReservationLeaseStatus, FinalizeResult, Exception | None]:
-        """Lease → restart → checked commit/reconcile/release.
-
-        Always finalizes the reservation. Returns
-        ``(restart_ok, lease_status, finalize_result, restart_exc)``.
-        Caller should re-raise ``restart_exc`` after consuming telemetry if set.
-        Heartbeat failures never replace a body exception.
-        """
-        restart_ok = False
-        restart_exc: Exception | None = None
+    ) -> RestartReservationResult:
+        """Lease → restart → checked commit/reconcile/release with critical flags."""
+        out = RestartReservationResult()
         lease_status = ReservationLeaseStatus()
+        out.lease_status = lease_status
         try:
             with self.reservation_lease(
                 handle,
                 heartbeat_interval_s=heartbeat_interval_s,
                 status=lease_status,
             ):
-                restart_ok = bool(restart_fn())
+                out.restart_ok = bool(restart_fn())
         except Exception as exc:
-            restart_exc = exc
-            restart_ok = False
+            out.restart_exception = exc
+            out.restart_ok = False
 
-        if restart_ok:
-            fr = self.commit(handle)
-            if not fr.ok:
-                fr = self.reconcile_commit(handle)
-            if not lease_status.heartbeat_ok:
-                tele = dict(fr.telemetry or {})
-                tele["adaptive_consolidation/replacement_lease_heartbeat_failed"] = 1.0
-                fr = FinalizeResult(
-                    ok=fr.ok,
-                    reason=fr.reason,
-                    status=fr.status,
-                    telemetry=tele,
+        def _merge_hb(fr: FinalizeResult) -> FinalizeResult:
+            if lease_status.heartbeat_ok:
+                return fr
+            tele = dict(fr.telemetry or {})
+            tele["adaptive_consolidation/replacement_lease_heartbeat_failed"] = 1.0
+            return FinalizeResult(
+                ok=fr.ok,
+                reason=fr.reason,
+                status=fr.status,
+                telemetry=tele,
+            )
+
+        if out.restart_ok:
+            commit_fr: FinalizeResult
+            try:
+                commit_fr = self.commit(handle)
+            except Exception as exc:
+                out.finalize_exception = exc
+                commit_fr = FinalizeResult(
+                    ok=False,
+                    reason=f"commit_exception:{type(exc).__name__}",
+                    status="failed",
+                    telemetry={},
                 )
+            out.commit_reason = str(commit_fr.reason)
+            if commit_fr.ok:
+                out.finalize_ok = True
+                out.finalize_result = _merge_hb(commit_fr)
+            else:
+                try:
+                    rec_fr = self.reconcile_commit(handle)
+                except Exception as exc:
+                    if out.finalize_exception is None:
+                        out.finalize_exception = exc
+                    rec_fr = FinalizeResult(
+                        ok=False,
+                        reason=f"reconcile_exception:{type(exc).__name__}",
+                        status="failed",
+                        telemetry={},
+                    )
+                out.reconcile_reason = str(rec_fr.reason)
+                if rec_fr.ok:
+                    out.finalize_ok = True
+                    out.applied_but_unrecorded = False
+                    out.finalize_result = _merge_hb(rec_fr)
+                else:
+                    out.finalize_ok = False
+                    out.applied_but_unrecorded = True
+                    tele = dict(rec_fr.telemetry or {})
+                    tele["adaptive_consolidation/replacement_finalize_critical_failure"] = (
+                        1.0
+                    )
+                    tele["adaptive_consolidation/replacement_applied_but_unrecorded"] = (
+                        1.0
+                    )
+                    tele["adaptive_consolidation/replacement_ledger_unhealthy"] = 1.0
+                    out.finalize_result = _merge_hb(
+                        FinalizeResult(
+                            ok=False,
+                            reason=str(rec_fr.reason),
+                            status="failed",
+                            telemetry=tele,
+                        )
+                    )
+                    try:
+                        self.mark_unhealthy(
+                            handle,
+                            "replacement_applied_but_unrecorded",
+                            {
+                                "commit_reason": out.commit_reason,
+                                "reconcile_reason": out.reconcile_reason,
+                                "finalize_exception": (
+                                    f"{type(out.finalize_exception).__name__}: "
+                                    f"{out.finalize_exception}"
+                                    if out.finalize_exception
+                                    else ""
+                                ),
+                            },
+                        )
+                    except Exception as mark_exc:
+                        if out.finalize_exception is None:
+                            out.finalize_exception = mark_exc
         else:
-            fr = self.release(handle)
-            if not fr.ok and not lease_status.heartbeat_ok:
-                tele = dict(fr.telemetry or {})
-                tele["adaptive_consolidation/replacement_lease_heartbeat_failed"] = 1.0
-                fr = FinalizeResult(
-                    ok=fr.ok,
-                    reason=fr.reason,
-                    status=fr.status,
-                    telemetry=tele,
+            try:
+                rel_fr = self.release(handle)
+            except Exception as exc:
+                out.finalize_exception = exc
+                rel_fr = FinalizeResult(
+                    ok=False,
+                    reason=f"release_exception:{type(exc).__name__}",
+                    status="failed",
+                    telemetry={},
                 )
-        return bool(restart_ok), lease_status, fr, restart_exc
+            out.release_reason = str(rel_fr.reason)
+            if rel_fr.ok:
+                out.finalize_ok = True
+                out.finalize_result = _merge_hb(rel_fr)
+            else:
+                out.finalize_ok = False
+                out.applied_but_unrecorded = False
+                tele = dict(rel_fr.telemetry or {})
+                tele[
+                    "adaptive_consolidation/replacement_release_critical_failure"
+                ] = 1.0
+                # Best-effort bump ledger counter.
+                try:
+                    json_path, _ = self._paths(handle.tick_id, handle.stage)
+
+                    def _bump(jp: Path) -> None:
+                        if not jp.exists():
+                            return
+                        try:
+                            state = json.loads(jp.read_text())
+                        except Exception:
+                            return
+                        if not isinstance(state, dict):
+                            return
+                        state["release_critical_failure"] = int(
+                            state.get("release_critical_failure", 0) or 0
+                        ) + 1
+                        self._save_unlocked(jp, state)
+
+                    self._with_lock(int(handle.tick_id), handle.stage, _bump)
+                except Exception:
+                    pass
+                out.finalize_result = _merge_hb(
+                    FinalizeResult(
+                        ok=False,
+                        reason=str(rel_fr.reason),
+                        status=str(rel_fr.status),
+                        telemetry=tele,
+                    )
+                )
+        return out
+
+
+def apply_observer_restart_reservation_side_effects(
+    result: RestartReservationResult,
+    *,
+    handle: ReservationHandle,
+    env_frames: int,
+    write_event: Callable[[dict[str, Any]], None],
+    add_scalar: Callable[[str, float, int], None] | None = None,
+) -> None:
+    """Shared observer telemetry/events for reservation finalize (testable)."""
+    lease_status = result.lease_status
+    fr = result.finalize_result
+    try:
+        if not lease_status.heartbeat_ok:
+            write_event(
+                {
+                    "event_type": "replacement_lease_heartbeat_failed",
+                    "reason": str(lease_status.heartbeat_error),
+                    "reservation_id": str(handle.reservation_id),
+                    "tick_id": int(handle.tick_id),
+                    "stage": str(handle.stage),
+                    "restart_ok": bool(result.restart_ok),
+                    "thread_stopped": bool(lease_status.thread_stopped),
+                    "env_frames": int(env_frames),
+                }
+            )
+        if result.restart_ok and result.applied_but_unrecorded:
+            write_event(
+                {
+                    "event_type": "replacement_finalize_critical_failure",
+                    "restart_ok": True,
+                    "finalize_ok": False,
+                    "applied_but_unrecorded": True,
+                    "commit_reason": str(result.commit_reason),
+                    "reconcile_reason": str(result.reconcile_reason),
+                    "restart_exception": (
+                        f"{type(result.restart_exception).__name__}: "
+                        f"{result.restart_exception}"
+                        if result.restart_exception
+                        else None
+                    ),
+                    "finalize_exception": (
+                        f"{type(result.finalize_exception).__name__}: "
+                        f"{result.finalize_exception}"
+                        if result.finalize_exception
+                        else None
+                    ),
+                    "reservation_id": str(handle.reservation_id),
+                    "tick_id": int(handle.tick_id),
+                    "stage": str(handle.stage),
+                    "target": int(handle.target),
+                    "source": int(handle.source),
+                    "env_frames": int(env_frames),
+                }
+            )
+            if add_scalar is not None:
+                add_scalar(
+                    "adaptive_consolidation/replacement_finalize_critical_failure",
+                    1.0,
+                    int(env_frames),
+                )
+                add_scalar(
+                    "adaptive_consolidation/replacement_applied_but_unrecorded",
+                    1.0,
+                    int(env_frames),
+                )
+                add_scalar(
+                    "adaptive_consolidation/replacement_ledger_unhealthy",
+                    1.0,
+                    int(env_frames),
+                )
+        elif result.restart_ok:
+            if str(result.reconcile_reason).startswith("reconciled") or str(
+                result.finalize_result.reason
+            ).startswith("reconciled"):
+                write_event(
+                    {
+                        "event_type": "replacement_commit_failed",
+                        "reason": "commit_then_reconcile",
+                        "reservation_id": str(handle.reservation_id),
+                        "tick_id": int(handle.tick_id),
+                        "stage": str(handle.stage),
+                        "env_frames": int(env_frames),
+                    }
+                )
+                write_event(
+                    {
+                        "event_type": "replacement_reconciled",
+                        "ok": bool(fr.ok),
+                        "reason": str(fr.reason),
+                        "reservation_id": str(handle.reservation_id),
+                        "tick_id": int(handle.tick_id),
+                        "stage": str(handle.stage),
+                        "env_frames": int(env_frames),
+                    }
+                )
+            if add_scalar is not None:
+                for k, v in (fr.telemetry or {}).items():
+                    add_scalar(str(k), float(v), int(env_frames))
+        else:
+            if not result.finalize_ok:
+                write_event(
+                    {
+                        "event_type": "replacement_release_critical_failure",
+                        "reason": str(result.release_reason or fr.reason),
+                        "finalize_exception": (
+                            f"{type(result.finalize_exception).__name__}: "
+                            f"{result.finalize_exception}"
+                            if result.finalize_exception
+                            else None
+                        ),
+                        "reservation_id": str(handle.reservation_id),
+                        "tick_id": int(handle.tick_id),
+                        "stage": str(handle.stage),
+                        "env_frames": int(env_frames),
+                    }
+                )
+            elif not fr.ok:
+                write_event(
+                    {
+                        "event_type": "replacement_release_failed",
+                        "reason": str(fr.reason),
+                        "reservation_id": str(handle.reservation_id),
+                        "tick_id": int(handle.tick_id),
+                        "stage": str(handle.stage),
+                        "env_frames": int(env_frames),
+                    }
+                )
+            if add_scalar is not None:
+                for k, v in (fr.telemetry or {}).items():
+                    add_scalar(str(k), float(v), int(env_frames))
+    except Exception:
+        # Telemetry must never replace restart/finalize state.
+        pass
+
+
+def run_observer_restart_with_reservation(
+    ledger: PopulationReplacementLedger,
+    handle: ReservationHandle,
+    restart_fn: Callable[[], bool],
+    *,
+    env_frames: int,
+    write_event: Callable[[dict[str, Any]], None],
+    add_scalar: Callable[[str, float, int], None] | None = None,
+    heartbeat_interval_s: float | None = None,
+    critical_log: Callable[[str], None] | None = None,
+) -> RestartReservationResult:
+    """Observer runtime path: lease/restart/finalize + critical side effects.
+
+    Shared by ``PBTObserver._run_restart_with_reservation`` and tests.
+    """
+    result = ledger.run_restart_with_reservation(
+        handle,
+        restart_fn,
+        heartbeat_interval_s=heartbeat_interval_s,
+    )
+    if result.applied_but_unrecorded and critical_log is not None:
+        critical_log(
+            "[adaptive-replacement] CRITICAL replacement_applied_but_unrecorded "
+            f"tick={handle.tick_id} stage={handle.stage} "
+            f"target={handle.target} source={handle.source} "
+            f"reservation_id={handle.reservation_id} "
+            f"commit={result.commit_reason} reconcile={result.reconcile_reason}"
+        )
+    apply_observer_restart_reservation_side_effects(
+        result,
+        handle=handle,
+        env_frames=int(env_frames),
+        write_event=write_event,
+        add_scalar=add_scalar,
+    )
+    return result
