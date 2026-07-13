@@ -629,6 +629,9 @@ class TestUnifiedHeadTargets(unittest.TestCase):
         from dexpbt_isaaclab.world_model.wm_calibration_metrics import (
             build_wm_calibration_targets,
         )
+        from dexpbt_isaaclab.world_model.wm_heldout_partition import (
+            build_env_partition_masks,
+        )
 
         batch = self._batch()
         _, diag = build_wm_calibration_targets(
@@ -639,9 +642,15 @@ class TestUnifiedHeadTargets(unittest.TestCase):
             floor_tol_threshold=0.02,
             recovery_shadow_tol_threshold=0.05,
         )
-        self.assertEqual(diag["wm_cal/heldout_fraction_enabled"], 0.0)
-        self.assertFalse(WMCalibrationConfig().heldout_fraction == -1)  # reserved field exists
-        # Document: config still has the knob, but builder reports not applied.
+        # Label builder does not own partition telemetry.
+        self.assertNotIn("wm_cal/heldout_fraction_enabled", diag)
+        # Fraction 0 => partition disabled (all train).
+        part = build_env_partition_masks(
+            16, heldout_fraction=0.0, partition_seed=0, worker_rank=0
+        )
+        self.assertEqual(part.diagnostics["wm_cal/heldout_enabled"], 0.0)
+        self.assertTrue(bool(part.train_mask.all()))
+        self.assertFalse(bool(part.heldout_mask.any()))
         self.assertGreater(WMCalibrationConfig().heldout_fraction, 0.0)
 
 
@@ -719,6 +728,7 @@ class TestCalibrationDeterminismAndTelemetry(unittest.TestCase):
                 gate_auc_recovery=0.0,
                 gate_ece_max=1.0,
                 gate_rank_corr_min=-1.0,
+                heldout_fraction=0.0,
             )
         )
 
@@ -784,7 +794,9 @@ class TestCalibrationDeterminismAndTelemetry(unittest.TestCase):
             }
 
         ev = WMCalibrationEvaluator(
-            WMCalibrationConfig(enabled=True, min_samples=4, eval_interval_frames=0)
+            WMCalibrationConfig(
+                enabled=True, min_samples=4, eval_interval_frames=0, heldout_fraction=0.0
+            )
         )
         trainer.run_wm_calibration_eval(
             experience_buffer=_Buf(),
@@ -874,7 +886,12 @@ class TestCalibrationDeterminismAndTelemetry(unittest.TestCase):
 
         heads.predict_transition = _nan_some
         ev = WMCalibrationEvaluator(
-            WMCalibrationConfig(enabled=True, min_samples=100000, eval_interval_frames=0)
+            WMCalibrationConfig(
+                enabled=True,
+                min_samples=100000,
+                eval_interval_frames=0,
+                heldout_fraction=0.0,
+            )
         )
         st = trainer.run_wm_calibration_eval(
             experience_buffer=_Buf(),

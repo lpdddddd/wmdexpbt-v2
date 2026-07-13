@@ -2263,6 +2263,7 @@ parser.add_argument("--wm_calibration_enable", action=argparse.BooleanOptionalAc
 parser.add_argument("--wm_calibration_eval_interval_frames", type=int, default=50000000)
 parser.add_argument("--wm_calibration_min_samples", type=int, default=512)
 parser.add_argument("--wm_calibration_heldout_fraction", type=float, default=0.2)
+parser.add_argument("--wm_calibration_heldout_partition_seed", type=int, default=0)
 parser.add_argument("--wm_calibration_alpha_min", type=float, default=0.0)
 parser.add_argument("--wm_calibration_alpha_max", type=float, default=1.0)
 parser.add_argument("--wm_calibration_gate_auc_recovery", type=float, default=0.55)
@@ -6643,6 +6644,7 @@ def main():
             eval_interval_frames=int(args_cli.wm_calibration_eval_interval_frames),
             min_samples=int(args_cli.wm_calibration_min_samples),
             heldout_fraction=float(args_cli.wm_calibration_heldout_fraction),
+            heldout_partition_seed=int(args_cli.wm_calibration_heldout_partition_seed),
             alpha_min=float(args_cli.wm_calibration_alpha_min),
             alpha_max=float(args_cli.wm_calibration_alpha_max),
             gate_auc_recovery=float(args_cli.wm_calibration_gate_auc_recovery),
@@ -6657,9 +6659,14 @@ def main():
                 args_cli.wm_calibration_eval_tol_min_samples_for_stats
             ),
         )
-        seq_wm_trainer._wm_calibration_evaluator = (
+        _wm_cal_ev = (
             WMCalibrationEvaluator(_wm_cal_cfg) if _wm_cal_cfg.enabled else None
         )
+        seq_wm_trainer.configure_wm_partition(
+            evaluator=_wm_cal_ev,
+            worker_rank=int(args_cli.policy_idx),
+        )
+        seq_wm_trainer._wm_calibration_evaluator = _wm_cal_ev
 
         # ------------------------------------------------------------------
         # Full RSSM ensemble (MPPI scoring only). Member 0 is the primary
@@ -6693,6 +6700,10 @@ def main():
                     cfg=seq_cfg,
                     device=rl_device,
                     strategy=args_cli.wm_strategy,
+                )
+                _member_trainer.configure_wm_partition(
+                    evaluator=_wm_cal_ev,
+                    worker_rank=int(args_cli.policy_idx),
                 )
                 ensemble_trainers.append(_member_trainer)
             seq_wm_trainer._rssm_ensemble_manager = RSSMEnsembleManager(

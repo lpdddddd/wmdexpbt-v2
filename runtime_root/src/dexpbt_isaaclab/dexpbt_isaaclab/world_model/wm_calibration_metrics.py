@@ -307,8 +307,8 @@ def build_wm_calibration_targets(
     - Missing required target sources → empty eval_mask +
       ``wm_cal/missing_target_source=1`` (fail-closed; no fake all-zero labels).
 
-    Note: ``heldout_fraction`` on the evaluator config is reserved / not applied
-    here (no replay held-out partition in this pass).
+    Note: env-slot held-out partition is applied by ``SeqWMTrainer`` /
+    ``SequenceSampler`` (not here). This builder only forms labels.
     """
     from .wm_head_probs import (
         FAILURE_MISSING_TARGET_SOURCE,
@@ -337,7 +337,7 @@ def build_wm_calibration_targets(
         "y_improve": z.clone(),
         "recovery_mask": torch.zeros(n_flat, device=device, dtype=torch.bool),
     }
-    # heldout_fraction is intentionally unused (reserved config).
+    # Legacy eval_tol kwargs ignored (recovery floor mask is authoritative).
     _ = (eval_tol_mode, eval_tol_threshold, eval_tol_quantile, eval_tol_margin,
          eval_tol_cap, eval_tol_min_samples_for_stats, horizon)
 
@@ -350,7 +350,6 @@ def build_wm_calibration_targets(
         "wm_cal/eval_tol_threshold": float(floor_tol_threshold),
         "wm_cal/horizon_count": float(len(steps)),
         "wm_cal/recovery_horizon": float(max(1, int(recovery_horizon))),
-        "wm_cal/heldout_fraction_enabled": 0.0,
         "wm_cal/missing_target_source": 0.0,
         "wm_cal/failure_reason_id": 0.0,
     }

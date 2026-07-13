@@ -31,8 +31,11 @@ class WMCalibrationConfig:
     enabled: bool = False
     eval_interval_frames: int = 50_000_000
     min_samples: int = 512
-    # Reserved: replay held-out partition is NOT applied yet.
+    # Env-slot held-out fraction for WM train vs calibration partition.
+    # 0.0 disables partition (legacy: both paths see all envs).
     heldout_fraction: float = 0.2
+    # Deterministic partition seed (combined with worker_rank + env_index).
+    heldout_partition_seed: int = 0
     alpha_min: float = 0.0
     alpha_max: float = 1.0
     gate_auc_recovery: float = 0.55
@@ -61,6 +64,22 @@ class WMCalibrationConfig:
         self.w_unc = float(getattr(rerank_cfg, "w_unc", self.w_unc))
         self.score_cap = float(getattr(rerank_cfg, "score_cap", self.score_cap))
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "eval_interval_frames": int(self.eval_interval_frames),
+            "min_samples": int(self.min_samples),
+            "heldout_fraction": float(self.heldout_fraction),
+            "heldout_partition_seed": int(self.heldout_partition_seed),
+            "alpha_min": float(self.alpha_min),
+            "alpha_max": float(self.alpha_max),
+            "gate_auc_recovery": float(self.gate_auc_recovery),
+            "gate_ece_max": float(self.gate_ece_max),
+            "gate_rank_corr_min": float(self.gate_rank_corr_min),
+            "ema_beta": float(self.ema_beta),
+            "pass_threshold": float(self.pass_threshold),
+        }
+
 
 @dataclass
 class WMCalibrationState:
@@ -69,6 +88,10 @@ class WMCalibrationState:
     calibration_pass: bool = False
     last_eval_frame: int = 0
     last_metrics: dict[str, float] = field(default_factory=dict)
+    # Persisted partition knobs so restart keeps the same env-slot split.
+    heldout_fraction: float = 0.2
+    heldout_partition_seed: int = 0
+    partition_worker_rank: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +100,9 @@ class WMCalibrationState:
             "calibration_pass": bool(self.calibration_pass),
             "last_eval_frame": int(self.last_eval_frame),
             "last_metrics": dict(self.last_metrics),
+            "heldout_fraction": float(self.heldout_fraction),
+            "heldout_partition_seed": int(self.heldout_partition_seed),
+            "partition_worker_rank": int(self.partition_worker_rank),
         }
 
     @classmethod
@@ -88,6 +114,13 @@ class WMCalibrationState:
         st.last_eval_frame = int(d.get("last_eval_frame", 0))
         lm = d.get("last_metrics")
         st.last_metrics = dict(lm) if isinstance(lm, dict) else {}
+        st.heldout_fraction = float(d.get("heldout_fraction", st.heldout_fraction))
+        st.heldout_partition_seed = int(
+            d.get("heldout_partition_seed", st.heldout_partition_seed)
+        )
+        st.partition_worker_rank = int(
+            d.get("partition_worker_rank", st.partition_worker_rank)
+        )
         return st
 
 
@@ -140,6 +173,7 @@ def apply_calibration_outcome(
     frames: int,
     metrics: dict[str, float],
     mode: str,
+    failure_reason_id: float | None = None,
 ) -> WMCalibrationState:
     """Unified alpha transitions: structural zero / insufficient EMA decay."""
     mode_norm = str(mode or "").strip().lower()
@@ -151,9 +185,12 @@ def apply_calibration_outcome(
         state.calibration_pass = False
         metrics["wm_cal/alpha_wm"] = 0.0
         metrics["wm_cal/calibration_pass"] = 0.0
-        metrics.setdefault("wm_cal/failure_reason_id", FAILURE_MISSING_HEAD)
+        if failure_reason_id is not None:
+            metrics["wm_cal/failure_reason_id"] = float(failure_reason_id)
+        else:
+            metrics.setdefault("wm_cal/failure_reason_id", FAILURE_MISSING_HEAD)
         metrics["wm_cal/eval_valid"] = 0.0
-    elif mode_norm == "insufficient":
+    elif mode_norm in ("insufficient", "insufficient_heldout"):
         raw = 0.0
         ema = float(cfg.ema_beta) * float(state.ema_raw) + (1.0 - float(cfg.ema_beta)) * raw
         alpha = clamp01(ema)
@@ -164,8 +201,17 @@ def apply_calibration_outcome(
         metrics["wm_cal/alpha_wm"] = float(alpha)
         metrics["wm_cal/calibration_pass"] = 0.0
         metrics["wm_cal/insufficient_samples"] = 1.0
+        if mode_norm == "insufficient_heldout":
+            metrics["wm_cal/insufficient_heldout_samples"] = 1.0
         # Always authoritative — do not keep pred_diag's OK=0 via setdefault.
-        metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_SAMPLES
+        if failure_reason_id is not None:
+            metrics["wm_cal/failure_reason_id"] = float(failure_reason_id)
+        elif mode_norm == "insufficient_heldout":
+            from .wm_head_probs import FAILURE_INSUFFICIENT_HELDOUT_SAMPLES
+
+            metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_HELDOUT_SAMPLES
+        else:
+            metrics["wm_cal/failure_reason_id"] = FAILURE_INSUFFICIENT_SAMPLES
         metrics["wm_cal/eval_valid"] = 0.0
     state.last_eval_frame = int(frames)
     state.last_metrics = dict(metrics)
