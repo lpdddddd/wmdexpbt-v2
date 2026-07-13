@@ -54,6 +54,15 @@ Teacher confidence and row weight:
 - Candidate score uses normalized priority on fallback / WM-disabled rows, and
   `S_wm = pr_norm + α_wm · (wm_term − w_δ · δ_a)` on WM-active rows, where
   `δ_a = mean_j (a_j − μ_j)²` (mean over action dims; action-dim invariant).
+- Shared WM term (reranker + calibration):
+  `wm_term = clip(w_rec·p_rec + w_success·p_succ − w_drop·p_drop − w_unc·u, ±cap)`
+  with `u = max(u_rec, u_succ, u_drop)` and `u_• = 1 − 2|p_• − 0.5|`.
+- Calibration predicted score uses the same `wm_term`; realized utility is
+  `U = w_rec·y_rec + w_success·y_succ − w_drop·y_drop` (no unc term).
+- `α_wm` gates: `raw = gate_auc_rec · gate_ece_rec · gate_rank_combined` where
+  `gate_rank` uses Spearman(`wm_term`, `U`). Recovery AUC/ECE remain base
+  quality gates; success/drop constrain α only via combined ranking (not a
+  per-head `min()` that would lock WM off under sparse labels).
 - `α_wm = 0` ⇒ score is exactly `pr_norm` (action penalty does not apply).
 - `c_margin = 2 · σ(max(S_best − S_actor, 0) / T_m) − 1` (tie ⇒ 0, not 0.5)
 - `c_wm = 1 − α_wm · clip(u_t, 0, 1)` (`= 1` when WM unavailable / uncalibrated /
@@ -224,6 +233,8 @@ nonfinite_candidate_row_frac}`,
 candidate_valid_frac,row_prediction_valid_frac,changed_frac,changed_frac_overall,
 changed_frac_given_active,wm_term_mean,action_delta_mean,action_penalty_mean,
 selected_score_mean,actor_proxy_score_mean,predict_error_count,fallback_reason_id}`,
+`wm_cal/{alpha_wm,AUC_recovery,ECE,ece_success,ece_drop,rank_corr,rank_corr_combined,
+rank_corr_recovery,combined_score_mean,realized_utility_mean,gate_combined_rank}`,
 `adaptive_consolidation/{curriculum_progress,stage,local_retention,
 probation_active,probation_frames,shrink_blocked,probation_can_shrink,
 hard_collapse_streak,degradation_streak,ordinary_rollback_blocked,
@@ -231,7 +242,8 @@ hard_collapse_rollback,rescue_ready,rescue_attempt_count,rescue_selected_count,
 rescue_executed_count,rescue_blocked_count,rescue_source_policy,
 rescue_source_rank,rescue_source_advantage_sigma,rescue_reason_hash,
 rescue_quota_used}`. Registered in
-`dexpbt_utils.PROGRESS_REFINE_TB_SCALAR_NAMES` (progress_refine scalars) with
+`dexpbt_utils.PROGRESS_REFINE_TB_SCALAR_NAMES` (progress_refine scalars) and
+`dexpbt_utils.CSER_TB_SCALAR_NAMES` (CSER + WM calibration scalars), with
 additional adaptive consolidation scalars emitted by the observer.
 
 ## Launch commands

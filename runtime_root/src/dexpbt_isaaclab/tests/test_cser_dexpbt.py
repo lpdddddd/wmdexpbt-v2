@@ -93,7 +93,9 @@ class TestCserProfileRegistration(unittest.TestCase):
     def test_cser_tb_scalar_registry(self):
         self.assertIn("elite_snippet/bank_size", CSER_TB_SCALAR_NAMES)
         self.assertIn("pbt_consolidation/stage", CSER_TB_SCALAR_NAMES)
-        self.assertEqual(len(CSER_TB_SCALAR_NAMES), 12)
+        self.assertEqual(len(CSER_TB_SCALAR_NAMES), 20)
+        self.assertIn("wm_cal/rank_corr_combined", CSER_TB_SCALAR_NAMES)
+        self.assertIn("wm_cal/realized_utility_mean", CSER_TB_SCALAR_NAMES)
 
     def test_cser_profile_blocks_restart_pollution(self):
         argv = [

@@ -135,7 +135,7 @@ class TestScoreAlignment(unittest.TestCase):
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0, w_delta=0.0)
         pri = torch.tensor([[1.0, 5.0, 2.0]])
         p_rec = torch.tensor([[0.9, 0.1, 0.2]])
-        best_idx, cand_score, _ = score_snippet_candidates(
+        best_idx, cand_score, _, _row = score_snippet_candidates(
             priority=pri,
             p_recovery=p_rec,
             p_success=torch.zeros(1, 3),
@@ -158,7 +158,7 @@ class TestScoreAlignment(unittest.TestCase):
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.0)
         pri = torch.tensor([[10.0, 1.0, 2.0]])  # priority prefers idx 0
         p_rec = torch.tensor([[0.0, 1.0, 0.0]])  # WM prefers idx 1
-        best_idx, cand_score, diag = score_snippet_candidates(
+        best_idx, cand_score, diag, _row = score_snippet_candidates(
             priority=pri,
             p_recovery=p_rec,
             p_success=torch.zeros(1, 3),
@@ -192,7 +192,7 @@ class TestWMValidity(unittest.TestCase):
         self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 1.0)
         self.assertTrue(torch.equal(unc, torch.ones_like(unc)))
 
-        best_idx, cand_score, score_diag = score_snippet_candidates(
+        best_idx, cand_score, score_diag, _row = score_snippet_candidates(
             priority=torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]]),
             p_recovery=p_rec,
             p_success=p_succ,
@@ -224,7 +224,7 @@ class TestWMValidity(unittest.TestCase):
         self.assertEqual(diag["snippet_wm_rerank/predict_error_count"], 1.0)
         self.assertFalse(bool(valid.any()))
         self.assertTrue(torch.equal(unc, torch.ones_like(unc)))
-        best_idx, _, score_diag = score_snippet_candidates(
+        best_idx, _, score_diag, _row = score_snippet_candidates(
             priority=torch.tensor([[2.0, 9.0]]),
             p_recovery=p_rec,
             p_success=p_succ,
@@ -261,7 +261,7 @@ class TestWMValidity(unittest.TestCase):
         self.assertTrue(bool(valid[0, 0]))
         self.assertAlmostEqual(float(unc[0, 1].item()), 1.0, places=5)
         pri = torch.tensor([[1.0, 8.0, 2.0]])
-        best_idx, cand_score, score_diag = score_snippet_candidates(
+        best_idx, cand_score, score_diag, _row = score_snippet_candidates(
             priority=pri,
             p_recovery=p_rec,
             p_success=p_succ,
@@ -284,7 +284,7 @@ class TestWMValidity(unittest.TestCase):
         pri = torch.tensor([[1.0, 1.0, 1.0], [9.0, 1.0, 2.0]])
         p_rec = torch.tensor([[0.9, 0.1, 0.1], [0.1, 0.9, 0.1]])
         valid = torch.tensor([[True, True, True], [False, False, False]])
-        best_idx, cand_score, diag = score_snippet_candidates(
+        best_idx, cand_score, diag, _row = score_snippet_candidates(
             priority=pri,
             p_recovery=p_rec,
             p_success=torch.zeros(2, 3),
@@ -318,6 +318,7 @@ class TestProgressRuntimeWM(unittest.TestCase):
         rerank_cfg="default",
         patch_retrieve=None,
         feat=None,
+        max_active_fraction=0.35,
     ):
         from dexpbt_isaaclab.world_model.eir_mpc import _compute_snippet_distill_loss_progress
 
@@ -337,6 +338,7 @@ class TestProgressRuntimeWM(unittest.TestCase):
             only_lifted=False,
             min_gate_for_retrieval=0.0,
             min_teacher_confidence=0.0,
+            max_active_fraction=float(max_active_fraction),
         )
         if rerank_cfg == "default":
             rerank = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0)
@@ -551,8 +553,9 @@ class TestProgressRuntimeWM(unittest.TestCase):
         self.assertEqual(int(score.argmax(dim=1).item()), int(pri[:1].argmax(dim=1).item()))
 
     def test_nonfinite_retrieval_row_zero_weight_teacher_actor(self):
+        from dexpbt_isaaclab.world_model import snippet_distill as sd_mod
+
         a2c = _A2C()
-        # Force deterministic actor action = 0 for zero feat.
         with torch.no_grad():
             a2c.mu.weight.zero_()
             a2c.mu.bias.zero_()
@@ -560,23 +563,62 @@ class TestProgressRuntimeWM(unittest.TestCase):
         belief = torch.zeros(4, 5)
         pri = torch.tensor([[1.0, 5.0, 2.0, 0.5]]).expand(4, 4).contiguous().clone()
         pri[0, 0] = float("nan")  # row0 retrieval data invalid
-        loss, bridge = self._run(
-            predict_fn=None,
-            belief=belief,
-            a2c=a2c,
-            feat=feat,
-            rerank_cfg=None,
-            patch_retrieve=self._make_retrieve(pri),
-        )
+        captured = {}
+        orig = sd_mod.compute_snippet_distill_loss
+
+        def _spy(*, mu_fn, feat_start, teacher_first_action, cfg, row_weight=None, **kwargs):
+            captured["teacher"] = teacher_first_action.detach().clone()
+            captured["weight"] = None if row_weight is None else row_weight.detach().clone()
+            captured["mu"] = mu_fn(feat_start).detach().clone()
+            return orig(
+                mu_fn=mu_fn,
+                feat_start=feat_start,
+                teacher_first_action=teacher_first_action,
+                cfg=cfg,
+                row_weight=row_weight,
+                **kwargs,
+            )
+
+        sd_mod.compute_snippet_distill_loss = _spy  # type: ignore[assignment]
+        try:
+            loss, bridge = self._run(
+                predict_fn=None,
+                belief=belief,
+                a2c=a2c,
+                feat=feat,
+                rerank_cfg=None,
+                patch_retrieve=self._make_retrieve(pri),
+                max_active_fraction=1.0,
+            )
+        finally:
+            sd_mod.compute_snippet_distill_loss = orig  # type: ignore[assignment]
+
         self.assertTrue(torch.isfinite(loss.float()))
-        self.assertGreater(
-            bridge.last_progress_refine["snippet_retrieval/nonfinite_candidate_row_frac"], 0.0
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_retrieval/nonfinite_candidate_row_frac"],
+            0.25,
+            places=5,
         )
-        self.assertGreater(bridge.last_progress_refine["progress_refine/nonfinite_count"], 0.0)
-        # Invalid row contributes zero teacher confidence / weight.
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["progress_refine/fallback_frac"], 0.25, places=5
+        )
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["progress_refine/retrieval_valid_frac"], 0.75, places=5
+        )
+        self.assertLessEqual(
+            bridge.last_progress_refine["progress_refine/active_frac"], 0.75 + 1e-6
+        )
         self.assertGreaterEqual(
-            bridge.last_progress_refine["progress_refine/fallback_frac"], 0.0
+            bridge.last_progress_refine["progress_refine/nonfinite_count"], 1.0
         )
+        self.assertIn("teacher", captured)
+        self.assertIn("weight", captured)
+        teacher = captured["teacher"]
+        weight = captured["weight"]
+        mu = captured["mu"]
+        self.assertTrue(torch.allclose(teacher[0].float(), mu[0].float(), atol=1e-5))
+        self.assertAlmostEqual(float(weight[0].item()), 0.0, places=5)
+        self.assertGreater(float((weight[1:] > 0).float().sum().item()), 0.0)
 
     def test_bf16_actor_fp32_snippet_with_wm_fallback(self):
         class _Bf16A2C(nn.Module):

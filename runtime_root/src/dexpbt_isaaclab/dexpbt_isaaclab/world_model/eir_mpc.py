@@ -903,6 +903,7 @@ class EIRBridge:
     last_snippet_wm_rerank_valid_frac: float = 0.0
     last_snippet_wm_rerank_fallback_frac: float = 0.0
     last_snippet_wm_rerank_predict_error_count: float = 0.0
+    last_snippet_nonfinite_candidate_row_frac: float = 0.0
     # Progress-conditioned refinement telemetry.
     progress_refine_cfg: Any = None
     last_progress_refine: dict = field(default_factory=dict)
@@ -1398,7 +1399,7 @@ def _compute_snippet_distill_loss_progress(
                 )
                 predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
                 rerank_diag.update(wm_diag)
-                best_idx, candidate_score, score_diag = score_snippet_candidates(
+                best_idx, candidate_score, score_diag, row_wm_active_scored = score_snippet_candidates(
                     priority=pri,
                     p_recovery=p_rec,
                     p_success=p_succ,
@@ -1416,16 +1417,25 @@ def _compute_snippet_distill_loss_progress(
                     1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 9.0,
                 ):
                     rerank_diag["snippet_wm_rerank/fallback_reason_id"] = predict_reason
-                row_prediction_valid = (
-                    wm_valid_mask.all(dim=1)
-                    if wm_valid_mask is not None
-                    else torch.zeros(int(sel_idx.numel()), dtype=torch.bool, device=dev)
-                )
-                wm_row_active = row_prediction_valid & (float(alpha_wm) > 0.0)
+                # Align confidence WM-active with scorer + retrieval data validity.
+                wm_row_active = row_wm_active_scored & retrieval_data_row_valid
+                if int(sel_idx.numel()) > 0:
+                    rerank_diag["snippet_wm_rerank/row_active_frac"] = float(
+                        wm_row_active.float().mean().item()
+                    )
+                    rerank_diag["snippet_wm_rerank/row_fallback_frac"] = float(
+                        (~wm_row_active).float().mean().item()
+                    )
+                    rerank_diag["snippet_wm_rerank/valid_frac"] = float(
+                        wm_row_active.float().mean().item()
+                    )
+                    rerank_diag["snippet_wm_rerank/fallback_frac"] = float(
+                        (~wm_row_active).float().mean().item()
+                    )
             else:
                 # Uncalibrated / alpha=0: do not call WM predict; still score via
                 # normalized priority so confidence scale matches WM-active rows.
-                best_idx, candidate_score, score_diag = score_snippet_candidates(
+                best_idx, candidate_score, score_diag, _row_active = score_snippet_candidates(
                     priority=pri,
                     p_recovery=torch.zeros_like(pri),
                     p_success=torch.zeros_like(pri),
@@ -1501,6 +1511,7 @@ def _compute_snippet_distill_loss_progress(
     bridge.last_snippet_wm_rerank_changed_frac = float(rerank_changed_frac)
     bridge.last_snippet_wm_rerank_wm_term_mean = float(wm_term_mean)
     bridge.last_snippet_retrieval_valid = valid_r
+    bridge.last_snippet_nonfinite_candidate_row_frac = float(nonfinite_candidate_row_frac)
     bridge.last_snippet_no_tolerance_compatible = float(
         retr_diag.get("snippet_retrieval/no_compatible_frac", 0.0)
     )
@@ -1662,7 +1673,6 @@ def _compute_snippet_distill_loss(
         query_tolerance=float(cache.tol_mean),
     )
     diag = dict(getattr(bank, "last_update_diagnostics", {}) or {})
-    bridge.last_snippet_retrieval_valid = 1.0 if valid else 0.0
     bridge.last_snippet_no_tolerance_compatible = float(
         diag.get("no_tolerance_compatible_candidate", 0.0)
     )
@@ -1670,6 +1680,8 @@ def _compute_snippet_distill_loss(
         diag.get("compatible_candidate_count", 0.0)
     )
     if not valid:
+        bridge.last_snippet_retrieval_valid = 0.0
+        bridge.last_snippet_nonfinite_candidate_row_frac = 0.0
         bridge.last_snippet_distill_loss = 0.0
         if float(diag.get("no_tolerance_compatible_candidate", 0.0)) > 0.5:
             bridge.last_actor_distill_fallback_reason = "no_tolerance_compatible_candidate"
@@ -1713,7 +1725,7 @@ def _compute_snippet_distill_loss(
                 predict_fn=bridge.rssm_predict_fn,
             )
             predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
-            best_idx, _candidate_score, score_diag = score_snippet_candidates(
+            best_idx, _candidate_score, score_diag, _row_active = score_snippet_candidates(
                 priority=pri,
                 p_recovery=p_rec,
                 p_success=p_succ,
@@ -1746,6 +1758,10 @@ def _compute_snippet_distill_loss(
         nsucc_mean=float(getattr(bridge, "last_nsucc_mean", -1.0)),
     )
     mask = retrieval_data_row_valid.to(device=feat.device, dtype=feat.dtype)
+    bridge.last_snippet_retrieval_valid = float(mask.mean().item()) if mask.numel() else 0.0
+    bridge.last_snippet_nonfinite_candidate_row_frac = float(
+        (~retrieval_data_row_valid).float().mean().item()
+    ) if retrieval_data_row_valid.numel() else 0.0
     loss, metrics = compute_snippet_distill_loss(
         mu_fn=_mu_fn,
         feat_start=feat_r,

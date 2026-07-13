@@ -94,8 +94,14 @@ def pos_rate(labels: list[float]) -> float:
 
 
 def prob_uncertainty(probs: torch.Tensor) -> torch.Tensor:
-    """Uncertainty proxy in [0, 1]: high when probability is near 0.5."""
-    return (1.0 - (probs - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+    """Uncertainty proxy in [0, 1]: high when probability is near 0.5.
+
+    Thin alias of ``binary_head_uncertainty`` for backward compatibility.
+    Prefer ``combined_head_uncertainty`` when recovery/success/drop are all used.
+    """
+    from .snippet_wm_reranker import binary_head_uncertainty
+
+    return binary_head_uncertainty(probs)
 
 
 def resolve_wm_calibration_eval_tol(
@@ -281,6 +287,8 @@ def extract_wm_calibration_predictions(
     horizon: int,
 ) -> tuple[Optional[dict[str, torch.Tensor]], dict[str, float]]:
     """Return WM head probabilities for calibration eval or None when heads missing."""
+    from .snippet_wm_reranker import combined_head_uncertainty
+
     diag: dict[str, float] = {"wm_cal/missing_head": 0.0}
     if heads is None or not bool(getattr(heads, "has_recovery_head", False)):
         diag["wm_cal/missing_head"] = 1.0
@@ -315,10 +323,20 @@ def extract_wm_calibration_predictions(
     else:
         diag["wm_cal/missing_head"] = 1.0
 
-    unc = prob_uncertainty(p_rec)
+    valid = (
+        torch.isfinite(p_rec)
+        & torch.isfinite(p_succ)
+        & torch.isfinite(p_drop)
+    )
+    p_rec_safe = torch.where(valid, p_rec, torch.zeros_like(p_rec))
+    p_succ_safe = torch.where(valid, p_succ, torch.zeros_like(p_succ))
+    p_drop_safe = torch.where(valid, p_drop, torch.zeros_like(p_drop))
+    unc = combined_head_uncertainty(p_rec_safe, p_succ_safe, p_drop_safe)
+    unc = torch.where(valid, unc, torch.ones_like(unc))
     return {
-        "p_recovery": p_rec,
-        "p_success": p_succ,
-        "p_drop": p_drop,
+        "p_recovery": p_rec_safe,
+        "p_success": p_succ_safe,
+        "p_drop": p_drop_safe,
         "uncertainty": unc,
+        "valid_mask": valid,
     }, diag

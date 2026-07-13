@@ -6922,6 +6922,10 @@ def main():
             w_delta=float(args_cli.snippet_wm_rerank_w_delta),
             score_cap=float(args_cli.snippet_wm_rerank_score_cap),
         )
+        # Keep calibration score weights identical to the live snippet reranker.
+        _wm_cal_ev = getattr(seq_wm_trainer, "_wm_calibration_evaluator", None)
+        if _wm_cal_ev is not None:
+            _wm_cal_ev.cfg.apply_snippet_rerank_weights(snippet_wm_rerank_cfg)
         eir_residual_cfg = RecoveryResidualConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_recovery_residual),
             feature_dim=_eir_feature_dim,

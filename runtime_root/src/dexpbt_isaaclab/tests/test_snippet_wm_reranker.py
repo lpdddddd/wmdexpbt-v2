@@ -21,7 +21,8 @@ from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
 
 
 def _score(**kw):
-    return score_snippet_candidates(**kw)
+    best_idx, cand_score, diag, _row_active = score_snippet_candidates(**kw)
+    return best_idx, cand_score, diag
 
 
 def _assert_fallback_norm(testcase, best_idx, cand_score, pri):
@@ -450,7 +451,7 @@ class TestWMScoreContinuityAndReasons(unittest.TestCase):
         self.assertTrue(bool(valid[1].all()))
         self.assertTrue(torch.equal(unc[0], torch.ones(2)))
         # Row1 remains usable for scoring.
-        best_idx, _, score_diag = score_snippet_candidates(
+        best_idx, _, score_diag, _row = score_snippet_candidates(
             priority=torch.tensor([[1.0, 2.0], [3.0, 1.0]]),
             p_recovery=_p_rec,
             p_success=_p_succ,
@@ -536,7 +537,7 @@ class TestWMHeadProbsValidity(unittest.TestCase):
         self.assertTrue(bool(valid[0, 0]))
         self.assertAlmostEqual(float(unc[0, 1].item()), 1.0, places=5)
         pri = torch.tensor([[1.0, 9.0, 2.0]])
-        best_idx, cand_score, score_diag = score_snippet_candidates(
+        best_idx, cand_score, score_diag, _row = score_snippet_candidates(
             priority=pri,
             p_recovery=p_rec,
             p_success=p_succ,

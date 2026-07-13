@@ -232,6 +232,357 @@ class TestWMCalibration(unittest.TestCase):
         self.assertLessEqual(eval_tol, 0.06)
         self.assertAlmostEqual(diag["wm_cal/eval_tol_threshold"], eval_tol)
 
+    def test_combined_uncertainty_max_over_heads(self):
+        from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
+            binary_head_uncertainty,
+            combined_head_uncertainty,
+        )
+
+        p_rec = torch.tensor([0.95, 0.9])
+        p_succ = torch.tensor([0.5, 0.9])
+        p_drop = torch.tensor([0.1, 0.1])
+        u = combined_head_uncertainty(p_rec, p_succ, p_drop)
+        self.assertGreater(float(u[0].item()), 0.9)
+        self.assertLess(float(u[1].item()), 0.3)
+        self.assertGreaterEqual(
+            float(u[1].item()), float(binary_head_uncertainty(p_rec[1]).item()) - 1e-5
+        )
+
+    def test_nan_head_forces_uncertainty_one(self):
+        class _NanHeads(_FakeHeads):
+            def predict_transition(self, belief_flat, action_flat):
+                n = belief_flat.shape[0]
+                return {
+                    "recovery_logits": torch.full((n, 1), 2.0),
+                    "horizon_logits": {
+                        4: {
+                            "success": torch.full((n, 1), float("nan")),
+                            "drop": torch.full((n, 1), -4.0),
+                        }
+                    },
+                }
+
+        preds, _diag = extract_wm_calibration_predictions(
+            _NanHeads(),
+            belief_flat=torch.zeros(2, 8),
+            action_flat=torch.zeros(2, 3),
+            horizon=4,
+        )
+        self.assertIsNotNone(preds)
+        self.assertTrue(torch.allclose(preds["uncertainty"], torch.ones(2)))
+        self.assertFalse(bool(preds["valid_mask"].all().item()))
+
+    def test_combined_score_matches_runtime_helper(self):
+        from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
+            SnippetWMRerankConfig,
+            compute_snippet_wm_term,
+            combined_head_uncertainty,
+        )
+
+        cfg = SnippetWMRerankConfig(
+            w_rec=0.55, w_success=0.15, w_drop=0.25, w_unc=0.05, score_cap=0.4
+        )
+        cal = WMCalibrationEvaluator(WMCalibrationConfig(enabled=True, min_samples=4))
+        cal.apply_snippet_rerank_weights(cfg)
+        p_rec = torch.tensor([0.8, 0.2, 0.7, 0.3, 0.9])
+        p_succ = torch.tensor([0.7, 0.1, 0.6, 0.4, 0.8])
+        p_drop = torch.tensor([0.2, 0.8, 0.3, 0.5, 0.1])
+        unc = combined_head_uncertainty(p_rec, p_succ, p_drop)
+        expected = compute_snippet_wm_term(
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            w_rec=cfg.w_rec,
+            w_success=cfg.w_success,
+            w_drop=cfg.w_drop,
+            w_unc=cfg.w_unc,
+            score_cap=cfg.score_cap,
+        )
+        metrics = cal.evaluate_batch(
+            {
+                "y_recovery": [1.0, 0.0, 1.0, 0.0, 1.0],
+                "y_success": [1.0, 0.0, 1.0, 0.0, 1.0],
+                "y_drop": [0.0, 1.0, 0.0, 1.0, 0.0],
+                "y_improve": [1.0, 0.0, 1.0, 0.0, 1.0],
+                "p_recovery": p_rec.tolist(),
+                "p_success": p_succ.tolist(),
+                "p_drop": p_drop.tolist(),
+                "uncertainty": unc.tolist(),
+            }
+        )
+        self.assertAlmostEqual(
+            metrics["wm_cal/combined_score_mean"],
+            float(expected.mean().item()),
+            places=5,
+        )
+
+    def test_recovery_good_combined_bad_keeps_alpha_low(self):
+        """Recovery ranks well but success/drop invert combined ranking → low alpha."""
+        cal = WMCalibrationEvaluator(
+            WMCalibrationConfig(
+                enabled=True,
+                min_samples=8,
+                gate_auc_recovery=0.55,
+                gate_ece_max=0.35,
+                gate_rank_corr_min=0.05,
+                alpha_max=0.5,
+                ema_beta=0.0,
+            )
+        )
+        cal.apply_snippet_rerank_weights(
+            type(
+                "C",
+                (),
+                {
+                    "w_rec": 0.1,
+                    "w_success": 0.4,
+                    "w_drop": 0.5,
+                    "w_unc": 0.0,
+                    "score_cap": 10.0,
+                },
+            )()
+        )
+        n = 12
+        p_rec = torch.linspace(0.1, 0.9, n)
+        y_rec = (p_rec > 0.5).float()
+        p_succ = 1.0 - p_rec
+        p_drop = p_rec.clone()
+        y_succ = y_rec.clone()
+        y_drop = 1.0 - y_rec
+        unc = torch.zeros(n)
+        metrics = cal.evaluate_batch(
+            {
+                "y_recovery": y_rec.tolist(),
+                "y_success": y_succ.tolist(),
+                "y_drop": y_drop.tolist(),
+                "y_improve": y_rec.tolist(),
+                "p_recovery": p_rec.tolist(),
+                "p_success": p_succ.tolist(),
+                "p_drop": p_drop.tolist(),
+                "uncertainty": unc.tolist(),
+            }
+        )
+        self.assertGreater(metrics["wm_cal/rank_corr_recovery"], 0.5)
+        self.assertLess(metrics["wm_cal/rank_corr_combined"], 0.05)
+        st = WMCalibrationState(alpha_wm=0.0)
+        st = cal.compute_alpha(metrics, st)
+        self.assertLessEqual(st.alpha_wm, 1e-6)
+
+    def test_combined_good_raises_alpha(self):
+        cal = WMCalibrationEvaluator(
+            WMCalibrationConfig(
+                enabled=True,
+                min_samples=8,
+                gate_auc_recovery=0.55,
+                gate_ece_max=0.35,
+                gate_rank_corr_min=0.05,
+                alpha_max=0.5,
+                ema_beta=0.0,
+            )
+        )
+        cal.apply_snippet_rerank_weights(
+            type(
+                "C",
+                (),
+                {
+                    "w_rec": 0.4,
+                    "w_success": 0.3,
+                    "w_drop": 0.3,
+                    "w_unc": 0.0,
+                    "score_cap": 10.0,
+                },
+            )()
+        )
+        n = 16
+        p_rec = torch.linspace(0.05, 0.95, n)
+        p_succ = p_rec.clone()
+        p_drop = 1.0 - p_rec
+        y_rec = (p_rec > 0.5).float()
+        y_succ = y_rec.clone()
+        y_drop = 1.0 - y_rec
+        unc = torch.zeros(n)
+        metrics = cal.evaluate_batch(
+            {
+                "y_recovery": y_rec.tolist(),
+                "y_success": y_succ.tolist(),
+                "y_drop": y_drop.tolist(),
+                "y_improve": y_rec.tolist(),
+                "p_recovery": p_rec.tolist(),
+                "p_success": p_succ.tolist(),
+                "p_drop": p_drop.tolist(),
+                "uncertainty": unc.tolist(),
+            }
+        )
+        self.assertGreater(metrics["wm_cal/rank_corr_combined"], 0.2)
+        self.assertEqual(metrics["wm_cal/rank_corr"], metrics["wm_cal/rank_corr_combined"])
+        st = WMCalibrationState(alpha_wm=0.0)
+        st = cal.compute_alpha(metrics, st)
+        self.assertGreater(st.alpha_wm, 0.05)
+
+    def test_single_class_success_drop_finite_no_min_gate_lock(self):
+        import math
+
+        cal = WMCalibrationEvaluator(
+            WMCalibrationConfig(
+                enabled=True,
+                min_samples=8,
+                gate_auc_recovery=0.55,
+                gate_ece_max=0.35,
+                gate_rank_corr_min=0.0,
+                alpha_max=0.5,
+                ema_beta=0.0,
+            )
+        )
+        n = 12
+        p_rec = torch.linspace(0.1, 0.9, n)
+        y_rec = (p_rec > 0.5).float()
+        metrics = cal.evaluate_batch(
+            {
+                "y_recovery": y_rec.tolist(),
+                "y_success": [1.0] * n,
+                "y_drop": [0.0] * n,
+                "y_improve": y_rec.tolist(),
+                "p_recovery": p_rec.tolist(),
+                "p_success": [0.8] * n,
+                "p_drop": [0.1] * n,
+                "uncertainty": [0.0] * n,
+            }
+        )
+        for k, v in metrics.items():
+            self.assertTrue(math.isfinite(float(v)), msg=k)
+        st = WMCalibrationState(alpha_wm=0.0)
+        st = cal.compute_alpha(metrics, st)
+        self.assertGreaterEqual(st.alpha_wm, 0.0)
+        self.assertTrue(math.isfinite(st.alpha_wm))
+
+    def test_rerank_weight_change_syncs_calibration_score(self):
+        from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
+            SnippetWMRerankConfig,
+            compute_snippet_wm_term,
+            combined_head_uncertainty,
+            score_snippet_candidates,
+        )
+
+        cfg_a = SnippetWMRerankConfig(
+            enabled=True,
+            w_rec=0.3,
+            w_success=0.2,
+            w_drop=0.4,
+            w_unc=0.1,
+            score_cap=0.25,
+        )
+        cfg_b = SnippetWMRerankConfig(
+            enabled=True,
+            w_rec=0.7,
+            w_success=0.05,
+            w_drop=0.05,
+            w_unc=0.2,
+            score_cap=0.5,
+        )
+        p_rec = torch.tensor([[0.9, 0.2]])
+        p_succ = torch.tensor([[0.8, 0.1]])
+        p_drop = torch.tensor([[0.1, 0.7]])
+        unc = combined_head_uncertainty(
+            p_rec.reshape(-1), p_succ.reshape(-1), p_drop.reshape(-1)
+        ).view(1, 2)
+        term_a = compute_snippet_wm_term(
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            w_rec=cfg_a.w_rec,
+            w_success=cfg_a.w_success,
+            w_drop=cfg_a.w_drop,
+            w_unc=cfg_a.w_unc,
+            score_cap=cfg_a.score_cap,
+        )
+        term_b = compute_snippet_wm_term(
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            w_rec=cfg_b.w_rec,
+            w_success=cfg_b.w_success,
+            w_drop=cfg_b.w_drop,
+            w_unc=cfg_b.w_unc,
+            score_cap=cfg_b.score_cap,
+        )
+        self.assertFalse(torch.allclose(term_a, term_b))
+        cal = WMCalibrationEvaluator(WMCalibrationConfig(enabled=True, min_samples=2))
+        cal.apply_snippet_rerank_weights(cfg_a)
+        self.assertAlmostEqual(cal.cfg.w_rec, cfg_a.w_rec)
+        cal.apply_snippet_rerank_weights(cfg_b)
+        self.assertAlmostEqual(cal.cfg.w_rec, cfg_b.w_rec)
+        self.assertAlmostEqual(cal.cfg.score_cap, cfg_b.score_cap)
+
+        pri = torch.ones(1, 2)
+        action_delta = torch.zeros(1, 2)
+        _, _, diag_a, _ = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=action_delta,
+            alpha_wm=1.0,
+            cfg=cfg_a,
+        )
+        _, _, diag_b, _ = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=action_delta,
+            alpha_wm=1.0,
+            cfg=cfg_b,
+        )
+        self.assertNotAlmostEqual(
+            diag_a["snippet_wm_rerank/wm_term_mean"],
+            diag_b["snippet_wm_rerank/wm_term_mean"],
+            places=4,
+        )
+        # Calibration combined score must track the same helper under cfg_b weights.
+        metrics = cal.evaluate_batch(
+            {
+                "p_recovery": p_rec.reshape(-1).tolist(),
+                "p_success": p_succ.reshape(-1).tolist(),
+                "p_drop": p_drop.reshape(-1).tolist(),
+                "uncertainty": unc.reshape(-1).tolist(),
+                "y_recovery": [1.0, 0.0],
+                "y_success": [1.0, 0.0],
+                "y_drop": [0.0, 1.0],
+                "y_improve": [1.0, 0.0],
+            }
+        )
+        self.assertAlmostEqual(
+            metrics["wm_cal/combined_score_mean"],
+            float(term_b.mean().item()),
+            places=5,
+        )
+
+    def test_state_backward_compat_missing_metrics(self):
+        st = WMCalibrationState.from_dict({"alpha_wm": 0.12, "last_eval_frame": 3})
+        self.assertAlmostEqual(st.alpha_wm, 0.12)
+        self.assertEqual(st.last_metrics, {})
+        cal = WMCalibrationEvaluator(WMCalibrationConfig(enabled=True, min_samples=4))
+        metrics = cal.evaluate_batch(
+            {
+                "y_recovery": [1.0, 0.0, 1.0, 0.0],
+                "y_success": [1.0, 0.0, 1.0, 0.0],
+                "y_drop": [0.0, 1.0, 0.0, 1.0],
+                "y_improve": [1.0, 0.0, 1.0, 0.0],
+                "p_recovery": [0.9, 0.1, 0.8, 0.2],
+                "p_success": [0.8, 0.2, 0.7, 0.3],
+                "p_drop": [0.1, 0.9, 0.2, 0.8],
+                "uncertainty": [0.0, 0.0, 0.0, 0.0],
+            }
+        )
+        self.assertIn("wm_cal/rank_corr", metrics)
+        self.assertIn("wm_cal/rank_corr_combined", metrics)
+        self.assertEqual(metrics["wm_cal/rank_corr"], metrics["wm_cal/rank_corr_combined"])
+
 
 if __name__ == "__main__":
     unittest.main()

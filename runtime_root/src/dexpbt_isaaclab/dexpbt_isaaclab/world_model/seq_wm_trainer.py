@@ -727,7 +727,6 @@ class SeqWMTrainer:
                 "y_success": y_succ,
                 "uncertainty": unc,
                 "error": err,
-                "wm_recovery_score": p_rec,
                 "y_improve": y_improve,
                 "missing_head": pred_diag.get("wm_cal/missing_head", 0.0),
             }

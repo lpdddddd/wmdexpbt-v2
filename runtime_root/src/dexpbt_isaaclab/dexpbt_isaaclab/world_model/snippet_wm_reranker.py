@@ -90,6 +90,66 @@ def mean_squared_action_delta(
     return ((cand_first.float() - actor_action.float()[:, None, :]) ** 2).mean(dim=-1)
 
 
+def binary_head_uncertainty(prob: torch.Tensor) -> torch.Tensor:
+    """Uncertainty in ``[0, 1]``: high when probability is near 0.5."""
+    return (1.0 - (prob.float() - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+
+
+def combined_head_uncertainty(
+    p_recovery: torch.Tensor,
+    p_success: torch.Tensor,
+    p_drop: torch.Tensor,
+) -> torch.Tensor:
+    """Max uncertainty across recovery/success/drop (conservative aggregate)."""
+    return torch.stack(
+        [
+            binary_head_uncertainty(p_recovery),
+            binary_head_uncertainty(p_success),
+            binary_head_uncertainty(p_drop),
+        ],
+        dim=0,
+    ).amax(dim=0)
+
+
+def compute_snippet_wm_term(
+    *,
+    p_recovery: torch.Tensor,
+    p_success: torch.Tensor,
+    p_drop: torch.Tensor,
+    uncertainty: torch.Tensor,
+    w_rec: float,
+    w_success: float,
+    w_drop: float,
+    w_unc: float,
+    score_cap: float,
+) -> torch.Tensor:
+    """Shared capped WM term used by snippet reranker and calibration."""
+    term = (
+        float(w_rec) * p_recovery.float()
+        + float(w_success) * p_success.float()
+        - float(w_drop) * p_drop.float()
+        - float(w_unc) * uncertainty.float()
+    )
+    return term.clamp(-float(score_cap), float(score_cap))
+
+
+def compute_realized_wm_utility(
+    *,
+    y_recovery: torch.Tensor,
+    y_success: torch.Tensor,
+    y_drop: torch.Tensor,
+    w_rec: float,
+    w_success: float,
+    w_drop: float,
+) -> torch.Tensor:
+    """Realized utility aligned with WM term direction (no uncertainty term)."""
+    return (
+        float(w_rec) * y_recovery.float()
+        + float(w_success) * y_success.float()
+        - float(w_drop) * y_drop.float()
+    )
+
+
 def score_snippet_candidates(
     *,
     priority: torch.Tensor,
@@ -101,8 +161,8 @@ def score_snippet_candidates(
     alpha_wm: float,
     cfg: SnippetWMRerankConfig,
     wm_valid_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Return ``(best_idx, candidate_score, diagnostics)``.
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float], torch.Tensor]:
+    """Return ``(best_idx, candidate_score, diagnostics, row_wm_active)``.
 
     Row-level fail-closed WM rerank:
     - ``row_prediction_valid = candidate_valid.all(dim=1)``
@@ -144,13 +204,17 @@ def score_snippet_candidates(
     row_wm_active = row_prediction_valid & wm_globally_active
 
     pr_norm = normalize_priority_scores(priority).float()
-    wm_term = (
-        float(cfg.w_rec) * p_recovery.float()
-        + float(cfg.w_success) * p_success.float()
-        - float(cfg.w_drop) * p_drop.float()
-        - float(cfg.w_unc) * uncertainty.float()
+    wm_term = compute_snippet_wm_term(
+        p_recovery=p_recovery,
+        p_success=p_success,
+        p_drop=p_drop,
+        uncertainty=uncertainty,
+        w_rec=float(cfg.w_rec),
+        w_success=float(cfg.w_success),
+        w_drop=float(cfg.w_drop),
+        w_unc=float(cfg.w_unc),
+        score_cap=float(cfg.score_cap),
     )
-    wm_term = wm_term.clamp(-float(cfg.score_cap), float(cfg.score_cap))
     action_delta_f = action_delta.float()
     action_penalty = float(cfg.w_delta) * action_delta_f
 
@@ -186,7 +250,6 @@ def score_snippet_candidates(
     elif B > 0 and bool(row_partial.any()):
         reason = _REASON_PARTIAL_INVALID
     elif B > 0 and bool((~row_all_valid).any()):
-        # Whole-row invalids (possibly mixed with whole-valid rows), no partial.
         reason = _REASON_NONFINITE_PREDS
 
     wm_term_mean = 0.0
@@ -211,7 +274,7 @@ def score_snippet_candidates(
         "snippet_wm_rerank/valid_frac": row_active_frac,
         "snippet_wm_rerank/fallback_frac": row_fallback_frac,
         "snippet_wm_rerank/fallback_reason_id": reason,
-    }
+    }, row_wm_active
 
 
 def effective_alpha_wm(*, wm_calibration_enable: bool, alpha_wm: float) -> float:
@@ -327,7 +390,7 @@ def wm_head_probs_for_candidates(
     except Exception:
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
 
-    unc = (1.0 - (p_rec - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+    unc = combined_head_uncertainty(p_rec, p_succ, p_drop)
     finite = (
         torch.isfinite(p_rec)
         & torch.isfinite(p_succ)
