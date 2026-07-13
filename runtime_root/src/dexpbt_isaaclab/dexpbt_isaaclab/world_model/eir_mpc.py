@@ -822,6 +822,7 @@ class EIRBridge:
     snippet_wm_rerank_cfg: Any = None
     wm_calibration_enable: bool = False
     wm_calibration_state: Any = None
+    wm_horizon_steps: tuple = (4, 8)
     rssm_reranker: Any = None
     capture: Any = None  # ERDCapture (actor_mlp forward output)
     agent_ref: Any = None
@@ -1396,6 +1397,13 @@ def _compute_snippet_distill_loss_progress(
                     belief_flat=belief_sel,
                     cand_first_actions=cand_first,
                     predict_fn=bridge.rssm_predict_fn,
+                    horizon_steps=tuple(
+                        getattr(
+                            bridge,
+                            "wm_horizon_steps",
+                            getattr(rerank_cfg, "horizon_steps", (4, 8)),
+                        )
+                    ),
                 )
                 predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
                 rerank_diag.update(wm_diag)
@@ -1723,6 +1731,13 @@ def _compute_snippet_distill_loss(
                 belief_flat=belief_r,
                 cand_first_actions=cand_first,
                 predict_fn=bridge.rssm_predict_fn,
+                horizon_steps=tuple(
+                    getattr(
+                        bridge,
+                        "wm_horizon_steps",
+                        getattr(rerank_cfg, "horizon_steps", (4, 8)),
+                    )
+                ),
             )
             predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
             best_idx, _candidate_score, score_diag, _row_active = score_snippet_candidates(

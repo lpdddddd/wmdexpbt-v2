@@ -57,8 +57,15 @@ Teacher confidence and row weight:
 - Shared WM term (reranker + calibration):
   `wm_term = clip(w_rec·p_rec + w_success·p_succ − w_drop·p_drop − w_unc·u, ±cap)`
   with `u = max(u_rec, u_succ, u_drop)` and `u_• = 1 − 2|p_• − 0.5|`.
+- Success/drop probabilities and targets average the configured `horizon_steps`
+  (sorted numerically) via shared `extract_required_wm_head_probs`; recovery
+  stays on the single recovery head / primary horizon.
 - Calibration predicted score uses the same `wm_term`; realized utility is
   `U = w_rec·y_rec + w_success·y_succ − w_drop·y_drop` (no unc term).
+- Eval samples require `target_eval_mask ∧ prediction_valid_mask` and
+  re-check `min_samples` after the intersection. Structural failures
+  (missing head / shape / nonfinite required preds) immediately zero
+  `α_wm` and `ema_raw`; insufficient samples apply one EMA decay with raw=0.
 - `α_wm` gates: `raw = gate_auc_rec · gate_ece_rec · gate_rank_combined` where
   `gate_rank` uses Spearman(`wm_term`, `U`). Recovery AUC/ECE remain base
   quality gates; success/drop constrain α only via combined ranking (not a

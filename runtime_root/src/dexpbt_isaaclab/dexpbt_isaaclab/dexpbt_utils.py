@@ -437,6 +437,9 @@ CSER_TB_SCALAR_NAMES: tuple[str, ...] = (
     "wm_cal/combined_score_mean",
     "wm_cal/realized_utility_mean",
     "wm_cal/gate_combined_rank",
+    "wm_cal/combined_abs_error_mean",
+    "wm_cal/valid_prediction_frac",
+    "wm_cal/failure_reason_id",
     "pbt_consolidation/stage",
     "pbt_consolidation/restart_blocked_count",
 )

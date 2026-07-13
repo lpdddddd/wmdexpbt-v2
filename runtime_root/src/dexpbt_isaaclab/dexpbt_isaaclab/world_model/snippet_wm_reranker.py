@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 import torch
 
-from .rssm_mppi_planner import _extract_head_probs
 from .wm_activation_gate import clamp01
+from .wm_head_probs import binary_head_uncertainty, combined_head_uncertainty
 
 
 @dataclass
@@ -20,6 +20,17 @@ class SnippetWMRerankConfig:
     w_unc: float = 0.1
     w_delta: float = 0.05
     score_cap: float = 0.25
+    # Must match SeqWM / calibration horizon_steps for success/drop aggregation.
+    horizon_steps: tuple[int, ...] = (4, 8)
+
+
+class SnippetScoreResult(NamedTuple):
+    """Public score result; unpacks as ``(best_idx, candidate_score, diag, row_wm_active)``."""
+
+    best_idx: torch.Tensor
+    candidate_score: torch.Tensor
+    diagnostics: dict[str, float]
+    row_wm_active: torch.Tensor
 
 
 # fallback_reason_id:
@@ -90,27 +101,6 @@ def mean_squared_action_delta(
     return ((cand_first.float() - actor_action.float()[:, None, :]) ** 2).mean(dim=-1)
 
 
-def binary_head_uncertainty(prob: torch.Tensor) -> torch.Tensor:
-    """Uncertainty in ``[0, 1]``: high when probability is near 0.5."""
-    return (1.0 - (prob.float() - 0.5).abs() * 2.0).clamp(0.0, 1.0)
-
-
-def combined_head_uncertainty(
-    p_recovery: torch.Tensor,
-    p_success: torch.Tensor,
-    p_drop: torch.Tensor,
-) -> torch.Tensor:
-    """Max uncertainty across recovery/success/drop (conservative aggregate)."""
-    return torch.stack(
-        [
-            binary_head_uncertainty(p_recovery),
-            binary_head_uncertainty(p_success),
-            binary_head_uncertainty(p_drop),
-        ],
-        dim=0,
-    ).amax(dim=0)
-
-
 def compute_snippet_wm_term(
     *,
     p_recovery: torch.Tensor,
@@ -161,10 +151,10 @@ def score_snippet_candidates(
     alpha_wm: float,
     cfg: SnippetWMRerankConfig,
     wm_valid_mask: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float], torch.Tensor]:
-    """Return ``(best_idx, candidate_score, diagnostics, row_wm_active)``.
+) -> SnippetScoreResult:
+    """Return ``SnippetScoreResult(best_idx, candidate_score, diagnostics, row_wm_active)``.
 
-    Row-level fail-closed WM rerank:
+    Also unpacks as a 4-tuple for callers. Row-level fail-closed WM rerank:
     - ``row_prediction_valid = candidate_valid.all(dim=1)``
     - ``row_wm_active = row_prediction_valid & (cfg.enabled and alpha_wm > 0)``
     - Active rows use ``pr_norm + alpha * (wm_term - w_delta * action_delta)``
@@ -260,21 +250,26 @@ def score_snippet_candidates(
         action_delta_mean = float(action_delta_f[row_wm_active].mean().item())
         action_penalty_mean = float(action_penalty[row_wm_active].mean().item())
 
-    return best_idx, candidate_score, {
-        "snippet_wm_rerank/changed_frac": float(changed.mean().item()) if B else 0.0,
-        "snippet_wm_rerank/changed_frac_overall": float(changed.mean().item()) if B else 0.0,
-        "snippet_wm_rerank/changed_frac_given_active": changed_given_active,
-        "snippet_wm_rerank/wm_term_mean": wm_term_mean,
-        "snippet_wm_rerank/action_delta_mean": action_delta_mean,
-        "snippet_wm_rerank/action_penalty_mean": action_penalty_mean,
-        "snippet_wm_rerank/candidate_valid_frac": cand_valid_frac,
-        "snippet_wm_rerank/row_prediction_valid_frac": row_pred_frac,
-        "snippet_wm_rerank/row_active_frac": row_active_frac,
-        "snippet_wm_rerank/row_fallback_frac": row_fallback_frac,
-        "snippet_wm_rerank/valid_frac": row_active_frac,
-        "snippet_wm_rerank/fallback_frac": row_fallback_frac,
-        "snippet_wm_rerank/fallback_reason_id": reason,
-    }, row_wm_active
+    return SnippetScoreResult(
+        best_idx=best_idx,
+        candidate_score=candidate_score,
+        diagnostics={
+            "snippet_wm_rerank/changed_frac": float(changed.mean().item()) if B else 0.0,
+            "snippet_wm_rerank/changed_frac_overall": float(changed.mean().item()) if B else 0.0,
+            "snippet_wm_rerank/changed_frac_given_active": changed_given_active,
+            "snippet_wm_rerank/wm_term_mean": wm_term_mean,
+            "snippet_wm_rerank/action_delta_mean": action_delta_mean,
+            "snippet_wm_rerank/action_penalty_mean": action_penalty_mean,
+            "snippet_wm_rerank/candidate_valid_frac": cand_valid_frac,
+            "snippet_wm_rerank/row_prediction_valid_frac": row_pred_frac,
+            "snippet_wm_rerank/row_active_frac": row_active_frac,
+            "snippet_wm_rerank/row_fallback_frac": row_fallback_frac,
+            "snippet_wm_rerank/valid_frac": row_active_frac,
+            "snippet_wm_rerank/fallback_frac": row_fallback_frac,
+            "snippet_wm_rerank/fallback_reason_id": reason,
+        },
+        row_wm_active=row_wm_active,
+    )
 
 
 def effective_alpha_wm(*, wm_calibration_enable: bool, alpha_wm: float) -> float:
@@ -310,15 +305,23 @@ def wm_head_probs_for_candidates(
     belief_flat: Optional[torch.Tensor],
     cand_first_actions: torch.Tensor,
     predict_fn: Optional[Callable[[torch.Tensor, torch.Tensor], dict[str, Any]]],
+    horizon_steps: Optional[Sequence[int]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     """Return ``p_recovery, p_success, p_drop, uncertainty, wm_valid_mask, diag``.
 
-    ``wm_valid_mask`` is ``[B, K]``. Invalid entries use ``uncertainty=1`` (not 0)
-    so a missed mask cannot look like high-confidence WM. Callers apply row-level
-    fail-closed via ``wm_valid_mask.all(dim=1)``.
+    Uses shared ``extract_required_wm_head_probs`` so success/drop aggregation
+    matches WM calibration. ``wm_valid_mask`` is ``[B, K]``. Invalid entries use
+    ``uncertainty=1``. Callers apply row-level fail-closed via ``.all(dim=1)``.
     """
+    from .wm_head_probs import (
+        FAILURE_HORIZON_MISMATCH,
+        FAILURE_SHAPE_MISMATCH,
+        extract_required_wm_head_probs,
+        infer_horizon_steps_from_preds,
+        normalize_horizon_steps,
+    )
+
     if not isinstance(cand_first_actions, torch.Tensor) or cand_first_actions.ndim != 3:
-        # Cannot even infer B,K safely.
         B = int(cand_first_actions.shape[0]) if getattr(cand_first_actions, "ndim", 0) >= 1 else 1
         K = int(cand_first_actions.shape[1]) if getattr(cand_first_actions, "ndim", 0) >= 2 else 1
         device = getattr(cand_first_actions, "device", torch.device("cpu"))
@@ -327,6 +330,9 @@ def wm_head_probs_for_candidates(
 
     B, K, _A = cand_first_actions.shape
     dev, dtype = cand_first_actions.device, cand_first_actions.dtype
+    configured_steps = (
+        None if horizon_steps is None else normalize_horizon_steps(horizon_steps)
+    )
 
     if predict_fn is None:
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PREDICT_NONE)
@@ -337,15 +343,13 @@ def wm_head_probs_for_candidates(
     if int(belief_flat.shape[0]) != int(B) or int(belief_flat.shape[1]) <= 0:
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_SHAPE)
 
-    # Per-row action validity: one bad row must not invalidate the whole batch.
-    cand_row_valid = torch.isfinite(cand_first_actions).all(dim=(1, 2))  # [B]
+    cand_row_valid = torch.isfinite(cand_first_actions).all(dim=(1, 2))
     cand_safe = torch.where(
         cand_row_valid[:, None, None],
         cand_first_actions,
         torch.zeros_like(cand_first_actions),
     )
-
-    belief_row_valid = torch.isfinite(belief_flat).all(dim=1)  # [B]
+    belief_row_valid = torch.isfinite(belief_flat).all(dim=1)
     belief_safe = torch.where(
         belief_row_valid[:, None],
         belief_flat,
@@ -364,42 +368,38 @@ def wm_head_probs_for_candidates(
     if not isinstance(preds, dict):
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
 
-    probs = _extract_head_probs(preds, dev, dtype)
-    if not all(k in probs for k in ("recovery", "success", "drop")):
+    steps = configured_steps
+    if steps is None:
+        steps = infer_horizon_steps_from_preds(preds)
+    if not steps:
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
 
-    try:
-        p_rec_flat = probs["recovery"].reshape(-1)
-        p_succ_flat = probs["success"].reshape(-1)
-        p_drop_flat = probs["drop"].reshape(-1)
-    except Exception:
-        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
-
-    need = B * K
-    if (
-        int(p_rec_flat.numel()) != need
-        or int(p_succ_flat.numel()) != need
-        or int(p_drop_flat.numel()) != need
-    ):
-        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
-
-    try:
-        p_rec = p_rec_flat.view(B, K)
-        p_succ = p_succ_flat.view(B, K)
-        p_drop = p_drop_flat.view(B, K)
-    except Exception:
-        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
-
-    unc = combined_head_uncertainty(p_rec, p_succ, p_drop)
-    finite = (
-        torch.isfinite(p_rec)
-        & torch.isfinite(p_succ)
-        & torch.isfinite(p_drop)
-        & torch.isfinite(unc)
+    extracted = extract_required_wm_head_probs(
+        preds,
+        horizon_steps=steps,
+        expected_batch=B * K,
+        device=dev,
+        dtype=dtype,
     )
-    # Belief-invalid or action-invalid rows => all candidates invalid for that row.
-    finite = finite & belief_row_valid[:, None] & cand_row_valid[:, None]
+    if not extracted.structural_ok:
+        fr = float(extracted.diagnostics.get("wm_cal/failure_reason_id", 1.0))
+        reason = _REASON_MISSING_HEADS
+        if fr == FAILURE_SHAPE_MISMATCH:
+            reason = _REASON_PRED_BATCH
+        elif fr == FAILURE_HORIZON_MISMATCH:
+            reason = _REASON_MISSING_HEADS
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=reason)
 
+    try:
+        p_rec = extracted.p_recovery.view(B, K)
+        p_succ = extracted.p_success.view(B, K)
+        p_drop = extracted.p_drop.view(B, K)
+        unc = extracted.uncertainty.view(B, K)
+        finite = extracted.valid_mask.view(B, K)
+    except Exception:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
+
+    finite = finite & belief_row_valid[:, None] & cand_row_valid[:, None]
     zeros = torch.zeros(B, K, device=dev, dtype=dtype)
     ones = torch.ones(B, K, device=dev, dtype=dtype)
     p_rec = torch.where(finite, p_rec, zeros)
@@ -416,10 +416,8 @@ def wm_head_probs_for_candidates(
     if bool(finite.all()):
         reason = _REASON_OK
     elif bool((~belief_row_valid).any()) and not bool((~cand_row_valid).any()):
-        # Prefer belief reason when belief rows are the only structural issue.
         reason = _REASON_BELIEF_NONFINITE
     elif bool((~cand_row_valid).any()) and bool(cand_row_valid.any()) and not bool(row_partial.any()):
-        # Whole bad-action rows mixed with good rows (no within-row action partial).
         reason = _REASON_CAND_INVALID
     elif bool(row_partial.any()):
         reason = _REASON_PARTIAL_INVALID

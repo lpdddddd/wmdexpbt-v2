@@ -109,9 +109,6 @@ class TestWMCalibration(unittest.TestCase):
                 "p_success": [0.1, 0.2],
                 "y_success": [0, 1],
                 "uncertainty": [0.1, 0.2],
-                "error": [0.5, 0.4],
-                "wm_recovery_score": [0.1, 0.2],
-                "y_improve": [0, 1],
             }
         )
         st = ev.compute_alpha(metrics, st)
@@ -582,6 +579,66 @@ class TestWMCalibration(unittest.TestCase):
         self.assertIn("wm_cal/rank_corr", metrics)
         self.assertIn("wm_cal/rank_corr_combined", metrics)
         self.assertEqual(metrics["wm_cal/rank_corr"], metrics["wm_cal/rank_corr_combined"])
+
+    def test_missing_success_head_returns_none(self):
+        class _NoSucc(_FakeHeads):
+            def predict_transition(self, belief_flat, action_flat):
+                n = belief_flat.shape[0]
+                return {
+                    "recovery_logits": torch.zeros(n, 1),
+                    "horizon_logits": {4: {"drop": torch.zeros(n, 1)}},
+                }
+
+        preds, diag = extract_wm_calibration_predictions(
+            _NoSucc(),
+            belief_flat=torch.zeros(3, 8),
+            action_flat=torch.zeros(3, 3),
+            horizon=4,
+            horizon_steps=(4,),
+        )
+        self.assertIsNone(preds)
+        self.assertGreater(diag["wm_cal/missing_head"], 0.5)
+
+    def test_shape_mismatch_returns_none(self):
+        class _BadShape(_FakeHeads):
+            def predict_transition(self, belief_flat, action_flat):
+                n = belief_flat.shape[0]
+                return {
+                    "recovery_logits": torch.zeros(n, 1),
+                    "horizon_logits": {
+                        4: {
+                            "success": torch.zeros(n + 1, 1),
+                            "drop": torch.zeros(n, 1),
+                        }
+                    },
+                }
+
+        preds, diag = extract_wm_calibration_predictions(
+            _BadShape(),
+            belief_flat=torch.zeros(3, 8),
+            action_flat=torch.zeros(3, 3),
+            horizon_steps=(4,),
+        )
+        self.assertIsNone(preds)
+        self.assertGreater(diag.get("wm_cal/shape_mismatch", 0.0), 0.5)
+
+    def test_horizon_intersection_mask(self):
+        # T=10 so H=8 is reachable for early rows only; intersection with H=4
+        # still requires H=8 future.
+        batch = _seq_batch(t=10, b=1, d0=0.05, d_improve=0.01, tol=0.015)
+        tgt, diag = build_wm_calibration_targets(
+            batch,
+            horizon=4,
+            horizon_steps=(4, 8),
+            improve_margin=0.005,
+            floor_tol_threshold=0.02,
+            eval_tol_mode="hybrid",
+            eval_tol_threshold=0.05,
+            eval_tol_cap=0.06,
+        )
+        self.assertEqual(diag["wm_cal/horizon_count"], 2.0)
+        # Only timesteps with full 8-step future can be in eval_mask.
+        self.assertLessEqual(int(tgt["eval_mask"].sum().item()), 2)
 
 
 if __name__ == "__main__":

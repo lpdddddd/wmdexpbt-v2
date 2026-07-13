@@ -5934,6 +5934,14 @@ class _WmEnabledRunner(Runner):
                 eir_bridge.snippet_wm_rerank_cfg = getattr(
                     self.seq_wm_trainer, "_snippet_wm_rerank_cfg", None
                 )
+                _rerank = eir_bridge.snippet_wm_rerank_cfg
+                eir_bridge.wm_horizon_steps = tuple(
+                    getattr(
+                        _rerank,
+                        "horizon_steps",
+                        getattr(getattr(self.seq_wm_trainer, "cfg", None), "horizon_steps", (4, 8)),
+                    )
+                )
                 eir_bridge.progress_refine_cfg = getattr(
                     self.seq_wm_trainer, "_progress_refine_cfg", None
                 )
@@ -6921,6 +6929,7 @@ def main():
             w_unc=float(args_cli.snippet_wm_rerank_w_unc),
             w_delta=float(args_cli.snippet_wm_rerank_w_delta),
             score_cap=float(args_cli.snippet_wm_rerank_score_cap),
+            horizon_steps=tuple(int(h) for h in seq_cfg.horizon_steps),
         )
         # Keep calibration score weights identical to the live snippet reranker.
         _wm_cal_ev = getattr(seq_wm_trainer, "_wm_calibration_evaluator", None)

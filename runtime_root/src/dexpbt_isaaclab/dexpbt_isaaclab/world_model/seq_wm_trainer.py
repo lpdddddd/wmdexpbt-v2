@@ -652,21 +652,29 @@ class SeqWMTrainer:
             success_tolerance_full=read_aux_full(experience_buffer, "aux_success_tolerance"),
         ).to(self.device)
         heads = getattr(self.model, "heads", None)
+        from .wm_calibration_evaluator import apply_calibration_outcome
         from .wm_calibration_metrics import (
             build_wm_calibration_targets,
             extract_wm_calibration_predictions,
             resolve_calibration_horizon,
         )
-
-        horizon = resolve_calibration_horizon(
-            getattr(self.cfg, "horizon_steps", (4, 8)), default=4
+        from .wm_head_probs import (
+            FAILURE_INSUFFICIENT_SAMPLES,
+            FAILURE_MISSING_HEAD,
+            normalize_horizon_steps,
         )
+
+        horizon_steps = normalize_horizon_steps(
+            getattr(self.cfg, "horizon_steps", (4, 8))
+        )
+        primary_horizon = resolve_calibration_horizon(horizon_steps, default=4)
         improve_margin = float(getattr(self.cfg, "recovery_d_hat_margin", 0.005))
         floor_tol = float(getattr(self.cfg, "floor_tol_threshold", 0.02))
 
         targets, tol_diag = build_wm_calibration_targets(
             batch,
-            horizon=horizon,
+            horizon=primary_horizon,
+            horizon_steps=horizon_steps,
             improve_margin=improve_margin,
             floor_tol_threshold=floor_tol,
             eval_tol_mode=str(getattr(cfg, "eval_tol_mode", "hybrid")),
@@ -678,18 +686,9 @@ class SeqWMTrainer:
                 getattr(cfg, "eval_tol_min_samples_for_stats", 32)
             ),
         )
-        eval_mask = targets["eval_mask"]
-        idx = eval_mask.nonzero(as_tuple=False).reshape(-1)
+        target_eval_mask = targets["eval_mask"]
+        target_eval_count = int(target_eval_mask.sum().item())
         min_samples = int(getattr(cfg, "min_samples", 32))
-        if int(idx.numel()) < min_samples:
-            metrics = {
-                "wm_cal/insufficient_samples": 1.0,
-                "wm_cal/missing_head": 0.0,
-                "wm_cal/n_samples": float(int(idx.numel())),
-            }
-            metrics.update(tol_diag)
-            state.last_metrics = metrics
-            return state
 
         belief = self.model.encode_sequence(batch)
         flat = belief.reshape(-1, belief.shape[-1])
@@ -698,14 +697,60 @@ class SeqWMTrainer:
             heads,
             belief_flat=flat,
             action_flat=action_flat,
-            horizon=horizon,
+            horizon=primary_horizon,
+            horizon_steps=horizon_steps,
         )
         if preds is None:
             metrics = dict(pred_diag)
-            metrics["wm_cal/n_samples"] = float(int(idx.numel()))
             metrics.update(tol_diag)
-            state.last_metrics = metrics
-            return state
+            metrics["wm_cal/target_eval_count"] = float(target_eval_count)
+            metrics["wm_cal/valid_prediction_count"] = 0.0
+            metrics["wm_cal/invalid_prediction_count"] = float(flat.shape[0])
+            metrics["wm_cal/valid_prediction_frac"] = 0.0
+            metrics["wm_cal/n_samples"] = 0.0
+            metrics.setdefault("wm_cal/missing_head", 1.0)
+            metrics.setdefault("wm_cal/failure_reason_id", FAILURE_MISSING_HEAD)
+            return apply_calibration_outcome(
+                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            )
+
+        pred_valid = preds["valid_mask"].bool().reshape(-1)
+        if int(pred_valid.numel()) != int(target_eval_mask.numel()):
+            metrics = dict(pred_diag)
+            metrics.update(tol_diag)
+            metrics["wm_cal/shape_mismatch"] = 1.0
+            metrics["wm_cal/failure_reason_id"] = 2.0
+            metrics["wm_cal/target_eval_count"] = float(target_eval_count)
+            return apply_calibration_outcome(
+                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            )
+
+        final_eval_mask = target_eval_mask & pred_valid
+        idx = final_eval_mask.nonzero(as_tuple=False).reshape(-1)
+        valid_pred_count = int(pred_valid.sum().item())
+        invalid_pred_count = int((~pred_valid).sum().item())
+        n_eval = int(idx.numel())
+        base_telem = {
+            "wm_cal/target_eval_count": float(target_eval_count),
+            "wm_cal/valid_prediction_count": float(valid_pred_count),
+            "wm_cal/invalid_prediction_count": float(invalid_pred_count),
+            "wm_cal/valid_prediction_frac": float(pred_valid.float().mean().item())
+            if pred_valid.numel()
+            else 0.0,
+            "wm_cal/n_samples": float(n_eval),
+        }
+        if n_eval < min_samples:
+            metrics = {
+                "wm_cal/insufficient_samples": 1.0,
+                "wm_cal/missing_head": float(pred_diag.get("wm_cal/missing_head", 0.0)),
+                "wm_cal/failure_reason_id": FAILURE_INSUFFICIENT_SAMPLES,
+            }
+            metrics.update(base_telem)
+            metrics.update(tol_diag)
+            metrics.update(pred_diag)
+            return apply_calibration_outcome(
+                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="insufficient"
+            )
 
         idx_list = idx.tolist()
         y_rec = [float(targets["y_recovery"][i].item()) for i in idx_list]
@@ -716,7 +761,6 @@ class SeqWMTrainer:
         p_succ = [float(preds["p_success"][i].item()) for i in idx_list]
         p_drop = [float(preds["p_drop"][i].item()) for i in idx_list]
         unc = [float(preds["uncertainty"][i].item()) for i in idx_list]
-        err = [abs(p_rec[j] - y_rec[j]) for j in range(len(idx_list))]
         metrics = evaluator.evaluate_batch(
             {
                 "p_recovery": p_rec,
@@ -726,14 +770,23 @@ class SeqWMTrainer:
                 "p_success": p_succ,
                 "y_success": y_succ,
                 "uncertainty": unc,
-                "error": err,
                 "y_improve": y_improve,
                 "missing_head": pred_diag.get("wm_cal/missing_head", 0.0),
             }
         )
+        if float(metrics.get("wm_cal/batch_invalid", 0.0)) > 0.5:
+            metrics.update(tol_diag)
+            metrics.update(pred_diag)
+            metrics.update(base_telem)
+            return apply_calibration_outcome(
+                state, cfg=cfg, frames=int(frames), metrics=metrics, mode="structural"
+            )
         metrics.update(tol_diag)
+        metrics.update(pred_diag)
+        metrics.update(base_telem)
         state = evaluator.compute_alpha(metrics, state)
         state.last_eval_frame = int(frames)
+        state.last_metrics = dict(metrics)
         return state
 
     # ----- save / load -----
