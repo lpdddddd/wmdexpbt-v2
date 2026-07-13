@@ -451,6 +451,65 @@ class TestRuntimeDistillPath(unittest.TestCase):
             loss.backward()
             self.assertIsNotNone(a2c.mu.weight.grad)
 
+    def test_22b_progress_distill_bf16_teacher_index_put(self):
+        """AMP-style mismatch: fp32 feats + bf16 actor mu must not crash.
+
+        Production: feat.dtype may be float32 while mu (teacher_first) is bf16
+        and snippet-bank actions are float32. Casting to feat.dtype is wrong;
+        RHS must match teacher_first.dtype.
+        """
+        from dexpbt_isaaclab.world_model.eir_mpc import _compute_snippet_distill_loss_progress
+
+        class _Bf16A2C(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._lin = nn.Linear(8, 3)
+
+            def mu(self, f):
+                # Mimic AMP: float activations in, bf16 actions out.
+                return self._lin(f.float()).to(dtype=torch.bfloat16)
+
+        a2c = _Bf16A2C()
+        bank = _bank(
+            tolerance_compatibility_mode="log_relative",
+            tolerance_max_log_gap=0.3,
+            progress_priority_weight=0.5,
+        )
+        bank.update_from_builder_batch(_snippet_batch([0.02, 0.021, 0.019]), frame=1)
+        sd = SnippetDistillConfig(enabled=True, weight=1.0, topk=4, loss_cap=0.0)
+        pr = ProgressRefinementConfig(
+            enabled=True,
+            history_steps=1,
+            start_after_frames=0,
+            ramp_frames=0,
+            only_lifted=False,
+            min_gate_for_retrieval=0.0,
+        )
+        bridge = _FakeBridge(bank, sd, pr, a2c)
+
+        R = 4
+        cache = _FakeCache()
+        cache.success_tol_flat = torch.full((R,), 0.02)
+        cache.lifted_flat = torch.ones(R)
+        cache.normalized_error_flat = torch.tensor([0.2, 0.5, 3.0, 0.3])
+        cache.recent_progress_flat = torch.zeros(R)
+        cache.oscillation_flat = torch.full((R,), 0.2)
+        cache.progress_history_valid_flat = torch.ones(R)
+
+        feat = torch.randn(R, 8, dtype=torch.float32)
+        risky = torch.ones(R, dtype=torch.bool)
+        loss = _compute_snippet_distill_loss_progress(
+            bridge,
+            eir_cfg=None,
+            cache=cache,
+            feat=feat,
+            risky=risky,
+            frames=10**9,
+            start=0,
+            end=R,
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+
 
 def _ns(**kwargs):
     return argparse.Namespace(**kwargs)

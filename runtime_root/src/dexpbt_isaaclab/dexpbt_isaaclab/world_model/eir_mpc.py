@@ -1379,7 +1379,11 @@ def _compute_snippet_distill_loss_progress(
 
         n = int(sel_idx.numel())
         ar = torch.arange(n, device=dev)
-        teacher_sel = cand_first[ar, best_idx]  # [n, A]
+        # Under AMP, ``feat`` may be fp32 while actor ``mu`` (and therefore
+        # ``teacher_first``) is bf16. Snippet-bank actions are typically fp32.
+        # Always cast the RHS to ``teacher_first.dtype`` before index_put.
+        teacher_dtype = teacher_first.dtype
+        teacher_sel = cand_first[ar, best_idx].to(device=dev, dtype=teacher_dtype)
         # Margin: best candidate score vs the candidate most like the actor.
         score_best = base.max(dim=1).values
         actor_like = action_delta.argmin(dim=1)
@@ -1399,8 +1403,10 @@ def _compute_snippet_distill_loss_progress(
         # Rows that failed retrieval fall back (no compatible snippet).
         fallback_rows = int((rv <= 0.5).sum().item())
         teacher_first[sel_idx] = torch.where(
-            rv[:, None] > 0.5, teacher_sel, teacher_first[sel_idx]
-        )
+            rv[:, None] > 0.5,
+            teacher_sel,
+            teacher_first[sel_idx],
+        ).to(dtype=teacher_dtype)
         retrieval_valid[sel_idx] = rv
         conf[sel_idx] = c_sel.to(dtype)
 
@@ -1428,24 +1434,24 @@ def _compute_snippet_distill_loss_progress(
     if valid_r <= 0.0:
         bridge.last_actor_distill_fallback_reason = "no_compatible_or_low_gate"
     bridge.last_progress_refine = {
-        "progress_refine/gate_mean": float(gate.mean().item()) if R else 0.0,
-        "progress_refine/gate_p50": float(torch.quantile(gate, 0.5).item()) if R else 0.0,
-        "progress_refine/gate_p90": float(torch.quantile(gate, 0.9).item()) if R else 0.0,
+        "progress_refine/gate_mean": float(gate.float().mean().item()) if R else 0.0,
+        "progress_refine/gate_p50": float(torch.quantile(gate.float(), 0.5).item()) if R else 0.0,
+        "progress_refine/gate_p90": float(torch.quantile(gate.float(), 0.9).item()) if R else 0.0,
         "progress_refine/active_frac": float(stats.get("snippet_distill/weight_pos_frac", 0.0)),
-        "progress_refine/history_valid_frac": float(gate_res.history_valid.mean().item()) if R else 0.0,
-        "progress_refine/normalized_error_mean": float(norm_err.mean().item()) if R else 0.0,
+        "progress_refine/history_valid_frac": float(gate_res.history_valid.float().mean().item()) if R else 0.0,
+        "progress_refine/normalized_error_mean": float(norm_err.float().mean().item()) if R else 0.0,
         "progress_refine/normalized_error_active_mean": float(
-            (norm_err * (row_weight > 0).float()).sum().item()
+            (norm_err.float() * (row_weight > 0).float()).sum().item()
             / max(float((row_weight > 0).float().sum().item()), 1.0)
         ),
-        "progress_refine/recent_progress_mean": float(recent.mean().item()) if R else 0.0,
+        "progress_refine/recent_progress_mean": float(recent.float().mean().item()) if R else 0.0,
         "progress_refine/recent_progress_active_mean": float(
-            (recent * (row_weight > 0).float()).sum().item()
+            (recent.float() * (row_weight > 0).float()).sum().item()
             / max(float((row_weight > 0).float().sum().item()), 1.0)
         ),
-        "progress_refine/oscillation_mean": float(osc.mean().item()) if R else 0.0,
-        "progress_refine/teacher_confidence_mean": float(conf.mean().item()) if R else 0.0,
-        "progress_refine/teacher_margin_mean": float(conf.mean().item()) if R else 0.0,
+        "progress_refine/oscillation_mean": float(osc.float().mean().item()) if R else 0.0,
+        "progress_refine/teacher_confidence_mean": float(conf.float().mean().item()) if R else 0.0,
+        "progress_refine/teacher_margin_mean": float(conf.float().mean().item()) if R else 0.0,
         "progress_refine/retrieval_valid_frac": valid_r,
         "progress_refine/retrieval_budget_frac": float(budget_frac),
         "progress_refine/effective_sample_size": float(
