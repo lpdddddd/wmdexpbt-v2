@@ -22,6 +22,25 @@ class SnippetWMRerankConfig:
     score_cap: float = 0.25
 
 
+# fallback_reason_id:
+# 0=ok, 1=predict_fn_none, 2=belief_missing, 3=belief_nonfinite_rows,
+# 4=predict_error, 5=missing_heads, 6=nonfinite_preds,
+# 7=belief_shape, 8=cand_shape_or_nonfinite, 9=pred_batch_mismatch,
+# 11=alpha_zero_or_disabled, 12=partial_candidate_invalid
+_REASON_OK = 0.0
+_REASON_PREDICT_NONE = 1.0
+_REASON_BELIEF_MISSING = 2.0
+_REASON_BELIEF_NONFINITE = 3.0
+_REASON_PREDICT_ERROR = 4.0
+_REASON_MISSING_HEADS = 5.0
+_REASON_NONFINITE_PREDS = 6.0
+_REASON_BELIEF_SHAPE = 7.0
+_REASON_CAND_INVALID = 8.0
+_REASON_PRED_BATCH = 9.0
+_REASON_ALPHA_ZERO = 11.0
+_REASON_PARTIAL_INVALID = 12.0
+
+
 def score_snippet_candidates(
     *,
     priority: torch.Tensor,
@@ -36,12 +55,34 @@ def score_snippet_candidates(
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Return ``(best_idx, candidate_score, diagnostics)``.
 
-    ``candidate_score`` is the per-candidate total used for ``argmax`` (and must
-    also be used for teacher confidence). Rows with no valid WM candidates fall
-    back to raw ``priority`` selection and scores so invalid WM never looks like
-    ``uncertainty=0`` high-confidence predictions.
+    Row-level fail-closed WM rerank:
+    - ``row_prediction_valid = wm_valid_mask.all(dim=1)``
+    - ``row_wm_active = row_prediction_valid & (cfg.enabled and alpha_wm > 0)``
+    - Active rows use ``pr_norm + alpha * wm_term - w_delta * action_delta``
+    - Inactive rows use raw ``priority`` (no action_delta penalty)
+
+    Invariant: ``best_idx == candidate_score.argmax(dim=1)``.
     """
     B, K = priority.shape
+    device = priority.device
+    dtype = priority.dtype
+
+    wm_globally_active = bool(cfg.enabled) and float(alpha_wm) > 0.0
+    alpha = clamp01(float(alpha_wm)) if wm_globally_active else 0.0
+
+    if wm_valid_mask is None:
+        candidate_wm_valid = torch.ones(B, K, dtype=torch.bool, device=device)
+    else:
+        candidate_wm_valid = wm_valid_mask.to(device=device, dtype=torch.bool)
+        if candidate_wm_valid.ndim == 1:
+            candidate_wm_valid = candidate_wm_valid[:, None].expand(B, K)
+        elif tuple(candidate_wm_valid.shape) != (B, K):
+            # Shape mismatch => treat entire batch as prediction-invalid.
+            candidate_wm_valid = torch.zeros(B, K, dtype=torch.bool, device=device)
+
+    row_prediction_valid = candidate_wm_valid.all(dim=1)
+    row_wm_active = row_prediction_valid & wm_globally_active
+
     pr_min = priority.min(dim=1, keepdim=True).values
     pr_max = priority.max(dim=1, keepdim=True).values
     pr_norm = (priority - pr_min) / (pr_max - pr_min + 1e-6)
@@ -51,43 +92,52 @@ def score_snippet_candidates(
         - float(cfg.w_drop) * p_drop
         - float(cfg.w_unc) * uncertainty
     )
-    cap = float(cfg.score_cap)
-    wm_term = wm_term.clamp(-cap, cap)
-    alpha = clamp01(float(alpha_wm)) if cfg.enabled else 0.0
+    wm_term = wm_term.clamp(-float(cfg.score_cap), float(cfg.score_cap))
 
-    if wm_valid_mask is None:
-        cand_valid = torch.ones(B, K, dtype=torch.bool, device=priority.device)
-    else:
-        cand_valid = wm_valid_mask.to(device=priority.device, dtype=torch.bool)
-        if cand_valid.ndim == 1:
-            cand_valid = cand_valid[:, None].expand(B, K)
-    row_wm_ok = cand_valid.any(dim=1)
-    valid_f = cand_valid.to(dtype=pr_norm.dtype)
-
-    # Invalid candidates contribute no WM term (neutral), but are excluded from
-    # WM-driven selection via -inf so they cannot win through fake zero unc.
-    total = pr_norm + alpha * wm_term * valid_f - float(cfg.w_delta) * action_delta
-    select_score = total.masked_fill(~cand_valid, -1e9)
-    wm_best = select_score.argmax(dim=1)
+    wm_total_score = pr_norm + alpha * wm_term - float(cfg.w_delta) * action_delta
+    # Single score tensor for both selection and confidence.
+    candidate_score = torch.where(row_wm_active[:, None], wm_total_score.to(dtype=dtype), priority)
+    best_idx = candidate_score.argmax(dim=1)
     priority_best = priority.argmax(dim=1)
-    best_idx = torch.where(row_wm_ok, wm_best, priority_best)
-
-    # Confidence / telemetry must read the same score family as selection.
-    candidate_score = torch.where(row_wm_ok[:, None], total, priority)
 
     changed = (best_idx != priority_best).float()
-    # Only count changes on rows that actually used WM.
-    changed_wm = torch.where(row_wm_ok, changed, torch.zeros_like(changed))
-    valid_frac = float(row_wm_ok.float().mean().item()) if B else 0.0
-    fallback_frac = float((~row_wm_ok).float().mean().item()) if B else 0.0
-    wm_term_used = wm_term * valid_f
+    n_active = int(row_wm_active.sum().item())
+    changed_given_active = (
+        float(changed[row_wm_active].mean().item()) if n_active > 0 else 0.0
+    )
+    cand_valid_frac = (
+        float(candidate_wm_valid.float().mean().item()) if candidate_wm_valid.numel() else 0.0
+    )
+    row_pred_frac = float(row_prediction_valid.float().mean().item()) if B else 0.0
+    row_active_frac = float(row_wm_active.float().mean().item()) if B else 0.0
+    row_fallback_frac = float((~row_wm_active).float().mean().item()) if B else 0.0
+
+    reason = _REASON_OK
+    if not wm_globally_active:
+        reason = _REASON_ALPHA_ZERO
+    elif B > 0 and bool((~candidate_wm_valid).any()) and bool(candidate_wm_valid.any()):
+        # Any mix of valid/invalid candidates (incl. within-row) => partial.
+        reason = _REASON_PARTIAL_INVALID
+    elif B > 0 and not bool(row_prediction_valid.any()):
+        reason = _REASON_NONFINITE_PREDS
+
+    wm_term_mean = 0.0
+    if n_active > 0 and alpha > 0.0:
+        wm_term_mean = float(wm_term[row_wm_active].mean().item())
+
     return best_idx, candidate_score, {
-        "snippet_wm_rerank/changed_frac": float(changed_wm.mean().item()) if B else 0.0,
-        "snippet_wm_rerank/wm_term_mean": (
-            float(wm_term_used.mean().item()) if alpha > 0 and bool(row_wm_ok.any()) else 0.0
-        ),
-        "snippet_wm_rerank/valid_frac": valid_frac,
-        "snippet_wm_rerank/fallback_frac": fallback_frac,
+        "snippet_wm_rerank/changed_frac": float(changed.mean().item()) if B else 0.0,
+        "snippet_wm_rerank/changed_frac_overall": float(changed.mean().item()) if B else 0.0,
+        "snippet_wm_rerank/changed_frac_given_active": changed_given_active,
+        "snippet_wm_rerank/wm_term_mean": wm_term_mean,
+        "snippet_wm_rerank/candidate_valid_frac": cand_valid_frac,
+        "snippet_wm_rerank/row_prediction_valid_frac": row_pred_frac,
+        "snippet_wm_rerank/row_active_frac": row_active_frac,
+        "snippet_wm_rerank/row_fallback_frac": row_fallback_frac,
+        # Back-compat aliases used by older telemetry consumers.
+        "snippet_wm_rerank/valid_frac": row_active_frac,
+        "snippet_wm_rerank/fallback_frac": row_fallback_frac,
+        "snippet_wm_rerank/fallback_reason_id": reason,
     }
 
 
@@ -95,6 +145,28 @@ def effective_alpha_wm(*, wm_calibration_enable: bool, alpha_wm: float) -> float
     if not wm_calibration_enable:
         return 0.0
     return clamp01(float(alpha_wm))
+
+
+def _empty_outputs(
+    B: int,
+    K: int,
+    *,
+    device,
+    dtype,
+    reason_id: float,
+    predict_error_count: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
+    zeros = torch.zeros(B, K, device=device, dtype=dtype)
+    ones_unc = torch.ones(B, K, device=device, dtype=dtype)
+    invalid = torch.zeros(B, K, dtype=torch.bool, device=device)
+    return zeros, zeros, zeros, ones_unc, invalid, {
+        "snippet_wm_rerank/predict_error_count": float(predict_error_count),
+        "snippet_wm_rerank/fallback_reason_id": float(reason_id),
+        "snippet_wm_rerank/candidate_valid_frac": 0.0,
+        "snippet_wm_rerank/row_prediction_valid_frac": 0.0,
+        "snippet_wm_rerank/valid_frac": 0.0,
+        "snippet_wm_rerank/fallback_frac": 1.0,
+    }
 
 
 def wm_head_probs_for_candidates(
@@ -105,57 +177,76 @@ def wm_head_probs_for_candidates(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     """Return ``p_recovery, p_success, p_drop, uncertainty, wm_valid_mask, diag``.
 
-    ``wm_valid_mask`` has shape ``[B, K]``. Invalid entries must not be treated as
-    ``uncertainty=0`` reliable predictions: callers fall back to snippet priority.
+    ``wm_valid_mask`` is ``[B, K]``. Invalid entries use ``uncertainty=1`` (not 0)
+    so a missed mask cannot look like high-confidence WM. Callers apply row-level
+    fail-closed via ``wm_valid_mask.all(dim=1)``.
     """
+    if not isinstance(cand_first_actions, torch.Tensor) or cand_first_actions.ndim != 3:
+        # Cannot even infer B,K safely.
+        B = int(cand_first_actions.shape[0]) if getattr(cand_first_actions, "ndim", 0) >= 1 else 1
+        K = int(cand_first_actions.shape[1]) if getattr(cand_first_actions, "ndim", 0) >= 2 else 1
+        device = getattr(cand_first_actions, "device", torch.device("cpu"))
+        dtype = getattr(cand_first_actions, "dtype", torch.float32)
+        return _empty_outputs(B, K, device=device, dtype=dtype, reason_id=_REASON_CAND_INVALID)
+
     B, K, _A = cand_first_actions.shape
     dev, dtype = cand_first_actions.device, cand_first_actions.dtype
-    zeros = torch.zeros(B, K, device=dev, dtype=dtype)
-    invalid = torch.zeros(B, K, dtype=torch.bool, device=dev)
-    base_diag = {
-        "snippet_wm_rerank/predict_error_count": 0.0,
-        "snippet_wm_rerank/fallback_reason_id": 0.0,
-        "snippet_wm_rerank/valid_frac": 0.0,
-        "snippet_wm_rerank/fallback_frac": 1.0,
-    }
-    # reason_id: 0=ok, 1=predict_fn_none, 2=belief_missing, 3=belief_nonfinite,
-    # 4=predict_error, 5=missing_heads, 6=nonfinite_preds
-    if predict_fn is None:
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 1.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
-    if belief_flat is None:
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 2.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
-    if not torch.isfinite(belief_flat).all():
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 3.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
 
-    belief_rep = belief_flat[:, None, :].expand(B, K, belief_flat.shape[-1]).reshape(B * K, -1)
+    if predict_fn is None:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PREDICT_NONE)
+    if belief_flat is None:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_MISSING)
+    if not isinstance(belief_flat, torch.Tensor) or belief_flat.ndim != 2:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_SHAPE)
+    if int(belief_flat.shape[0]) != int(B) or int(belief_flat.shape[1]) <= 0:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_SHAPE)
+    if not torch.isfinite(cand_first_actions).all():
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_CAND_INVALID)
+
+    belief_row_valid = torch.isfinite(belief_flat).all(dim=1)  # [B]
+    belief_safe = torch.where(
+        belief_row_valid[:, None],
+        belief_flat,
+        torch.zeros_like(belief_flat),
+    )
+
+    belief_rep = belief_safe[:, None, :].expand(B, K, belief_safe.shape[-1]).reshape(B * K, -1)
     cand_flat = cand_first_actions.reshape(B * K, -1)
     try:
         preds = predict_fn(belief_rep, cand_flat)
     except Exception:
-        base_diag["snippet_wm_rerank/predict_error_count"] = 1.0
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 4.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
+        return _empty_outputs(
+            B, K, device=dev, dtype=dtype, reason_id=_REASON_PREDICT_ERROR, predict_error_count=1.0
+        )
 
     if not isinstance(preds, dict):
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 5.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
 
     probs = _extract_head_probs(preds, dev, dtype)
-    # Require the heads used by the WM term; missing heads => invalid (not zero).
     if not all(k in probs for k in ("recovery", "success", "drop")):
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 5.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
 
     try:
-        p_rec = probs["recovery"].view(B, K)
-        p_succ = probs["success"].view(B, K)
-        p_drop = probs["drop"].view(B, K)
+        p_rec_flat = probs["recovery"].reshape(-1)
+        p_succ_flat = probs["success"].reshape(-1)
+        p_drop_flat = probs["drop"].reshape(-1)
     except Exception:
-        base_diag["snippet_wm_rerank/fallback_reason_id"] = 5.0
-        return zeros, zeros, zeros, zeros, invalid, base_diag
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_MISSING_HEADS)
+
+    need = B * K
+    if (
+        int(p_rec_flat.numel()) != need
+        or int(p_succ_flat.numel()) != need
+        or int(p_drop_flat.numel()) != need
+    ):
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
+
+    try:
+        p_rec = p_rec_flat.view(B, K)
+        p_succ = p_succ_flat.view(B, K)
+        p_drop = p_drop_flat.view(B, K)
+    except Exception:
+        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_PRED_BATCH)
 
     unc = (1.0 - (p_rec - 0.5).abs() * 2.0).clamp(0.0, 1.0)
     finite = (
@@ -164,18 +255,36 @@ def wm_head_probs_for_candidates(
         & torch.isfinite(p_drop)
         & torch.isfinite(unc)
     )
-    # Neutralize invalid candidates so they cannot leak into scoring if a caller
-    # forgets the mask; the mask remains the source of truth.
+    # Belief-invalid rows => all candidates invalid for that row.
+    finite = finite & belief_row_valid[:, None]
+
+    zeros = torch.zeros(B, K, device=dev, dtype=dtype)
+    ones = torch.ones(B, K, device=dev, dtype=dtype)
+    # Conservative uncertainty on invalid entries (not zero).
     p_rec = torch.where(finite, p_rec, zeros)
     p_succ = torch.where(finite, p_succ, zeros)
     p_drop = torch.where(finite, p_drop, zeros)
-    unc = torch.where(finite, unc, zeros)
+    unc = torch.where(finite, unc, ones)
 
-    valid_frac = float(finite.float().mean().item()) if finite.numel() else 0.0
+    cand_valid_frac = float(finite.float().mean().item()) if finite.numel() else 0.0
+    row_pred_frac = float(finite.all(dim=1).float().mean().item()) if B else 0.0
+    if bool(finite.all()):
+        reason = _REASON_OK
+    elif bool((~belief_row_valid).any()) and bool(belief_row_valid.any()):
+        reason = _REASON_BELIEF_NONFINITE
+    elif not bool(belief_row_valid.any()):
+        reason = _REASON_BELIEF_NONFINITE
+    elif bool(finite.any()) and not bool(finite.all(dim=1).all()):
+        reason = _REASON_PARTIAL_INVALID
+    else:
+        reason = _REASON_NONFINITE_PREDS
+
     diag = {
         "snippet_wm_rerank/predict_error_count": 0.0,
-        "snippet_wm_rerank/fallback_reason_id": 0.0 if bool(finite.any()) else 6.0,
-        "snippet_wm_rerank/valid_frac": valid_frac,
-        "snippet_wm_rerank/fallback_frac": float(1.0 - valid_frac),
+        "snippet_wm_rerank/fallback_reason_id": reason,
+        "snippet_wm_rerank/candidate_valid_frac": cand_valid_frac,
+        "snippet_wm_rerank/row_prediction_valid_frac": row_pred_frac,
+        "snippet_wm_rerank/valid_frac": row_pred_frac,
+        "snippet_wm_rerank/fallback_frac": float(1.0 - row_pred_frac),
     }
     return p_rec, p_succ, p_drop, unc, finite, diag

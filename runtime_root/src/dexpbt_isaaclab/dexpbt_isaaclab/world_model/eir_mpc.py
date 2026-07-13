@@ -1343,12 +1343,12 @@ def _compute_snippet_distill_loss_progress(
         mu_sel = mu_r[sel_idx]  # [n, A]
         action_delta = ((cand_first - mu_sel[:, None, :]) ** 2).sum(dim=-1)  # [n, k]
 
-        # Default (no WM / WM invalid): priority selection AND priority scores.
+        # Default (no WM / WM inactive): priority selection AND priority scores.
         candidate_score = pri
         best_idx = pri.argmax(dim=1)
         unc = None
         wm_valid_mask = None
-        wm_row_valid = None
+        wm_row_active = None
         alpha_wm = effective_alpha_wm(
             wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
             alpha_wm=_alpha_wm_from_bridge(bridge),
@@ -1356,37 +1356,67 @@ def _compute_snippet_distill_loss_progress(
         rerank_cfg = bridge.snippet_wm_rerank_cfg
         rerank_diag: dict[str, float] = {
             "snippet_wm_rerank/changed_frac": 0.0,
+            "snippet_wm_rerank/changed_frac_overall": 0.0,
+            "snippet_wm_rerank/changed_frac_given_active": 0.0,
             "snippet_wm_rerank/wm_term_mean": 0.0,
+            "snippet_wm_rerank/candidate_valid_frac": 0.0,
+            "snippet_wm_rerank/row_prediction_valid_frac": 0.0,
+            "snippet_wm_rerank/row_active_frac": 0.0,
+            "snippet_wm_rerank/row_fallback_frac": 1.0,
             "snippet_wm_rerank/valid_frac": 0.0,
             "snippet_wm_rerank/fallback_frac": 1.0,
             "snippet_wm_rerank/predict_error_count": 0.0,
             "snippet_wm_rerank/fallback_reason_id": 0.0,
         }
         if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
-            belief_r = _belief_for_risky_rows(
-                bridge, start=start, end=end, risky=risky, device=dev, dtype=dtype
+            if float(alpha_wm) > 0.0:
+                belief_r = _belief_for_risky_rows(
+                    bridge, start=start, end=end, risky=risky, device=dev, dtype=dtype
+                )
+                belief_sel = belief_r[sel_idx] if belief_r is not None else None
+                p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
+                    belief_flat=belief_sel,
+                    cand_first_actions=cand_first,
+                    predict_fn=bridge.rssm_predict_fn,
+                )
+                predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
+                rerank_diag.update(wm_diag)
+                best_idx, candidate_score, score_diag = score_snippet_candidates(
+                    priority=pri,
+                    p_recovery=p_rec,
+                    p_success=p_succ,
+                    p_drop=p_drop,
+                    uncertainty=unc,
+                    action_delta=action_delta,
+                    alpha_wm=alpha_wm,
+                    cfg=rerank_cfg,
+                    wm_valid_mask=wm_valid_mask,
+                )
+                rerank_diag.update(score_diag)
+                # Keep predict-path reason when scoring only reports generic all-invalid.
+                score_reason = float(score_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
+                if score_reason == 6.0 and predict_reason in (
+                    1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 9.0,
+                ):
+                    rerank_diag["snippet_wm_rerank/fallback_reason_id"] = predict_reason
+                # Row-level fail-closed: all candidates valid AND WM globally active.
+                row_prediction_valid = (
+                    wm_valid_mask.all(dim=1)
+                    if wm_valid_mask is not None
+                    else torch.zeros(int(sel_idx.numel()), dtype=torch.bool, device=dev)
+                )
+                wm_row_active = row_prediction_valid & (float(alpha_wm) > 0.0)
+            else:
+                # Uncalibrated / alpha=0: do not call WM; keep raw priority.
+                rerank_diag["snippet_wm_rerank/fallback_reason_id"] = 11.0
+                rerank_diag["snippet_wm_rerank/row_fallback_frac"] = 1.0
+                rerank_diag["snippet_wm_rerank/fallback_frac"] = 1.0
+            rerank_changed_frac = float(
+                rerank_diag.get(
+                    "snippet_wm_rerank/changed_frac_overall",
+                    rerank_diag.get("snippet_wm_rerank/changed_frac", 0.0),
+                )
             )
-            belief_sel = belief_r[sel_idx] if belief_r is not None else None
-            p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
-                belief_flat=belief_sel,
-                cand_first_actions=cand_first,
-                predict_fn=bridge.rssm_predict_fn,
-            )
-            rerank_diag.update(wm_diag)
-            best_idx, candidate_score, score_diag = score_snippet_candidates(
-                priority=pri,
-                p_recovery=p_rec,
-                p_success=p_succ,
-                p_drop=p_drop,
-                uncertainty=unc,
-                action_delta=action_delta,
-                alpha_wm=alpha_wm,
-                cfg=rerank_cfg,
-                wm_valid_mask=wm_valid_mask,
-            )
-            rerank_diag.update(score_diag)
-            wm_row_valid = wm_valid_mask.any(dim=1) if wm_valid_mask is not None else None
-            rerank_changed_frac = float(rerank_diag.get("snippet_wm_rerank/changed_frac", 0.0))
             wm_term_mean = float(rerank_diag.get("snippet_wm_rerank/wm_term_mean", 0.0))
 
         n = int(sel_idx.numel())
@@ -1401,7 +1431,7 @@ def _compute_snippet_distill_loss_progress(
         actor_like_idx = action_delta.argmin(dim=1)
         score_actor_proxy = candidate_score[ar, actor_like_idx]
         wm_unc_best = None
-        if unc is not None and wm_row_valid is not None and bool(wm_row_valid.any()):
+        if unc is not None and wm_row_active is not None and bool(wm_row_active.any()):
             wm_unc_best = unc[ar, best_idx].clamp(0.0, 1.0)
         rv = res.valid_mask.to(dtype)
         c_sel, c_diag = teacher_confidence(
@@ -1411,7 +1441,7 @@ def _compute_snippet_distill_loss_progress(
             wm_uncertainty=wm_unc_best,
             alpha_wm=float(alpha_wm),
             retrieval_valid=rv,
-            wm_valid=wm_row_valid,
+            wm_valid=wm_row_active,
         )
         # Rows that failed retrieval fall back (no compatible snippet).
         fallback_rows = int((rv <= 0.5).sum().item())
@@ -1449,8 +1479,21 @@ def _compute_snippet_distill_loss_progress(
     selected_score_mean = 0.0
     actor_proxy_score_mean = 0.0
     teacher_margin_mean = 0.0
-    wm_valid_frac = float(rerank_diag.get("snippet_wm_rerank/valid_frac", 0.0))
-    wm_fallback_frac = float(rerank_diag.get("snippet_wm_rerank/fallback_frac", 1.0 if int(sel_idx.numel()) == 0 else 0.0))
+    wm_valid_frac = float(
+        rerank_diag.get(
+            "snippet_wm_rerank/row_active_frac",
+            rerank_diag.get("snippet_wm_rerank/valid_frac", 0.0),
+        )
+    )
+    wm_fallback_frac = float(
+        rerank_diag.get(
+            "snippet_wm_rerank/row_fallback_frac",
+            rerank_diag.get(
+                "snippet_wm_rerank/fallback_frac",
+                1.0 if int(sel_idx.numel()) == 0 else 0.0,
+            ),
+        )
+    )
     wm_predict_errors = float(rerank_diag.get("snippet_wm_rerank/predict_error_count", 0.0))
     if score_selected is not None and score_actor_proxy is not None:
         selected_score_mean = float(score_selected.float().mean().item())
@@ -1499,6 +1542,20 @@ def _compute_snippet_distill_loss_progress(
         ),
         "snippet_wm_rerank/valid_frac": wm_valid_frac,
         "snippet_wm_rerank/fallback_frac": wm_fallback_frac,
+        "snippet_wm_rerank/candidate_valid_frac": float(
+            rerank_diag.get("snippet_wm_rerank/candidate_valid_frac", 0.0)
+        ),
+        "snippet_wm_rerank/row_prediction_valid_frac": float(
+            rerank_diag.get("snippet_wm_rerank/row_prediction_valid_frac", 0.0)
+        ),
+        "snippet_wm_rerank/row_active_frac": float(
+            rerank_diag.get("snippet_wm_rerank/row_active_frac", wm_valid_frac)
+        ),
+        "snippet_wm_rerank/row_fallback_frac": wm_fallback_frac,
+        "snippet_wm_rerank/changed_frac_overall": float(rerank_changed_frac),
+        "snippet_wm_rerank/changed_frac_given_active": float(
+            rerank_diag.get("snippet_wm_rerank/changed_frac_given_active", 0.0)
+        ),
         "snippet_wm_rerank/predict_error_count": wm_predict_errors,
         "snippet_wm_rerank/selected_score_mean": selected_score_mean,
         "snippet_wm_rerank/actor_proxy_score_mean": actor_proxy_score_mean,
@@ -1592,31 +1649,42 @@ def _compute_snippet_distill_loss(
         "snippet_wm_rerank/valid_frac": 0.0,
         "snippet_wm_rerank/fallback_frac": 1.0,
         "snippet_wm_rerank/predict_error_count": 0.0,
+        "snippet_wm_rerank/fallback_reason_id": 0.0,
     }
     if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
-        belief_r = _belief_for_risky_rows(
-            bridge, start=start, end=end, risky=risky, device=feat_r.device, dtype=feat_r.dtype
-        )
-        cand_first = acts[:, :, 0, :]
-        p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
-            belief_flat=belief_r,
-            cand_first_actions=cand_first,
-            predict_fn=bridge.rssm_predict_fn,
-        )
-        action_delta = ((cand_first - mu_r[:, None, :]) ** 2).sum(dim=-1)
-        best_idx, _candidate_score, score_diag = score_snippet_candidates(
-            priority=pri,
-            p_recovery=p_rec,
-            p_success=p_succ,
-            p_drop=p_drop,
-            uncertainty=unc,
-            action_delta=action_delta,
-            alpha_wm=alpha_wm,
-            cfg=rerank_cfg,
-            wm_valid_mask=wm_valid_mask,
-        )
-        rerank_diag.update(wm_diag)
-        rerank_diag.update(score_diag)
+            if float(alpha_wm) > 0.0:
+                belief_r = _belief_for_risky_rows(
+                    bridge, start=start, end=end, risky=risky, device=feat_r.device, dtype=feat_r.dtype
+                )
+                cand_first = acts[:, :, 0, :]
+                p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
+                    belief_flat=belief_r,
+                    cand_first_actions=cand_first,
+                    predict_fn=bridge.rssm_predict_fn,
+                )
+                predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
+                action_delta = ((cand_first - mu_r[:, None, :]) ** 2).sum(dim=-1)
+                best_idx, _candidate_score, score_diag = score_snippet_candidates(
+                    priority=pri,
+                    p_recovery=p_rec,
+                    p_success=p_succ,
+                    p_drop=p_drop,
+                    uncertainty=unc,
+                    action_delta=action_delta,
+                    alpha_wm=alpha_wm,
+                    cfg=rerank_cfg,
+                    wm_valid_mask=wm_valid_mask,
+                )
+                rerank_diag.update(wm_diag)
+                rerank_diag.update(score_diag)
+                score_reason = float(score_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
+                if score_reason == 6.0 and predict_reason in (
+                    1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 9.0,
+                ):
+                    rerank_diag["snippet_wm_rerank/fallback_reason_id"] = predict_reason
+            else:
+                rerank_diag["snippet_wm_rerank/fallback_reason_id"] = 11.0
+                rerank_diag["snippet_wm_rerank/fallback_frac"] = 1.0
     teacher_first = acts[torch.arange(acts.shape[0], device=acts.device), best_idx, 0, :]
 
     act_w = compute_snippet_activation_weight(

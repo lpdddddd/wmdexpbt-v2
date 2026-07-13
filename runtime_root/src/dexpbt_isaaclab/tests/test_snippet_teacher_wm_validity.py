@@ -89,13 +89,15 @@ class _Agent:
 
 
 class _FakeBridge:
-    def __init__(self, bank, sd_cfg, pr_cfg, a2c, *, rerank_cfg=None, predict_fn=None):
+    def __init__(self, bank, sd_cfg, pr_cfg, a2c, *, rerank_cfg=None, predict_fn=None, alpha_wm=1.0):
         self.snippet_bank = bank
         self.snippet_distill_cfg = sd_cfg
         self.progress_refine_cfg = pr_cfg
         self.snippet_wm_rerank_cfg = rerank_cfg
-        self.wm_calibration_enable = bool(rerank_cfg is not None)
-        self.wm_calibration_state = {"alpha_wm": 1.0} if rerank_cfg is not None else None
+        self.wm_calibration_enable = bool(rerank_cfg is not None) and float(alpha_wm) > 0.0
+        self.wm_calibration_state = (
+            {"alpha_wm": float(alpha_wm)} if rerank_cfg is not None else None
+        )
         self.agent_ref = _Agent(a2c)
         self.rssm_belief_cache = None
         self.rssm_belief_provider = None
@@ -148,7 +150,7 @@ class TestScoreAlignment(unittest.TestCase):
         self.assertAlmostEqual(
             float(score_selected.item()), float(cand_score.max(dim=1).values.item()), places=5
         )
-        self.assertEqual(int(best_idx.item()), int(cand_score.argmax(dim=1).item()))
+        self.assertTrue(torch.equal(best_idx, cand_score.argmax(dim=1)))
 
     def test_wm_rerank_low_base_priority_uses_selected_score(self):
         """WM can pick a low-priority candidate; confidence must use that score."""
@@ -187,7 +189,7 @@ class TestWMValidity(unittest.TestCase):
         )
         self.assertFalse(bool(valid.any()))
         self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 1.0)
-        self.assertTrue(torch.equal(unc, torch.zeros_like(unc)))
+        self.assertTrue(torch.equal(unc, torch.ones_like(unc)))
 
         best_idx, cand_score, score_diag = score_snippet_candidates(
             priority=torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]]),
@@ -216,7 +218,7 @@ class TestWMValidity(unittest.TestCase):
         )
         self.assertEqual(diag["snippet_wm_rerank/predict_error_count"], 1.0)
         self.assertFalse(bool(valid.any()))
-        self.assertTrue(torch.equal(unc, torch.zeros_like(unc)))
+        self.assertTrue(torch.equal(unc, torch.ones_like(unc)))
         best_idx, _, score_diag = score_snippet_candidates(
             priority=torch.tensor([[2.0, 9.0]]),
             p_recovery=p_rec,
@@ -231,7 +233,7 @@ class TestWMValidity(unittest.TestCase):
         self.assertEqual(int(best_idx.item()), 1)
         self.assertEqual(score_diag["snippet_wm_rerank/changed_frac"], 0.0)
 
-    def test_nan_inf_candidates_invalid(self):
+    def test_nan_inf_candidates_row_fail_closed(self):
         acts = torch.randn(1, 3, 2)
         belief = torch.randn(1, 3)
 
@@ -246,17 +248,31 @@ class TestWMValidity(unittest.TestCase):
                 },
             }
 
-        _p_rec, _p_succ, _p_drop, _unc, valid, diag = wm_head_probs_for_candidates(
+        p_rec, p_succ, p_drop, unc, valid, diag = wm_head_probs_for_candidates(
             belief_flat=belief, cand_first_actions=acts, predict_fn=_bad
         )
         self.assertFalse(bool(valid[0, 1]))
         self.assertFalse(bool(valid[0, 2]))
         self.assertTrue(bool(valid[0, 0]))
+        self.assertAlmostEqual(float(unc[0, 1].item()), 1.0, places=5)
+        best_idx, cand_score, score_diag = score_snippet_candidates(
+            priority=torch.tensor([[1.0, 8.0, 2.0]]),
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=torch.tensor([[0.0, 1.0, 2.0]]),
+            alpha_wm=1.0,
+            cfg=SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.1),
+            wm_valid_mask=valid,
+        )
+        self.assertEqual(int(best_idx.item()), 1)
+        self.assertTrue(torch.equal(cand_score, torch.tensor([[1.0, 8.0, 2.0]])))
+        self.assertEqual(score_diag["snippet_wm_rerank/row_active_frac"], 0.0)
         self.assertGreater(diag["snippet_wm_rerank/fallback_frac"], 0.0)
 
-    def test_partial_row_valid_mixed(self):
+    def test_partial_row_valid_mixed_batch(self):
         cfg = SnippetWMRerankConfig(enabled=True, w_rec=2.0, score_cap=2.0, w_delta=0.0)
-        # Row0: flat priority so WM can flip to idx0; Row1: invalid WM -> priority idx0.
         pri = torch.tensor([[1.0, 1.0, 1.0], [9.0, 1.0, 2.0]])
         p_rec = torch.tensor([[0.9, 0.1, 0.1], [0.1, 0.9, 0.1]])
         valid = torch.tensor([[True, True, True], [False, False, False]])
@@ -273,12 +289,12 @@ class TestWMValidity(unittest.TestCase):
         )
         self.assertEqual(int(best_idx[0].item()), 0)
         self.assertEqual(int(best_idx[1].item()), 0)
-        self.assertAlmostEqual(diag["snippet_wm_rerank/valid_frac"], 0.5, places=5)
+        self.assertAlmostEqual(diag["snippet_wm_rerank/row_active_frac"], 0.5, places=5)
         self.assertTrue(torch.equal(cand_score[1], pri[1]))
 
 
 class TestProgressRuntimeWM(unittest.TestCase):
-    def _run(self, *, predict_fn, belief=None, a2c=None):
+    def _run(self, *, predict_fn, belief=None, a2c=None, alpha_wm=1.0, calibration=True):
         from dexpbt_isaaclab.world_model.eir_mpc import _compute_snippet_distill_loss_progress
 
         a2c = a2c or _A2C()
@@ -298,7 +314,11 @@ class TestProgressRuntimeWM(unittest.TestCase):
             min_gate_for_retrieval=0.0,
         )
         rerank = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0)
-        bridge = _FakeBridge(bank, sd, pr, a2c, rerank_cfg=rerank, predict_fn=predict_fn)
+        bridge = _FakeBridge(
+            bank, sd, pr, a2c, rerank_cfg=rerank, predict_fn=predict_fn, alpha_wm=alpha_wm
+        )
+        if not calibration:
+            bridge.wm_calibration_enable = False
         R = 4
         if belief is not None:
             bridge.rssm_belief_cache = _FakeBeliefCache(belief)
@@ -338,6 +358,7 @@ class TestProgressRuntimeWM(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss.float()))
         self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/predict_error_count"], 1.0)
         self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_frac"], 1.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 4.0)
 
     def test_belief_missing_no_feat_substitute(self):
         def _ok(belief_rep, cand_flat):
@@ -354,6 +375,31 @@ class TestProgressRuntimeWM(unittest.TestCase):
         self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/valid_frac"], 0.0)
         self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 2.0)
 
+    def test_alpha_zero_runtime_skips_wm(self):
+        def _should_not_run(_b, _a):
+            raise AssertionError("WM predict must not run when alpha_wm=0")
+
+        loss, bridge = self._run(
+            predict_fn=_should_not_run, belief=torch.randn(4, 5), alpha_wm=0.0
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 11.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/row_active_frac"], 0.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/wm_term_mean"], 0.0)
+
+    def test_uncalibrated_runtime_skips_wm(self):
+        def _should_not_run(_b, _a):
+            raise AssertionError("WM predict must not run when uncalibrated")
+
+        loss, bridge = self._run(
+            predict_fn=_should_not_run,
+            belief=torch.randn(4, 5),
+            alpha_wm=1.0,
+            calibration=False,
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 11.0)
+
     def test_bf16_actor_fp32_snippet_with_wm_fallback(self):
         class _Bf16A2C(nn.Module):
             def __init__(self):
@@ -368,6 +414,8 @@ class TestProgressRuntimeWM(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss.float()))
         self.assertIn("progress_refine/teacher_margin_mean", bridge.last_progress_refine)
+        self.assertIn("snippet_wm_rerank/selected_score_mean", bridge.last_progress_refine)
+        self.assertIn("snippet_wm_rerank/row_active_frac", bridge.last_progress_refine)
 
 
 if __name__ == "__main__":
