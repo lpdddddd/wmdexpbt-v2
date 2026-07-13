@@ -19,6 +19,7 @@ from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
 from dexpbt_isaaclab.world_model.snippet_distill import SnippetDistillConfig
 from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
     SnippetWMRerankConfig,
+    normalize_priority_scores,
     score_snippet_candidates,
     wm_head_probs_for_candidates,
 )
@@ -305,7 +306,18 @@ class TestWMValidity(unittest.TestCase):
 
 
 class TestProgressRuntimeWM(unittest.TestCase):
-    def _run(self, *, predict_fn, belief=None, a2c=None, alpha_wm=1.0, calibration=True):
+    def _run(
+        self,
+        *,
+        predict_fn,
+        belief=None,
+        a2c=None,
+        alpha_wm=1.0,
+        calibration=True,
+        rerank_cfg="default",
+        patch_retrieve=None,
+        feat=None,
+    ):
         from dexpbt_isaaclab.world_model.eir_mpc import _compute_snippet_distill_loss_progress
 
         a2c = a2c or _A2C()
@@ -323,13 +335,19 @@ class TestProgressRuntimeWM(unittest.TestCase):
             ramp_frames=0,
             only_lifted=False,
             min_gate_for_retrieval=0.0,
+            min_teacher_confidence=0.0,
         )
-        rerank = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0)
+        if rerank_cfg == "default":
+            rerank = SnippetWMRerankConfig(enabled=True, w_rec=1.0, score_cap=1.0)
+        else:
+            rerank = rerank_cfg
         bridge = _FakeBridge(
             bank, sd, pr, a2c, rerank_cfg=rerank, predict_fn=predict_fn, alpha_wm=alpha_wm
         )
         if not calibration:
             bridge.wm_calibration_enable = False
+        if patch_retrieve is not None:
+            bank.retrieve_candidates_batched = patch_retrieve  # type: ignore[method-assign]
         R = 4
         if belief is not None:
             bridge.rssm_belief_cache = _FakeBeliefCache(belief)
@@ -340,7 +358,7 @@ class TestProgressRuntimeWM(unittest.TestCase):
         cache.recent_progress_flat = torch.zeros(R)
         cache.oscillation_flat = torch.full((R,), 0.2)
         cache.progress_history_valid_flat = torch.ones(R)
-        feat = torch.randn(R, 8)
+        feat = torch.zeros(R, 8) if feat is None else feat
         risky = torch.ones(R, dtype=torch.bool)
         loss = _compute_snippet_distill_loss_progress(
             bridge,
@@ -353,6 +371,29 @@ class TestProgressRuntimeWM(unittest.TestCase):
             end=R,
         )
         return loss, bridge
+
+    def _make_retrieve(self, priority: torch.Tensor):
+        """Controlled retrieve returning fixed priority (and matching action shapes)."""
+        from types import SimpleNamespace
+
+        n, k = priority.shape
+        a_dim = 3
+        actions = torch.zeros(n, k, 4, a_dim)
+        # Distinct first actions so action_delta is non-uniform if ever used.
+        for j in range(k):
+            actions[:, j, 0, :] = float(j)
+        valid = torch.ones(n)
+
+        def _retrieve(feat, **kwargs):
+            nn = int(feat.shape[0])
+            return SimpleNamespace(
+                actions=actions[:nn].clone(),
+                priority=priority[:nn].clone(),
+                valid_mask=valid[:nn].clone(),
+                diagnostics={},
+            )
+
+        return _retrieve
 
     def test_predict_none_runtime_fallback_finite(self):
         loss, bridge = self._run(predict_fn=None, belief=torch.randn(4, 5))
@@ -410,6 +451,97 @@ class TestProgressRuntimeWM(unittest.TestCase):
         )
         self.assertTrue(torch.isfinite(loss.float()))
         self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 11.0)
+
+    def test_rerank_none_skips_wm_uses_normalized_priority(self):
+        def _should_not_run(_b, _a):
+            raise AssertionError("WM predict must not run when rerank_cfg is None")
+
+        a2c = _A2C()
+        feat = torch.zeros(4, 8)
+        belief = torch.zeros(4, 5)
+        pri = torch.tensor([[1.0, 5.0, 2.0, 0.5]]).expand(4, 4).contiguous()
+        loss, bridge = self._run(
+            predict_fn=_should_not_run,
+            belief=belief,
+            a2c=a2c,
+            feat=feat,
+            rerank_cfg=None,
+            patch_retrieve=self._make_retrieve(pri),
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/row_active_frac"], 0.0)
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/wm_term_mean"], 0.0)
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"], 1.0, places=5
+        )
+        loss2, bridge2 = self._run(
+            predict_fn=_should_not_run,
+            belief=belief,
+            a2c=a2c,
+            feat=feat,
+            rerank_cfg=None,
+            patch_retrieve=self._make_retrieve(3.0 * pri + 11.0),
+        )
+        self.assertTrue(torch.isfinite(loss2.float()))
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"],
+            bridge2.last_progress_refine["snippet_wm_rerank/selected_score_mean"],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/actor_proxy_score_mean"],
+            bridge2.last_progress_refine["snippet_wm_rerank/actor_proxy_score_mean"],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["progress_refine/teacher_confidence_mean"],
+            bridge2.last_progress_refine["progress_refine/teacher_confidence_mean"],
+            places=4,
+        )
+
+    def test_rerank_disabled_skips_wm_affine_and_ignores_action_delta(self):
+        def _should_not_run(_b, _a):
+            raise AssertionError("WM predict must not run when reranker disabled")
+
+        a2c = _A2C()
+        feat = torch.zeros(4, 8)
+        belief = torch.zeros(4, 5)
+        # Highest priority at idx1; action_delta would prefer idx0 if applied.
+        pri = torch.tensor([[1.0, 9.0, 2.0, 0.5]]).expand(4, 4).contiguous()
+        disabled = SnippetWMRerankConfig(enabled=False, w_delta=100.0)
+        loss, bridge = self._run(
+            predict_fn=_should_not_run,
+            belief=belief,
+            a2c=a2c,
+            feat=feat,
+            rerank_cfg=disabled,
+            patch_retrieve=self._make_retrieve(pri),
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertEqual(bridge.last_progress_refine["snippet_wm_rerank/row_active_frac"], 0.0)
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"], 1.0, places=5
+        )
+        loss2, bridge2 = self._run(
+            predict_fn=_should_not_run,
+            belief=belief,
+            a2c=a2c,
+            feat=feat,
+            rerank_cfg=disabled,
+            patch_retrieve=self._make_retrieve(2.5 * pri + 4.0),
+        )
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"],
+            bridge2.last_progress_refine["snippet_wm_rerank/selected_score_mean"],
+            places=5,
+        )
+        self.assertAlmostEqual(
+            bridge.last_progress_refine["progress_refine/teacher_confidence_mean"],
+            bridge2.last_progress_refine["progress_refine/teacher_confidence_mean"],
+            places=4,
+        )
+        score = normalize_priority_scores(pri[:1])
+        self.assertEqual(int(score.argmax(dim=1).item()), int(pri[:1].argmax(dim=1).item()))
 
     def test_bf16_actor_fp32_snippet_with_wm_fallback(self):
         class _Bf16A2C(nn.Module):

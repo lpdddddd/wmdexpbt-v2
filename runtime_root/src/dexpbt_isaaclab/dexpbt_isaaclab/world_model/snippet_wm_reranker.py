@@ -41,6 +41,34 @@ _REASON_ALPHA_ZERO = 11.0
 _REASON_PARTIAL_INVALID = 12.0
 
 
+def normalize_priority_scores(priority: torch.Tensor) -> torch.Tensor:
+    """Row-wise min-max normalize priority for selection + teacher confidence.
+
+    Computed in fp32 for AMP stability. Finite entries map to roughly ``[0, 1]``;
+    constant-priority rows become all zeros. Non-finite entries are zeroed and
+    excluded from the row min/max so they cannot poison the row. All-invalid
+    rows are all zeros (deterministic ``argmax`` → index 0). For ordinary
+    finite non-degenerate inputs, ``argmax`` matches raw ``priority.argmax``.
+    """
+    pri_f = priority.float()
+    finite = torch.isfinite(pri_f)
+    row_has_valid = finite.any(dim=1, keepdim=True)
+    # Exclude non-finite from extrema without letting NaN/Inf propagate.
+    row_min = torch.where(
+        finite, pri_f, torch.full_like(pri_f, float("inf"))
+    ).min(dim=1, keepdim=True).values
+    row_max = torch.where(
+        finite, pri_f, torch.full_like(pri_f, float("-inf"))
+    ).max(dim=1, keepdim=True).values
+    # All-invalid rows: avoid Inf extrema in the division.
+    row_min = torch.where(row_has_valid, row_min, torch.zeros_like(row_min))
+    row_max = torch.where(row_has_valid, row_max, torch.zeros_like(row_max))
+    normalized = (pri_f - row_min) / (row_max - row_min + 1e-6)
+    normalized = torch.where(finite, normalized, torch.zeros_like(normalized))
+    normalized = torch.where(row_has_valid, normalized, torch.zeros_like(normalized))
+    return normalized.to(dtype=priority.dtype)
+
+
 def score_snippet_candidates(
     *,
     priority: torch.Tensor,
@@ -85,11 +113,7 @@ def score_snippet_candidates(
     row_prediction_valid = candidate_wm_valid.all(dim=1)
     row_wm_active = row_prediction_valid & wm_globally_active
 
-    # Normalize in fp32 for stable margins under AMP (bf16 priority / scores).
-    pri_f = priority.float()
-    pr_min = pri_f.min(dim=1, keepdim=True).values
-    pr_max = pri_f.max(dim=1, keepdim=True).values
-    pr_norm = (pri_f - pr_min) / (pr_max - pr_min + 1e-6)
+    pr_norm = normalize_priority_scores(priority).float()
     wm_term = (
         float(cfg.w_rec) * p_recovery.float()
         + float(cfg.w_success) * p_success.float()
@@ -106,7 +130,8 @@ def score_snippet_candidates(
         pr_norm.to(dtype=dtype),
     )
     best_idx = candidate_score.argmax(dim=1)
-    priority_best = priority.argmax(dim=1)
+    # Same ranking as raw priority on ordinary finite non-degenerate inputs.
+    priority_best = pr_norm.argmax(dim=1)
 
     changed = (best_idx != priority_best).float()
     n_active = int(row_wm_active.sum().item())

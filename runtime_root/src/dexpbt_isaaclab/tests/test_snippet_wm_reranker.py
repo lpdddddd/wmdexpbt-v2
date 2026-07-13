@@ -13,6 +13,7 @@ from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
 from dexpbt_isaaclab.world_model.snippet_wm_reranker import (
     SnippetWMRerankConfig,
     effective_alpha_wm,
+    normalize_priority_scores,
     score_snippet_candidates,
     wm_head_probs_for_candidates,
 )
@@ -29,6 +30,75 @@ def _assert_fallback_norm(testcase, best_idx, cand_score, pri):
     testcase.assertTrue(torch.isfinite(cand_score).all())
     testcase.assertTrue(bool((cand_score >= -1e-5).all().item()))
     testcase.assertTrue(bool((cand_score <= 1.0 + 1e-5).all().item()))
+
+
+class TestNormalizePriorityScores(unittest.TestCase):
+    def test_finite_argmax_matches_raw(self):
+        pri = torch.tensor([[1.0, 5.0, 2.0], [3.0, 1.0, 4.0]])
+        norm = normalize_priority_scores(pri)
+        self.assertTrue(torch.isfinite(norm).all())
+        self.assertTrue(torch.equal(norm.argmax(dim=1), pri.argmax(dim=1)))
+        self.assertTrue(torch.allclose(norm[0], torch.tensor([0.0, 1.0, 0.25]), atol=1e-5))
+
+    def test_constant_row_all_zero(self):
+        pri = torch.tensor([[3.0, 3.0, 3.0]])
+        norm = normalize_priority_scores(pri)
+        self.assertTrue(torch.allclose(norm, torch.zeros(1, 3), atol=1e-5))
+        self.assertEqual(int(norm.argmax(dim=1).item()), 0)
+
+    def test_single_nan_does_not_poison_row(self):
+        pri = torch.tensor([[1.0, float("nan"), 3.0]])
+        norm = normalize_priority_scores(pri)
+        self.assertTrue(torch.isfinite(norm).all())
+        self.assertAlmostEqual(float(norm[0, 1].item()), 0.0, places=5)
+        self.assertEqual(int(norm.argmax(dim=1).item()), 2)
+        self.assertAlmostEqual(float(norm[0, 2].item()), 1.0, places=5)
+
+    def test_all_nonfinite_row_zeros_index0(self):
+        pri = torch.tensor([[float("nan"), float("inf"), float("-inf")]])
+        norm = normalize_priority_scores(pri)
+        self.assertTrue(torch.isfinite(norm).all())
+        self.assertTrue(torch.allclose(norm, torch.zeros(1, 3), atol=1e-5))
+        self.assertEqual(int(norm.argmax(dim=1).item()), 0)
+
+    def test_bf16_input_finite(self):
+        pri = torch.tensor([[1.0, 5.0, 2.0]], dtype=torch.bfloat16)
+        norm = normalize_priority_scores(pri)
+        self.assertEqual(norm.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(norm.float()).all())
+        self.assertEqual(int(norm.argmax(dim=1).item()), 1)
+
+    def test_disabled_reranker_path_affine_and_action_delta_ignored(self):
+        """Simulates progress default branch: normalize only (no WM / action_delta)."""
+        pri = torch.tensor([[1.0, 5.0, 2.0]])
+        pri_aff = 4.0 * pri + 9.0
+        action_delta = torch.tensor([[0.0, 1000.0, 0.0]])  # would flip WM path
+        for p in (pri, pri_aff):
+            score = normalize_priority_scores(p)
+            # action_delta must not be consulted at all in this path
+            best = score.argmax(dim=1)
+            self.assertEqual(int(best.item()), 1)
+            self.assertTrue(torch.equal(best, score.argmax(dim=1)))
+        conf_cfg = ProgressRefinementConfig(
+            enabled=True, min_teacher_confidence=0.0, teacher_margin_temperature=0.05
+        )
+        s0 = normalize_priority_scores(pri)
+        s1 = normalize_priority_scores(pri_aff)
+        self.assertTrue(torch.allclose(s0.float(), s1.float(), atol=1e-5))
+        ar = torch.arange(1)
+        actor_idx = torch.tensor([0])
+        c0, _ = teacher_confidence(
+            score_best=s0[ar, s0.argmax(dim=1)],
+            score_actor=s0[ar, actor_idx],
+            cfg=conf_cfg,
+        )
+        c1, _ = teacher_confidence(
+            score_best=s1[ar, s1.argmax(dim=1)],
+            score_actor=s1[ar, actor_idx],
+            cfg=conf_cfg,
+        )
+        self.assertAlmostEqual(float(c0.item()), float(c1.item()), places=5)
+        _ = action_delta  # documented unused on disabled-reranker path
 
 
 class TestSnippetWMReranker(unittest.TestCase):

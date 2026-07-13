@@ -1254,6 +1254,7 @@ def _compute_snippet_distill_loss_progress(
     from .snippet_distill import compute_snippet_distill_loss
     from .snippet_wm_reranker import (
         effective_alpha_wm,
+        normalize_priority_scores,
         score_snippet_candidates,
         wm_head_probs_for_candidates,
     )
@@ -1343,10 +1344,13 @@ def _compute_snippet_distill_loss_progress(
         mu_sel = mu_r[sel_idx]  # [n, A]
         action_delta = ((cand_first - mu_sel[:, None, :]) ** 2).sum(dim=-1)  # [n, k]
 
-        # Default (no WM / WM inactive): normalized-priority selection scores
-        # (ranking matches raw priority; scale matches WM-active rows).
-        candidate_score = pri
-        best_idx = pri.argmax(dim=1)
+        # Default before (and when) WM reranker is unavailable: normalized
+        # priority for both selection and teacher confidence. Ranking matches
+        # raw priority on ordinary finite inputs; scale matches WM-active rows.
+        # Must run before the rerank_cfg check so rerank_cfg=None / enabled=False
+        # never fall back to raw priority scores.
+        candidate_score = normalize_priority_scores(pri)
+        best_idx = candidate_score.argmax(dim=1)
         unc = None
         wm_valid_mask = None
         wm_row_active = None
