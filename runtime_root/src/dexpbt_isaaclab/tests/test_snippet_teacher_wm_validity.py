@@ -303,6 +303,7 @@ class TestWMValidity(unittest.TestCase):
         self.assertTrue(torch.isfinite(cand_score[1]).all())
         self.assertTrue(bool((cand_score[1] >= -1e-5).all().item()))
         self.assertTrue(bool((cand_score[1] <= 1.0 + 1e-5).all().item()))
+        self.assertEqual(diag["snippet_wm_rerank/fallback_reason_id"], 6.0)
 
 
 class TestProgressRuntimeWM(unittest.TestCase):
@@ -474,6 +475,9 @@ class TestProgressRuntimeWM(unittest.TestCase):
         self.assertAlmostEqual(
             bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"], 1.0, places=5
         )
+        self.assertEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 11.0
+        )
         loss2, bridge2 = self._run(
             predict_fn=_should_not_run,
             belief=belief,
@@ -522,6 +526,9 @@ class TestProgressRuntimeWM(unittest.TestCase):
         self.assertAlmostEqual(
             bridge.last_progress_refine["snippet_wm_rerank/selected_score_mean"], 1.0, places=5
         )
+        self.assertEqual(
+            bridge.last_progress_refine["snippet_wm_rerank/fallback_reason_id"], 11.0
+        )
         loss2, bridge2 = self._run(
             predict_fn=_should_not_run,
             belief=belief,
@@ -542,6 +549,34 @@ class TestProgressRuntimeWM(unittest.TestCase):
         )
         score = normalize_priority_scores(pri[:1])
         self.assertEqual(int(score.argmax(dim=1).item()), int(pri[:1].argmax(dim=1).item()))
+
+    def test_nonfinite_retrieval_row_zero_weight_teacher_actor(self):
+        a2c = _A2C()
+        # Force deterministic actor action = 0 for zero feat.
+        with torch.no_grad():
+            a2c.mu.weight.zero_()
+            a2c.mu.bias.zero_()
+        feat = torch.zeros(4, 8)
+        belief = torch.zeros(4, 5)
+        pri = torch.tensor([[1.0, 5.0, 2.0, 0.5]]).expand(4, 4).contiguous().clone()
+        pri[0, 0] = float("nan")  # row0 retrieval data invalid
+        loss, bridge = self._run(
+            predict_fn=None,
+            belief=belief,
+            a2c=a2c,
+            feat=feat,
+            rerank_cfg=None,
+            patch_retrieve=self._make_retrieve(pri),
+        )
+        self.assertTrue(torch.isfinite(loss.float()))
+        self.assertGreater(
+            bridge.last_progress_refine["snippet_retrieval/nonfinite_candidate_row_frac"], 0.0
+        )
+        self.assertGreater(bridge.last_progress_refine["progress_refine/nonfinite_count"], 0.0)
+        # Invalid row contributes zero teacher confidence / weight.
+        self.assertGreaterEqual(
+            bridge.last_progress_refine["progress_refine/fallback_frac"], 0.0
+        )
 
     def test_bf16_actor_fp32_snippet_with_wm_fallback(self):
         class _Bf16A2C(nn.Module):

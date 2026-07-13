@@ -51,10 +51,18 @@ Gates:
 
 Teacher confidence and row weight:
 
-- `c_margin = σ((S_best − S_actor) / T_m)`
-- `c_wm = 1 − α_wm · clip(u_t, 0, 1)` (`= 1` when WM unavailable / uncalibrated)
-- `c_teacher = c_margin · c_wm`
+- Candidate score uses normalized priority on fallback / WM-disabled rows, and
+  `S_wm = pr_norm + α_wm · (wm_term − w_δ · δ_a)` on WM-active rows, where
+  `δ_a = mean_j (a_j − μ_j)²` (mean over action dims; action-dim invariant).
+- `α_wm = 0` ⇒ score is exactly `pr_norm` (action penalty does not apply).
+- `c_margin = 2 · σ(max(S_best − S_actor, 0) / T_m) − 1` (tie ⇒ 0, not 0.5)
+- `c_wm = 1 − α_wm · clip(u_t, 0, 1)` (`= 1` when WM unavailable / uncalibrated /
+  `wm_valid=False`)
+- `c_teacher = c_margin · c_wm`, then hard-gated by `min_teacher_confidence`
+  (values below the threshold become 0)
 - `w_t = g_t · c_teacher · 1[retrieval_valid]`
+- Retrieval rows with any non-finite priority / candidate action / action delta
+  are fail-closed (`retrieval_valid=0`, teacher stays actor)
 - `L_refine = λ · Σ_i w_i · Huber(μ_θ(f_i), a*_i) / (Σ_i w_i + eps)`
 
 Retrieval compatibility (dimensionless):
@@ -208,9 +216,14 @@ these settings are restart-safe.
 `progress_refine/{gate_mean,gate_p50,gate_p90,active_frac,history_valid_frac,
 normalized_error_mean,normalized_error_active_mean,recent_progress_mean,
 recent_progress_active_mean,oscillation_mean,teacher_confidence_mean,
-teacher_margin_mean,retrieval_valid_frac,retrieval_budget_frac,
+teacher_margin_mean,teacher_score_margin_mean,retrieval_valid_frac,retrieval_budget_frac,
 effective_sample_size,loss,fallback_frac,nonfinite_count}`,
-`snippet_retrieval/{tolerance_weight_mean,log_tolerance_gap_mean,no_compatible_frac}`,
+`snippet_retrieval/{tolerance_weight_mean,log_tolerance_gap_mean,no_compatible_frac,
+nonfinite_candidate_row_frac}`,
+`snippet_wm_rerank/{valid_frac,fallback_frac,row_active_frac,row_fallback_frac,
+candidate_valid_frac,row_prediction_valid_frac,changed_frac,changed_frac_overall,
+changed_frac_given_active,wm_term_mean,action_delta_mean,action_penalty_mean,
+selected_score_mean,actor_proxy_score_mean,predict_error_count,fallback_reason_id}`,
 `adaptive_consolidation/{curriculum_progress,stage,local_retention,
 probation_active,probation_frames,shrink_blocked,probation_can_shrink,
 hard_collapse_streak,degradation_streak,ordinary_rollback_blocked,

@@ -44,29 +44,50 @@ _REASON_PARTIAL_INVALID = 12.0
 def normalize_priority_scores(priority: torch.Tensor) -> torch.Tensor:
     """Row-wise min-max normalize priority for selection + teacher confidence.
 
-    Computed in fp32 for AMP stability. Finite entries map to roughly ``[0, 1]``;
-    constant-priority rows become all zeros. Non-finite entries are zeroed and
-    excluded from the row min/max so they cannot poison the row. All-invalid
-    rows are all zeros (deterministic ``argmax`` → index 0). For ordinary
-    finite non-degenerate inputs, ``argmax`` matches raw ``priority.argmax``.
+    Computed in fp32 for AMP stability:
+
+    - Ordinary finite non-degenerate rows → strict ``[0, 1]`` min-max.
+    - Finite constant rows → all finite entries ``1`` (outrank invalids).
+    - Partial non-finite rows → non-finite ``0``; finite constants ``1``.
+    - All-non-finite rows → all zeros (deterministic ``argmax`` → index 0).
+
+    For ordinary finite non-degenerate inputs, ``argmax`` matches raw
+    ``priority.argmax``. Affine transforms of finite priorities leave the
+    normalized scores unchanged (exact span denominator, not ``span + eps``).
     """
     pri_f = priority.float()
     finite = torch.isfinite(pri_f)
     row_has_valid = finite.any(dim=1, keepdim=True)
-    # Exclude non-finite from extrema without letting NaN/Inf propagate.
     row_min = torch.where(
         finite, pri_f, torch.full_like(pri_f, float("inf"))
     ).min(dim=1, keepdim=True).values
     row_max = torch.where(
         finite, pri_f, torch.full_like(pri_f, float("-inf"))
     ).max(dim=1, keepdim=True).values
-    # All-invalid rows: avoid Inf extrema in the division.
     row_min = torch.where(row_has_valid, row_min, torch.zeros_like(row_min))
     row_max = torch.where(row_has_valid, row_max, torch.zeros_like(row_max))
-    normalized = (pri_f - row_min) / (row_max - row_min + 1e-6)
+    span = row_max - row_min
+    has_span = row_has_valid & (span > 0.0)
+    safe_span = torch.where(has_span, span, torch.ones_like(span))
+    normalized = (pri_f - row_min) / safe_span
+    normalized = torch.where(finite & has_span, normalized, torch.zeros_like(normalized))
+    # Degenerate but at least one finite candidate: finite outranks invalid.
+    normalized = torch.where(
+        finite & row_has_valid & (~has_span),
+        torch.ones_like(normalized),
+        normalized,
+    )
     normalized = torch.where(finite, normalized, torch.zeros_like(normalized))
     normalized = torch.where(row_has_valid, normalized, torch.zeros_like(normalized))
     return normalized.to(dtype=priority.dtype)
+
+
+def mean_squared_action_delta(
+    cand_first: torch.Tensor,
+    actor_action: torch.Tensor,
+) -> torch.Tensor:
+    """Per-candidate mean squared action delta ``[B, K]`` (action-dim invariant)."""
+    return ((cand_first.float() - actor_action.float()[:, None, :]) ** 2).mean(dim=-1)
 
 
 def score_snippet_candidates(
@@ -84,12 +105,12 @@ def score_snippet_candidates(
     """Return ``(best_idx, candidate_score, diagnostics)``.
 
     Row-level fail-closed WM rerank:
-    - ``row_prediction_valid = wm_valid_mask.all(dim=1)``
+    - ``row_prediction_valid = candidate_valid.all(dim=1)``
     - ``row_wm_active = row_prediction_valid & (cfg.enabled and alpha_wm > 0)``
-    - Active rows use ``pr_norm + alpha * wm_term - w_delta * action_delta``
+    - Active rows use ``pr_norm + alpha * (wm_term - w_delta * action_delta)``
     - Fallback rows use ``pr_norm`` only (no WM term / action_delta). Ranking
-      matches raw ``priority.argmax`` under non-degenerate inputs, while the
-      score scale stays comparable to WM-active rows for teacher confidence.
+      matches raw ``priority.argmax`` under ordinary finite non-degenerate
+      inputs, while the score scale stays comparable for teacher confidence.
 
     Invariant: ``best_idx == candidate_score.argmax(dim=1)``.
     """
@@ -107,10 +128,19 @@ def score_snippet_candidates(
         if candidate_wm_valid.ndim == 1:
             candidate_wm_valid = candidate_wm_valid[:, None].expand(B, K)
         elif tuple(candidate_wm_valid.shape) != (B, K):
-            # Shape mismatch => treat entire batch as prediction-invalid.
             candidate_wm_valid = torch.zeros(B, K, dtype=torch.bool, device=device)
 
-    row_prediction_valid = candidate_wm_valid.all(dim=1)
+    score_input_valid = (
+        torch.isfinite(priority)
+        & torch.isfinite(p_recovery)
+        & torch.isfinite(p_success)
+        & torch.isfinite(p_drop)
+        & torch.isfinite(uncertainty)
+        & torch.isfinite(action_delta)
+    )
+    candidate_valid = candidate_wm_valid & score_input_valid
+
+    row_prediction_valid = candidate_valid.all(dim=1)
     row_wm_active = row_prediction_valid & wm_globally_active
 
     pr_norm = normalize_priority_scores(priority).float()
@@ -121,16 +151,17 @@ def score_snippet_candidates(
         - float(cfg.w_unc) * uncertainty.float()
     )
     wm_term = wm_term.clamp(-float(cfg.score_cap), float(cfg.score_cap))
+    action_delta_f = action_delta.float()
+    action_penalty = float(cfg.w_delta) * action_delta_f
 
-    wm_total_score = pr_norm + alpha * wm_term - float(cfg.w_delta) * action_delta.float()
-    # Single score tensor for both selection and confidence (comparable scale).
+    # Alpha-continuous: alpha=0 ⇒ exact pr_norm; action penalty scales with alpha.
+    wm_total_score = pr_norm + alpha * (wm_term - action_penalty)
     candidate_score = torch.where(
         row_wm_active[:, None],
         wm_total_score.to(dtype=dtype),
         pr_norm.to(dtype=dtype),
     )
     best_idx = candidate_score.argmax(dim=1)
-    # Same ranking as raw priority on ordinary finite non-degenerate inputs.
     priority_best = pr_norm.argmax(dim=1)
 
     changed = (best_idx != priority_best).float()
@@ -139,35 +170,44 @@ def score_snippet_candidates(
         float(changed[row_wm_active].mean().item()) if n_active > 0 else 0.0
     )
     cand_valid_frac = (
-        float(candidate_wm_valid.float().mean().item()) if candidate_wm_valid.numel() else 0.0
+        float(candidate_valid.float().mean().item()) if candidate_valid.numel() else 0.0
     )
     row_pred_frac = float(row_prediction_valid.float().mean().item()) if B else 0.0
     row_active_frac = float(row_wm_active.float().mean().item()) if B else 0.0
     row_fallback_frac = float((~row_wm_active).float().mean().item()) if B else 0.0
 
+    row_any_valid = candidate_valid.any(dim=1)
+    row_all_valid = candidate_valid.all(dim=1)
+    row_partial = row_any_valid & (~row_all_valid)
+
     reason = _REASON_OK
     if not wm_globally_active:
         reason = _REASON_ALPHA_ZERO
-    elif B > 0 and bool((~candidate_wm_valid).any()) and bool(candidate_wm_valid.any()):
-        # Any mix of valid/invalid candidates (incl. within-row) => partial.
+    elif B > 0 and bool(row_partial.any()):
         reason = _REASON_PARTIAL_INVALID
-    elif B > 0 and not bool(row_prediction_valid.any()):
+    elif B > 0 and bool((~row_all_valid).any()):
+        # Whole-row invalids (possibly mixed with whole-valid rows), no partial.
         reason = _REASON_NONFINITE_PREDS
 
     wm_term_mean = 0.0
+    action_delta_mean = 0.0
+    action_penalty_mean = 0.0
     if n_active > 0 and alpha > 0.0:
         wm_term_mean = float(wm_term[row_wm_active].mean().item())
+        action_delta_mean = float(action_delta_f[row_wm_active].mean().item())
+        action_penalty_mean = float(action_penalty[row_wm_active].mean().item())
 
     return best_idx, candidate_score, {
         "snippet_wm_rerank/changed_frac": float(changed.mean().item()) if B else 0.0,
         "snippet_wm_rerank/changed_frac_overall": float(changed.mean().item()) if B else 0.0,
         "snippet_wm_rerank/changed_frac_given_active": changed_given_active,
         "snippet_wm_rerank/wm_term_mean": wm_term_mean,
+        "snippet_wm_rerank/action_delta_mean": action_delta_mean,
+        "snippet_wm_rerank/action_penalty_mean": action_penalty_mean,
         "snippet_wm_rerank/candidate_valid_frac": cand_valid_frac,
         "snippet_wm_rerank/row_prediction_valid_frac": row_pred_frac,
         "snippet_wm_rerank/row_active_frac": row_active_frac,
         "snippet_wm_rerank/row_fallback_frac": row_fallback_frac,
-        # Back-compat aliases used by older telemetry consumers.
         "snippet_wm_rerank/valid_frac": row_active_frac,
         "snippet_wm_rerank/fallback_frac": row_fallback_frac,
         "snippet_wm_rerank/fallback_reason_id": reason,
@@ -233,8 +273,14 @@ def wm_head_probs_for_candidates(
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_SHAPE)
     if int(belief_flat.shape[0]) != int(B) or int(belief_flat.shape[1]) <= 0:
         return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_BELIEF_SHAPE)
-    if not torch.isfinite(cand_first_actions).all():
-        return _empty_outputs(B, K, device=dev, dtype=dtype, reason_id=_REASON_CAND_INVALID)
+
+    # Per-row action validity: one bad row must not invalidate the whole batch.
+    cand_row_valid = torch.isfinite(cand_first_actions).all(dim=(1, 2))  # [B]
+    cand_safe = torch.where(
+        cand_row_valid[:, None, None],
+        cand_first_actions,
+        torch.zeros_like(cand_first_actions),
+    )
 
     belief_row_valid = torch.isfinite(belief_flat).all(dim=1)  # [B]
     belief_safe = torch.where(
@@ -244,7 +290,7 @@ def wm_head_probs_for_candidates(
     )
 
     belief_rep = belief_safe[:, None, :].expand(B, K, belief_safe.shape[-1]).reshape(B * K, -1)
-    cand_flat = cand_first_actions.reshape(B * K, -1)
+    cand_flat = cand_safe.reshape(B * K, -1)
     try:
         preds = predict_fn(belief_rep, cand_flat)
     except Exception:
@@ -288,27 +334,36 @@ def wm_head_probs_for_candidates(
         & torch.isfinite(p_drop)
         & torch.isfinite(unc)
     )
-    # Belief-invalid rows => all candidates invalid for that row.
-    finite = finite & belief_row_valid[:, None]
+    # Belief-invalid or action-invalid rows => all candidates invalid for that row.
+    finite = finite & belief_row_valid[:, None] & cand_row_valid[:, None]
 
     zeros = torch.zeros(B, K, device=dev, dtype=dtype)
     ones = torch.ones(B, K, device=dev, dtype=dtype)
-    # Conservative uncertainty on invalid entries (not zero).
     p_rec = torch.where(finite, p_rec, zeros)
     p_succ = torch.where(finite, p_succ, zeros)
     p_drop = torch.where(finite, p_drop, zeros)
     unc = torch.where(finite, unc, ones)
 
     cand_valid_frac = float(finite.float().mean().item()) if finite.numel() else 0.0
-    row_pred_frac = float(finite.all(dim=1).float().mean().item()) if B else 0.0
+    row_all_valid = finite.all(dim=1)
+    row_any_valid = finite.any(dim=1)
+    row_partial = row_any_valid & (~row_all_valid)
+    row_pred_frac = float(row_all_valid.float().mean().item()) if B else 0.0
+
     if bool(finite.all()):
         reason = _REASON_OK
-    elif bool((~belief_row_valid).any()) and bool(belief_row_valid.any()):
+    elif bool((~belief_row_valid).any()) and not bool((~cand_row_valid).any()):
+        # Prefer belief reason when belief rows are the only structural issue.
         reason = _REASON_BELIEF_NONFINITE
+    elif bool((~cand_row_valid).any()) and bool(cand_row_valid.any()) and not bool(row_partial.any()):
+        # Whole bad-action rows mixed with good rows (no within-row action partial).
+        reason = _REASON_CAND_INVALID
+    elif bool(row_partial.any()):
+        reason = _REASON_PARTIAL_INVALID
     elif not bool(belief_row_valid.any()):
         reason = _REASON_BELIEF_NONFINITE
-    elif bool(finite.any()) and not bool(finite.all(dim=1).all()):
-        reason = _REASON_PARTIAL_INVALID
+    elif not bool(cand_row_valid.any()):
+        reason = _REASON_CAND_INVALID
     else:
         reason = _REASON_NONFINITE_PREDS
 
