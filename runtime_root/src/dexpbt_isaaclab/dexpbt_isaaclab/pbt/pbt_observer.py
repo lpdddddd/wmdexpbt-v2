@@ -107,8 +107,9 @@ from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
 )
 from dexpbt_isaaclab.pbt.pbt_live_source_health import (
     CommonSourceEligibility,
+    PeerCheckpointHealth,
     evaluate_common_live_source_eligibility,
-    evaluate_peer_checkpoint_health,
+    inspect_peer_snapshot_health,
 )
 
 
@@ -2097,58 +2098,96 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
     def _inspect_peer_checkpoint_health(
         self, policy_idx: int, state: dict[str, Any] | None
-    ) -> tuple[bool | None, bool | None, bool | None, str, bool]:
-        """Return (commit_ok, lineage_ok, freshness_ok, reason, checkpoint_exists)."""
-        peer_ws = self._peer_workspace(policy_idx)
-        checkpoint = (state or {}).get("checkpoint")
-        checkpoint_exists = bool(checkpoint and Path(str(checkpoint)).is_file())
-        latest = read_latest_commit_info(peer_ws)
-        commit_lineage_id: str | None = None
-        latest_path = peer_ws / "LATEST.commit"
-        latest_exists: bool | None = (
-            True if latest_path.is_file() else latest.get("latest_commit_exists")
-        )
-        if bool(latest_exists):
-            try:
-                latest_payload = json.loads(latest_path.read_text())
-                commit_dir_name = str(latest_payload.get("commit_dir") or "")
-                manifest_path = peer_ws / commit_dir_name / "MANIFEST"
-                if manifest_path.is_file():
-                    manifest = json.loads(manifest_path.read_text())
-                    lineage = manifest.get("lineage_id")
-                    commit_lineage_id = str(lineage) if lineage is not None else None
-            except Exception:
-                commit_lineage_id = None
+    ) -> PeerCheckpointHealth:
+        """Inspect peer LATEST snapshot via production ``validate_snapshot_commit``.
 
-        frame_complete: bool | None = None
-        marker_path = peer_ws / "population_frame_complete.json"
-        if bool(latest_exists):
-            if not marker_path.is_file():
-                frame_complete = False
-            else:
-                try:
-                    marker = json.loads(marker_path.read_text())
-                    if isinstance(marker, bool):
-                        frame_complete = marker
-                    elif isinstance(marker, dict):
-                        frame_complete = bool(
-                            marker.get("complete", marker.get("completed", False))
-                            or marker.get("completed_at")
-                        )
-                    else:
-                        frame_complete = False
-                except Exception:
-                    frame_complete = False
-        commit_ok, lineage_ok, freshness_ok, reason = evaluate_peer_checkpoint_health(
-            checkpoint=str(checkpoint) if checkpoint else None,
-            state_lineage_id=(state or {}).get("lineage_id"),
-            latest_commit_exists=(
-                bool(latest_exists) if latest_exists is not None else None
-            ),
-            commit_lineage_id=commit_lineage_id,
-            population_frame_complete=frame_complete,
+        Does not consult ``population_frame_complete.json`` (frame-stop only).
+        """
+        return inspect_peer_snapshot_health(
+            policy_workspace=self._peer_workspace(policy_idx),
+            state=state,
+            tick=int(self.interval_steps),
         )
-        return commit_ok, lineage_ok, freshness_ok, reason, checkpoint_exists
+
+    def _log_chronic_source_checkpoint_health(
+        self,
+        *,
+        source_policy: int | None,
+        target_policy: int,
+        env_frames: int,
+        peer_health: PeerCheckpointHealth | None,
+        common_health: CommonSourceEligibility | None = None,
+    ) -> None:
+        """TB + JSONL for chronic source snapshot health (selection ticks only)."""
+        h = peer_health or PeerCheckpointHealth(final_health_reason="no_peer_health")
+        allowed = bool(h.final_health_allowed)
+        if common_health is not None:
+            allowed = bool(common_health.eligible) and allowed
+        reason = str(
+            (common_health.reason if common_health is not None else "")
+            or h.final_health_reason
+            or ""
+        )
+        if self.writer is not None:
+            try:
+                self.writer.add_scalar(
+                    "pbt/chronic_source_checkpoint_valid",
+                    1.0 if h.snapshot_commit_valid else 0.0,
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_source_lineage_valid",
+                    1.0 if h.lineage_valid else 0.0,
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_source_freshness_valid",
+                    1.0 if h.freshness_valid else 0.0,
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_source_health_allowed",
+                    1.0 if allowed else 0.0,
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_source_health_reason_hash",
+                    float(abs(hash(reason)) % 10_000),
+                    int(env_frames),
+                )
+            except Exception:
+                pass
+        try:
+            run_dir = self._policy_run_dir()
+            path = Path(run_dir) / "pbt_chronic_source_health.jsonl"
+            payload = {
+                "event": "chronic_source_checkpoint_health",
+                "source_policy": (
+                    int(source_policy) if source_policy is not None else -1
+                ),
+                "target_policy": int(target_policy),
+                "frame": int(env_frames),
+                "checkpoint_path": h.checkpoint_path,
+                "latest_commit_path": h.latest_commit_path,
+                "commit_dir": h.commit_dir,
+                "snapshot_commit_valid": bool(h.snapshot_commit_valid),
+                "snapshot_commit_reason": str(h.snapshot_commit_reason),
+                "manifest_lineage_id": h.manifest_lineage_id,
+                "state_lineage_id": h.state_lineage_id,
+                "lineage_valid": bool(h.lineage_valid),
+                "manifest_population_frame": h.manifest_population_frame,
+                "state_population_frame": h.state_population_frame,
+                "freshness_valid": bool(h.freshness_valid),
+                "freshness_reason": str(h.freshness_reason),
+                "final_health_reason": str(h.final_health_reason),
+                "common_health_reason": (
+                    str(common_health.reason) if common_health is not None else ""
+                ),
+            }
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception:
+            pass
 
     def _evaluate_common_live_source_health(
         self,
@@ -2205,9 +2244,11 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             and self.late_degradation_rescue_require_source_control
         ):
             collapse_ok = False
-        commit_ok, lineage_ok, freshness_ok, _health_reason, checkpoint_exists = (
-            self._inspect_peer_checkpoint_health(policy_idx, state)
-        )
+        peer_health = self._inspect_peer_checkpoint_health(policy_idx, state)
+        # Stash for chronic selection telemetry (same tick).
+        if not hasattr(self, "_last_peer_checkpoint_health"):
+            self._last_peer_checkpoint_health = {}
+        self._last_peer_checkpoint_health[int(policy_idx)] = peer_health
         return evaluate_common_live_source_eligibility(
             has_state=state is not None,
             ranking_score=ranking_score,
@@ -2216,10 +2257,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             source_gate_reason=source_gate_reason,
             restart_burnin_ok=restart_burnin_ok,
             restart_burnin_reason=restart_burnin_reason,
-            checkpoint_exists=checkpoint_exists,
-            checkpoint_commit_ok=commit_ok,
-            lineage_ok=lineage_ok,
-            freshness_ok=freshness_ok,
+            checkpoint_exists=bool(peer_health.checkpoint_exists),
+            checkpoint_commit_ok=peer_health.checkpoint_commit_ok,
+            lineage_ok=peer_health.lineage_ok,
+            freshness_ok=peer_health.freshness_ok,
             probation_ok=probation_ok,
             collapse_ok=collapse_ok,
         )
@@ -2301,6 +2342,27 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             skill_delta_by_policy=deltas,
             drop_ratio_by_policy=drops,
             common_health_by_policy=common_health_by_policy,
+        )
+        src_for_log = (
+            int(chronic.source_policy) if chronic.source_policy is not None else None
+        )
+        peer_h = None
+        common_h = None
+        if src_for_log is not None:
+            peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(src_for_log)
+            common_h = common_health_by_policy.get(src_for_log)
+        elif common_health_by_policy:
+            # No source selected: log a representative rejected peer for diagnostics.
+            any_idx = next(iter(common_health_by_policy.keys()))
+            peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(int(any_idx))
+            common_h = common_health_by_policy.get(int(any_idx))
+            src_for_log = int(any_idx)
+        self._log_chronic_source_checkpoint_health(
+            source_policy=src_for_log,
+            target_policy=int(self.policy_idx),
+            env_frames=int(env_frames),
+            peer_health=peer_h,
+            common_health=common_h,
         )
         return {
             "action": chronic.action,
@@ -10748,6 +10810,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         for_top = True
                     health = self._evaluate_common_live_source_health(
                         src_idx, src_state, env_frames, for_top=for_top
+                    )
+                    peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(
+                        int(src_idx)
+                    )
+                    self._log_chronic_source_checkpoint_health(
+                        source_policy=int(src_idx),
+                        target_policy=int(self.policy_idx),
+                        env_frames=int(env_frames),
+                        peer_health=peer_h,
+                        common_health=health,
                     )
                     decision["chronic_common_health_allowed"] = bool(health.eligible)
                     decision["chronic_common_health_reason"] = str(health.reason)

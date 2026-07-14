@@ -50,3 +50,10 @@ def need_eir_belief_false_reason(
     if not (snippet_wm_rerank_enabled or bridge_snippet_rerank_enabled):
         return "snippet_wm_rerank_disabled"
     return "need_belief_false"
+
+
+def int_or_missing(value, *, missing: int = -1) -> int:
+    """Preserve legitimate 0; map only ``None`` to ``missing``."""
+    if value is None:
+        return int(missing)
+    return int(value)

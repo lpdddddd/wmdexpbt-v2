@@ -2944,6 +2944,7 @@ from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
 )
 from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_cache
 from dexpbt_isaaclab.world_model.eir_belief import (
+    int_or_missing,
     need_eir_belief_cache,
     need_eir_belief_false_reason,
 )
@@ -4649,13 +4650,19 @@ def _patch_actor_train_for_seq_wm(
                     try:
                         if not bool(getattr(xb, "_belief_event_written_frame", None) == frames):
                             _wcs = getattr(xb, "wm_calibration_state", None) or {}
+                            _cache = getattr(xb, "rssm_belief_cache", None)
+                            _gen_raw = (
+                                getattr(_cache, "generation", None)
+                                if _cache is not None
+                                else None
+                            )
+                            _reason_raw = getattr(
+                                xb, "last_snippet_wm_rerank_reason_id", None
+                            )
                             _ev = {
                                 "event": "belief_cache",
                                 "frame": int(frames),
-                                "generation": int(
-                                    getattr(getattr(xb, "rssm_belief_cache", None), "generation", -1)
-                                    or -1
-                                ),
+                                "generation": int_or_missing(_gen_raw, missing=-1),
                                 "policy_idx": int(getattr(args_cli, "policy_idx", -1)),
                                 "need_belief": bool(getattr(xb, "last_need_belief", False)),
                                 "belief_build_attempted": bool(
@@ -4690,9 +4697,8 @@ def _patch_actor_train_for_seq_wm(
                                         _wcs.get("calibration_reject_reason", ""),
                                     )
                                 ),
-                                "rerank_reason_id": int(
-                                    getattr(xb, "last_snippet_wm_rerank_reason_id", -1)
-                                    or -1
+                                "rerank_reason_id": int_or_missing(
+                                    _reason_raw, missing=-1
                                 ),
                                 "changed_frac": float(
                                     getattr(xb, "last_snippet_wm_rerank_changed_frac", 0.0)

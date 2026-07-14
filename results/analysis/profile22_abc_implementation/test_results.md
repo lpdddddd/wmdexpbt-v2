@@ -1,7 +1,7 @@
-# Profile22 ABC Implementation — Test Results (post review fixes)
+# Profile22 ABC Implementation — Test Results (snapshot freshness fix)
 
 Date: 2026-07-14  
-Parent tip before fix commit: `b529bb6`
+Parent tip before this fix: `cc1b3a1`
 
 ## Commands
 
@@ -31,14 +31,20 @@ PYTHONPATH=. python -m unittest \
 |---|---|
 | `bash -n` ABC launcher | PASS |
 | `py_compile` | PASS |
-| `tests.test_profile22_abc` + Profile22/23 wiring | **Ran 35 tests … OK** |
-| Training processes after tests | **none** |
+| `tests.test_profile22_abc` + Profile22/23 wiring | **Ran 50 tests … OK** |
+| Training processes after tests | **none started** |
+| GPU / runtime smoke | **not executed** |
 
 ## Coverage highlights
 
-- Common health rejects: ineligible, burn-in, lineage, commit, probation, collapse, NaN, missing fields  
-- Chronic valid Δ + mixed-tol fallback + non-mixed invalid rejects  
-- Lineage reset keeps cooldown / clears span+quota  
-- Full-bank merge `incoming_kept_count > 0`  
-- Production `need_eir_belief_cache` matrix + Profile22/24 flags  
-- Profile24 authoritative overrides `--no-*` ABC flags  
+- Real tempfile workspace via production `snapshot_commit_barrier`
+- Legal mid-train snapshot **without** `population_frame_complete.json` → health PASS
+- Completion marker neither required nor a substitute for valid commit
+- Corrupt LATEST / missing commit_dir / missing MANIFEST → reject
+- model.pth / meta.json hash mismatch → reject
+- lineage / population_frame / checkpoint-missing / stale-vs-LATEST → reject
+- Invalid snapshot not chronicaly selectable despite high score
+- Legal snapshot enables skill_delta + mixed-tol fallback paths
+- Belief `int_or_missing(0) == 0`
+- Incoming local reflux eviction counting
+- Profile22 ABC flags still off; Profile24 still authoritative all-on

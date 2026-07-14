@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import tempfile
 import unittest
@@ -465,6 +466,466 @@ class TestBeliefPredicate(unittest.TestCase):
             snippet_wm_rerank_enabled=True,
         )
         self.assertTrue(need)
+
+
+class TestBeliefIntOrMissing(unittest.TestCase):
+    def test_preserves_zero(self):
+        from dexpbt_isaaclab.world_model.eir_belief import int_or_missing
+
+        self.assertEqual(int_or_missing(0), 0)
+        self.assertEqual(int_or_missing(None), -1)
+        self.assertEqual(int_or_missing(3), 3)
+
+
+class TestBankForeignEvictionWithLocalReflux(unittest.TestCase):
+    def _mk(self, n, policy, tol, pri, capacity=10):
+        cfg = EliteSnippetBankConfig(
+            enabled=True, bank_size=capacity, feature_dim=4, action_dim=2, horizon=2
+        )
+        bank = EliteSnippetBank(cfg)
+        if n <= 0:
+            return bank
+        block = {
+            "feature": torch.randn(n, 4),
+            "actions": torch.randn(n, 2, 2),
+            "d_hat": torch.ones(n) * 0.01,
+            "success_tol": torch.ones(n) * float(tol),
+            "lifted": torch.ones(n),
+            "picked": torch.ones(n),
+            "dropped": torch.zeros(n),
+            "closest_d_hat": torch.ones(n) * 0.005,
+            "success_h": torch.ones(n),
+            "improve_h": torch.ones(n),
+            "drop_h": torch.zeros(n),
+            "recovery_label": torch.ones(n),
+            "source_policy_idx": torch.ones(n) * float(policy),
+            "source_nsucc_mean": torch.ones(n) * 30.0,
+            "source_nsucc_max": torch.ones(n) * 40.0,
+            "frame": torch.ones(n),
+            "priority_score": torch.ones(n) * float(pri),
+            "bucket_id": torch.ones(n) * 2.0,
+            "horizon": torch.ones(n) * 2.0,
+            "normalized_error": torch.zeros(n),
+            "recent_progress": torch.zeros(n),
+            "oscillation": torch.zeros(n),
+            "progress_history_valid": torch.zeros(n),
+            "normalized_improvement": torch.zeros(n),
+        }
+        bank._insert(block)
+        return bank
+
+    def test_incoming_local_rows_are_not_counted_as_foreign(self):
+        bank = self._mk(8, 0, 0.02, 1.0, capacity=10)  # existing foreign
+        incoming = self._mk(4, 2, 0.02, 50.0, capacity=10).state_dict()  # local reflux
+        kept = bank.merge_tolerance_aware(
+            incoming, local_policy_idx=2, preserve_local_fraction=0.2
+        )
+        d = bank.last_update_diagnostics
+        self.assertEqual(int(d["incoming_kept_count"]), kept)
+        self.assertEqual(int(d["incoming_local_kept"]), kept)
+        self.assertEqual(int(d["incoming_foreign_kept"]), 0)
+        self.assertEqual(int(d["foreign_evicted_count"]), max(0, 8 - int(d["existing_foreign_kept"])))
+
+
+class TestSnapshotWorkspaceHealth(unittest.TestCase):
+    TICK = 200_000_000
+
+    def _publish(self, peer_ws: Path, *, frame: int, lineage: str, prefix: str):
+        from dexpbt_isaaclab.pbt.pbt_control_plane import snapshot_commit_barrier
+
+        peer_ws.mkdir(parents=True, exist_ok=True)
+        model_src = peer_ws / f"{prefix}.model.tmp"
+        meta_src = peer_ws / f"{prefix}.meta.tmp"
+        publish_model = peer_ws / f"{prefix}.pth"
+        publish_meta = peer_ws / f"{prefix}.json"
+        torch.save({"w": torch.arange(4).float()}, model_src)
+        state = {
+            "policy_idx": 1,
+            "checkpoint": str(publish_model.resolve()),
+            "lineage_id": lineage,
+            "population_frame": int(frame),
+            "frame": int(frame),
+            "objective": 0.95,
+            "pbt_ranking_score": 0.95,
+            "nsucc_mean": 42.0,
+            "iteration": int(frame // self.TICK),
+            "params": {},
+        }
+        meta_src.write_text(json.dumps(state))
+        commit_dir = snapshot_commit_barrier(
+            staging_dir=peer_ws / f"{prefix}.staging",
+            model_src=model_src,
+            meta_src=meta_src,
+            publish_model=publish_model,
+            publish_meta=publish_meta,
+            manifest={
+                "population_frame": int(frame),
+                "lineage_id": lineage,
+                "lineage_start_pf": 0,
+                "weight_age_frame": int(frame),
+                "policy_idx": 1,
+                "pbt_iteration": int(frame // self.TICK),
+            },
+            tick=self.TICK,
+        )
+        state = json.loads(publish_meta.read_text())
+        return state, commit_dir
+
+    def test_legal_snapshot_without_completion_marker_passes(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=400_000_000, lineage="L1", prefix="iter0002"
+            )
+            self.assertFalse((peer / "population_frame_complete.json").exists())
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertTrue(h.snapshot_commit_valid, h.snapshot_commit_reason)
+            self.assertTrue(h.lineage_valid)
+            self.assertTrue(h.freshness_valid, h.freshness_reason)
+            self.assertTrue(h.final_health_allowed, h.final_health_reason)
+            common = evaluate_common_live_source_eligibility(
+                has_state=True,
+                ranking_score=0.95,
+                nsucc_mean=42.0,
+                source_gate_ok=True,
+                source_gate_reason="ok",
+                restart_burnin_ok=True,
+                restart_burnin_reason="ok",
+                checkpoint_exists=h.checkpoint_exists,
+                checkpoint_commit_ok=h.checkpoint_commit_ok,
+                lineage_ok=h.lineage_ok,
+                freshness_ok=h.freshness_ok,
+                probation_ok=True,
+                collapse_ok=True,
+            )
+            self.assertTrue(common.eligible, common.reason)
+
+    def test_completion_marker_neither_required_nor_substitute(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            (peer / "population_frame_complete.json").write_text(
+                json.dumps({"complete": True})
+            )
+            h_ok = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertTrue(h_ok.final_health_allowed)
+            # Marker cannot rescue a destroyed commit.
+            import shutil
+
+            shutil.rmtree(commit_dir)
+            h_bad = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h_bad.final_health_allowed)
+            self.assertIn("commit_dir", h_bad.final_health_reason)
+
+    def test_corrupt_latest_commit_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            (peer / "LATEST.commit").write_text("{not-json")
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.final_health_allowed)
+            self.assertEqual(h.snapshot_commit_reason, "latest_commit_corrupt")
+
+    def test_missing_commit_dir_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            import shutil
+
+            shutil.rmtree(commit_dir)
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.final_health_allowed)
+            self.assertFalse(h.commit_dir_exists)
+
+    def test_missing_manifest_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            (commit_dir / "MANIFEST").unlink()
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.snapshot_commit_valid)
+            self.assertFalse(h.final_health_allowed)
+
+    def test_model_hash_mismatch_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            torch.save({"w": torch.ones(4)}, commit_dir / "model.pth")
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.snapshot_commit_valid)
+            self.assertIn("member_corrupt", h.snapshot_commit_reason)
+
+    def test_meta_hash_mismatch_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            (commit_dir / "meta.json").write_text(json.dumps({"tampered": True}))
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.snapshot_commit_valid)
+            self.assertIn("member_corrupt", h.snapshot_commit_reason)
+
+    def test_lineage_mismatch_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            state = dict(state)
+            state["lineage_id"] = "OTHER"
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertTrue(h.snapshot_commit_valid)
+            self.assertFalse(h.lineage_valid)
+            self.assertFalse(h.final_health_allowed)
+
+    def test_frame_mismatch_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            state = dict(state)
+            state["population_frame"] = 400_000_000
+            state["frame"] = 400_000_000
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertEqual(h.freshness_reason, "population_frame_mismatch")
+            self.assertFalse(h.final_health_allowed)
+
+    def test_checkpoint_missing_rejected(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            Path(state["checkpoint"]).unlink()
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(h.checkpoint_exists)
+            self.assertFalse(h.final_health_allowed)
+
+    def test_latest_points_to_newer_commit_only(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state_old, old_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            state_new, new_dir = self._publish(
+                peer, frame=400_000_000, lineage="L1", prefix="iter0002"
+            )
+            self.assertTrue(old_dir.is_dir())
+            self.assertTrue(new_dir.is_dir())
+            latest = json.loads((peer / "LATEST.commit").read_text())
+            self.assertEqual(latest["commit_dir"], new_dir.name)
+            h_new = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state_new, tick=self.TICK
+            )
+            self.assertTrue(h_new.final_health_allowed)
+            # Old state vs LATEST(new) → frame/identity fail-close.
+            h_stale = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state_old, tick=self.TICK
+            )
+            self.assertFalse(h_stale.final_health_allowed)
+
+    def test_high_score_invalid_snapshot_not_selectable(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            (commit_dir / "MANIFEST").unlink()
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            common = evaluate_common_live_source_eligibility(
+                has_state=True,
+                ranking_score=9.9,
+                nsucc_mean=99.0,
+                source_gate_ok=True,
+                source_gate_reason="ok",
+                restart_burnin_ok=True,
+                restart_burnin_reason="ok",
+                checkpoint_exists=h.checkpoint_exists,
+                checkpoint_commit_ok=h.checkpoint_commit_ok,
+                lineage_ok=h.lineage_ok,
+                freshness_ok=h.freshness_ok,
+                probation_ok=True,
+                collapse_ok=True,
+            )
+            self.assertFalse(common.eligible)
+            decision = pick_chronic_source(
+                sorted_policies=[1, 0],
+                population={
+                    0: {"objective": 0.01, "nsucc_mean": 1.0},
+                    1: {
+                        **state,
+                        "objective": 9.9,
+                        "pbt_ranking_score": 9.9,
+                        "nsucc_mean": 99.0,
+                    },
+                },
+                target_idx=0,
+                target_score=0.01,
+                target_nsucc_mean=1.0,
+                n_top=1,
+                n_mid=0,
+                min_score_gap=0.0,
+                skill_delta_by_policy={1: (0.05, "ok")},
+                drop_ratio_by_policy={1: 0.0},
+                common_health_by_policy={1: common},
+            )
+            self.assertEqual(decision.action, "skip")
+            self.assertEqual(decision.source_policy, -1)
+
+    def test_legal_snapshot_enables_chronic_skill_and_fallback_paths(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+            inspect_peer_snapshot_health,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            h = inspect_peer_snapshot_health(
+                policy_workspace=peer, state=state, tick=self.TICK
+            )
+            common = evaluate_common_live_source_eligibility(
+                has_state=True,
+                ranking_score=0.95,
+                nsucc_mean=42.0,
+                source_gate_ok=True,
+                source_gate_reason="ok",
+                restart_burnin_ok=True,
+                restart_burnin_reason="ok",
+                checkpoint_exists=h.checkpoint_exists,
+                checkpoint_commit_ok=h.checkpoint_commit_ok,
+                lineage_ok=h.lineage_ok,
+                freshness_ok=h.freshness_ok,
+                probation_ok=True,
+                collapse_ok=True,
+            )
+            self.assertTrue(common.eligible)
+            ok_delta, _, fallback = live_source_ok_for_chronic(
+                skill_delta=0.05,
+                skill_delta_why="ok",
+                source_nsucc_mean=42.0,
+                target_nsucc_mean=1.0,
+                source_recent_drop_ratio=0.0,
+            )
+            self.assertTrue(ok_delta)
+            self.assertFalse(fallback)
+            ok_fb, reason, fallback2 = live_source_ok_for_chronic(
+                skill_delta=None,
+                skill_delta_why="mixed_tol_bins",
+                source_nsucc_mean=42.0,
+                target_nsucc_mean=1.0,
+                source_recent_drop_ratio=0.0,
+            )
+            self.assertTrue(ok_fb, reason)
+            self.assertTrue(fallback2)
+            decision = pick_chronic_source(
+                sorted_policies=[1, 0],
+                population={
+                    0: {"objective": 0.01, "nsucc_mean": 1.0},
+                    1: {
+                        **state,
+                        "objective": 0.95,
+                        "pbt_ranking_score": 0.95,
+                        "nsucc_mean": 42.0,
+                    },
+                },
+                target_idx=0,
+                target_score=0.01,
+                target_nsucc_mean=1.0,
+                n_top=1,
+                n_mid=0,
+                min_score_gap=0.0,
+                skill_delta_by_policy={1: (0.05, "ok")},
+                drop_ratio_by_policy={1: 0.0},
+                common_health_by_policy={1: common},
+            )
+            self.assertEqual(decision.action, "copy")
+            self.assertEqual(decision.source_policy, 1)
 
 
 class TestLauncherSyntax(unittest.TestCase):

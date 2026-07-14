@@ -664,23 +664,31 @@ class EliteSnippetBank:
             src1 = self.scalars["source_policy_idx"][:after]
             local_after = int((src1 == float(local_policy_idx)).sum().item())
             foreign_after = int(after - local_after)
-        existing_kept = max(0, after - int(kept_incoming))
+        ins = getattr(self, "_last_insert_eviction", None) or {}
+        incoming_local_kept = int(ins.get("incoming_local_kept", 0))
+        incoming_foreign_kept = int(ins.get("incoming_foreign_kept", 0))
+        existing_local_kept = int(ins.get("existing_local_kept", 0))
+        existing_foreign_kept = int(ins.get("existing_foreign_kept", 0))
+        local_evicted = int(ins.get("local_evicted_count", 0))
+        foreign_evicted = int(ins.get("foreign_evicted_count", 0))
+        existing_kept = existing_local_kept + existing_foreign_kept
         existing_evicted = max(0, before - existing_kept)
-        local_evicted = max(0, local_before - local_after)
-        foreign_evicted = max(0, foreign_before - (foreign_after - int(kept_incoming)))
-        # Prefer exact foreign eviction from diagnostics when available.
         diag.update(
             {
                 "incoming_kept_count": float(kept_incoming),
                 "incoming_rejected_count": float(max(0, m - int(kept_incoming))),
+                "incoming_local_kept": float(incoming_local_kept),
+                "incoming_foreign_kept": float(incoming_foreign_kept),
+                "existing_local_kept": float(existing_local_kept),
+                "existing_foreign_kept": float(existing_foreign_kept),
                 "existing_evicted_count": float(existing_evicted),
                 "local_after": float(local_after),
                 "foreign_after": float(foreign_after),
                 "local_evicted_count": float(local_evicted),
-                "foreign_evicted_count": float(max(0, foreign_evicted)),
+                "foreign_evicted_count": float(foreign_evicted),
                 "bank_size_after": float(after),
                 "eviction_local_count": float(local_evicted),
-                "eviction_foreign_count": float(max(0, foreign_evicted)),
+                "eviction_foreign_count": float(foreign_evicted),
             }
         )
         self.last_update_diagnostics = dict(self.last_update_diagnostics or {})
@@ -701,13 +709,75 @@ class EliteSnippetBank:
         new_n = int(new["feature"].shape[0])
         combined = {k: torch.cat([cur[k], new[k]], dim=0) for k in new}
         n = int(combined["feature"].shape[0])
+        src = combined["source_policy_idx"]
+        local_pid = float(local_policy_idx) if int(local_policy_idx) >= 0 else None
+
+        def _count_range(start: int, end: int, *, local: bool) -> int:
+            if end <= start:
+                return 0
+            sl = src[start:end]
+            if local_pid is None:
+                return 0 if local else int(end - start)
+            mask = sl == local_pid
+            loc = int(mask.sum().item())
+            return loc if local else int(end - start) - loc
+
+        existing_local_before = _count_range(0, old_n, local=True)
+        existing_foreign_before = _count_range(0, old_n, local=False)
+        incoming_local_before = _count_range(old_n, n, local=True)
+        incoming_foreign_before = _count_range(old_n, n, local=False)
+
+        def _record_kept(kept_idx: torch.Tensor) -> int:
+            if kept_idx.numel() == 0:
+                tele = {
+                    "incoming_local_kept": 0,
+                    "incoming_foreign_kept": 0,
+                    "existing_local_kept": 0,
+                    "existing_foreign_kept": 0,
+                    "local_evicted_count": int(existing_local_before),
+                    "foreign_evicted_count": int(existing_foreign_before),
+                }
+                self._last_insert_eviction = tele
+                return 0
+            kept_list = [int(x) for x in kept_idx.tolist()]
+            existing_local_kept = 0
+            existing_foreign_kept = 0
+            incoming_local_kept = 0
+            incoming_foreign_kept = 0
+            for i in kept_list:
+                is_local = local_pid is not None and float(src[i].item()) == local_pid
+                if i < old_n:
+                    if is_local:
+                        existing_local_kept += 1
+                    else:
+                        existing_foreign_kept += 1
+                elif i < n:
+                    if is_local:
+                        incoming_local_kept += 1
+                    else:
+                        incoming_foreign_kept += 1
+            self._last_insert_eviction = {
+                "incoming_local_kept": int(incoming_local_kept),
+                "incoming_foreign_kept": int(incoming_foreign_kept),
+                "existing_local_kept": int(existing_local_kept),
+                "existing_foreign_kept": int(existing_foreign_kept),
+                "local_evicted_count": int(
+                    max(0, existing_local_before - existing_local_kept)
+                ),
+                "foreign_evicted_count": int(
+                    max(0, existing_foreign_before - existing_foreign_kept)
+                ),
+                "incoming_local_before": int(incoming_local_before),
+                "incoming_foreign_before": int(incoming_foreign_before),
+            }
+            return int(incoming_local_kept + incoming_foreign_kept)
+
         if n <= self.capacity:
             self._store_block(combined)
-            return new_n
+            return _record_kept(torch.arange(n, dtype=torch.long))
         reserve = max(
             0, int(math.floor(self.capacity * max(0.0, float(preserve_local_fraction))))
         )
-        src = combined["source_policy_idx"]
         local_mask = (
             src == float(local_policy_idx)
             if int(local_policy_idx) >= 0
@@ -737,11 +807,7 @@ class EliteSnippetBank:
         if kept.numel() > self.capacity:
             kept = kept[: self.capacity]
         self._store_block({k: v[kept] for k, v in combined.items()})
-        if kept.numel() == 0:
-            return 0
-        incoming_kept = int(((kept >= old_n) & (kept < n)).sum().item())
-        return incoming_kept
-
+        return _record_kept(kept)
     def metrics(self):
         out = {"elite_snippet/bank_size": float(self.size), "elite_snippet/inserted_rows": float(self.add_count), "elite_snippet/retrieval_hit_rate": float(self.retrieval_hit_rate)}
         if self.size > 0:
