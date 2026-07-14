@@ -2,7 +2,8 @@
 
 Date: 2026-07-14  
 Parent: `358133f`  
-Commit: (see current HEAD after Optimize ABC snapshot validation caching)
+Cache commit: `5779d0f5e9965676d5ce4a53a7022fa22c40d53a`  
+Launch commit (CLI wiring follow-up): `c890ccda63193c2b49da4549dbe451b55b39dbb2`
 
 ## Problem
 
