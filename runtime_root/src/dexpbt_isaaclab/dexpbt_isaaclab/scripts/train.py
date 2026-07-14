@@ -1826,34 +1826,15 @@ parser.add_argument("--allegro_actions_penalty_scale", type=float, default=None)
 parser.add_argument("--sigma", type=str, default=None)
 parser.add_argument("--test", action="store_true", default=False, help="Run in play / evaluation mode.")
 # ---- World Model (WM) args ----
+# Keep CLI choices in sync with PROFILE_IDS so new profiles (e.g. Profile24 ABC)
+# are launchable without a second hardcoded list.
+from dexpbt_isaaclab.world_model.wm_strategy_profiles import PROFILE_IDS as _WM_PROFILE_IDS  # noqa: E402
+
 parser.add_argument(
     "--wm_strategy_profile",
     type=str,
     default="legacy",
-    choices=[
-        "legacy",
-        "ppo_only",
-        "rssm_mppi_actor_distill",
-        "wm_curriculum_controller",
-        "wm_pbt_source_selector",
-        "elite_bank_actor_distill",
-        "conservative_rssm_planner_distill",
-        "light_rssm_mppi_actor_distill",
-        "wm_pbt_source_selector_v2",
-        "light_conservative_rssm_planner_distill",
-        "elite_bank_actor_distill_fast",
-        "elite_bank_actor_distill_strong",
-        "elite_bank_actor_distill_fast_awr",
-        "wm_pbt_source_selector_awr",
-        "elite_bank_actor_distill_awr",
-        "elite_bank_actor_distill_strong_awr",
-        "unified_elite_wm_pbt",
-        "cser_dexpbt",
-        "cser_dexpbt_conservative",
-        "cser_dexpbt_2cm_bridge",
-        "cser_dexpbt_progress_refine",
-        "cser_dexpbt_readiness_adaptive",
-    ],
+    choices=sorted(_WM_PROFILE_IDS.keys()),
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
 )

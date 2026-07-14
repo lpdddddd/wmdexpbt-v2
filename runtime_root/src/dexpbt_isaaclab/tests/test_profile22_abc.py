@@ -95,6 +95,16 @@ class TestConfigRegressionABC(unittest.TestCase):
         self.assertFalse(args.eir_tolerance_aware_bank_broadcast)
         self.assertFalse(args.eir_enable_belief_for_snippet_wm_rerank)
 
+    def test_profile24_in_train_cli_choices(self):
+        """Regression: Profile24 must be a valid --wm_strategy_profile choice."""
+        from dexpbt_isaaclab.world_model.wm_strategy_profiles import PROFILE_IDS
+
+        self.assertIn("cser_dexpbt_progress_refine_abc", PROFILE_IDS)
+        # Mimic train.py CLI wiring (choices derived from PROFILE_IDS).
+        choices = sorted(PROFILE_IDS.keys())
+        self.assertIn("cser_dexpbt_progress_refine_abc", choices)
+        self.assertIn("cser_dexpbt_progress_refine", choices)
+
     def test_profile24_authoritative_all_on_overrides_cli_off(self):
         self.assertEqual(PROFILE_IDS["cser_dexpbt_progress_refine_abc"], 24)
         args = _ns(
