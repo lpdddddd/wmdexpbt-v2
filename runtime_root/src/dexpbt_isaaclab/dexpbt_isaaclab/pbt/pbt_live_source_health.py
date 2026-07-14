@@ -412,3 +412,334 @@ def evaluate_peer_checkpoint_health(
         return True, False, False, "lineage_mismatch"
     # Without a full workspace inspect we cannot prove freshness; fail-closed.
     return True, True, None, "freshness_requires_inspect_peer_snapshot_health"
+
+
+@dataclass(frozen=True)
+class SnapshotValidationFingerprint:
+    """Lightweight identity for immutable snapshot commit validation cache."""
+
+    policy_idx: int
+    commit_id: str
+    commit_dir: str
+    latest_size: int
+    latest_mtime_ns: int
+    manifest_size: int
+    manifest_mtime_ns: int
+    checkpoint_path: str
+    checkpoint_size: int
+    checkpoint_mtime_ns: int
+    state_lineage_id: str
+    state_population_frame: int
+    tick: int
+    commit_model_size: int = 0
+    commit_model_mtime_ns: int = 0
+    commit_meta_size: int = 0
+    commit_meta_mtime_ns: int = 0
+
+
+@dataclass
+class CachedSnapshotHealth:
+    fingerprint: SnapshotValidationFingerprint
+    health: PeerCheckpointHealth
+    validated_at_monotonic: float
+
+
+@dataclass
+class SnapshotInspectTelemetry:
+    health: PeerCheckpointHealth
+    cache_hit: bool
+    invalidated_reason: str
+    validation_latency_s: float
+    full_hash_executed: bool
+    fingerprint: SnapshotValidationFingerprint | None = None
+
+
+def _file_stat_size_mtime(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+        return int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    except Exception:
+        return None
+
+
+def build_snapshot_validation_fingerprint(
+    *,
+    policy_idx: int,
+    policy_workspace: Path,
+    state: dict[str, Any] | None,
+    tick: int,
+) -> tuple[SnapshotValidationFingerprint | None, str]:
+    """Build a lightweight fingerprint or explain why it cannot be built.
+
+    Failures here force a full (uncached) inspect and never hit a prior entry.
+    """
+    st = state or {}
+    lineage = st.get("lineage_id")
+    if lineage is None or str(lineage).strip() == "":
+        return None, "lineage_missing_for_fingerprint"
+    frame = _parse_population_frame(st)
+    if frame is None:
+        return None, "frame_missing_for_fingerprint"
+    checkpoint = st.get("checkpoint")
+    if not checkpoint:
+        return None, "checkpoint_missing_for_fingerprint"
+    ckpt_path = Path(str(checkpoint))
+    ckpt_stat = _file_stat_size_mtime(ckpt_path)
+    if ckpt_stat is None:
+        return None, "checkpoint_stat_unreadable"
+
+    latest_path = Path(policy_workspace) / "LATEST.commit"
+    latest_stat = _file_stat_size_mtime(latest_path)
+    if latest_stat is None:
+        return None, "latest_missing_or_unreadable"
+    try:
+        latest_payload = json.loads(latest_path.read_text())
+    except Exception:
+        return None, "latest_commit_corrupt"
+    if not isinstance(latest_payload, dict):
+        return None, "latest_commit_not_dict"
+    commit_id = str(latest_payload.get("commit_id") or "").strip()
+    commit_dir_name = str(latest_payload.get("commit_dir") or "").strip()
+    if not commit_id or not commit_dir_name:
+        return None, "latest_commit_incomplete"
+    commit_dir = Path(policy_workspace) / commit_dir_name
+    if not commit_dir.is_dir():
+        return None, "commit_dir_missing"
+    manifest_path = commit_dir / "MANIFEST"
+    manifest_stat = _file_stat_size_mtime(manifest_path)
+    if manifest_stat is None:
+        return None, "manifest_missing_or_unreadable"
+    model_stat = _file_stat_size_mtime(commit_dir / "model.pth") or (0, 0)
+    meta_stat = _file_stat_size_mtime(commit_dir / "meta.json") or (0, 0)
+    return (
+        SnapshotValidationFingerprint(
+            policy_idx=int(policy_idx),
+            commit_id=commit_id,
+            commit_dir=commit_dir_name,
+            latest_size=int(latest_stat[0]),
+            latest_mtime_ns=int(latest_stat[1]),
+            manifest_size=int(manifest_stat[0]),
+            manifest_mtime_ns=int(manifest_stat[1]),
+            checkpoint_path=str(ckpt_path.resolve())
+            if ckpt_path.exists()
+            else str(ckpt_path),
+            checkpoint_size=int(ckpt_stat[0]),
+            checkpoint_mtime_ns=int(ckpt_stat[1]),
+            state_lineage_id=str(lineage),
+            state_population_frame=int(frame),
+            tick=int(tick),
+            commit_model_size=int(model_stat[0]),
+            commit_model_mtime_ns=int(model_stat[1]),
+            commit_meta_size=int(meta_stat[0]),
+            commit_meta_mtime_ns=int(meta_stat[1]),
+        ),
+        "ok",
+    )
+
+
+def fingerprint_invalidation_reason(
+    previous: SnapshotValidationFingerprint | None,
+    current: SnapshotValidationFingerprint,
+) -> str:
+    if previous is None:
+        return "first_validation"
+    if (
+        previous.commit_id != current.commit_id
+        or previous.commit_dir != current.commit_dir
+        or previous.latest_size != current.latest_size
+        or previous.latest_mtime_ns != current.latest_mtime_ns
+    ):
+        return "latest_changed"
+    if (
+        previous.manifest_size != current.manifest_size
+        or previous.manifest_mtime_ns != current.manifest_mtime_ns
+        or previous.commit_model_size != current.commit_model_size
+        or previous.commit_model_mtime_ns != current.commit_model_mtime_ns
+        or previous.commit_meta_size != current.commit_meta_size
+        or previous.commit_meta_mtime_ns != current.commit_meta_mtime_ns
+    ):
+        return "manifest_changed"
+    if (
+        previous.checkpoint_path != current.checkpoint_path
+        or previous.checkpoint_size != current.checkpoint_size
+        or previous.checkpoint_mtime_ns != current.checkpoint_mtime_ns
+    ):
+        return "checkpoint_stat_changed"
+    if previous.state_lineage_id != current.state_lineage_id:
+        return "lineage_changed"
+    if previous.state_population_frame != current.state_population_frame:
+        return "frame_changed"
+    if previous.tick != current.tick:
+        return "tick_changed"
+    if previous != current:
+        return "fingerprint_changed"
+    return "cache_hit"
+
+
+class PeerSnapshotHealthCache:
+    """Process-local LRU of peer snapshot health keyed by fingerprint.
+
+    Only immutable commit/identity results are cached. Probation, skill_delta,
+    collapse, and ranking scores are never stored here.
+    """
+
+    def __init__(self, *, max_per_policy: int = 3) -> None:
+        self.max_per_policy = max(1, int(max_per_policy))
+        self._by_policy: dict[int, list[CachedSnapshotHealth]] = {}
+        self.hit_count = 0
+        self.miss_count = 0
+        self.last_telemetry: SnapshotInspectTelemetry | None = None
+
+    def entry_count(self) -> int:
+        return sum(len(v) for v in self._by_policy.values())
+
+    def clear(self) -> None:
+        self._by_policy.clear()
+
+    def _lookup(
+        self, fp: SnapshotValidationFingerprint
+    ) -> CachedSnapshotHealth | None:
+        entries = self._by_policy.get(int(fp.policy_idx), [])
+        for item in entries:
+            if item.fingerprint == fp:
+                return item
+        return None
+
+    def _store(self, item: CachedSnapshotHealth) -> None:
+        pidx = int(item.fingerprint.policy_idx)
+        entries = [
+            e
+            for e in self._by_policy.get(pidx, [])
+            if e.fingerprint != item.fingerprint
+        ]
+        entries.insert(0, item)
+        self._by_policy[pidx] = entries[: self.max_per_policy]
+
+    def inspect(
+        self,
+        *,
+        policy_idx: int,
+        policy_workspace: Path,
+        state: dict[str, Any] | None,
+        tick: int,
+        validate_fn: Any | None = None,
+        sha256_fn: Any | None = None,
+    ) -> SnapshotInspectTelemetry:
+        """Inspect with fingerprint-gated cache. Fail-close on corruption."""
+        import copy
+        import time
+
+        t0 = time.monotonic()
+        fp, fp_reason = build_snapshot_validation_fingerprint(
+            policy_idx=int(policy_idx),
+            policy_workspace=Path(policy_workspace),
+            state=state,
+            tick=int(tick),
+        )
+        if fp is None:
+            self.miss_count += 1
+            health = self._full_inspect(
+                policy_workspace=Path(policy_workspace),
+                state=state,
+                tick=int(tick),
+                validate_fn=validate_fn,
+                sha256_fn=sha256_fn,
+            )
+            tele = SnapshotInspectTelemetry(
+                health=health,
+                cache_hit=False,
+                invalidated_reason=str(fp_reason),
+                validation_latency_s=float(time.monotonic() - t0),
+                full_hash_executed=True,
+                fingerprint=None,
+            )
+            self.last_telemetry = tele
+            return tele
+
+        cached = self._lookup(fp)
+        if cached is not None:
+            self.hit_count += 1
+            # Move to front (LRU).
+            self._store(cached)
+            health = copy.deepcopy(cached.health)
+            tele = SnapshotInspectTelemetry(
+                health=health,
+                cache_hit=True,
+                invalidated_reason="cache_hit",
+                validation_latency_s=float(time.monotonic() - t0),
+                full_hash_executed=False,
+                fingerprint=fp,
+            )
+            self.last_telemetry = tele
+            return tele
+
+        # Find nearest prior entry for this policy to classify miss reason.
+        prior = None
+        prior_entries = self._by_policy.get(int(policy_idx), [])
+        if prior_entries:
+            prior = prior_entries[0].fingerprint
+        reason = fingerprint_invalidation_reason(prior, fp)
+
+        self.miss_count += 1
+        health = self._full_inspect(
+            policy_workspace=Path(policy_workspace),
+            state=state,
+            tick=int(tick),
+            validate_fn=validate_fn,
+            sha256_fn=sha256_fn,
+        )
+        # Cache successful validations always; also cache negative results that
+        # completed under a full fingerprint (mtime/size still gates reuse).
+        # Do not cache when fingerprint build failed (handled above).
+        self._store(
+            CachedSnapshotHealth(
+                fingerprint=fp,
+                health=copy.deepcopy(health),
+                validated_at_monotonic=float(time.monotonic()),
+            )
+        )
+        tele = SnapshotInspectTelemetry(
+            health=health,
+            cache_hit=False,
+            invalidated_reason=reason if reason != "cache_hit" else "first_validation",
+            validation_latency_s=float(time.monotonic() - t0),
+            full_hash_executed=True,
+            fingerprint=fp,
+        )
+        self.last_telemetry = tele
+        return tele
+
+    @staticmethod
+    def _full_inspect(
+        *,
+        policy_workspace: Path,
+        state: dict[str, Any] | None,
+        tick: int,
+        validate_fn: Any | None,
+        sha256_fn: Any | None,
+    ) -> PeerCheckpointHealth:
+        """Run full validation, optionally injecting spies for tests."""
+        if validate_fn is None and sha256_fn is None:
+            return inspect_peer_snapshot_health(
+                policy_workspace=policy_workspace,
+                state=state,
+                tick=tick,
+            )
+        # Spy path: temporarily patch module symbols used by inspect.
+        import dexpbt_isaaclab.pbt.pbt_live_source_health as mod
+
+        old_validate = mod.validate_snapshot_commit
+        old_sha = mod._sha256_file
+        try:
+            if validate_fn is not None:
+                mod.validate_snapshot_commit = validate_fn  # type: ignore[assignment]
+            if sha256_fn is not None:
+                mod._sha256_file = sha256_fn  # type: ignore[assignment]
+            return inspect_peer_snapshot_health(
+                policy_workspace=policy_workspace,
+                state=state,
+                tick=tick,
+            )
+        finally:
+            mod.validate_snapshot_commit = old_validate
+            mod._sha256_file = old_sha

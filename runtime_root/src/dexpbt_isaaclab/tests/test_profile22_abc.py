@@ -928,6 +928,414 @@ class TestSnapshotWorkspaceHealth(unittest.TestCase):
             self.assertEqual(decision.source_policy, 1)
 
 
+class TestSnapshotValidationCache(unittest.TestCase):
+    TICK = 200_000_000
+
+    def _publish(self, peer_ws: Path, *, frame: int, lineage: str, prefix: str):
+        from dexpbt_isaaclab.pbt.pbt_control_plane import snapshot_commit_barrier
+
+        peer_ws.mkdir(parents=True, exist_ok=True)
+        model_src = peer_ws / f"{prefix}.model.tmp"
+        meta_src = peer_ws / f"{prefix}.meta.tmp"
+        publish_model = peer_ws / f"{prefix}.pth"
+        publish_meta = peer_ws / f"{prefix}.json"
+        torch.save({"w": torch.arange(8).float() + float(frame % 7)}, model_src)
+        state = {
+            "policy_idx": 1,
+            "checkpoint": str(publish_model.resolve()),
+            "lineage_id": lineage,
+            "population_frame": int(frame),
+            "frame": int(frame),
+            "objective": 0.95,
+            "pbt_ranking_score": 0.95,
+            "nsucc_mean": 42.0,
+            "iteration": int(frame // self.TICK),
+            "params": {},
+        }
+        meta_src.write_text(json.dumps(state))
+        commit_dir = snapshot_commit_barrier(
+            staging_dir=peer_ws / f"{prefix}.staging",
+            model_src=model_src,
+            meta_src=meta_src,
+            publish_model=publish_model,
+            publish_meta=publish_meta,
+            manifest={
+                "population_frame": int(frame),
+                "lineage_id": lineage,
+                "lineage_start_pf": 0,
+                "weight_age_frame": int(frame),
+                "policy_idx": 1,
+                "pbt_iteration": int(frame // self.TICK),
+            },
+            tick=self.TICK,
+        )
+        state = json.loads(publish_meta.read_text())
+        return state, commit_dir
+
+    def _spy_fns(self):
+        from dexpbt_isaaclab.pbt import pbt_control_plane as cp
+        from dexpbt_isaaclab.pbt import pbt_live_source_health as health_mod
+
+        counts = {"validate": 0, "sha": 0}
+        real_validate = cp.validate_snapshot_commit
+        real_sha = health_mod._sha256_file
+
+        def validate_spy(staging_dir, *, tick):
+            counts["validate"] += 1
+            return real_validate(staging_dir, tick=tick)
+
+        def sha_spy(path):
+            counts["sha"] += 1
+            return real_sha(path)
+
+        return counts, validate_spy, sha_spy
+
+    def test_first_miss_then_hit_skips_full_hash(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            self.assertFalse((peer / "population_frame_complete.json").exists())
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            t1 = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t1.cache_hit)
+            self.assertTrue(t1.full_hash_executed)
+            self.assertTrue(t1.health.final_health_allowed)
+            self.assertEqual(counts["validate"], 1)
+            sha_after_first = counts["sha"]
+            self.assertGreaterEqual(sha_after_first, 1)
+
+            t2 = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertTrue(t2.cache_hit)
+            self.assertEqual(t2.invalidated_reason, "cache_hit")
+            self.assertFalse(t2.full_hash_executed)
+            self.assertTrue(t2.health.final_health_allowed)
+            self.assertEqual(counts["validate"], 1)
+            self.assertEqual(counts["sha"], sha_after_first)
+
+    def test_selection_then_post_selection_hits_cache(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=400_000_000, lineage="L1", prefix="iter0002"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            sel = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            post = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(sel.cache_hit)
+            self.assertTrue(post.cache_hit)
+            self.assertEqual(sel.health.final_health_reason, post.health.final_health_reason)
+            self.assertEqual(counts["validate"], 1)
+
+    def test_latest_points_new_commit_misses(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state1, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state1,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            state2, _ = self._publish(
+                peer, frame=400_000_000, lineage="L1", prefix="iter0002"
+            )
+            t = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state2,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertEqual(t.invalidated_reason, "latest_changed")
+            self.assertEqual(counts["validate"], 2)
+
+    def test_checkpoint_mtime_change_misses(self):
+        import os
+        import time as time_mod
+
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            ckpt = Path(state["checkpoint"])
+            time_mod.sleep(0.02)
+            now = time_mod.time() + 5
+            os.utime(ckpt, (now, now))
+            t = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertEqual(t.invalidated_reason, "checkpoint_stat_changed")
+            self.assertEqual(counts["validate"], 2)
+
+    def test_checkpoint_size_change_miss_and_identity_fail(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            ckpt = Path(state["checkpoint"])
+            with ckpt.open("ab") as fh:
+                fh.write(b"x")
+            t = cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertFalse(t.health.final_health_allowed)
+            self.assertIn(
+                t.health.freshness_reason,
+                ("checkpoint_identity_mismatch", "checkpoint_stat_changed"),
+            )
+
+    def test_manifest_change_misses(self):
+        import os
+        import time as time_mod
+
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            man = commit_dir / "MANIFEST"
+            time_mod.sleep(0.02)
+            now = time_mod.time() + 5
+            os.utime(man, (now, now))
+            t = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertEqual(t.invalidated_reason, "manifest_changed")
+            self.assertEqual(counts["validate"], 2)
+
+    def test_lineage_and_frame_mismatch_miss(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            bad_lin = dict(state)
+            bad_lin["lineage_id"] = "OTHER"
+            t_lin = cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=bad_lin, tick=self.TICK
+            )
+            self.assertFalse(t_lin.cache_hit)
+            self.assertEqual(t_lin.invalidated_reason, "lineage_changed")
+            self.assertFalse(t_lin.health.final_health_allowed)
+
+            # Re-prime from a clean cache so invalidation reason is vs the legal fp.
+            cache2 = PeerSnapshotHealthCache(max_per_policy=3)
+            cache2.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            bad_fr = dict(state)
+            bad_fr["population_frame"] = 400_000_000
+            bad_fr["frame"] = 400_000_000
+            t_fr = cache2.inspect(
+                policy_idx=1, policy_workspace=peer, state=bad_fr, tick=self.TICK
+            )
+            self.assertFalse(t_fr.cache_hit)
+            self.assertEqual(t_fr.invalidated_reason, "frame_changed")
+            self.assertFalse(t_fr.health.final_health_allowed)
+
+    def test_corrupt_latest_fail_close_no_stale_hit(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            (peer / "LATEST.commit").write_text("{bad")
+            t = cache.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertFalse(t.health.final_health_allowed)
+            self.assertEqual(t.health.final_health_reason, "latest_commit_corrupt")
+
+    def test_tampered_model_fail_close(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, commit_dir = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            import os
+            import time as time_mod
+
+            torch.save({"w": torch.ones(8)}, commit_dir / "model.pth")
+            time_mod.sleep(0.02)
+            now = time_mod.time() + 3
+            os.utime(commit_dir / "model.pth", (now, now))
+            os.utime(commit_dir / "MANIFEST", (now, now))
+            t = cache.inspect(
+                policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertFalse(t.health.snapshot_commit_valid)
+
+    def test_cache_capacity_bounded(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            cache = PeerSnapshotHealthCache(max_per_policy=2)
+            for i, frame in enumerate(
+                (200_000_000, 400_000_000, 600_000_000), start=1
+            ):
+                state, _ = self._publish(
+                    peer, frame=frame, lineage="L1", prefix=f"iter{i:04d}"
+                )
+                cache.inspect(
+                    policy_idx=1, policy_workspace=peer, state=state, tick=self.TICK
+                )
+            self.assertLessEqual(cache.entry_count(), 2)
+            self.assertEqual(len(cache._by_policy[1]), 2)
+
+    def test_new_cache_is_process_local(self):
+        from dexpbt_isaaclab.pbt.pbt_live_source_health import PeerSnapshotHealthCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = Path(tmp) / "001"
+            state, _ = self._publish(
+                peer, frame=200_000_000, lineage="L1", prefix="iter0001"
+            )
+            c1 = PeerSnapshotHealthCache(max_per_policy=3)
+            counts, validate_spy, sha_spy = self._spy_fns()
+            c1.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            c2 = PeerSnapshotHealthCache(max_per_policy=3)
+            t = c2.inspect(
+                policy_idx=1,
+                policy_workspace=peer,
+                state=state,
+                tick=self.TICK,
+                validate_fn=validate_spy,
+                sha256_fn=sha_spy,
+            )
+            self.assertFalse(t.cache_hit)
+            self.assertEqual(counts["validate"], 2)
+
+
 class TestLauncherSyntax(unittest.TestCase):
     def test_bash_n(self):
         import subprocess

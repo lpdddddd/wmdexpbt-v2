@@ -108,6 +108,8 @@ from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
 from dexpbt_isaaclab.pbt.pbt_live_source_health import (
     CommonSourceEligibility,
     PeerCheckpointHealth,
+    PeerSnapshotHealthCache,
+    SnapshotInspectTelemetry,
     evaluate_common_live_source_eligibility,
     inspect_peer_snapshot_health,
 )
@@ -817,6 +819,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self._chronic_bottom_state: dict[int, ChronicBottomState] = {}
         self._chronic_bottom_lineage_id: dict[int, str] = {}
+        self._peer_snapshot_health_cache = PeerSnapshotHealthCache(max_per_policy=3)
+        self._last_peer_checkpoint_health: dict[int, PeerCheckpointHealth] = {}
+        self._last_snapshot_inspect_tele: dict[int, SnapshotInspectTelemetry] = {}
+        self._last_snapshot_inspect_for_log: SnapshotInspectTelemetry | None = None
 
         # Seed diversity audit (B1/B2): set by train.py after env creation
         # via set_seeding_audit(); included in every training_curve point.
@@ -2101,13 +2107,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
     ) -> PeerCheckpointHealth:
         """Inspect peer LATEST snapshot via production ``validate_snapshot_commit``.
 
+        Uses process-local fingerprint cache so selection and post-selection
+        defense-in-depth do not re-hash the same immutable commit.
         Does not consult ``population_frame_complete.json`` (frame-stop only).
         """
-        return inspect_peer_snapshot_health(
+        cache = getattr(self, "_peer_snapshot_health_cache", None)
+        if cache is None:
+            cache = PeerSnapshotHealthCache(max_per_policy=3)
+            self._peer_snapshot_health_cache = cache
+        tele = cache.inspect(
+            policy_idx=int(policy_idx),
             policy_workspace=self._peer_workspace(policy_idx),
             state=state,
             tick=int(self.interval_steps),
         )
+        if not hasattr(self, "_last_snapshot_inspect_tele"):
+            self._last_snapshot_inspect_tele = {}
+        self._last_snapshot_inspect_tele[int(policy_idx)] = tele
+        self._last_snapshot_inspect_for_log = tele
+        return tele.health
 
     def _log_chronic_source_checkpoint_health(
         self,
@@ -2117,9 +2135,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         env_frames: int,
         peer_health: PeerCheckpointHealth | None,
         common_health: CommonSourceEligibility | None = None,
+        inspect_tele: SnapshotInspectTelemetry | None = None,
     ) -> None:
         """TB + JSONL for chronic source snapshot health (selection ticks only)."""
         h = peer_health or PeerCheckpointHealth(final_health_reason="no_peer_health")
+        tele = inspect_tele or getattr(self, "_last_snapshot_inspect_for_log", None)
+        if (
+            tele is None
+            and source_policy is not None
+            and hasattr(self, "_last_snapshot_inspect_tele")
+        ):
+            tele = self._last_snapshot_inspect_tele.get(int(source_policy))
         allowed = bool(h.final_health_allowed)
         if common_health is not None:
             allowed = bool(common_health.eligible) and allowed
@@ -2128,6 +2154,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             or h.final_health_reason
             or ""
         )
+        cache = getattr(self, "_peer_snapshot_health_cache", None)
+        hit = bool(tele.cache_hit) if tele is not None else False
+        miss = not hit if tele is not None else True
+        latency = float(tele.validation_latency_s) if tele is not None else 0.0
+        full_hash = bool(tele.full_hash_executed) if tele is not None else True
+        inv_reason = (
+            str(tele.invalidated_reason) if tele is not None else "unknown"
+        )
+        fp = tele.fingerprint if tele is not None else None
         if self.writer is not None:
             try:
                 self.writer.add_scalar(
@@ -2153,6 +2188,42 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self.writer.add_scalar(
                     "pbt/chronic_source_health_reason_hash",
                     float(abs(hash(reason)) % 10_000),
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_snapshot_cache_hit",
+                    1.0 if hit else 0.0,
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_snapshot_cache_miss",
+                    1.0 if miss else 0.0,
+                    int(env_frames),
+                )
+                if cache is not None:
+                    self.writer.add_scalar(
+                        "pbt/chronic_snapshot_cache_hit_count",
+                        float(cache.hit_count),
+                        int(env_frames),
+                    )
+                    self.writer.add_scalar(
+                        "pbt/chronic_snapshot_cache_miss_count",
+                        float(cache.miss_count),
+                        int(env_frames),
+                    )
+                    self.writer.add_scalar(
+                        "pbt/chronic_snapshot_cache_entries",
+                        float(cache.entry_count()),
+                        int(env_frames),
+                    )
+                self.writer.add_scalar(
+                    "pbt/chronic_snapshot_validation_latency",
+                    float(latency),
+                    int(env_frames),
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_snapshot_validation_full_hash",
+                    1.0 if full_hash else 0.0,
                     int(env_frames),
                 )
             except Exception:
@@ -2183,6 +2254,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "common_health_reason": (
                     str(common_health.reason) if common_health is not None else ""
                 ),
+                "cache_hit": bool(hit),
+                "cache_key_commit_id": fp.commit_id if fp is not None else "",
+                "cache_key_commit_dir": fp.commit_dir if fp is not None else "",
+                "validation_latency_s": float(latency),
+                "full_hash_executed": bool(full_hash),
+                "cache_invalidated_reason": str(inv_reason),
             }
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, sort_keys=True) + "\n")
@@ -2245,9 +2322,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         ):
             collapse_ok = False
         peer_health = self._inspect_peer_checkpoint_health(policy_idx, state)
-        # Stash for chronic selection telemetry (same tick).
-        if not hasattr(self, "_last_peer_checkpoint_health"):
-            self._last_peer_checkpoint_health = {}
         self._last_peer_checkpoint_health[int(policy_idx)] = peer_health
         return evaluate_common_live_source_eligibility(
             has_state=state is not None,
@@ -2357,12 +2431,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(int(any_idx))
             common_h = common_health_by_policy.get(int(any_idx))
             src_for_log = int(any_idx)
+        tele = None
+        if src_for_log is not None:
+            tele = getattr(self, "_last_snapshot_inspect_tele", {}).get(int(src_for_log))
         self._log_chronic_source_checkpoint_health(
             source_policy=src_for_log,
             target_policy=int(self.policy_idx),
             env_frames=int(env_frames),
             peer_health=peer_h,
             common_health=common_h,
+            inspect_tele=tele,
         )
         return {
             "action": chronic.action,

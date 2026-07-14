@@ -225,3 +225,11 @@ Plus `py_compile` of touched modules and `bash -n` ABC launcher — OK.
 ## 12. Training declaration
 
 **No training, smoke, master, worker, supervisor, or launcher was started.**
+
+---
+
+## Snapshot validation cache (follow-up)
+
+See `SNAPSHOT_CACHE.md`. Observer-local fingerprint cache avoids re-hashing the
+same immutable peer snapshot between chronic selection and post-selection.
+Fail-close semantics and mid-train (no completion marker) acceptance unchanged.
