@@ -45,6 +45,8 @@ PROFILE_IDS: dict[str, int] = {
     "cser_dexpbt_progress_refine": 22,
     # Readiness-Adaptive CSER-DexPBT — bank-readiness / WM-graduation control.
     "cser_dexpbt_readiness_adaptive": 23,
+    # Profile22 + chronic-bottom exploit / tolerance-aware bank / snippet WM belief.
+    "cser_dexpbt_progress_refine_abc": 24,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -115,6 +117,11 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "population consolidation."
     ),
     "cser_dexpbt_readiness_adaptive": "Readiness-Adaptive CSER-DexPBT",
+    "cser_dexpbt_progress_refine_abc": (
+        "Profile22 + Experiment ABC: chronic-bottom PBT exploit, "
+        "tolerance-aware EliteSnippetBank broadcast merge, and snippet-WM "
+        "belief cache (flags independently ablatable)."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -140,6 +147,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "cser_dexpbt_2cm_bridge": "unified",
     "cser_dexpbt_progress_refine": "unified",
     "cser_dexpbt_readiness_adaptive": "unified",
+    "cser_dexpbt_progress_refine_abc": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -164,6 +172,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "cser_dexpbt_conservative": 1.0,
     "cser_dexpbt_progress_refine": 1.0,
     "cser_dexpbt_readiness_adaptive": 1.0,
+    "cser_dexpbt_progress_refine_abc": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -952,6 +961,26 @@ _CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
     "eir_residual_apply_to_rollout": False,
     "eir_use_rssm_mppi": False,
     "eir_mppi_mode": "off",
+    # Experiment ABC remain OFF on Profile22 (ablation safety / restart purity).
+    "pbt_enable_chronic_bottom_exploit": False,
+    "eir_tolerance_aware_bank_broadcast": False,
+    "eir_enable_belief_for_snippet_wm_rerank": False,
+}
+
+_CSER_DEXPBT_PROGRESS_REFINE_ABC: dict[str, Any] = {
+    **_CSER_DEXPBT_PROGRESS_REFINE,
+    # Experiment A — chronic-bottom PBT exploit (independent of adaptive rescue).
+    "pbt_enable_chronic_bottom_exploit": True,
+    "pbt_chronic_min_bottom_frames": 200_000_000,
+    "pbt_chronic_min_bottom_ticks": 5,
+    "pbt_chronic_min_score_gap": 0.15,
+    "pbt_chronic_cooldown_frames": 400_000_000,
+    "pbt_chronic_max_copies_per_lineage": 1,
+    # Experiment B — tolerance-aware elite snippet bank broadcast consume.
+    "eir_tolerance_aware_bank_broadcast": True,
+    "eir_preserve_local_bank_fraction": 0.20,
+    # Experiment C — build RSSM belief when snippet WM rerank is enabled.
+    "eir_enable_belief_for_snippet_wm_rerank": True,
 }
 
 _CSER_DEXPBT_READINESS_ADAPTIVE: dict[str, Any] = {
@@ -1046,6 +1075,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "cser_dexpbt_2cm_bridge": _CSER_DEXPBT_2CM_BRIDGE,
     "cser_dexpbt_progress_refine": _CSER_DEXPBT_PROGRESS_REFINE,
     "cser_dexpbt_readiness_adaptive": _CSER_DEXPBT_READINESS_ADAPTIVE,
+    "cser_dexpbt_progress_refine_abc": _CSER_DEXPBT_PROGRESS_REFINE_ABC,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

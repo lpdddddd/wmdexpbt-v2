@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -602,6 +603,86 @@ class EliteSnippetBank:
             other = {k: v[o] for k, v in other.items()}
         self._insert(other)
         return int(other["feature"].shape[0])
+
+    def merge_tolerance_aware(
+        self,
+        other_state,
+        *,
+        max_entries=None,
+        local_policy_idx: int = -1,
+        preserve_local_fraction: float = 0.20,
+    ) -> int:
+        """Merge pre-filtered compatible foreign entries with a soft local reserve.
+
+        Eviction keeps up to ``floor(capacity * preserve_local_fraction)`` local
+        entries (matching ``local_policy_idx``) when enough exist; remaining
+        capacity may be filled by foreign / new entries by priority. Never raises
+        bank size above ``self.capacity``.
+        """
+        other = self._block_from_state(other_state)
+        m = int(other["feature"].shape[0])
+        if m == 0:
+            return 0
+        if max_entries is not None and m > int(max_entries):
+            o = torch.argsort(other["priority_score"], descending=True)[: int(max_entries)]
+            other = {k: v[o] for k, v in other.items()}
+        before = int(self.size)
+        self._insert_with_local_reserve(
+            other,
+            local_policy_idx=int(local_policy_idx),
+            preserve_local_fraction=float(preserve_local_fraction),
+        )
+        # Count newly accepted rows approximately via size delta vs prior.
+        return max(0, int(self.size) - before) if before + m > self.capacity else int(other["feature"].shape[0])
+
+    def _insert_with_local_reserve(
+        self,
+        new,
+        *,
+        local_policy_idx: int,
+        preserve_local_fraction: float,
+    ) -> None:
+        cur = self._current_block()
+        combined = {k: torch.cat([cur[k], new[k]], dim=0) for k in new}
+        n = int(combined["feature"].shape[0])
+        if n <= self.capacity:
+            self._store_block(combined)
+            return
+        reserve = max(0, int(math.floor(self.capacity * max(0.0, float(preserve_local_fraction)))))
+        src = combined["source_policy_idx"]
+        local_mask = src == float(local_policy_idx) if int(local_policy_idx) >= 0 else torch.zeros(
+            n, dtype=torch.bool
+        )
+        pri = combined["priority_score"]
+        local_idx = torch.nonzero(local_mask, as_tuple=False).reshape(-1)
+        foreign_idx = torch.nonzero(~local_mask, as_tuple=False).reshape(-1)
+        keep_list: list[torch.Tensor] = []
+        if local_idx.numel() > 0 and reserve > 0:
+            l_order = local_idx[torch.argsort(pri[local_idx], descending=True)]
+            keep_list.append(l_order[: min(reserve, int(l_order.numel()))])
+        kept = torch.cat(keep_list) if keep_list else torch.zeros(0, dtype=torch.long)
+        remaining = self.capacity - int(kept.numel())
+        # Fill remainder from all remaining rows (local beyond reserve + foreign).
+        if remaining > 0:
+            kept_set = set(int(x) for x in kept.tolist()) if kept.numel() else set()
+            rest = torch.tensor(
+                [i for i in range(n) if i not in kept_set],
+                dtype=torch.long,
+            )
+            if rest.numel() > 0:
+                rest = rest[torch.argsort(pri[rest], descending=True)][:remaining]
+                kept = torch.cat([kept, rest]) if kept.numel() else rest
+        if kept.numel() > self.capacity:
+            kept = kept[: self.capacity]
+        self._store_block({k: v[kept] for k, v in combined.items()})
+        # Soft telemetry on eviction composition.
+        if kept.numel() > 0 and "source_policy_idx" in combined:
+            local_kept = int((combined["source_policy_idx"][kept] == float(local_policy_idx)).sum().item()) if local_policy_idx >= 0 else 0
+            self.last_update_diagnostics = dict(self.last_update_diagnostics or {})
+            self.last_update_diagnostics["eviction_local_count"] = float(local_kept)
+            self.last_update_diagnostics["eviction_foreign_count"] = float(
+                int(kept.numel()) - local_kept
+            )
 
     def metrics(self):
         out = {"elite_snippet/bank_size": float(self.size), "elite_snippet/inserted_rows": float(self.add_count), "elite_snippet/retrieval_hit_rate": float(self.retrieval_hit_rate)}

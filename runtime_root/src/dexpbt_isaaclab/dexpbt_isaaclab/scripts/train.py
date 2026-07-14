@@ -372,6 +372,43 @@ parser.add_argument(
     "and re-enables the mid-tier self-mutation + restart path subject to "
     "the count/cooldown gates below.",
 )
+# Experiment A: chronic-bottom PBT exploit (independent of adaptive rescue).
+parser.add_argument(
+    "--pbt_enable_chronic_bottom_exploit",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Enable chronic-bottom exploit path for long-stuck bottom workers.",
+)
+parser.add_argument(
+    "--pbt_chronic_min_bottom_frames",
+    type=int,
+    default=200_000_000,
+    help="Min continuous bottom frames before chronic exploit may fire.",
+)
+parser.add_argument(
+    "--pbt_chronic_min_bottom_ticks",
+    type=int,
+    default=5,
+    help="Min continuous bottom PBT ticks before chronic exploit may fire.",
+)
+parser.add_argument(
+    "--pbt_chronic_min_score_gap",
+    type=float,
+    default=0.15,
+    help="Min ranking-score gap (source - target) for chronic sources.",
+)
+parser.add_argument(
+    "--pbt_chronic_cooldown_frames",
+    type=int,
+    default=400_000_000,
+    help="Cooldownoldown frames after a chronic copy for the same worker.",
+)
+parser.add_argument(
+    "--pbt_chronic_max_copies_per_lineage",
+    type=int,
+    default=1,
+    help="Max chronic copies allowed per lineage on a target worker.",
+)
 parser.add_argument(
     "--pbt_max_self_restarts_per_policy",
     type=int,
@@ -2305,6 +2342,13 @@ parser.add_argument("--snippet_distill_tol_start", type=float, default=0.070)
 parser.add_argument("--snippet_distill_tol_full", type=float, default=0.045)
 parser.add_argument("--snippet_distill_ramp_frames", type=int, default=200000000)
 parser.add_argument("--snippet_wm_rerank_enable", action=argparse.BooleanOptionalAction, default=False)
+parser.add_argument(
+    "--eir_enable_belief_for_snippet_wm_rerank",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="When True, build the RSSM belief cache if snippet WM rerank is on, "
+    "even when MPPI planner / RSSM-MPPI reranker are disabled.",
+)
 parser.add_argument("--snippet_wm_rerank_w_rec", type=float, default=0.3)
 parser.add_argument("--snippet_wm_rerank_w_success", type=float, default=0.2)
 parser.add_argument("--snippet_wm_rerank_w_drop", type=float, default=0.4)
@@ -2543,6 +2587,21 @@ parser.add_argument("--eir_mppi_ensemble_uncertainty_allow_margin", type=float, 
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument(
+    "--eir_tolerance_aware_bank_broadcast",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Filter broadcast snippet entries by log-relative tolerance "
+    "compatibility before merge; reject whole overwrite when none compatible.",
+)
+parser.add_argument(
+    "--eir_preserve_local_bank_fraction",
+    type=float,
+    default=0.20,
+    help="Soft reserve fraction of bank capacity for local snippets when "
+    "tolerance-aware broadcast merge is enabled (unused slots fill with "
+    "compatible foreign entries).",
+)
 parser.add_argument("--eir_pbt_broadcast_threshold_nsucc_mean", type=float, default=38.0)
 parser.add_argument("--eir_pbt_broadcast_gap_over_pop_mean", type=float, default=6.0)
 parser.add_argument("--eir_pbt_broadcast_to_bottom_k", type=int, default=3)
@@ -3860,9 +3919,34 @@ def _patch_actor_train_for_seq_wm(
             _need_belief = (
                 getattr(eir_bridge, "rssm_planner", None) is not None
                 or getattr(eir_bridge, "rssm_reranker", None) is not None
+                or (
+                    bool(getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False))
+                    and bool(getattr(args_cli, "snippet_wm_rerank_enable", False))
+                )
+                or (
+                    # Also honor bridge snippet_wm_rerank_cfg when wired.
+                    bool(getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False))
+                    and bool(
+                        getattr(
+                            getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
+                            "enabled",
+                            False,
+                        )
+                    )
+                )
             )
+            eir_bridge.last_need_belief = bool(_need_belief)
+            eir_bridge.last_belief_build_attempted = False
+            eir_bridge.last_belief_build_success = False
+            eir_bridge.last_belief_failure_reason = ""
+            eir_bridge.last_belief_cache_valid = False
+            eir_bridge.last_belief_shape = ""
             if _need_belief:
                 try:
+                    import time as _time_belief
+
+                    eir_bridge.last_belief_build_attempted = True
+                    _t_belief0 = _time_belief.perf_counter()
                     T_b = int(actor.horizon_length)
                     N_b = int(actor.num_actors * actor.num_agents)
                     _returns_flat = bd.get("returns")
@@ -3901,11 +3985,31 @@ def _patch_actor_train_for_seq_wm(
                         enabled=True,
                         ensemble_models=_ens_models_for_cache,
                     )
+                    eir_bridge.last_belief_build_latency = float(
+                        _time_belief.perf_counter() - _t_belief0
+                    )
+                    _cache = eir_bridge.rssm_belief_cache
+                    _ok = _cache is not None and bool(getattr(_cache, "valid", True))
+                    # Some caches expose `.belief` / `.h` tensors
+                    _bel = None
+                    if _cache is not None:
+                        _bel = getattr(_cache, "belief", None)
+                        if _bel is None:
+                            _bel = getattr(_cache, "h", None)
+                    if _bel is not None and hasattr(_bel, "shape"):
+                        eir_bridge.last_belief_shape = str(tuple(_bel.shape))
+                    eir_bridge.last_belief_build_success = bool(_ok)
+                    eir_bridge.last_belief_cache_valid = bool(_ok)
+                    if not _ok:
+                        eir_bridge.last_belief_failure_reason = "cache_invalid"
                 except Exception as _bc_exc:
                     print(f"[EIR-belief] cache build failed: {_bc_exc}")
                     eir_bridge.rssm_belief_cache = None
-
-        if seq_distill_bridge is not None:
+                    eir_bridge.last_belief_build_success = False
+                    eir_bridge.last_belief_cache_valid = False
+                    eir_bridge.last_belief_failure_reason = f"build_exc:{type(_bc_exc).__name__}"
+            else:
+                eir_bridge.last_belief_failure_reason = "need_belief_false"
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
             seq_distill_bridge.feature_capture.reset()
             # Build the teacher cache NOW from the freshly-collected rollout
@@ -7208,6 +7312,13 @@ def main():
             min_frames_between_broadcasts_per_target=int(
                 args_cli.eir_pbt_min_frames_between_broadcasts_per_target
             ),
+            tolerance_aware_bank_broadcast=bool(
+                args_cli.eir_tolerance_aware_bank_broadcast
+            ),
+            preserve_local_bank_fraction=float(
+                args_cli.eir_preserve_local_bank_fraction
+            ),
+            target_policy_idx=int(args_cli.policy_idx),
         )
         from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
             ProgressRefinementConfig,
@@ -7805,6 +7916,17 @@ def main():
             # Patch F (2026-05-31): mid-tier self-restart governor.
             pbt_disable_self_restart=args_cli.pbt_disable_self_restart,
             pbt_allow_mid_self_mutation=args_cli.pbt_allow_mid_self_mutation,
+            # Experiment A: chronic-bottom exploit (off by default).
+            pbt_enable_chronic_bottom_exploit=(
+                args_cli.pbt_enable_chronic_bottom_exploit
+            ),
+            pbt_chronic_min_bottom_frames=args_cli.pbt_chronic_min_bottom_frames,
+            pbt_chronic_min_bottom_ticks=args_cli.pbt_chronic_min_bottom_ticks,
+            pbt_chronic_min_score_gap=args_cli.pbt_chronic_min_score_gap,
+            pbt_chronic_cooldown_frames=args_cli.pbt_chronic_cooldown_frames,
+            pbt_chronic_max_copies_per_lineage=(
+                args_cli.pbt_chronic_max_copies_per_lineage
+            ),
             pbt_max_self_restarts_per_policy=(
                 args_cli.pbt_max_self_restarts_per_policy
             ),

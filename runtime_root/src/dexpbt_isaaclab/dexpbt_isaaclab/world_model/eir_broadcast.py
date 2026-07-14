@@ -52,6 +52,12 @@ class EliteBroadcastConfig:
     min_source_bank_size: int = 100
     min_frames_between_broadcasts_per_source: int = 100_000_000
     min_frames_between_broadcasts_per_target: int = 100_000_000
+    # Experiment B: tolerance-aware consume / soft local reserve
+    tolerance_aware_bank_broadcast: bool = False
+    preserve_local_bank_fraction: float = 0.20
+    tolerance_max_log_gap: float = 0.20
+    target_policy_idx: int = -1
+    query_success_tolerance: float | None = None
 
 
 def should_broadcast(
@@ -337,14 +343,26 @@ def merge_payload_into_bridge(
     payload: dict[str, Any],
     *,
     cfg: EliteBroadcastConfig,
+    query_success_tolerance: float | None = None,
 ) -> dict[str, Any]:
     """Live-merge a broadcast payload into a running ``EIRBridge``.
 
     Returns a summary dict ``{merged_entries, residual_copied, scorer_copied}``.
     Bank entries are folded in priority-capped (never replacing the target's own
     accumulated memory); the residual head + scorer are copied wholesale.
+
+    When ``cfg.tolerance_aware_bank_broadcast`` is True, snippet bank entries are
+    filtered by log-relative tolerance compatibility *before* truncate/merge.
+    Zero compatible incoming rejects the snippet overwrite and keeps the local bank.
     """
-    out = {"merged_entries": 0, "snippet_merged_entries": 0, "residual_copied": False, "scorer_copied": False}
+    out = {
+        "merged_entries": 0,
+        "snippet_merged_entries": 0,
+        "residual_copied": False,
+        "scorer_copied": False,
+        "broadcast_rejected_incompatible": False,
+        "bank_diagnostics": {},
+    }
     bank = getattr(bridge, "bank", None)
     bank_state = payload.get("bank_state")
     if bank is not None and isinstance(bank_state, dict):
@@ -358,11 +376,53 @@ def merge_payload_into_bridge(
     snippet_state = payload.get("snippet_bank_state")
     if snippet_bank is not None and isinstance(snippet_state, dict):
         try:
-            out["snippet_merged_entries"] = int(
-                snippet_bank.merge(
-                    snippet_state, max_entries=int(cfg.max_bank_merge_entries)
+            if bool(getattr(cfg, "tolerance_aware_bank_broadcast", False)):
+                from dexpbt_isaaclab.world_model.snippet_bank_tolerance import (
+                    filter_state_by_tolerance,
                 )
-            )
+
+                qtol = query_success_tolerance
+                if qtol is None:
+                    qtol = getattr(cfg, "query_success_tolerance", None)
+                if qtol is None:
+                    # Prefer live curriculum snapshot on the bridge / agent.
+                    agent = getattr(bridge, "agent_ref", None)
+                    env = getattr(agent, "vec_env", None) if agent is not None else None
+                    unwrapped = getattr(env, "unwrapped", env) if env is not None else None
+                    qtol = getattr(unwrapped, "success_tolerance", None) if unwrapped is not None else None
+                if qtol is None:
+                    qtol = float("nan")
+                filtered, diag = filter_state_by_tolerance(
+                    snippet_state,
+                    query_tol=float(qtol),
+                    max_log_gap=float(getattr(cfg, "tolerance_max_log_gap", 0.20)),
+                )
+                out["bank_diagnostics"] = dict(diag)
+                if int(filtered.get("size", 0) or 0) <= 0:
+                    out["broadcast_rejected_incompatible"] = True
+                    out["snippet_merged_entries"] = 0
+                else:
+                    local_idx = int(getattr(cfg, "target_policy_idx", -1))
+                    out["snippet_merged_entries"] = int(
+                        snippet_bank.merge_tolerance_aware(
+                            filtered,
+                            max_entries=int(cfg.max_bank_merge_entries),
+                            local_policy_idx=local_idx,
+                            preserve_local_fraction=float(
+                                getattr(cfg, "preserve_local_bank_fraction", 0.20)
+                            ),
+                        )
+                    )
+                    out["bank_diagnostics"]["merge_count"] = float(
+                        out["snippet_merged_entries"]
+                    )
+                    out["bank_diagnostics"]["overwrite_count"] = 0.0
+            else:
+                out["snippet_merged_entries"] = int(
+                    snippet_bank.merge(
+                        snippet_state, max_entries=int(cfg.max_bank_merge_entries)
+                    )
+                )
         except Exception:
             out["snippet_merged_entries"] = 0
     if cfg.copy_residual_head:

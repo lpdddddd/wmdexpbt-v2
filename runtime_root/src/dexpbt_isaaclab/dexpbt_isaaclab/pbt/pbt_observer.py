@@ -96,6 +96,14 @@ from dexpbt_isaaclab.pbt.pbt_control_plane import (
     snapshot_commit_barrier,
     validate_snapshot_commit,
 )
+from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
+    ChronicBottomState,
+    evaluate_chronic_eligibility,
+    pick_chronic_source,
+    reset_after_chronic_copy,
+    skill_delta_with_reason,
+    update_continuous_bottom,
+)
 
 
 def _sample_factor(change_min: float, change_max: float) -> float:
@@ -291,6 +299,8 @@ def _decision_uses_live_source(decision: dict[str, Any]) -> bool:
         "relaxed_live",
         "late_rescue_live",
         "adaptive_rescue_live",
+        "chronic_top_live",
+        "chronic_mid_live",
     }
     archive_types = {
         "archive",
@@ -743,6 +753,12 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         adaptive_rescue_source_freshness_mode: str = "hard_max",
         adaptive_rescue_source_freshness_tau_frames: int = 80_000_000,
         adaptive_rescue_source_hard_max_age_frames: int = 160_000_000,
+        pbt_enable_chronic_bottom_exploit: bool = False,
+        pbt_chronic_min_bottom_frames: int = 200_000_000,
+        pbt_chronic_min_bottom_ticks: int = 5,
+        pbt_chronic_min_score_gap: float = 0.15,
+        pbt_chronic_cooldown_frames: int = 400_000_000,
+        pbt_chronic_max_copies_per_lineage: int = 1,
         wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
@@ -781,6 +797,19 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.ternary_split = ternary_split
         self.r_meta_window_enabled = r_meta_window
         self.num_envs = num_envs
+        # Experiment A: chronic-bottom exploit. The feature is entirely inert
+        # unless explicitly enabled; state is persisted independently of the
+        # adaptive precision controller.
+        self.pbt_enable_chronic_bottom_exploit = bool(pbt_enable_chronic_bottom_exploit)
+        self.pbt_chronic_min_bottom_frames = int(pbt_chronic_min_bottom_frames)
+        self.pbt_chronic_min_bottom_ticks = int(pbt_chronic_min_bottom_ticks)
+        self.pbt_chronic_min_score_gap = float(pbt_chronic_min_score_gap)
+        self.pbt_chronic_cooldown_frames = int(pbt_chronic_cooldown_frames)
+        self.pbt_chronic_max_copies_per_lineage = int(
+            pbt_chronic_max_copies_per_lineage
+        )
+        self._chronic_bottom_state: dict[int, ChronicBottomState] = {}
+        self._chronic_bottom_lineage_id: dict[int, str] = {}
 
         # Seed diversity audit (B1/B2): set by train.py after env creation
         # via set_seeding_audit(); included in every training_curve point.
@@ -2016,9 +2045,115 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{int(policy_idx):03d}.json"
 
+    def _chronic_bottom_path(self, policy_idx: int) -> Path:
+        return self.workspace / "chronic_bottom" / f"{int(policy_idx):03d}.json"
+
+    def _chronic_bottom_state_for(
+        self, policy_idx: int, *, lineage_id: str
+    ) -> ChronicBottomState:
+        """Restore Experiment A state and reset only its lineage quota."""
+        pidx = int(policy_idx)
+        if pidx not in self._chronic_bottom_state:
+            data: dict[str, Any] | None = None
+            path = self._chronic_bottom_path(pidx)
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text())
+                    data = raw if isinstance(raw, dict) else None
+                except Exception:
+                    data = None
+            self._chronic_bottom_state[pidx] = ChronicBottomState.from_json(data)
+            self._chronic_bottom_lineage_id[pidx] = str(
+                (data or {}).get("lineage_id", "") or ""
+            )
+        current = str(lineage_id or "")
+        if current != self._chronic_bottom_lineage_id.get(pidx, ""):
+            self._chronic_bottom_state[pidx].chronic_copy_count = 0
+            self._chronic_bottom_lineage_id[pidx] = current
+        return self._chronic_bottom_state[pidx]
+
+    def _persist_chronic_bottom_state(self, policy_idx: int) -> None:
+        pidx = int(policy_idx)
+        state = self._chronic_bottom_state.get(pidx)
+        if state is None:
+            return
+        path = self._chronic_bottom_path(pidx)
+        payload = state.to_json()
+        payload.update(
+            policy_idx=pidx,
+            lineage_id=str(self._chronic_bottom_lineage_id.get(pidx, "") or ""),
+        )
+        self._atomic_write_json(path, payload)
+
+    def _select_chronic_bottom_source(
+        self,
+        *,
+        sorted_policies: list[int],
+        population: dict[int, dict[str, Any] | None],
+        target_score: float,
+        target_nsucc_mean: float,
+        n_top: int,
+        n_mid: int,
+    ) -> dict[str, Any]:
+        """Adapt the pure chronic source decision to observer cascade shape."""
+        deltas: dict[int, tuple[float | None, str]] = {}
+        drops: dict[int, float] = {}
+        checkpoint_ok: dict[int, bool] = {}
+        for idx, state in population.items():
+            if int(idx) == int(self.policy_idx):
+                continue
+            deltas[int(idx)] = skill_delta_with_reason(
+                self._policy_nsucc_windows.get(int(idx)),
+                interval_steps=self.interval_steps,
+            )
+            window = self._policy_nsucc_windows.get(int(idx))
+            drops[int(idx)] = (
+                float(window.drop_ratio_vs_prior(2)) if window is not None else 0.0
+            )
+            checkpoint = (state or {}).get("checkpoint")
+            checkpoint_ok[int(idx)] = bool(
+                checkpoint and Path(str(checkpoint)).is_file()
+            )
+        chronic = pick_chronic_source(
+            sorted_policies=sorted_policies,
+            population=population,
+            target_idx=self.policy_idx,
+            target_score=target_score,
+            target_nsucc_mean=target_nsucc_mean,
+            n_top=n_top,
+            n_mid=n_mid,
+            min_score_gap=self.pbt_chronic_min_score_gap,
+            skill_delta_by_policy=deltas,
+            drop_ratio_by_policy=drops,
+            checkpoint_ok=checkpoint_ok,
+        )
+        return {
+            "action": chronic.action,
+            "source_policy": chronic.source_policy,
+            "source_state": chronic.source_state,
+            "tier": chronic.tier,
+            "checkpoint_type": chronic.checkpoint_type,
+            "skip_reason": chronic.skip_reason,
+            "strict_candidates": [],
+            "relaxed_candidates": [],
+            "strict_filter_reasons": {},
+            "relaxed_filter_reasons": {},
+            "archive_reason": None,
+            "chronic_path": True,
+            "chronic_score_gap": chronic.score_gap,
+            "chronic_source_score": chronic.source_score,
+            "chronic_target_score": chronic.target_score,
+            "chronic_source_skill_delta": chronic.source_skill_delta,
+            "chronic_source_skill_delta_valid": chronic.source_skill_delta_valid,
+            "chronic_source_filter_reason": chronic.source_filter_reason,
+            "chronic_source_fallback_used": chronic.source_fallback_used,
+            "chronic_candidates_considered": chronic.candidates_considered,
+        }
+
     def _adaptive_precision_required(self) -> bool:
         return str(self.wm_strategy_profile_name or "") in (
             "cser_dexpbt_progress_refine",
+            "cser_dexpbt_progress_refine_abc",
             "cser_dexpbt_readiness_adaptive",
         )
 
@@ -9745,6 +9880,41 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if self.writer is not None:
             self.writer.add_scalar("pbt/dexpbt_tier_rank", float(rank), env_frames)
 
+        if self.pbt_enable_chronic_bottom_exploit:
+            own_for_chronic = population.get(self.policy_idx) or {}
+            chronic_lineage = str(
+                own_for_chronic.get("lineage_id")
+                or getattr(self, "_lineage_id", "")
+                or ""
+            )
+            chronic_state = self._chronic_bottom_state_for(
+                self.policy_idx, lineage_id=chronic_lineage
+            )
+            update_continuous_bottom(
+                chronic_state,
+                tier=tier,
+                env_frames=env_frames,
+                interval_steps=self.interval_steps,
+            )
+            self._persist_chronic_bottom_state(self.policy_idx)
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "pbt/chronic_continuous_bottom_frames",
+                    float(chronic_state.continuous_bottom_frames),
+                    env_frames,
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_continuous_bottom_ticks",
+                    float(chronic_state.continuous_bottom_ticks),
+                    env_frames,
+                )
+                self.writer.add_scalar(
+                    "pbt/chronic_copy_count",
+                    float(chronic_state.chronic_copy_count),
+                    env_frames,
+                )
+                self.writer.add_scalar("pbt/chronic_candidate", 0.0, env_frames)
+
         self._maybe_save_best_policy(population[sorted_policies[0]])
 
         # Phase A4 P4 (2026-06-09): cache hard-collapse signal for the
@@ -9786,6 +9956,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         rescue_mode = "none"
         rescue_active = False
         adaptive_rescue_reason = "disabled"
+        chronic_path = False
+        chronic_eligibility = None
         if tier == "mid":
             self._maybe_enter_promising_protection(
                 self.policy_idx,
@@ -10056,6 +10228,82 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     own_window,
                     interval_steps=self.interval_steps,
                 )
+            chronic_path = False
+            chronic_eligibility = None
+            ordinary_target_gate_reason = str(reason)
+            if not rescue_active and self.pbt_enable_chronic_bottom_exploit:
+                chronic_state = self._chronic_bottom_state_for(
+                    self.policy_idx, lineage_id=own_lineage
+                )
+                chronic_probation = False
+                adaptive_state = self._adaptive_precision_state(
+                    self.policy_idx,
+                    strict_local=bool(self._adaptive_precision_required()),
+                )
+                if adaptive_state is not None:
+                    _chronic_cfg, chronic_probation_state, _chronic_tracker = adaptive_state
+                    chronic_probation = bool(
+                        getattr(chronic_probation_state, "active", False)
+                    )
+                own_population_state = population.get(self.policy_idx)
+                ranked_scores: dict[int, float] = {}
+                for pidx, pstate in population.items():
+                    if pstate is None:
+                        continue
+                    try:
+                        ranked_scores[int(pidx)] = float(
+                            pstate.get(
+                                "pbt_ranking_score",
+                                pstate.get("objective", float("-inf")),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                target_score = float(
+                    ranked_scores.get(self.policy_idx, float("-inf"))
+                )
+                chronic_eligibility = evaluate_chronic_eligibility(
+                    tier=tier,
+                    state=chronic_state,
+                    env_frames=env_frames,
+                    promising_protected=bool(protected),
+                    in_elimination_burnin=not self._is_eligible_for_elimination(
+                        own_population_state, env_frames
+                    ),
+                    in_probation=chronic_probation,
+                    target_score=target_score,
+                    ranked_scores=ranked_scores,
+                    target_idx=self.policy_idx,
+                    min_bottom_frames=self.pbt_chronic_min_bottom_frames,
+                    min_bottom_ticks=self.pbt_chronic_min_bottom_ticks,
+                    min_score_gap=self.pbt_chronic_min_score_gap,
+                    max_copies_per_lineage=self.pbt_chronic_max_copies_per_lineage,
+                )
+                if chronic_eligibility.eligible and not allowed:
+                    allowed = True
+                    chronic_path = True
+                    reason = "chronic_bottom_override"
+                if self.writer is not None:
+                    self.writer.add_scalar(
+                        "pbt/chronic_candidate",
+                        1.0 if chronic_eligibility.eligible else 0.0,
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/chronic_score_gap",
+                        float(chronic_eligibility.score_gap),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/chronic_bottom_frames",
+                        float(chronic_eligibility.continuous_bottom_frames),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "pbt/chronic_bottom_ticks",
+                        float(chronic_eligibility.continuous_bottom_ticks),
+                        env_frames,
+                    )
             if self.algo is not None:
                 self.algo._pbt_skill_delta = (
                     float(d_self) if d_self is not None else 0.0
@@ -10138,6 +10386,24 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     target_tolerance=own_rescue_tol,
                     target_nsucc_mean=own_rescue_nsucc,
                 )
+            elif chronic_path:
+                decision = self._select_chronic_bottom_source(
+                    sorted_policies=sorted_policies,
+                    population=population,
+                    target_score=float(
+                        (population.get(self.policy_idx) or {}).get(
+                            "pbt_ranking_score",
+                            objectives.get(self.policy_idx, float("-inf")),
+                        )
+                    ),
+                    target_nsucc_mean=own_rescue_nsucc,
+                    n_top=n_top,
+                    n_mid=n_mid,
+                )
+                decision["chronic_target_gate_reason"] = ordinary_target_gate_reason
+                decision["chronic_eligibility_reason"] = str(
+                    chronic_eligibility.reason if chronic_eligibility is not None else ""
+                )
             else:
                 decision = self._select_source(
                     sorted_policies=sorted_policies,
@@ -10172,6 +10438,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "adaptive_rescue_best_stable_archive",
                     "adaptive_rescue_floor_recovery_archive",
                     "adaptive_rescue_best_nsucc_archive",
+                    "chronic_top_live",
+                    "chronic_mid_live",
                     "skipped",
                 )
                 for k in tier_one_hot:
@@ -10283,7 +10551,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._last_restart_type = 3  # skipped
                 return
 
-            if _decision_uses_live_source(decision):
+            if _decision_uses_live_source(decision) and not chronic_path:
                 src_idx = int(decision["source_policy"])
                 src_ok, src_reason = pbt_copy_allowed_for_live_source(
                     self._policy_nsucc_windows.get(src_idx),
@@ -11135,6 +11403,35 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "promising_protect_until": int(
                     self._promising_protect_until.get(self.policy_idx, 0)
                 ),
+                "chronic_path": bool(tier == "bottom" and chronic_path),
+                "chronic_target_gate_reason": (
+                    str(decision.get("chronic_target_gate_reason", ""))
+                    if tier == "bottom" and chronic_path
+                    else ""
+                ),
+                "target_gate_reason": (
+                    str(decision.get("chronic_target_gate_reason", ""))
+                    if tier == "bottom" and chronic_path
+                    else ""
+                ),
+                "chronic_eligibility_reason": (
+                    str(decision.get("chronic_eligibility_reason", ""))
+                    if tier == "bottom" and chronic_path
+                    else ""
+                ),
+                "chronic_score_gap": (
+                    _coerce_finite(decision.get("chronic_score_gap", 0.0))
+                    if tier == "bottom" and chronic_path
+                    else 0.0
+                ),
+                "chronic_source_filter_reason": (
+                    str(decision.get("chronic_source_filter_reason", ""))
+                    if tier == "bottom" and chronic_path
+                    else ""
+                ),
+                "mutation_applied": bool(
+                    not (tier == "bottom" and chronic_path)
+                ),
             }
         )
         if self.writer is not None:
@@ -11175,7 +11472,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         mutation_frozen = int(env_frames) < self._mutation_frozen_until.get(
             self.policy_idx, 0
         )
-        if rescue_active or mutation_frozen:
+        if chronic_path or rescue_active or mutation_frozen:
             # Rescue restores a compatible policy; never mutate params.
             new_params = dict(source_params)
         else:
@@ -11275,6 +11572,40 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 })
             self._last_restart_type = 3
             return
+        if chronic_path:
+            chronic_state = self._chronic_bottom_state_for(
+                self.policy_idx, lineage_id=own_lineage
+            )
+            reset_after_chronic_copy(
+                chronic_state,
+                env_frames=env_frames,
+                cooldown=self.pbt_chronic_cooldown_frames,
+            )
+            chronic_state.last_chronic_source = int(source_policy)
+            chronic_state.last_reason = str(
+                decision.get("chronic_eligibility_reason", "selected")
+            )
+            self._persist_chronic_bottom_state(self.policy_idx)
+            self._safe_write_pbt_copy_event(
+                {
+                    "event_type": "chronic_bottom_copy_committed",
+                    "target_policy": int(self.policy_idx),
+                    "source_policy": int(source_policy),
+                    "env_frames": int(env_frames),
+                    "tier": str(tier_label),
+                    "target_gate_reason": str(
+                        decision.get("chronic_target_gate_reason", "")
+                    ),
+                    "score_gap": float(decision.get("chronic_score_gap", 0.0)),
+                    "continuous_bottom_frames": int(
+                        chronic_state.continuous_bottom_frames
+                    ),
+                    "continuous_bottom_ticks": int(
+                        chronic_state.continuous_bottom_ticks
+                    ),
+                    "chronic_copy_count": int(chronic_state.chronic_copy_count),
+                }
+            )
 
     def _run_restart_with_reservation(
         self,
@@ -11520,8 +11851,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         mode = _bc.decide_consume_mode(bridge is not None)
         if mode == _bc.CONSUME_LIVE:
             payload = _bc.load_payload(meta)
+            query_tol = None
+            try:
+                own_curr = self._read_curriculum_state() or {}
+                query_tol = float(own_curr.get("success_tolerance", float("nan")))
+            except Exception:
+                query_tol = None
+            if cfg is not None and hasattr(cfg, "query_success_tolerance"):
+                cfg.query_success_tolerance = query_tol
             summary = (
-                _bc.merge_payload_into_bridge(bridge, payload, cfg=cfg)
+                _bc.merge_payload_into_bridge(
+                    bridge,
+                    payload,
+                    cfg=cfg,
+                    query_success_tolerance=query_tol,
+                )
                 if payload is not None else {"merged_entries": 0}
             )
             _bc.mark_consumed(
