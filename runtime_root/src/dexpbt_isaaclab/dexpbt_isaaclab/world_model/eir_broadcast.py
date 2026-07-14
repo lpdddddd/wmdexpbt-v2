@@ -401,6 +401,36 @@ def merge_payload_into_bridge(
                 if int(filtered.get("size", 0) or 0) <= 0:
                     out["broadcast_rejected_incompatible"] = True
                     out["snippet_merged_entries"] = 0
+                    # Preserve local counts from target bank for reject telemetry.
+                    try:
+                        sb = snippet_bank
+                        before = int(getattr(sb, "size", 0) or 0)
+                        local_idx = int(getattr(cfg, "target_policy_idx", -1))
+                        local_c = 0
+                        if before > 0 and local_idx >= 0:
+                            local_c = int(
+                                (
+                                    sb.scalars["source_policy_idx"][:before]
+                                    == float(local_idx)
+                                )
+                                .sum()
+                                .item()
+                            )
+                        out["bank_diagnostics"].update(
+                            {
+                                "bank_size_before": float(before),
+                                "bank_size_after": float(before),
+                                "local_count_before": float(local_c),
+                                "local_count_after": float(local_c),
+                                "foreign_count_before": float(before - local_c),
+                                "foreign_count_after": float(before - local_c),
+                                "incoming_kept_count": 0.0,
+                                "merge_count": 0.0,
+                                "overwrite_count": 0.0,
+                            }
+                        )
+                    except Exception:
+                        pass
                 else:
                     local_idx = int(getattr(cfg, "target_policy_idx", -1))
                     out["snippet_merged_entries"] = int(
@@ -413,18 +443,36 @@ def merge_payload_into_bridge(
                             ),
                         )
                     )
+                    merge_diag = dict(
+                        getattr(snippet_bank, "last_update_diagnostics", {}) or {}
+                    )
+                    out["bank_diagnostics"].update(merge_diag)
                     out["bank_diagnostics"]["merge_count"] = float(
                         out["snippet_merged_entries"]
                     )
                     out["bank_diagnostics"]["overwrite_count"] = 0.0
+                    # Alias requested telemetry names.
+                    out["bank_diagnostics"]["local_count_before"] = float(
+                        merge_diag.get("local_before", 0.0)
+                    )
+                    out["bank_diagnostics"]["local_count_after"] = float(
+                        merge_diag.get("local_after", 0.0)
+                    )
+                    out["bank_diagnostics"]["foreign_count_before"] = float(
+                        merge_diag.get("foreign_before", 0.0)
+                    )
+                    out["bank_diagnostics"]["foreign_count_after"] = float(
+                        merge_diag.get("foreign_after", 0.0)
+                    )
             else:
                 out["snippet_merged_entries"] = int(
                     snippet_bank.merge(
                         snippet_state, max_entries=int(cfg.max_bank_merge_entries)
                     )
                 )
-        except Exception:
+        except Exception as exc:
             out["snippet_merged_entries"] = 0
+            out["bank_diagnostics"]["merge_failure_reason"] = f"{type(exc).__name__}:{exc}"
     if cfg.copy_residual_head:
         rb = getattr(bridge, "residual_bridge", None)
         head = getattr(rb, "head", None) if rb is not None else None
@@ -449,6 +497,8 @@ def merge_payload_into_bridge(
                 out["scorer_copied"] = True
             except Exception:
                 out["scorer_copied"] = False
+    out["recovery_bank_merged_entries"] = int(out["merged_entries"])
+    out["snippet_bank_merged_entries"] = int(out["snippet_merged_entries"])
     return out
 
 

@@ -1,4 +1,5 @@
 # Profile22 vs ABC resolved config diff
+
 - Profile22 id: 22
 - ABC id: 24
 
@@ -16,8 +17,9 @@
 | `pbt_chronic_min_score_gap` | `None` | `0.15` |
 | `pbt_enable_chronic_bottom_exploit` | `False` | `True` |
 
-## Notes
+## Ablation note (authoritative profiles)
 
-- All other Profile22 keys are identical (PPO/curriculum/WM/snippet/adaptive rescue/hard-offs).
-- Profile22 now **pins** A/B/C enable flags to `False` for restart purity; runtime behavior with default CLI was already False.
-- Mid mutation / MPPI / AWR / residual rollout remain off on both.
+- Code paths for A/B/C remain independently flaggable.
+- **Profile24 (`cser_dexpbt_progress_refine_abc`) is authoritative all-on**; `--no-*` on ABC flags is **not** a reliable ablation under restart-safe profile expansion.
+- Future A/B/C ablations should add separate derived profiles (not allocated this round).
+- Profile22 pins A/B/C enables to False.

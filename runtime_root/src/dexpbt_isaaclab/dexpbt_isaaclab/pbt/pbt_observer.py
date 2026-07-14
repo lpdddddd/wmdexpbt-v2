@@ -101,8 +101,14 @@ from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
     evaluate_chronic_eligibility,
     pick_chronic_source,
     reset_after_chronic_copy,
+    reset_on_lineage_change,
     skill_delta_with_reason,
     update_continuous_bottom,
+)
+from dexpbt_isaaclab.pbt.pbt_live_source_health import (
+    CommonSourceEligibility,
+    evaluate_common_live_source_eligibility,
+    evaluate_peer_checkpoint_health,
 )
 
 
@@ -2068,8 +2074,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             )
         current = str(lineage_id or "")
         if current != self._chronic_bottom_lineage_id.get(pidx, ""):
-            self._chronic_bottom_state[pidx].chronic_copy_count = 0
+            reset_on_lineage_change(self._chronic_bottom_state[pidx])
             self._chronic_bottom_lineage_id[pidx] = current
+            self._persist_chronic_bottom_state(pidx)
         return self._chronic_bottom_state[pidx]
 
     def _persist_chronic_bottom_state(self, policy_idx: int) -> None:
@@ -2085,11 +2092,176 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         )
         self._atomic_write_json(path, payload)
 
+    def _peer_workspace(self, policy_idx: int) -> Path:
+        return self.workspace / f"{int(policy_idx):03d}"
+
+    def _inspect_peer_checkpoint_health(
+        self, policy_idx: int, state: dict[str, Any] | None
+    ) -> tuple[bool | None, bool | None, bool | None, str, bool]:
+        """Return (commit_ok, lineage_ok, freshness_ok, reason, checkpoint_exists)."""
+        peer_ws = self._peer_workspace(policy_idx)
+        checkpoint = (state or {}).get("checkpoint")
+        checkpoint_exists = bool(checkpoint and Path(str(checkpoint)).is_file())
+        latest = read_latest_commit_info(peer_ws)
+        commit_lineage_id: str | None = None
+        latest_path = peer_ws / "LATEST.commit"
+        latest_exists: bool | None = (
+            True if latest_path.is_file() else latest.get("latest_commit_exists")
+        )
+        if bool(latest_exists):
+            try:
+                latest_payload = json.loads(latest_path.read_text())
+                commit_dir_name = str(latest_payload.get("commit_dir") or "")
+                manifest_path = peer_ws / commit_dir_name / "MANIFEST"
+                if manifest_path.is_file():
+                    manifest = json.loads(manifest_path.read_text())
+                    lineage = manifest.get("lineage_id")
+                    commit_lineage_id = str(lineage) if lineage is not None else None
+            except Exception:
+                commit_lineage_id = None
+
+        frame_complete: bool | None = None
+        marker_path = peer_ws / "population_frame_complete.json"
+        if bool(latest_exists):
+            if not marker_path.is_file():
+                frame_complete = False
+            else:
+                try:
+                    marker = json.loads(marker_path.read_text())
+                    if isinstance(marker, bool):
+                        frame_complete = marker
+                    elif isinstance(marker, dict):
+                        frame_complete = bool(
+                            marker.get("complete", marker.get("completed", False))
+                            or marker.get("completed_at")
+                        )
+                    else:
+                        frame_complete = False
+                except Exception:
+                    frame_complete = False
+        commit_ok, lineage_ok, freshness_ok, reason = evaluate_peer_checkpoint_health(
+            checkpoint=str(checkpoint) if checkpoint else None,
+            state_lineage_id=(state or {}).get("lineage_id"),
+            latest_commit_exists=(
+                bool(latest_exists) if latest_exists is not None else None
+            ),
+            commit_lineage_id=commit_lineage_id,
+            population_frame_complete=frame_complete,
+        )
+        return commit_ok, lineage_ok, freshness_ok, reason, checkpoint_exists
+
+    def _evaluate_common_live_source_health(
+        self,
+        policy_idx: int,
+        state: dict[str, Any] | None,
+        env_frames: int,
+        *,
+        for_top: bool,
+    ) -> CommonSourceEligibility:
+        """Evaluate shared live-source health for chronic source selection."""
+        gate = (
+            self._eligible_as_source_with_reason
+            if for_top
+            else self._eligible_as_source_relaxed_with_reason
+        )
+        source_gate_ok, source_gate_reason = gate(state, env_frames)
+        fsr = self._frames_since_restart(state)
+        restart_burnin_ok = fsr >= self.min_frames_as_source_after_restart
+        restart_burnin_reason = (
+            "ok"
+            if restart_burnin_ok
+            else f"frames_since_restart<{self.min_frames_as_source_after_restart}"
+        )
+        st = state or {}
+        try:
+            ranking_score = float(
+                st.get("pbt_ranking_score", st.get("objective", float("nan")))
+            )
+        except Exception:
+            ranking_score = float("nan")
+        try:
+            nsucc_mean = float(
+                st["nsucc_mean"]
+                if st.get("nsucc_mean") is not None
+                else (st.get("curriculum") or {})["mean_prev_episode_successes"]
+            )
+        except Exception:
+            nsucc_mean = float("nan")
+
+        probation_ok: bool | None = True
+        if self.adaptive_precision_enable:
+            adaptive_state = self._adaptive_precision_state(
+                policy_idx, strict_local=False
+            )
+            probation_ok = (
+                None if adaptive_state is None else not bool(adaptive_state[1].active)
+            )
+        has_collapse, collapse_reason = self._late_rescue_source_has_collapse(
+            int(policy_idx), st
+        )
+        collapse_ok: bool | None = not bool(has_collapse)
+        if (
+            collapse_reason in ("source_control_missing", "source_control_parse_error")
+            and self.late_degradation_rescue_require_source_control
+        ):
+            collapse_ok = False
+        commit_ok, lineage_ok, freshness_ok, _health_reason, checkpoint_exists = (
+            self._inspect_peer_checkpoint_health(policy_idx, state)
+        )
+        return evaluate_common_live_source_eligibility(
+            has_state=state is not None,
+            ranking_score=ranking_score,
+            nsucc_mean=nsucc_mean,
+            source_gate_ok=source_gate_ok,
+            source_gate_reason=source_gate_reason,
+            restart_burnin_ok=restart_burnin_ok,
+            restart_burnin_reason=restart_burnin_reason,
+            checkpoint_exists=checkpoint_exists,
+            checkpoint_commit_ok=commit_ok,
+            lineage_ok=lineage_ok,
+            freshness_ok=freshness_ok,
+            probation_ok=probation_ok,
+            collapse_ok=collapse_ok,
+        )
+
+    def _validate_live_source_skill_delta(
+        self,
+        source_idx: int,
+        *,
+        chronic_path: bool,
+        target_nsucc_mean: float,
+    ) -> tuple[bool, str, bool]:
+        """Validate ordinary or chronic live-source skill delta only."""
+        window = self._policy_nsucc_windows.get(int(source_idx))
+        if not chronic_path:
+            ok, reason = pbt_copy_allowed_for_live_source(
+                window, interval_steps=self.interval_steps
+            )
+            return ok, reason, False
+        delta, why = skill_delta_with_reason(
+            window, interval_steps=self.interval_steps
+        )
+        source_state = self._load_population_checkpoints().get(int(source_idx)) or {}
+        drop_ratio = (
+            float(window.drop_ratio_vs_prior(2)) if window is not None else 0.0
+        )
+        from dexpbt_isaaclab.pbt.pbt_chronic_bottom import live_source_ok_for_chronic
+
+        ok, reason, fallback = live_source_ok_for_chronic(
+            skill_delta=delta,
+            skill_delta_why=why,
+            source_nsucc_mean=self._state_nsucc_mean(source_state),
+            target_nsucc_mean=float(target_nsucc_mean),
+            source_recent_drop_ratio=drop_ratio,
+        )
+        return ok, reason, fallback
+
     def _select_chronic_bottom_source(
         self,
         *,
         sorted_policies: list[int],
         population: dict[int, dict[str, Any] | None],
+        env_frames: int,
         target_score: float,
         target_nsucc_mean: float,
         n_top: int,
@@ -2098,10 +2270,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         """Adapt the pure chronic source decision to observer cascade shape."""
         deltas: dict[int, tuple[float | None, str]] = {}
         drops: dict[int, float] = {}
-        checkpoint_ok: dict[int, bool] = {}
+        common_health_by_policy: dict[int, CommonSourceEligibility] = {}
+        ranks = {int(idx): rank for rank, idx in enumerate(sorted_policies)}
         for idx, state in population.items():
             if int(idx) == int(self.policy_idx):
                 continue
+            rank = ranks.get(int(idx), len(sorted_policies))
+            common_health_by_policy[int(idx)] = (
+                self._evaluate_common_live_source_health(
+                    int(idx), state, env_frames, for_top=rank < int(n_top)
+                )
+            )
             deltas[int(idx)] = skill_delta_with_reason(
                 self._policy_nsucc_windows.get(int(idx)),
                 interval_steps=self.interval_steps,
@@ -2109,10 +2288,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             window = self._policy_nsucc_windows.get(int(idx))
             drops[int(idx)] = (
                 float(window.drop_ratio_vs_prior(2)) if window is not None else 0.0
-            )
-            checkpoint = (state or {}).get("checkpoint")
-            checkpoint_ok[int(idx)] = bool(
-                checkpoint and Path(str(checkpoint)).is_file()
             )
         chronic = pick_chronic_source(
             sorted_policies=sorted_policies,
@@ -2125,7 +2300,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             min_score_gap=self.pbt_chronic_min_score_gap,
             skill_delta_by_policy=deltas,
             drop_ratio_by_policy=drops,
-            checkpoint_ok=checkpoint_ok,
+            common_health_by_policy=common_health_by_policy,
         )
         return {
             "action": chronic.action,
@@ -2145,8 +2320,13 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "chronic_target_score": chronic.target_score,
             "chronic_source_skill_delta": chronic.source_skill_delta,
             "chronic_source_skill_delta_valid": chronic.source_skill_delta_valid,
+            "chronic_source_skill_delta_invalid_reason": chronic.source_skill_delta_invalid_reason,
             "chronic_source_filter_reason": chronic.source_filter_reason,
             "chronic_source_fallback_used": chronic.source_fallback_used,
+            "chronic_mixed_tol_fallback_used": chronic.mixed_tol_fallback_used,
+            "chronic_final_source_filter_reason": chronic.final_source_filter_reason,
+            "chronic_common_health_allowed": chronic.common_health_allowed,
+            "chronic_common_health_reason": chronic.common_health_reason,
             "chronic_candidates_considered": chronic.candidates_considered,
         }
 
@@ -10390,6 +10570,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 decision = self._select_chronic_bottom_source(
                     sorted_policies=sorted_policies,
                     population=population,
+                    env_frames=env_frames,
                     target_score=float(
                         (population.get(self.policy_idx) or {}).get(
                             "pbt_ranking_score",
@@ -10551,12 +10732,65 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._last_restart_type = 3  # skipped
                 return
 
-            if _decision_uses_live_source(decision) and not chronic_path:
+            if _decision_uses_live_source(decision):
                 src_idx = int(decision["source_policy"])
-                src_ok, src_reason = pbt_copy_allowed_for_live_source(
-                    self._policy_nsucc_windows.get(src_idx),
-                    interval_steps=self.interval_steps,
-                )
+                src_state = population.get(src_idx)
+                if chronic_path:
+                    tier_s = str(decision.get("tier", ""))
+                    for_top = (
+                        tier_s.endswith("top_live")
+                        or "strict" in tier_s
+                        or tier_s in ("strict_live", "strict_stable_live")
+                    )
+                    if "mid_live" in tier_s:
+                        for_top = False
+                    elif "top_live" in tier_s:
+                        for_top = True
+                    health = self._evaluate_common_live_source_health(
+                        src_idx, src_state, env_frames, for_top=for_top
+                    )
+                    decision["chronic_common_health_allowed"] = bool(health.eligible)
+                    decision["chronic_common_health_reason"] = str(health.reason)
+                    if not health.eligible:
+                        print(
+                            f"Policy {self.policy_idx}: skip restart "
+                            f"(chronic_common_health:{health.reason})"
+                        )
+                        self._last_restart_type = 3
+                        return
+                    delta, why = skill_delta_with_reason(
+                        self._policy_nsucc_windows.get(src_idx),
+                        interval_steps=self.interval_steps,
+                    )
+                    window = self._policy_nsucc_windows.get(src_idx)
+                    drop_ratio = (
+                        float(window.drop_ratio_vs_prior(2))
+                        if window is not None
+                        else 0.0
+                    )
+                    from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
+                        live_source_ok_for_chronic,
+                    )
+
+                    src_ok, src_reason, fallback = live_source_ok_for_chronic(
+                        skill_delta=delta,
+                        skill_delta_why=why,
+                        source_nsucc_mean=self._state_nsucc_mean(src_state),
+                        target_nsucc_mean=own_rescue_nsucc,
+                        source_recent_drop_ratio=drop_ratio,
+                    )
+                    decision["chronic_source_skill_delta_invalid_reason"] = (
+                        "" if delta is not None else str(why)
+                    )
+                    decision["chronic_mixed_tol_fallback_used"] = bool(fallback)
+                    decision["chronic_final_source_filter_reason"] = str(src_reason)
+                else:
+                    # Preserve ordinary PBT's existing live skill-delta gate.
+                    src_ok, src_reason, _ = self._validate_live_source_skill_delta(
+                        src_idx,
+                        chronic_path=False,
+                        target_nsucc_mean=own_rescue_nsucc,
+                    )
                 if not src_ok:
                     print(
                         f"Policy {self.policy_idx}: skip restart "
@@ -11576,6 +11810,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             chronic_state = self._chronic_bottom_state_for(
                 self.policy_idx, lineage_id=own_lineage
             )
+            trigger_frames = int(chronic_state.continuous_bottom_frames)
+            trigger_ticks = int(chronic_state.continuous_bottom_ticks)
             reset_after_chronic_copy(
                 chronic_state,
                 env_frames=env_frames,
@@ -11596,12 +11832,38 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "target_gate_reason": str(
                         decision.get("chronic_target_gate_reason", "")
                     ),
+                    "trigger_score_gap": float(
+                        decision.get("chronic_score_gap", 0.0)
+                    ),
                     "score_gap": float(decision.get("chronic_score_gap", 0.0)),
-                    "continuous_bottom_frames": int(
+                    "trigger_continuous_bottom_frames": trigger_frames,
+                    "trigger_continuous_bottom_ticks": trigger_ticks,
+                    "trigger_frames": trigger_frames,
+                    "trigger_ticks": trigger_ticks,
+                    "post_copy_bottom_frames": int(
                         chronic_state.continuous_bottom_frames
                     ),
-                    "continuous_bottom_ticks": int(
+                    "post_copy_bottom_ticks": int(
                         chronic_state.continuous_bottom_ticks
+                    ),
+                    "post_copy_frames": int(
+                        chronic_state.continuous_bottom_frames
+                    ),
+                    "post_copy_ticks": int(
+                        chronic_state.continuous_bottom_ticks
+                    ),
+                    "continuous_bottom_frames": trigger_frames,
+                    "continuous_bottom_ticks": trigger_ticks,
+                    "cooldown_until": int(
+                        chronic_state.chronic_copy_cooldown_until
+                    ),
+                    "selected_source": int(source_policy),
+                    "source_filter_reason": str(
+                        decision.get("chronic_final_source_filter_reason")
+                        or decision.get("chronic_source_filter_reason", "")
+                    ),
+                    "mixed_tol_fallback_used": bool(
+                        decision.get("chronic_mixed_tol_fallback_used", False)
                     ),
                     "chronic_copy_count": int(chronic_state.chronic_copy_count),
                 }
@@ -11850,67 +12112,137 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return
         mode = _bc.decide_consume_mode(bridge is not None)
         if mode == _bc.CONSUME_LIVE:
-            payload = _bc.load_payload(meta)
-            query_tol = None
             try:
-                own_curr = self._read_curriculum_state() or {}
-                query_tol = float(own_curr.get("success_tolerance", float("nan")))
-            except Exception:
+                payload = _bc.load_payload(meta)
+                if payload is None:
+                    raise RuntimeError("broadcast_payload_missing_or_unreadable")
                 query_tol = None
-            if cfg is not None and hasattr(cfg, "query_success_tolerance"):
-                cfg.query_success_tolerance = query_tol
-            summary = (
-                _bc.merge_payload_into_bridge(
+                try:
+                    own_curr = self._read_curriculum_state() or {}
+                    query_tol = float(
+                        own_curr.get("success_tolerance", float("nan"))
+                    )
+                except Exception:
+                    query_tol = None
+                if hasattr(cfg, "query_success_tolerance"):
+                    cfg.query_success_tolerance = query_tol
+                summary = _bc.merge_payload_into_bridge(
                     bridge,
                     payload,
                     cfg=cfg,
                     query_success_tolerance=query_tol,
                 )
-                if payload is not None else {"merged_entries": 0}
-            )
-            _bc.mark_consumed(
-                self.workspace, self.policy_idx,
-                frame=int(meta.get("frame", 0)),
-                source_policy=int(meta.get("source_policy", -1)),
-                mode=mode,
-                merged_entries=int(summary.get("merged_entries", 0)),
-            )
-            self._eir_bank_merge_count += int(summary.get("merged_entries", 0))
-            consumed = 1.0
-            _bc.append_broadcast_event(
-                self._metrics_dir,
-                {
+                recovery_entries = int(
+                    summary.get(
+                        "recovery_bank_merged_entries",
+                        summary.get("merged_entries", 0),
+                    )
+                )
+                snippet_entries = int(summary.get("snippet_bank_merged_entries", 0))
+                total_entries = recovery_entries + snippet_entries
+                diagnostics = dict(summary.get("bank_diagnostics") or {})
+                _bc.mark_consumed(
+                    self.workspace,
+                    self.policy_idx,
+                    frame=int(meta.get("frame", 0)),
+                    source_policy=int(meta.get("source_policy", -1)),
+                    mode=mode,
+                    merged_entries=total_entries,
+                )
+                self._eir_bank_merge_count += total_entries
+                consumed = 1.0
+                event = {
                     "event": "consume",
                     "source": int(meta.get("source_policy", -1)),
                     "target": int(self.policy_idx),
                     "frame": int(env_frames),
-                    "entries": int(summary.get("merged_entries", 0)),
+                    "entries": total_entries,
+                    "recovery_bank_merged_entries": recovery_entries,
+                    "snippet_bank_merged_entries": snippet_entries,
+                    "broadcast_rejected_incompatible": bool(
+                        summary.get("broadcast_rejected_incompatible", False)
+                    ),
+                    "bank_diagnostics": diagnostics,
                     "mode": mode,
                     "consumed": True,
-                },
-            )
-            if self.writer is not None:
-                self.writer.add_scalar(
-                    "eir_pbt/broadcast_consumed_source_policy",
-                    float(meta.get("source_policy", -1)), env_frames,
+                }
+                _bc.append_broadcast_event(self._metrics_dir, event)
+                if self.writer is not None:
+                    self.writer.add_scalar(
+                        "eir_pbt/broadcast_consumed_source_policy",
+                        float(meta.get("source_policy", -1)),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "eir_pbt/broadcast_consumed_bank_entries",
+                        float(total_entries),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "eir_pbt/recovery_bank_merged_entries",
+                        float(recovery_entries),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "eir_pbt/snippet_bank_merged_entries",
+                        float(snippet_entries),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "eir_pbt/broadcast_rejected_incompatible",
+                        1.0
+                        if summary.get("broadcast_rejected_incompatible")
+                        else 0.0,
+                        env_frames,
+                    )
+                    for key, value in diagnostics.items():
+                        try:
+                            self.writer.add_scalar(
+                                f"eir_pbt/snippet_{key}",
+                                float(value),
+                                env_frames,
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                    self.writer.add_scalar(
+                        "eir_pbt/bank_merge_count",
+                        float(self._eir_bank_merge_count),
+                        env_frames,
+                    )
+                    self.writer.add_scalar(
+                        "eir_pbt/residual_head_copied",
+                        1.0 if summary.get("residual_copied") else 0.0,
+                        env_frames,
+                    )
+                rejection = (
+                    " rejected_incompatible"
+                    if summary.get("broadcast_rejected_incompatible")
+                    else ""
                 )
-                self.writer.add_scalar(
-                    "eir_pbt/broadcast_consumed_bank_entries",
-                    float(summary.get("merged_entries", 0)), env_frames,
+                print(
+                    f"[EIR-broadcast] policy {self.policy_idx} consumed "
+                    f"recovery={recovery_entries} snippet={snippet_entries} "
+                    f"from policy {meta.get('source_policy')} (mode={mode}){rejection}"
                 )
-                self.writer.add_scalar(
-                    "eir_pbt/bank_merge_count",
-                    float(self._eir_bank_merge_count), env_frames,
+            except Exception as exc:
+                failure_reason = f"{type(exc).__name__}:{exc}"
+                _bc.append_broadcast_event(
+                    self._metrics_dir,
+                    {
+                        "event": "consume",
+                        "source": int(meta.get("source_policy", -1)),
+                        "target": int(self.policy_idx),
+                        "frame": int(env_frames),
+                        "entries": 0,
+                        "mode": mode,
+                        "consumed": False,
+                        "failure_reason": failure_reason,
+                    },
                 )
-                self.writer.add_scalar(
-                    "eir_pbt/residual_head_copied",
-                    1.0 if summary.get("residual_copied") else 0.0, env_frames,
+                print(
+                    f"[EIR-broadcast] policy {self.policy_idx} consume failed: "
+                    f"{failure_reason}"
                 )
-            print(
-                f"[EIR-broadcast] policy {self.policy_idx} consumed "
-                f"{summary.get('merged_entries', 0)} entries from policy "
-                f"{meta.get('source_policy')} (mode={mode})"
-            )
         else:
             # forced-restart hand-off: leave the payload for the next process
             # incarnation to consume on startup; record the deferral.

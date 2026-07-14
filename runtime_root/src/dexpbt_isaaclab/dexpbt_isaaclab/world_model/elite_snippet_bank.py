@@ -614,26 +614,78 @@ class EliteSnippetBank:
     ) -> int:
         """Merge pre-filtered compatible foreign entries with a soft local reserve.
 
-        Eviction keeps up to ``floor(capacity * preserve_local_fraction)`` local
-        entries (matching ``local_policy_idx``) when enough exist; remaining
-        capacity may be filled by foreign / new entries by priority. Never raises
-        bank size above ``self.capacity``.
+        Returns ``incoming_kept_count`` (rows from the incoming block that survive
+        capacity eviction). Detailed counters land in ``last_update_diagnostics``.
         """
         other = self._block_from_state(other_state)
         m = int(other["feature"].shape[0])
+        before = int(self.size)
+        local_before = 0
+        foreign_before = 0
+        if before > 0 and int(local_policy_idx) >= 0:
+            src0 = self.scalars["source_policy_idx"][:before]
+            local_before = int((src0 == float(local_policy_idx)).sum().item())
+            foreign_before = int(before - local_before)
+        diag = {
+            "incoming_count": float(m),
+            "incoming_compatible_count": float(m),
+            "incoming_kept_count": 0.0,
+            "incoming_rejected_count": float(m),
+            "existing_evicted_count": 0.0,
+            "local_before": float(local_before),
+            "foreign_before": float(foreign_before),
+            "local_after": float(local_before),
+            "foreign_after": float(foreign_before),
+            "local_evicted_count": 0.0,
+            "foreign_evicted_count": 0.0,
+            "bank_size_before": float(before),
+            "bank_size_after": float(before),
+        }
         if m == 0:
+            self.last_update_diagnostics = dict(self.last_update_diagnostics or {})
+            self.last_update_diagnostics.update(diag)
             return 0
         if max_entries is not None and m > int(max_entries):
             o = torch.argsort(other["priority_score"], descending=True)[: int(max_entries)]
             other = {k: v[o] for k, v in other.items()}
-        before = int(self.size)
-        self._insert_with_local_reserve(
+            m = int(other["feature"].shape[0])
+            diag["incoming_count"] = float(m)
+            diag["incoming_compatible_count"] = float(m)
+        kept_incoming = self._insert_with_local_reserve(
             other,
             local_policy_idx=int(local_policy_idx),
             preserve_local_fraction=float(preserve_local_fraction),
+            old_size=before,
         )
-        # Count newly accepted rows approximately via size delta vs prior.
-        return max(0, int(self.size) - before) if before + m > self.capacity else int(other["feature"].shape[0])
+        after = int(self.size)
+        local_after = 0
+        foreign_after = 0
+        if after > 0 and int(local_policy_idx) >= 0:
+            src1 = self.scalars["source_policy_idx"][:after]
+            local_after = int((src1 == float(local_policy_idx)).sum().item())
+            foreign_after = int(after - local_after)
+        existing_kept = max(0, after - int(kept_incoming))
+        existing_evicted = max(0, before - existing_kept)
+        local_evicted = max(0, local_before - local_after)
+        foreign_evicted = max(0, foreign_before - (foreign_after - int(kept_incoming)))
+        # Prefer exact foreign eviction from diagnostics when available.
+        diag.update(
+            {
+                "incoming_kept_count": float(kept_incoming),
+                "incoming_rejected_count": float(max(0, m - int(kept_incoming))),
+                "existing_evicted_count": float(existing_evicted),
+                "local_after": float(local_after),
+                "foreign_after": float(foreign_after),
+                "local_evicted_count": float(local_evicted),
+                "foreign_evicted_count": float(max(0, foreign_evicted)),
+                "bank_size_after": float(after),
+                "eviction_local_count": float(local_evicted),
+                "eviction_foreign_count": float(max(0, foreign_evicted)),
+            }
+        )
+        self.last_update_diagnostics = dict(self.last_update_diagnostics or {})
+        self.last_update_diagnostics.update(diag)
+        return int(kept_incoming)
 
     def _insert_with_local_reserve(
         self,
@@ -641,28 +693,38 @@ class EliteSnippetBank:
         *,
         local_policy_idx: int,
         preserve_local_fraction: float,
-    ) -> None:
+        old_size: int | None = None,
+    ) -> int:
+        """Insert ``new`` with soft local reserve. Returns incoming rows kept."""
         cur = self._current_block()
+        old_n = int(old_size) if old_size is not None else int(cur["feature"].shape[0])
+        new_n = int(new["feature"].shape[0])
         combined = {k: torch.cat([cur[k], new[k]], dim=0) for k in new}
         n = int(combined["feature"].shape[0])
         if n <= self.capacity:
             self._store_block(combined)
-            return
-        reserve = max(0, int(math.floor(self.capacity * max(0.0, float(preserve_local_fraction)))))
-        src = combined["source_policy_idx"]
-        local_mask = src == float(local_policy_idx) if int(local_policy_idx) >= 0 else torch.zeros(
-            n, dtype=torch.bool
+            return new_n
+        reserve = max(
+            0, int(math.floor(self.capacity * max(0.0, float(preserve_local_fraction))))
         )
+        src = combined["source_policy_idx"]
+        local_mask = (
+            src == float(local_policy_idx)
+            if int(local_policy_idx) >= 0
+            else torch.zeros(n, dtype=torch.bool)
+        )
+        # Soft reserve applies to *existing* local rows that fall in [0, old_n).
+        existing_local = local_mask.clone()
+        if old_n < n:
+            existing_local[old_n:] = False
         pri = combined["priority_score"]
-        local_idx = torch.nonzero(local_mask, as_tuple=False).reshape(-1)
-        foreign_idx = torch.nonzero(~local_mask, as_tuple=False).reshape(-1)
+        local_idx = torch.nonzero(existing_local, as_tuple=False).reshape(-1)
         keep_list: list[torch.Tensor] = []
         if local_idx.numel() > 0 and reserve > 0:
             l_order = local_idx[torch.argsort(pri[local_idx], descending=True)]
             keep_list.append(l_order[: min(reserve, int(l_order.numel()))])
         kept = torch.cat(keep_list) if keep_list else torch.zeros(0, dtype=torch.long)
         remaining = self.capacity - int(kept.numel())
-        # Fill remainder from all remaining rows (local beyond reserve + foreign).
         if remaining > 0:
             kept_set = set(int(x) for x in kept.tolist()) if kept.numel() else set()
             rest = torch.tensor(
@@ -675,14 +737,10 @@ class EliteSnippetBank:
         if kept.numel() > self.capacity:
             kept = kept[: self.capacity]
         self._store_block({k: v[kept] for k, v in combined.items()})
-        # Soft telemetry on eviction composition.
-        if kept.numel() > 0 and "source_policy_idx" in combined:
-            local_kept = int((combined["source_policy_idx"][kept] == float(local_policy_idx)).sum().item()) if local_policy_idx >= 0 else 0
-            self.last_update_diagnostics = dict(self.last_update_diagnostics or {})
-            self.last_update_diagnostics["eviction_local_count"] = float(local_kept)
-            self.last_update_diagnostics["eviction_foreign_count"] = float(
-                int(kept.numel()) - local_kept
-            )
+        if kept.numel() == 0:
+            return 0
+        incoming_kept = int(((kept >= old_n) & (kept < n)).sum().item())
+        return incoming_kept
 
     def metrics(self):
         out = {"elite_snippet/bank_size": float(self.size), "elite_snippet/inserted_rows": float(self.add_count), "elite_snippet/retrieval_hit_rate": float(self.retrieval_hit_rate)}

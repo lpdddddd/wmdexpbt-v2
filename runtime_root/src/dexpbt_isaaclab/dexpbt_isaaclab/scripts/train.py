@@ -2943,6 +2943,10 @@ from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
     RSSMMPPIPlanner,
 )
 from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_cache
+from dexpbt_isaaclab.world_model.eir_belief import (
+    need_eir_belief_cache,
+    need_eir_belief_false_reason,
+)
 from dexpbt_isaaclab.world_model.rssm_ensemble import (
     RSSMEnsembleConfig,
     RSSMEnsembleManager,
@@ -3916,24 +3920,22 @@ def _patch_actor_train_for_seq_wm(
             # (deterministic full-rollout encode). compute_eir_loss slices it
             # per minibatch; we never re-encode the RSSM per minibatch. Cleanly
             # invalidated to a fallback cache on any failure / non-RSSM backbone.
-            _need_belief = (
-                getattr(eir_bridge, "rssm_planner", None) is not None
-                or getattr(eir_bridge, "rssm_reranker", None) is not None
-                or (
-                    bool(getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False))
-                    and bool(getattr(args_cli, "snippet_wm_rerank_enable", False))
-                )
-                or (
-                    # Also honor bridge snippet_wm_rerank_cfg when wired.
-                    bool(getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False))
-                    and bool(
-                        getattr(
-                            getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
-                            "enabled",
-                            False,
-                        )
+            _need_belief = need_eir_belief_cache(
+                rssm_planner_present=getattr(eir_bridge, "rssm_planner", None) is not None,
+                rssm_reranker_present=getattr(eir_bridge, "rssm_reranker", None) is not None,
+                snippet_belief_flag=bool(
+                    getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False)
+                ),
+                snippet_wm_rerank_enabled=bool(
+                    getattr(args_cli, "snippet_wm_rerank_enable", False)
+                ),
+                bridge_snippet_rerank_enabled=bool(
+                    getattr(
+                        getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
+                        "enabled",
+                        False,
                     )
-                )
+                ),
             )
             eir_bridge.last_need_belief = bool(_need_belief)
             eir_bridge.last_belief_build_attempted = False
@@ -3941,6 +3943,9 @@ def _patch_actor_train_for_seq_wm(
             eir_bridge.last_belief_failure_reason = ""
             eir_bridge.last_belief_cache_valid = False
             eir_bridge.last_belief_shape = ""
+            eir_bridge.last_belief_build_latency = 0.0
+            eir_bridge.last_belief_numel = 0
+            eir_bridge.last_belief_ndim = 0
             if _need_belief:
                 try:
                     import time as _time_belief
@@ -3998,6 +4003,11 @@ def _patch_actor_train_for_seq_wm(
                             _bel = getattr(_cache, "h", None)
                     if _bel is not None and hasattr(_bel, "shape"):
                         eir_bridge.last_belief_shape = str(tuple(_bel.shape))
+                        try:
+                            eir_bridge.last_belief_numel = int(_bel.numel())
+                            eir_bridge.last_belief_ndim = int(_bel.ndim)
+                        except Exception:
+                            pass
                     eir_bridge.last_belief_build_success = bool(_ok)
                     eir_bridge.last_belief_cache_valid = bool(_ok)
                     if not _ok:
@@ -4009,7 +4019,25 @@ def _patch_actor_train_for_seq_wm(
                     eir_bridge.last_belief_cache_valid = False
                     eir_bridge.last_belief_failure_reason = f"build_exc:{type(_bc_exc).__name__}"
             else:
-                eir_bridge.last_belief_failure_reason = "need_belief_false"
+                eir_bridge.last_belief_failure_reason = need_eir_belief_false_reason(
+                    rssm_planner_present=getattr(eir_bridge, "rssm_planner", None) is not None,
+                    rssm_reranker_present=getattr(eir_bridge, "rssm_reranker", None) is not None,
+                    snippet_belief_flag=bool(
+                        getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False)
+                    ),
+                    snippet_wm_rerank_enabled=bool(
+                        getattr(args_cli, "snippet_wm_rerank_enable", False)
+                    ),
+                    bridge_snippet_rerank_enabled=bool(
+                        getattr(
+                            getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
+                            "enabled",
+                            False,
+                        )
+                    ),
+                )
+
+        if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
             seq_distill_bridge.feature_capture.reset()
             # Build the teacher cache NOW from the freshly-collected rollout
@@ -4582,6 +4610,108 @@ def _patch_actor_train_for_seq_wm(
                             tb_writer.add_scalar(k, float(v), frames)
                         except Exception:
                             pass
+                    # Experiment C: belief-cache observability (one set per rollout
+                    # via last_* fields; also mirrored in eir_belief_events.jsonl).
+                    _belief_fail = str(
+                        getattr(xb, "last_belief_failure_reason", "") or ""
+                    )
+                    for k, v in {
+                        "eir_wm/need_belief": float(
+                            getattr(xb, "last_need_belief", False)
+                        ),
+                        "eir_wm/belief_build_attempted": float(
+                            getattr(xb, "last_belief_build_attempted", False)
+                        ),
+                        "eir_wm/belief_build_success": float(
+                            getattr(xb, "last_belief_build_success", False)
+                        ),
+                        "eir_wm/belief_cache_valid": float(
+                            getattr(xb, "last_belief_cache_valid", False)
+                        ),
+                        "eir_wm/belief_build_latency": float(
+                            getattr(xb, "last_belief_build_latency", 0.0) or 0.0
+                        ),
+                        "eir_wm/belief_numel": float(
+                            getattr(xb, "last_belief_numel", 0) or 0
+                        ),
+                        "eir_wm/belief_ndim": float(
+                            getattr(xb, "last_belief_ndim", 0) or 0
+                        ),
+                        "eir_wm/belief_failure_reason_hash": float(
+                            abs(hash(_belief_fail)) % 10_000
+                        ),
+                    }.items():
+                        try:
+                            tb_writer.add_scalar(k, float(v), frames)
+                        except Exception:
+                            pass
+                    # One structured belief event per train step (not minibatch).
+                    try:
+                        if not bool(getattr(xb, "_belief_event_written_frame", None) == frames):
+                            _wcs = getattr(xb, "wm_calibration_state", None) or {}
+                            _ev = {
+                                "event": "belief_cache",
+                                "frame": int(frames),
+                                "generation": int(
+                                    getattr(getattr(xb, "rssm_belief_cache", None), "generation", -1)
+                                    or -1
+                                ),
+                                "policy_idx": int(getattr(args_cli, "policy_idx", -1)),
+                                "need_belief": bool(getattr(xb, "last_need_belief", False)),
+                                "belief_build_attempted": bool(
+                                    getattr(xb, "last_belief_build_attempted", False)
+                                ),
+                                "belief_build_success": bool(
+                                    getattr(xb, "last_belief_build_success", False)
+                                ),
+                                "belief_cache_valid": bool(
+                                    getattr(xb, "last_belief_cache_valid", False)
+                                ),
+                                "belief_failure_reason": _belief_fail,
+                                "belief_shape": str(
+                                    getattr(xb, "last_belief_shape", "")
+                                ),
+                                "belief_build_latency": float(
+                                    getattr(xb, "last_belief_build_latency", 0.0) or 0.0
+                                ),
+                                "belief_numel": int(
+                                    getattr(xb, "last_belief_numel", 0) or 0
+                                ),
+                                "belief_ndim": int(
+                                    getattr(xb, "last_belief_ndim", 0) or 0
+                                ),
+                                "alpha_wm": float(_wcs.get("alpha_wm", 0.0) or 0.0),
+                                "calibration_pass": bool(
+                                    _wcs.get("pass", _wcs.get("calibration_pass", False))
+                                ),
+                                "calibration_reject_reason": str(
+                                    _wcs.get(
+                                        "reject_reason",
+                                        _wcs.get("calibration_reject_reason", ""),
+                                    )
+                                ),
+                                "rerank_reason_id": int(
+                                    getattr(xb, "last_snippet_wm_rerank_reason_id", -1)
+                                    or -1
+                                ),
+                                "changed_frac": float(
+                                    getattr(xb, "last_snippet_wm_rerank_changed_frac", 0.0)
+                                    or 0.0
+                                ),
+                                "fallback_frac": float(
+                                    getattr(xb, "last_snippet_wm_rerank_fallback_frac", 0.0)
+                                    or 0.0
+                                ),
+                            }
+                            _md = Path(getattr(args_cli, "workspace", ".")) / "metrics"
+                            _md.mkdir(parents=True, exist_ok=True)
+                            with (_md / "eir_belief_events.jsonl").open(
+                                "a", encoding="utf-8"
+                            ) as _bf:
+                                _bf.write(json.dumps(_ev) + "\n")
+                            xb._belief_event_written_frame = int(frames)
+                    except Exception as _belief_log_exc:
+                        print(f"[EIR-belief] event log failed: {_belief_log_exc}")
                     # Progress-conditioned refinement scalars (only present when
                     # the progress_refine path produced a step).
                     _pr = getattr(xb, "last_progress_refine", None)

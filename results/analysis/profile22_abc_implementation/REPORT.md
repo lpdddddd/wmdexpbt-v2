@@ -1,9 +1,35 @@
 # Profile22 ABC Implementation Review Pack
 
 Date: 2026-07-14  
-Workspace tip: `b3cf704` (+ uncommitted ABC worktree)  
+Workspace tip before review-fix commit: `b529bb6`  
+See also: [`REVIEW_FIXES.md`](REVIEW_FIXES.md) for post-review corrections.
+
 Baseline (unchanged): `regrasping_cser_dexpbt_progress_refine_5b_20260714_092846`  
-Decision after code/tests: **STOP for human review — do not start ABC run.**
+**STOP for human review — do not start ABC run.**
+
+---
+
+## Ablation clarification (authoritative profiles)
+
+- A/B/C **code switches are independent**.
+- Profile **24** is a fixed **authoritative all-on** ABC profile; `--no-*` is **not** a reliable ablation under restart-safe expansion.
+- Future ablations should use new derived profiles (not allocated this round).
+- Profile **22** pins A/B/C enables to **False**.
+
+---
+
+## Quick answers
+
+| Question | Answer |
+|---|---|
+| Profile22 training behavior changed? | **No** (enables still False; ordinary live skill_delta path unchanged) |
+| Chronic uses common source health gate? | **Yes** (selection + post-select). Ordinary keeps prior gates + skill_delta |
+| Lineage change clears stale bottom span? | **Yes** (keeps cooldown) |
+| Full-bank merge records `incoming_kept_count`? | **Yes** |
+| B/C telemetry observable? | **Yes** — TB + JSONL |
+| Training started? | **No** |
+
+Full original implementation notes remain below; prefer REVIEW_FIXES for the latest semantics.
 
 ---
 
