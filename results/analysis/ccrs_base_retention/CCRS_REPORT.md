@@ -1,5 +1,15 @@
 # CCRS Report — base-retention 5B
 
+> ## ⚠ CANONICAL RESULT NOTICE
+>
+> - **Canonical final interpretation: [`CCRS_FINAL_INTERPRETATION.md`](CCRS_FINAL_INTERPRETATION.md).**
+> - Earlier raw verdict sections below (including the auto-applied
+>   pre-registered verdicts, the Anchor-Scout criterion wording, and any
+>   "criterion-drift-main" phrasing) are retained ONLY for audit history.
+> - They must NOT be quoted as the current scientific conclusion. Where
+>   this file and `CCRS_FINAL_INTERPRETATION.md` disagree, the latter
+>   supersedes.
+
 ## Pre-registered decision criteria (frozen before sweep results)
 
 PRIMARY metric: normalized_nsucc Q(k, τ) = E[min(nsucc, M)]/M, M=50.
@@ -138,52 +148,100 @@ The sweep ran while the ccrs_eval loader fix was still uncommitted; that fix
 only inlined `eval_fair` loader helpers (module-level argparse/AppLauncher
 cross-import abort) and changed no policy/environment/tolerance/metric
 semantics. Recorded git_sha values in existing CSVs are intentionally left
-unmodified. Future ccrs_eval rows additionally record `git_dirty`,
-`evaluator_source_sha256` and `analysis_protocol_version`.
+unmodified. ccrs_eval rows now additionally record `git_dirty`,
+`evaluator_source_sha256` and `analysis_protocol_version` (all three are in
+CSV_COLUMNS); aggregation writes `aggregation_provenance.json` and flags
+`mixed_provenance=true` loudly if evaluator hashes or protocol versions are
+ever mixed. Historical rows report the new fields as unrecorded and are
+never rewritten.
+
+## Statistical labels (used below and in CCRS_FINAL_INTERPRETATION.md)
+
+Three separate judgements, never conflated:
+
+- statistically significant: 95% paired CI excludes zero;
+- practical (point estimate): |ΔQ| >= 0.05;
+- practical (CI-confirmed): whole CI beyond ±0.05 on the side of the point
+  estimate.
+
+The older mixed `practical` flag (significant AND |point| >= 0.05) is
+deprecated. The best-checkpoint envelope is EXPLORATORY / POST-SELECTION
+(winner chosen from the same data as the CI, no family-wise
+multiple-comparison correction) and is reported separately from the named
+confirmatory comparisons.
 
 ## Capability frontier (see CCRS_FINAL_INTERPRETATION.md for full tables)
 
-- Best checkpoint per fixed tolerance: p5 peak (it117) is numerically best
-  at 2.8-2.1 cm (leads significant but all < 0.05 practical threshold);
-  p1 tip (it160) is numerically best at 2.0-1.8 cm, with the lead practical
-  at 1.8 cm (dQ = +0.056 over p5 peak).
-- p1 tip vs p5 peak: NUMERICAL curve crossing around 2.0-2.1 cm confirmed;
-  PRACTICAL crossing not confirmed (loose-region gaps < 0.05; tight-region
-  gap practical only at 1.8 cm).
-- p1 tip reaches ~43.0 raw nsucc at fixed 2.0 cm and ~40.8 at fixed 1.8 cm:
-  this run has broken the 2 cm fixed-precision barrier.
-- Figures: figures/best_checkpoint_envelope.png,
+- Best checkpoint per fixed tolerance (exploratory envelope): p5 peak
+  (it117) is numerically best at 2.8-2.1 cm — every lead statistically
+  significant but below the 0.05 practical threshold; p1 tip (it160) is
+  numerically best at 2.0-1.8 cm — the 1.8 cm lead over p5 peak (+0.056,
+  CI [+0.036, +0.076]) is practical at point-estimate scale but NOT
+  CI-confirmed.
+- p1 tip vs p5 peak (named comparison): NUMERICAL curve crossing around
+  2.0-2.1 cm; practical crossing NOT confirmed at either the point-estimate
+  or the CI-confirmed level.
+- Epsilon dominance (ε = 0.05): p1 tip ε-dominates p5 peak at
+  point-estimate scale (never worse by > 0.05, better by > 0.05 at 1.8 cm);
+  this dominance is NOT CI-confirmed. p1 tip CI-confirmed ε-dominates
+  p1 peak and the p3/p4/p5 tips.
+- Scope-limited precision statement: in this single population run, the
+  p1 tip checkpoint achieved approximately 43.0 nsucc at fixed 2.0 cm and
+  40.8 at fixed 1.8 cm. This is not a general "2 cm barrier broken" claim.
+- Figures: figures/best_checkpoint_envelope.png (exploratory),
   figures/peak_tip_temporal_differences.png.
 
 ## Corrected scientific conclusions
 
 1. p4's smaller live tolerance does not correspond to stronger
-   fixed-precision capability; p1 peak dominates p4 peak at all 8
-   tolerances. The p1/p4 Anchor-Scout hypothesis is refuted.
-2. p5 peak->tip is real policy forgetting at all 8 tolerances (all
-   significant and practical). p1 peak->tip IMPROVED in the high-precision
-   region (practical at 2.0/1.9/1.8 cm).
-3. Of the 22 evaluated exact transitions (p1/p4/p5), 21 satisfy |F| > |C|;
-   the policy-update effect F is the dominant source of capability change.
-   Criterion drift C is a minor factor in this run and must not be
-   presented as a confirmed core conclusion.
-4. The core problem is re-framed as worker-dependent long-horizon
+   fixed-precision capability; p1 peak leads p4 peak at all 8 tolerances
+   (all statistically significant, 6/8 practical at point-estimate scale).
+   The p1/p4 Anchor-Scout hypothesis is refuted.
+2. p5 peak->tip is real policy forgetting at all 8 tolerances (every point
+   CI-confirmed practical). p1 peak->tip IMPROVED in the high-precision
+   region (practical point estimates at 2.0/1.9/1.8 cm, CI-confirmed at
+   1.8 cm).
+3. p5 peak and p1 tip are NOT established as practically complementary
+   checkpoints: p5 peak's loose-region leads are all < 0.05, and the
+   current run does not confirm a practical capability crossing. A
+   multi-checkpoint frontier archive remains a candidate hypothesis; the
+   data are insufficient to show it beats selecting a single checkpoint
+   such as p1 tip. p5's main value is the unambiguous long-horizon
+   forgetting counterexample.
+4. Of the 22 evaluated exact transitions (p1/p4/p5), 21 satisfy |F| > |C|;
+   within those 22, the policy-update effect F dominates and criterion
+   drift C is a minor factor. This is NOT a confirmed core conclusion
+   beyond the evaluated 22 transitions.
+5. The core problem is re-framed as worker-dependent long-horizon
    capability retention.
-5. Evaluation seeds quantify fixed-checkpoint evaluation uncertainty only;
-   they are not training seeds. This is a single population run: no claims
-   about average method benefit or stability across runs.
+6. Scope: single population training run; the 4 evaluation seeds quantify
+   fixed-checkpoint evaluation uncertainty only (not training variance);
+   average method benefit vs a baseline and cross-training-seed stability
+   are unproven.
 
 ## Scope caveat for D/F/C
 
 Exact D/F/C covers only the 22 p1/p4/p5 in-band transitions. The 15 p0/p2/p3
 in-band transitions were not evaluated (exact cells deliberately excluded
-from this sweep); the F-dominated conclusion is limited to the evaluated 22.
+from this sweep; no new GPU work was launched for them); the F-dominated
+conclusion is limited to the evaluated 22.
 
 ## Next-step method direction (candidate only, NOT validated)
 
-Capability-Frontier Retention: maintain multi-tolerance capability vectors
-for archived checkpoints (p5-peak-style loose-region strength and
-p1-tip-style high-precision strength are complementary and cannot be ranked
-by one live scalar); PBT promotion consults the vector, prunes dominated
-archive members, keeps complementary ones. Not implemented, not validated,
-no novelty claim.
+Fixed-Tolerance Capability Retention / Sentinel-Grid Retention (design
+sketch): maintain a few fixed tolerance sentinels (e.g. 0.025 / 0.022 /
+0.020 / 0.018 m); periodically compare the candidate policy against a
+retained anchor on a fixed reset probe; on a confidence-threshold-crossing
+regression of the capability vector, trigger one of three INDEPENDENT
+candidate mechanisms — update rejection, rollback, or anchor distillation —
+studied separately, not all at once. A multi-checkpoint archive is only
+justified if a true practical (CI-confirmed) curve crossing is observed
+across multiple training runs; this run observed only a numerical crossing.
+Unimplemented, unvalidated, no novelty claim.
+
+## CHANGELOG (2026-07-19, rev. 2)
+
+This revision changes interpretation, statistical labels and provenance
+recording ONLY. No new evaluation data were produced, no GPU task was
+launched, and no recorded result rows (including historical git_sha values)
+were modified.

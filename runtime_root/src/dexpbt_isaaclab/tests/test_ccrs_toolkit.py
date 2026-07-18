@@ -951,6 +951,162 @@ class TestProvenance(unittest.TestCase):
             self.assertIn(fieldname, src)
         self.assertIn("_code_provenance()", src)
 
+    def test_provenance_fields_in_csv_columns(self):
+        from dexpbt_isaaclab.ccrs.eval_protocol import CSV_COLUMNS
+        for fieldname in ("git_dirty", "evaluator_source_sha256",
+                          "analysis_protocol_version", "git_sha"):
+            self.assertIn(fieldname, CSV_COLUMNS)
+
+    def test_provenance_summary_mixed_hashes_flagged(self):
+        from dexpbt_isaaclab.ccrs.eval_protocol import provenance_summary
+        rows = [
+            {"git_sha": "aaa", "evaluator_source_sha256": "h1",
+             "analysis_protocol_version": "v2.1_frontier", "git_dirty": False},
+            {"git_sha": "aaa", "evaluator_source_sha256": "h2",
+             "analysis_protocol_version": "v2.1_frontier", "git_dirty": True},
+        ]
+        prov = provenance_summary(rows)
+        self.assertTrue(prov["mixed_provenance"])
+        self.assertEqual(sorted(prov["unique_evaluator_source_sha256"]),
+                         ["h1", "h2"])
+        self.assertTrue(prov["any_git_dirty"])
+
+    def test_provenance_summary_legacy_rows_not_mixed(self):
+        # historical 736-unit rows lack the new fields entirely: they map to
+        # a single 'unrecorded' bucket and must remain analyzable, not mixed
+        from dexpbt_isaaclab.ccrs.eval_protocol import (
+            PROVENANCE_UNRECORDED, provenance_summary)
+        rows = [{"git_sha": "bc749d2"} for _ in range(3)]
+        prov = provenance_summary(rows)
+        self.assertFalse(prov["mixed_provenance"])
+        self.assertFalse(prov["any_git_dirty"])
+        self.assertEqual(prov["unique_evaluator_source_sha256"],
+                         [PROVENANCE_UNRECORDED])
+        self.assertEqual(prov["unique_git_sha"], ["bc749d2"])
+
+    def test_aggregate_writes_provenance_summary(self):
+        from dexpbt_isaaclab.ccrs.eval_protocol import aggregate_raw_dir
+        u = _mk_unit(num_episodes=2, num_envs=4)
+        row = _mk_row(u, nsuccs=[1.0, 2.0])
+        with tempfile.TemporaryDirectory() as td:
+            raw = Path(td) / "raw"
+            raw.mkdir()
+            (raw / "r1.json").write_text(json.dumps(row))
+            n = aggregate_raw_dir(raw, Path(td) / "out.jsonl",
+                                  Path(td) / "out.csv")
+            self.assertEqual(n, 1)
+            prov = json.loads(
+                (Path(td) / "aggregation_provenance.json").read_text())
+            self.assertIn("mixed_provenance", prov)
+            self.assertIn("unique_git_sha", prov)
+            self.assertIn("any_git_dirty", prov)
+            self.assertFalse(prov["mixed_provenance"])
+
+
+def _mk_cmp_point(tol, diff, lo, hi, pairing=True):
+    """Synthetic ComparisonPoint with the three judgements derived from
+    (diff, lo, hi) exactly as compare_checkpoints does."""
+    from dexpbt_isaaclab.ccrs.frontier import (
+        PREREG_MIN_EFFECT, ComparisonPoint, practical_ci_confirmed)
+    sig = pairing and not math.isnan(lo) and (lo > 0 or hi < 0)
+    pt = abs(diff) >= PREREG_MIN_EFFECT
+    ci = pairing and practical_ci_confirmed(diff, lo, hi)
+    return ComparisonPoint(
+        tolerance=tol, Q_a=0.8, Q_b=0.8 - diff, nsucc_a=40.0, nsucc_b=39.0,
+        diff=diff, ci_lo=lo, ci_hi=hi,
+        statistically_significant=sig,
+        practical_point_estimate=pt,
+        practical_ci_confirmed=ci,
+        significant=sig, practical=bool(sig and pt),
+        n_paired_samples=2048, expected_paired_samples=2048,
+        paired_samples_complete=True, reset_pairing_valid=pairing)
+
+
+class TestPracticalLabels(unittest.TestCase):
+    """Three separate significance/practical judgements (never conflated)."""
+
+    def test_practical_ci_confirmed_rules(self):
+        from dexpbt_isaaclab.ccrs.frontier import practical_ci_confirmed
+        # positive diff: whole CI must clear +threshold
+        self.assertTrue(practical_ci_confirmed(0.10, 0.06, 0.14))
+        self.assertFalse(practical_ci_confirmed(0.10, 0.04, 0.16))
+        # negative diff: whole CI must clear -threshold
+        self.assertTrue(practical_ci_confirmed(-0.10, -0.14, -0.06))
+        self.assertFalse(practical_ci_confirmed(-0.10, -0.16, -0.04))
+        # NaN CI -> never confirmed
+        self.assertFalse(practical_ci_confirmed(0.10, float("nan"), float("nan")))
+
+    def test_ci_straddling_threshold_not_confirmed(self):
+        # the focal real case: dQ=+0.056, CI [0.036, 0.076] at 1.8 cm
+        p = _mk_cmp_point(0.018, 0.056, 0.036, 0.076)
+        self.assertTrue(p.statistically_significant)
+        self.assertTrue(p.practical_point_estimate)
+        self.assertFalse(p.practical_ci_confirmed)
+
+    def test_three_fields_independent(self):
+        # significant but tiny effect
+        p = _mk_cmp_point(0.022, 0.02, 0.01, 0.03)
+        self.assertTrue(p.statistically_significant)
+        self.assertFalse(p.practical_point_estimate)
+        self.assertFalse(p.practical_ci_confirmed)
+        # big effect, fully CI-confirmed
+        p = _mk_cmp_point(0.018, 0.106, 0.085, 0.126)
+        self.assertTrue(p.statistically_significant)
+        self.assertTrue(p.practical_point_estimate)
+        self.assertTrue(p.practical_ci_confirmed)
+        # deprecated alias keeps the old mixed meaning
+        self.assertEqual(p.practical,
+                         p.statistically_significant and p.practical_point_estimate)
+
+    def test_invalid_pairing_disables_ci_judgements(self):
+        p = _mk_cmp_point(0.018, 0.10, 0.06, 0.14, pairing=False)
+        self.assertFalse(p.statistically_significant)
+        self.assertFalse(p.practical_ci_confirmed)
+        self.assertTrue(p.practical_point_estimate)  # point scale unaffected
+
+
+class TestEpsilonDominance(unittest.TestCase):
+    def test_point_dominance_without_ci_confirmation(self):
+        # mirrors p1 tip vs p5 peak: slightly behind (< eps) on loose tols,
+        # ahead by > eps at the tight end, but ci_lo never clears +eps
+        from dexpbt_isaaclab.ccrs.frontier import epsilon_dominance
+        pts = [
+            _mk_cmp_point(0.028, -0.025, -0.046, -0.002),
+            _mk_cmp_point(0.021, -0.017, -0.034, -0.001),
+            _mk_cmp_point(0.018, +0.056, +0.036, +0.076),
+        ]
+        d = epsilon_dominance(pts, epsilon=0.05)
+        self.assertTrue(d["point_estimate_epsilon_dominance"])
+        self.assertFalse(d["ci_confirmed_epsilon_dominance"])
+        self.assertEqual(d["pt_better_tols"], [0.018])
+        self.assertEqual(d["ci_better_tols"], [])
+
+    def test_ci_confirmed_dominance(self):
+        from dexpbt_isaaclab.ccrs.frontier import epsilon_dominance
+        pts = [
+            _mk_cmp_point(0.028, +0.01, -0.01, +0.03),
+            _mk_cmp_point(0.018, +0.11, +0.08, +0.14),
+        ]
+        d = epsilon_dominance(pts, epsilon=0.05)
+        self.assertTrue(d["point_estimate_epsilon_dominance"])
+        self.assertTrue(d["ci_confirmed_epsilon_dominance"])
+
+    def test_no_dominance_when_worse_beyond_epsilon(self):
+        from dexpbt_isaaclab.ccrs.frontier import epsilon_dominance
+        pts = [
+            _mk_cmp_point(0.028, -0.08, -0.10, -0.06),  # worse by > eps
+            _mk_cmp_point(0.018, +0.11, +0.08, +0.14),
+        ]
+        d = epsilon_dominance(pts, epsilon=0.05)
+        self.assertFalse(d["point_estimate_epsilon_dominance"])
+        self.assertFalse(d["ci_confirmed_epsilon_dominance"])
+
+    def test_invalid_pairing_blocks_ci_dominance(self):
+        from dexpbt_isaaclab.ccrs.frontier import epsilon_dominance
+        pts = [_mk_cmp_point(0.018, +0.11, +0.08, +0.14, pairing=False)]
+        d = epsilon_dominance(pts, epsilon=0.05)
+        self.assertFalse(d["ci_confirmed_epsilon_dominance"])
+
 
 class TestFrontier(unittest.TestCase):
     def _table(self, crossing=True):
@@ -980,7 +1136,13 @@ class TestFrontier(unittest.TestCase):
         by_tol = {round(p.tolerance, 3): p for p in pts}
         self.assertLess(by_tol[0.028].diff, 0)   # B better loose
         self.assertGreater(by_tol[0.018].diff, 0)  # A better tight
-        self.assertTrue(by_tol[0.018].practical)
+        p18 = by_tol[0.018]
+        self.assertTrue(p18.statistically_significant)
+        self.assertTrue(p18.practical_point_estimate)
+        # deprecated alias consistent with old mixed definition
+        self.assertEqual(p18.practical,
+                         p18.statistically_significant
+                         and p18.practical_point_estimate)
 
     def test_incomplete_paired_samples_flagged(self):
         from dexpbt_isaaclab.ccrs.frontier import compare_checkpoints
@@ -998,14 +1160,35 @@ class TestFrontier(unittest.TestCase):
         c = assess_crossing(pts, region_b_better=[0.028, 0.021],
                             region_a_better=[0.019, 0.018])
         self.assertTrue(c["numerical_crossing"])
-        self.assertTrue(c["practical_crossing"])
+        self.assertTrue(c["practical_crossing_point_estimate"])
         c2 = assess_crossing(
             compare_checkpoints(self._table(crossing=False), (1, 160), (5, 117),
                                 [0.028, 0.021, 0.019, 0.018], n_boot=100,
                                 expected_paired_samples=8),
             region_b_better=[0.028, 0.021], region_a_better=[0.019, 0.018])
         self.assertFalse(c2["numerical_crossing"])
-        self.assertFalse(c2["practical_crossing"])
+        self.assertFalse(c2["practical_crossing_point_estimate"])
+        self.assertFalse(c2["practical_crossing_ci_confirmed"])
+
+    def test_numerical_crossing_is_not_practical_crossing(self):
+        # sign flips but every diff is below the practical threshold, and no
+        # CI clears it: numerical crossing yes, practical crossing (both
+        # levels) no. Mirrors the real p1 tip vs p5 peak outcome.
+        from dexpbt_isaaclab.ccrs.frontier import assess_crossing
+        pts = [
+            _mk_cmp_point(0.028, -0.025, -0.046, -0.002),
+            _mk_cmp_point(0.021, -0.017, -0.034, -0.001),
+            _mk_cmp_point(0.019, +0.025, -0.004, +0.054),
+            _mk_cmp_point(0.018, +0.056, +0.036, +0.076),
+        ]
+        c = assess_crossing(pts, region_b_better=[0.028, 0.021],
+                            region_a_better=[0.019, 0.018])
+        self.assertTrue(c["numerical_crossing"])
+        # 1.8 cm is practical at point scale on A's side, but B's side never
+        # reaches the threshold -> no practical crossing at either level
+        self.assertEqual(c["a_better_practical_point_tols"], [0.018])
+        self.assertFalse(c["practical_crossing_point_estimate"])
+        self.assertFalse(c["practical_crossing_ci_confirmed"])
 
     def test_envelope_numerical_vs_practical_separate(self):
         from dexpbt_isaaclab.ccrs.frontier import best_checkpoint_envelope
@@ -1016,9 +1199,14 @@ class TestFrontier(unittest.TestCase):
         by_tol = {round(e.tolerance, 3): e for e in env}
         self.assertEqual(by_tol[0.028].best_label, "p5 peak")
         self.assertEqual(by_tol[0.018].best_label, "p1 tip")
-        # numerical best is always defined; practical is a separate flag
+        # numerical best is always defined; the three judgements are
+        # separate flags, and the envelope is marked exploratory
         for e in env:
-            self.assertIsInstance(e.practical, bool)
+            self.assertIsInstance(e.statistically_significant, bool)
+            self.assertIsInstance(e.practical_point_estimate, bool)
+            self.assertIsInstance(e.practical_ci_confirmed, bool)
+            self.assertEqual(e.inference_kind,
+                             "exploratory_post_selection_uncorrected")
             self.assertGreaterEqual(e.diff_best_second, 0.0)
 
 

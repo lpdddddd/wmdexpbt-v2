@@ -1030,6 +1030,8 @@
         0.018
       ],
       "numerical_crossing": true,
+      "practical_crossing_point_estimate": false,
+      "practical_crossing_ci_confirmed": false,
       "practical_crossing": false,
       "b_better_numerical_tols": [
         0.028,
@@ -1043,76 +1045,226 @@
         0.019,
         0.018
       ],
-      "b_better_practical_tols": [],
-      "a_better_practical_tols": [
+      "b_better_practical_point_tols": [],
+      "a_better_practical_point_tols": [
         0.018
       ],
-      "reset_pairing_valid": true
+      "b_better_practical_ci_tols": [],
+      "a_better_practical_ci_tols": [],
+      "reset_pairing_valid": true,
+      "note": "numerical crossing alone is not evidence for multi-checkpoint archiving decisions"
     },
+    "epsilon_dominance": {
+      "p1 tip vs p5 peak": {
+        "epsilon": 0.05,
+        "n_tolerances": 8,
+        "point_estimate_epsilon_dominance": true,
+        "pt_never_worse_than_minus_eps": true,
+        "pt_better_than_plus_eps_somewhere": true,
+        "pt_better_tols": [
+          0.018
+        ],
+        "pt_worst_diff": -0.02573242187499991,
+        "ci_confirmed_epsilon_dominance": false,
+        "ci_never_worse_than_minus_eps": true,
+        "ci_better_than_plus_eps_somewhere": false,
+        "ci_better_tols": [],
+        "ci_worst_lo": -0.04634765625000037,
+        "reset_pairing_valid": true
+      },
+      "p1 tip vs p1 peak": {
+        "epsilon": 0.05,
+        "n_tolerances": 8,
+        "point_estimate_epsilon_dominance": true,
+        "pt_never_worse_than_minus_eps": true,
+        "pt_better_than_plus_eps_somewhere": true,
+        "pt_better_tols": [
+          0.02,
+          0.019,
+          0.018
+        ],
+        "pt_worst_diff": 0.008769531249999352,
+        "ci_confirmed_epsilon_dominance": true,
+        "ci_never_worse_than_minus_eps": true,
+        "ci_better_than_plus_eps_somewhere": true,
+        "ci_better_tols": [
+          0.018
+        ],
+        "ci_worst_lo": -0.01171875000000111,
+        "reset_pairing_valid": true
+      },
+      "p1 tip vs p3 tip": {
+        "epsilon": 0.05,
+        "n_tolerances": 8,
+        "point_estimate_epsilon_dominance": true,
+        "pt_never_worse_than_minus_eps": true,
+        "pt_better_than_plus_eps_somewhere": true,
+        "pt_better_tols": [
+          0.028,
+          0.025,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "pt_worst_diff": 0.07020507812500021,
+        "ci_confirmed_epsilon_dominance": true,
+        "ci_never_worse_than_minus_eps": true,
+        "ci_better_than_plus_eps_somewhere": true,
+        "ci_better_tols": [
+          0.028,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "ci_worst_lo": 0.04521484374999962,
+        "reset_pairing_valid": true
+      },
+      "p1 tip vs p4 tip": {
+        "epsilon": 0.05,
+        "n_tolerances": 8,
+        "point_estimate_epsilon_dominance": true,
+        "pt_never_worse_than_minus_eps": true,
+        "pt_better_than_plus_eps_somewhere": true,
+        "pt_better_tols": [
+          0.028,
+          0.025,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "pt_worst_diff": 0.10804687500000054,
+        "ci_confirmed_epsilon_dominance": true,
+        "ci_never_worse_than_minus_eps": true,
+        "ci_better_than_plus_eps_somewhere": true,
+        "ci_better_tols": [
+          0.028,
+          0.025,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "ci_worst_lo": 0.08806640624999962,
+        "reset_pairing_valid": true
+      },
+      "p1 tip vs p5 tip": {
+        "epsilon": 0.05,
+        "n_tolerances": 8,
+        "point_estimate_epsilon_dominance": true,
+        "pt_never_worse_than_minus_eps": true,
+        "pt_better_than_plus_eps_somewhere": true,
+        "pt_better_tols": [
+          0.028,
+          0.025,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "pt_worst_diff": 0.09262695312499936,
+        "ci_confirmed_epsilon_dominance": true,
+        "ci_never_worse_than_minus_eps": true,
+        "ci_better_than_plus_eps_somewhere": true,
+        "ci_better_tols": [
+          0.028,
+          0.025,
+          0.023,
+          0.022,
+          0.021,
+          0.02,
+          0.019,
+          0.018
+        ],
+        "ci_worst_lo": 0.0722851562499992,
+        "reset_pairing_valid": true
+      }
+    },
+    "envelope_inference_kind": "exploratory_post_selection_uncorrected",
     "envelope_best_per_tolerance": {
       "0.028": {
         "best": "p5 peak",
-        "best_Q": 0.90775390625,
+        "best_Q": 0.9077539062500003,
         "best_nsucc": 45.3876953125,
         "second": "p2 target",
-        "lead_significant": true,
-        "lead_practical": false
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.025": {
         "best": "p5 peak",
-        "best_Q": 0.90126953125,
+        "best_Q": 0.9012695312500001,
         "best_nsucc": 45.0634765625,
         "second": "p1 tip",
-        "lead_significant": true,
-        "lead_practical": false
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.023": {
         "best": "p5 peak",
         "best_Q": 0.8977734375,
         "best_nsucc": 44.888671875,
         "second": "p1 tip",
-        "lead_significant": true,
-        "lead_practical": false
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.022": {
         "best": "p5 peak",
-        "best_Q": 0.8916015625,
+        "best_Q": 0.8916015624999998,
         "best_nsucc": 44.580078125,
         "second": "p1 tip",
-        "lead_significant": true,
-        "lead_practical": false
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.021": {
         "best": "p5 peak",
-        "best_Q": 0.881455078125,
+        "best_Q": 0.8814550781249996,
         "best_nsucc": 44.07275390625,
         "second": "p1 tip",
-        "lead_significant": true,
-        "lead_practical": false
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.020": {
         "best": "p1 tip",
-        "best_Q": 0.860361328125,
+        "best_Q": 0.8603613281249997,
         "best_nsucc": 43.01806640625,
         "second": "p5 peak",
-        "lead_significant": false,
-        "lead_practical": false
+        "lead_statistically_significant": false,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.019": {
         "best": "p1 tip",
-        "best_Q": 0.83798828125,
+        "best_Q": 0.8379882812499994,
         "best_nsucc": 41.8994140625,
         "second": "p5 peak",
-        "lead_significant": false,
-        "lead_practical": false
+        "lead_statistically_significant": false,
+        "lead_practical_point_estimate": false,
+        "lead_practical_ci_confirmed": false
       },
       "0.018": {
         "best": "p1 tip",
-        "best_Q": 0.815458984375,
+        "best_Q": 0.8154589843749999,
         "best_nsucc": 40.77294921875,
         "second": "p5 peak",
-        "lead_significant": true,
-        "lead_practical": true
+        "lead_statistically_significant": true,
+        "lead_practical_point_estimate": true,
+        "lead_practical_ci_confirmed": false
       }
     }
   },
@@ -1120,6 +1272,21 @@
     "training_commit": "5cb2c7cdafb12e50b9b7db88fdc47e7ef1056f86",
     "recorded_runtime_HEAD": "bc749d2f792fe330ca29755754bf19293229a5e3",
     "committed_runtime_source_snapshot": "2147387528e77071eba080d15b19978f2c09045f",
-    "note": "sweep ran with the ccrs_eval loader fix uncommitted; the fix only inlined eval_fair loader helpers (module-level argparse/AppLauncher import issue) and did not change policy/env/tolerance/metric semantics. git_sha values inside ccrs_results.csv are unmodified."
+    "note": "sweep ran with the ccrs_eval loader fix uncommitted; the fix only inlined eval_fair loader helpers (module-level argparse/AppLauncher import issue) and did not change policy/env/tolerance/metric semantics. git_sha values inside ccrs_results.csv are unmodified.",
+    "aggregation": {
+      "n_rows": 736,
+      "unique_git_sha": [
+        "bc749d2f792fe330ca29755754bf19293229a5e3"
+      ],
+      "unique_evaluator_source_sha256": [
+        "unrecorded"
+      ],
+      "unique_analysis_protocol_version": [
+        "unrecorded"
+      ],
+      "any_git_dirty": false,
+      "mixed_provenance": false
+    },
+    "canonical_interpretation": "CCRS_FINAL_INTERPRETATION.md"
   }
 }

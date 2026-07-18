@@ -549,8 +549,45 @@ CSV_COLUMNS = [
     "terminal_error_q75", "terminal_error_q90", "dropped_rate",
     "reset_fingerprint", "max_consecutive_successes",
     "reset_protocol_version", "metric_protocol_version",
-    "git_sha", "config_hash", "checkpoint_hash", "checkpoint_path",
+    "git_sha", "git_dirty", "evaluator_source_sha256",
+    "analysis_protocol_version",
+    "config_hash", "checkpoint_hash", "checkpoint_path",
 ]
+
+# Sentinel used in provenance summaries for rows that predate the
+# git_dirty / evaluator_source_sha256 / analysis_protocol_version fields.
+# Historical rows are NEVER rewritten — their absence is reported as-is.
+PROVENANCE_UNRECORDED = "unrecorded"
+
+
+def provenance_summary(rows: list[dict]) -> dict:
+    """Summarise code provenance across aggregated result rows.
+
+    mixed_provenance=True when more than one RECORDED evaluator source hash
+    or analysis protocol version is present (rows lacking the fields count
+    as a single 'unrecorded' bucket and do not by themselves trigger mixing,
+    but a mix of recorded + unrecorded does).
+    """
+    def _uniq(field: str) -> list:
+        vals = set()
+        for r in rows:
+            v = r.get(field)
+            vals.add(PROVENANCE_UNRECORDED if v in (None, "") else v)
+        return sorted(vals, key=str)
+
+    uniq_sha = _uniq("git_sha")
+    uniq_src = _uniq("evaluator_source_sha256")
+    uniq_proto = _uniq("analysis_protocol_version")
+    any_dirty = any(r.get("git_dirty") is True for r in rows)
+    mixed = len(uniq_src) > 1 or len(uniq_proto) > 1
+    return {
+        "n_rows": len(rows),
+        "unique_git_sha": uniq_sha,
+        "unique_evaluator_source_sha256": uniq_src,
+        "unique_analysis_protocol_version": uniq_proto,
+        "any_git_dirty": any_dirty,
+        "mixed_provenance": mixed,
+    }
 
 
 def aggregate_raw_dir(raw_dir: Path, jsonl_out: Path, csv_out: Path) -> int:
@@ -559,6 +596,12 @@ def aggregate_raw_dir(raw_dir: Path, jsonl_out: Path, csv_out: Path) -> int:
     Only status=ok rows with the CURRENT schema version are aggregated;
     old-schema and incomplete rows are excluded (never silently mixed in).
     Per-sample arrays are kept in the jsonl but not the csv.
+
+    A provenance summary (unique git_sha / evaluator_source_sha256 /
+    analysis_protocol_version, any git_dirty, mixed_provenance flag) is
+    written next to jsonl_out as aggregation_provenance.json. Mixed
+    evaluator hashes or protocol versions trigger a loud warning — they are
+    flagged, never silently blended. Historical rows are not modified.
     Returns number of rows written.
     """
     import csv as _csv
@@ -586,6 +629,18 @@ def aggregate_raw_dir(raw_dir: Path, jsonl_out: Path, csv_out: Path) -> int:
         w.writeheader()
         for r in rows:
             w.writerow(r)
+    prov = provenance_summary(rows)
+    prov_out = jsonl_out.parent / "aggregation_provenance.json"
+    prov_out.write_text(json.dumps(prov, indent=2) + "\n")
+    if prov["mixed_provenance"]:
+        print("[ccrs.aggregate] WARNING: mixed provenance detected — "
+              f"evaluator_source_sha256={prov['unique_evaluator_source_sha256']} "
+              f"analysis_protocol_version={prov['unique_analysis_protocol_version']}. "
+              "Results from different evaluator code versions are being "
+              "aggregated together; interpret with care.")
+    if prov["any_git_dirty"]:
+        print("[ccrs.aggregate] WARNING: some rows were produced from a dirty "
+              "git worktree (git_dirty=true).")
     if skipped_old_schema or skipped_incomplete:
         print(f"[ccrs.aggregate] skipped {skipped_old_schema} old-schema and "
               f"{skipped_incomplete} incomplete raw files")

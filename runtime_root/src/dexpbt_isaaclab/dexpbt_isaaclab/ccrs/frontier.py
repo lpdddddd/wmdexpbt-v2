@@ -6,17 +6,20 @@ reset fingerprints) and produces:
 
 1. Named pairwise checkpoint comparisons (e.g. p1 tip vs p5 peak) on the
    fixed tolerance grid, with strict fingerprint pairing, hierarchical
-   paired bootstrap CIs, practical-threshold flags and paired-sample
-   completeness checks.
+   paired bootstrap CIs and paired-sample completeness checks. Each point
+   carries THREE separate judgements: statistically_significant (CI excludes
+   0), practical_point_estimate (|diff| >= PREREG_MIN_EFFECT), and
+   practical_ci_confirmed (whole CI beyond the threshold).
 2. Best-checkpoint capability envelope: per fixed tolerance, the
    numerically best and second-best checkpoints among a given set, with the
-   paired CI of their difference. "Numerically best" and "practically
-   significantly best" are reported as SEPARATE fields — a checkpoint can
-   lead numerically without the lead being statistically or practically
-   meaningful.
-3. Curve-crossing assessment between two checkpoints: A significantly +
-   practically better in one tolerance region while B is in another.
-4. Figures: best_checkpoint_envelope.png, peak_tip_temporal_differences.png.
+   paired CI of their difference. EXPLORATORY / POST-SELECTION: the winner
+   is chosen from the same data as the CI and no family-wise
+   multiple-comparison correction is applied — never confirmatory.
+3. Curve-crossing assessment between two checkpoints at three levels:
+   numerical, practical point-estimate, practical CI-confirmed.
+4. Epsilon practical dominance (epsilon = PREREG_MIN_EFFECT): point-estimate
+   and CI-confirmed variants.
+5. Figures: best_checkpoint_envelope.png, peak_tip_temporal_differences.png.
 
 All comparisons use the PRIMARY metric normalized_nsucc (Q); raw nsucc_mean
 is attached as context. Practical threshold: PREREG_MIN_EFFECT (0.05
@@ -52,9 +55,40 @@ from .analysis import (
 )
 
 
+def practical_ci_confirmed(diff: float, ci_lo: float, ci_hi: float,
+                           threshold: float = PREREG_MIN_EFFECT) -> bool:
+    """CI-level practical confirmation: the WHOLE 95% CI lies beyond the
+    practical threshold on the side of the point estimate.
+
+    Positive diff: requires ci_lo >= +threshold.
+    Negative diff: requires ci_hi <= -threshold.
+    A significant effect whose CI straddles the threshold (e.g. diff=+0.056,
+    CI [0.036, 0.076]) is practical at point-estimate scale but NOT
+    CI-confirmed.
+    """
+    if math.isnan(ci_lo) or math.isnan(ci_hi):
+        return False
+    if diff >= 0:
+        return ci_lo >= threshold
+    return ci_hi <= -threshold
+
+
 @dataclass
 class ComparisonPoint:
-    """A vs B at one fixed tolerance (paired samples)."""
+    """A vs B at one fixed tolerance (paired samples).
+
+    Three separate judgements (never conflated):
+    - statistically_significant: 95% CI excludes zero (pairing valid);
+    - practical_point_estimate:  |diff| >= PREREG_MIN_EFFECT (point scale);
+    - practical_ci_confirmed:    the whole CI lies beyond the threshold
+                                 (ci_lo >= +thr for positive diffs,
+                                  ci_hi <= -thr for negative diffs).
+
+    `significant` / `practical` are DEPRECATED aliases kept for output
+    compatibility: significant == statistically_significant; practical ==
+    statistically_significant AND practical_point_estimate (the old mixed
+    definition). New reporting must use the three explicit fields.
+    """
     tolerance: float
     Q_a: float
     Q_b: float
@@ -63,8 +97,11 @@ class ComparisonPoint:
     diff: float                     # Q_a - Q_b
     ci_lo: float
     ci_hi: float
-    significant: bool               # CI excludes 0 AND pairing valid
-    practical: bool                 # significant AND |diff| >= PREREG_MIN_EFFECT
+    statistically_significant: bool
+    practical_point_estimate: bool
+    practical_ci_confirmed: bool
+    significant: bool               # DEPRECATED alias
+    practical: bool                 # DEPRECATED (old mixed definition)
     n_paired_samples: int
     expected_paired_samples: int
     paired_samples_complete: bool
@@ -135,12 +172,17 @@ def compare_checkpoints(
             except ResetPairingError as e:
                 pairing = PairingCheck(False, len(common), reason=str(e))
         sig = (pairing.valid and not math.isnan(lo) and (lo > 0 or hi < 0))
+        prac_point = abs(diff) >= PREREG_MIN_EFFECT
+        prac_ci = pairing.valid and practical_ci_confirmed(diff, lo, hi)
         out.append(ComparisonPoint(
             tolerance=tol,
             Q_a=q_a, Q_b=q_b, nsucc_a=ns_a, nsucc_b=ns_b,
             diff=diff, ci_lo=lo, ci_hi=hi,
+            statistically_significant=sig,
+            practical_point_estimate=prac_point,
+            practical_ci_confirmed=prac_ci,
             significant=sig,
-            practical=bool(sig and abs(diff) >= PREREG_MIN_EFFECT),
+            practical=bool(sig and prac_point),
             n_paired_samples=len(common),
             expected_paired_samples=int(expected_paired_samples),
             paired_samples_complete=(len(common) == int(expected_paired_samples)),
@@ -157,7 +199,14 @@ def compare_checkpoints(
 
 @dataclass
 class EnvelopePoint:
-    """Per-tolerance ranking of checkpoints on Q (numerical vs practical)."""
+    """Per-tolerance ranking of checkpoints on Q.
+
+    EXPLORATORY / POST-SELECTION: the winner is selected from the same data
+    the pointwise CI is computed on, and no family-wise multiple-comparison
+    correction is applied. These CIs must not be read as confirmatory
+    "significantly best" statements; use the pre-named comparisons for
+    confirmatory claims.
+    """
     tolerance: float
     best: tuple[int, int]           # numerically best (worker, iteration)
     best_label: str
@@ -170,9 +219,13 @@ class EnvelopePoint:
     diff_best_second: float
     ci_lo: float
     ci_hi: float
-    significant: bool
-    practical: bool                 # best lead is significant AND >= threshold
+    statistically_significant: bool
+    practical_point_estimate: bool
+    practical_ci_confirmed: bool
+    significant: bool               # DEPRECATED alias
+    practical: bool                 # DEPRECATED (old mixed definition)
     reset_pairing_valid: bool
+    inference_kind: str = "exploratory_post_selection_uncorrected"
 
 
 def best_checkpoint_envelope(
@@ -198,12 +251,13 @@ def best_checkpoint_envelope(
         pts = compare_checkpoints(table, k1, k2, [tol], n_boot=n_boot)
         if pts:
             p = pts[0]
-            lo, hi, sig, prac, pv = (p.ci_lo, p.ci_hi, p.significant,
-                                     p.practical, p.reset_pairing_valid)
-            diff = p.diff
+            lo, hi, pv, diff = p.ci_lo, p.ci_hi, p.reset_pairing_valid, p.diff
+            sig, prac_pt, prac_ci = (p.statistically_significant,
+                                     p.practical_point_estimate,
+                                     p.practical_ci_confirmed)
         else:
             lo = hi = float("nan")
-            sig = prac = pv = False
+            sig = prac_pt = prac_ci = pv = False
             diff = q1 - q2
         out.append(EnvelopePoint(
             tolerance=tol,
@@ -212,7 +266,11 @@ def best_checkpoint_envelope(
             second=k2, second_label=checkpoints[k2],
             second_Q=q2, second_nsucc=table.Q(CellKey(*k2, tol), METRIC_NSUCC_MEAN),
             diff_best_second=diff, ci_lo=lo, ci_hi=hi,
-            significant=sig, practical=prac, reset_pairing_valid=pv,
+            statistically_significant=sig,
+            practical_point_estimate=prac_pt,
+            practical_ci_confirmed=prac_ci,
+            significant=sig, practical=bool(sig and prac_pt),
+            reset_pairing_valid=pv,
         ))
     out.sort(key=lambda p: -p.tolerance)
     return out
@@ -227,30 +285,99 @@ def assess_crossing(
     region_b_better: list[float],
     region_a_better: list[float],
 ) -> dict:
-    """Crossing between A and B (points = A - B):
+    """Crossing between A and B (points = A - B), three separate levels:
 
-    numerical crossing: sign of the diff flips between the two regions;
-    practical crossing: B practically better (diff <= -threshold, sig) at
-    some tol in region_b_better AND A practically better (diff >= +threshold,
-    sig) at some tol in region_a_better. Reported separately.
+    - numerical_crossing: the sign of the point estimate flips between the
+      two regions (no magnitude or CI requirement);
+    - practical_crossing_point_estimate: both regions contain a point
+      estimate beyond +/- PREREG_MIN_EFFECT in their respective directions
+      (statistical significance also required on each side);
+    - practical_crossing_ci_confirmed: both sides additionally have the
+      whole CI beyond the threshold (practical_ci_confirmed).
+
+    A numerical crossing on its own is a weak observation and must not be
+    auto-interpreted as evidence for architectural decisions (e.g. a
+    multi-checkpoint archive).
+
+    `practical_crossing` is a DEPRECATED alias of
+    practical_crossing_point_estimate.
     """
     def _in(t: float, region: list[float]) -> bool:
         return any(abs(t - r) < 1e-9 for r in region)
 
     b_num = [p for p in points if _in(p.tolerance, region_b_better) and p.diff < 0]
     a_num = [p for p in points if _in(p.tolerance, region_a_better) and p.diff > 0]
-    b_prac = [p for p in b_num if p.practical]
-    a_prac = [p for p in a_num if p.practical]
+    b_pt = [p for p in b_num
+            if p.statistically_significant and p.practical_point_estimate]
+    a_pt = [p for p in a_num
+            if p.statistically_significant and p.practical_point_estimate]
+    b_ci = [p for p in b_num if p.practical_ci_confirmed]
+    a_ci = [p for p in a_num if p.practical_ci_confirmed]
     pairing_ok = all(p.reset_pairing_valid for p in points) if points else False
     return {
         "region_b_better_tols_m": region_b_better,
         "region_a_better_tols_m": region_a_better,
         "numerical_crossing": bool(b_num and a_num),
-        "practical_crossing": bool(pairing_ok and b_prac and a_prac),
+        "practical_crossing_point_estimate": bool(pairing_ok and b_pt and a_pt),
+        "practical_crossing_ci_confirmed": bool(pairing_ok and b_ci and a_ci),
+        "practical_crossing": bool(pairing_ok and b_pt and a_pt),  # DEPRECATED alias
         "b_better_numerical_tols": [p.tolerance for p in b_num],
         "a_better_numerical_tols": [p.tolerance for p in a_num],
-        "b_better_practical_tols": [p.tolerance for p in b_prac],
-        "a_better_practical_tols": [p.tolerance for p in a_prac],
+        "b_better_practical_point_tols": [p.tolerance for p in b_pt],
+        "a_better_practical_point_tols": [p.tolerance for p in a_pt],
+        "b_better_practical_ci_tols": [p.tolerance for p in b_ci],
+        "a_better_practical_ci_tols": [p.tolerance for p in a_ci],
+        "reset_pairing_valid": pairing_ok,
+        "note": ("numerical crossing alone is not evidence for "
+                 "multi-checkpoint archiving decisions"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Epsilon practical dominance
+# ---------------------------------------------------------------------------
+
+def epsilon_dominance(
+    points: list[ComparisonPoint],
+    epsilon: float = PREREG_MIN_EFFECT,
+) -> dict:
+    """Pairwise epsilon-dominance of A over B across all compared tolerances
+    (points = A - B).
+
+    - point_estimate_epsilon_dominance: A is never worse than B by more than
+      epsilon at ANY tolerance (diff >= -epsilon everywhere) AND is better
+      than B by more than epsilon at AT LEAST one tolerance (diff >= +epsilon
+      somewhere).
+    - ci_confirmed_epsilon_dominance: the same relation supported by the
+      paired CIs: ci_lo >= -epsilon at every tolerance AND ci_lo >= +epsilon
+      at at least one tolerance. Requires valid reset pairing and CIs at all
+      points.
+    """
+    if not points:
+        return {"epsilon": epsilon,
+                "point_estimate_epsilon_dominance": False,
+                "ci_confirmed_epsilon_dominance": False,
+                "reason": "no points"}
+    pairing_ok = all(p.reset_pairing_valid for p in points)
+    cis_ok = pairing_ok and all(not math.isnan(p.ci_lo) for p in points)
+    never_worse_pt = all(p.diff >= -epsilon for p in points)
+    better_somewhere_pt = any(p.diff >= epsilon for p in points)
+    never_worse_ci = cis_ok and all(p.ci_lo >= -epsilon for p in points)
+    better_somewhere_ci = cis_ok and any(p.ci_lo >= epsilon for p in points)
+    return {
+        "epsilon": epsilon,
+        "n_tolerances": len(points),
+        "point_estimate_epsilon_dominance": bool(never_worse_pt and better_somewhere_pt),
+        "pt_never_worse_than_minus_eps": never_worse_pt,
+        "pt_better_than_plus_eps_somewhere": better_somewhere_pt,
+        "pt_better_tols": [p.tolerance for p in points if p.diff >= epsilon],
+        "pt_worst_diff": min(p.diff for p in points),
+        "ci_confirmed_epsilon_dominance": bool(never_worse_ci and better_somewhere_ci),
+        "ci_never_worse_than_minus_eps": bool(never_worse_ci),
+        "ci_better_than_plus_eps_somewhere": bool(better_somewhere_ci),
+        "ci_better_tols": [p.tolerance for p in points
+                           if cis_ok and p.ci_lo >= epsilon],
+        "ci_worst_lo": (min(p.ci_lo for p in points) if cis_ok else float("nan")),
         "reset_pairing_valid": pairing_ok,
     }
 
@@ -284,17 +411,25 @@ def fig_envelope(
                 label=label if bold else None,
                 zorder=3 if bold else 1)
     for e in envelope:
-        marker = "*" if e.practical else ("^" if e.significant else ".")
-        ax.scatter(e.tolerance * 100, e.best_Q, s=160 if e.practical else 70,
+        if e.practical_ci_confirmed:
+            marker, size = "*", 170
+        elif e.statistically_significant and e.practical_point_estimate:
+            marker, size = "s", 90
+        elif e.statistically_significant:
+            marker, size = "^", 70
+        else:
+            marker, size = ".", 60
+        ax.scatter(e.tolerance * 100, e.best_Q, s=size,
                    marker=marker, color="k", zorder=5)
         ax.annotate(e.best_label, (e.tolerance * 100, e.best_Q),
                     xytext=(0, 9), textcoords="offset points",
                     ha="center", fontsize=7)
     ax.set_xlabel("fixed tolerance (cm)")
     ax.set_ylabel("Q = normalized nsucc")
-    ax.set_title("Best-checkpoint capability envelope\n"
-                 "(★ lead is significant + practical; ▲ significant only; "
-                 "· numerical only)")
+    ax.set_title("Best-checkpoint capability envelope "
+                 "[EXPLORATORY / post-selection, no multiplicity correction]\n"
+                 "lead vs 2nd: ★ practical CI-confirmed; ■ significant + "
+                 "practical point estimate; ▲ significant only; · numerical only")
     ax.invert_xaxis()
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc="lower left")
@@ -324,13 +459,17 @@ def fig_peak_tip_differences(
                             [p.ci_hi for p in comp.points],
                             color=line.get_color(), alpha=0.15)
         for p in comp.points:
-            if p.practical:
+            if p.practical_ci_confirmed:
                 ax.annotate("*", (p.tolerance * 100, p.diff), fontsize=13,
+                            ha="center", color=line.get_color())
+            elif p.statistically_significant and p.practical_point_estimate:
+                ax.annotate("+", (p.tolerance * 100, p.diff), fontsize=11,
                             ha="center", color=line.get_color())
     ax.set_xlabel("fixed tolerance (cm)")
     ax.set_ylabel("ΔQ = Q(tip) − Q(peak)")
     ax.set_title("Peak → tip temporal capability change per worker\n"
-                 "(* = significant + practical; negative = forgetting)")
+                 "(* practical CI-confirmed; + significant with practical "
+                 "point estimate; negative = forgetting)")
     ax.invert_xaxis()
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
@@ -364,6 +503,18 @@ NAMED_COMPARISONS: list[tuple[str, tuple[int, int], tuple[int, int]]] = [
     ("p4 tip vs p4 peak", (4, 160), (4, 141)),
     ("p3 tip vs p3 peak", (3, 160), (3, 159)),
     ("p5 tip vs p5 peak", (5, 160), (5, 117)),
+    ("p1 tip vs p3 tip", (1, 160), (3, 160)),
+    ("p1 tip vs p4 tip", (1, 160), (4, 160)),
+    ("p1 tip vs p5 tip", (1, 160), (5, 160)),
+]
+
+# A-vs-B pairs analysed for epsilon practical dominance (epsilon = 0.05).
+DOMINANCE_PAIRS: list[str] = [
+    "p1 tip vs p5 peak",
+    "p1 tip vs p1 peak",
+    "p1 tip vs p3 tip",
+    "p1 tip vs p4 tip",
+    "p1 tip vs p5 tip",
 ]
 
 
@@ -398,9 +549,16 @@ def run(results_jsonl: Path, out_dir: Path, n_boot: int = 2000,
         region_a_better=[0.020, 0.019, 0.018],
     )
 
+    dominance = {}
+    for name in DOMINANCE_PAIRS:
+        comp = next(c for c in comparisons if c.name == name)
+        dominance[name] = epsilon_dominance(comp.points)
+
     fig_envelope(table, BASE_RETENTION_CHECKPOINTS, envelope,
                  fig_dir / "best_checkpoint_envelope.png")
-    temporal = [c for c in comparisons if c.name != "p1 tip vs p5 peak"]
+    temporal = [c for c in comparisons
+                if c.name in ("p1 tip vs p1 peak", "p3 tip vs p3 peak",
+                              "p4 tip vs p4 peak", "p5 tip vs p5 peak")]
     fig_peak_tip_differences(temporal,
                              fig_dir / "peak_tip_temporal_differences.png")
 
@@ -417,6 +575,10 @@ def run(results_jsonl: Path, out_dir: Path, n_boot: int = 2000,
                 "points": [dataclasses.asdict(p) for p in c.points],
             } for c in comparisons
         ],
+        "envelope_inference_kind": "exploratory_post_selection_uncorrected",
+        "envelope_note": ("winner selected from the same data as the pointwise "
+                          "CI; no family-wise multiple-comparison correction; "
+                          "not confirmatory"),
         "envelope": [
             {**dataclasses.asdict(e),
              "best": list(e.best),
@@ -424,6 +586,7 @@ def run(results_jsonl: Path, out_dir: Path, n_boot: int = 2000,
             for e in envelope
         ],
         "crossing_p1tip_vs_p5peak": crossing,
+        "epsilon_dominance": dominance,
         "figures": ["best_checkpoint_envelope.png",
                     "peak_tip_temporal_differences.png"],
     }
@@ -442,13 +605,16 @@ def run(results_jsonl: Path, out_dir: Path, n_boot: int = 2000,
         summary["frontier"] = {
             "analysis_protocol_version": ANALYSIS_PROTOCOL_VERSION,
             "crossing_p1tip_vs_p5peak": crossing,
+            "epsilon_dominance": dominance,
+            "envelope_inference_kind": "exploratory_post_selection_uncorrected",
             "envelope_best_per_tolerance": {
                 f"{e.tolerance:.3f}": {
                     "best": e.best_label, "best_Q": e.best_Q,
                     "best_nsucc": e.best_nsucc,
                     "second": e.second_label,
-                    "lead_significant": e.significant,
-                    "lead_practical": e.practical,
+                    "lead_statistically_significant": e.statistically_significant,
+                    "lead_practical_point_estimate": e.practical_point_estimate,
+                    "lead_practical_ci_confirmed": e.practical_ci_confirmed,
                 } for e in envelope
             },
         }
