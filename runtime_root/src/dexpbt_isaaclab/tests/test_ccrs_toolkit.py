@@ -904,6 +904,124 @@ class TestVerdicts(unittest.TestCase):
         self.assertEqual(v["verdict_p5"], "reset_pairing_invalid")
 
 
+class TestProvenance(unittest.TestCase):
+    def test_source_sha256_stable_and_sensitive(self):
+        from dexpbt_isaaclab.ccrs.eval_protocol import source_sha256
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / "a.py"
+            b = Path(td) / "b.py"
+            a.write_text("x = 1\n")
+            b.write_text("y = 2\n")
+            h1 = source_sha256(a, b)
+            h2 = source_sha256(b, a)          # order-independent
+            self.assertEqual(h1, h2)
+            b.write_text("y = 3\n")           # content change -> new hash
+            self.assertNotEqual(h1, source_sha256(a, b))
+
+    def test_git_dirty_detection(self):
+        import subprocess
+        from dexpbt_isaaclab.ccrs.eval_protocol import git_dirty
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-q"], cwd=td, check=True)
+            f = repo / "f.txt"
+            f.write_text("clean")
+            subprocess.run(["git", "add", "f.txt"], cwd=td, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                 "commit", "-qm", "init"], cwd=td, check=True)
+            self.assertFalse(git_dirty(repo))
+            f.write_text("dirty")             # tracked modification
+            self.assertTrue(git_dirty(repo))
+        # non-repo -> None (unknown), not a crash
+        with tempfile.TemporaryDirectory() as td2:
+            self.assertIsNone(git_dirty(Path(td2)))
+
+    def test_result_row_carries_analysis_protocol_version(self):
+        from dexpbt_isaaclab.ccrs.eval_protocol import ANALYSIS_PROTOCOL_VERSION
+        u = _mk_unit(num_episodes=2, num_envs=4)
+        row = _mk_row(u, nsuccs=[1.0, 2.0])
+        self.assertEqual(row["analysis_protocol_version"], ANALYSIS_PROTOCOL_VERSION)
+
+    def test_ccrs_eval_emits_provenance_fields(self):
+        src = (Path(__file__).resolve().parents[1]
+               / "dexpbt_isaaclab" / "scripts" / "ccrs_eval.py").read_text()
+        for fieldname in ("git_dirty", "evaluator_source_sha256",
+                          "analysis_protocol_version"):
+            self.assertIn(fieldname, src)
+        self.assertIn("_code_provenance()", src)
+
+
+class TestFrontier(unittest.TestCase):
+    def _table(self, crossing=True):
+        """A: better at tight tols; B: better at loose tols (if crossing)."""
+        t = CCRSTable()
+        for seed in (1, 2):
+            for tol, qa, qb in [(0.028, 30.0, 40.0), (0.021, 32.0, 36.0),
+                                (0.019, 38.0, 25.0), (0.018, 40.0, 20.0)]:
+                if not crossing:
+                    qa = qb + 5.0
+                t.add_row(_table_row(1, 160, tol, seed, [qa, qa - 2, qa + 2, qa - 1]))
+                t.add_row(_table_row(5, 117, tol, seed, [qb, qb - 2, qb + 2, qb - 1]))
+        return t
+
+    def test_compare_checkpoints_fields(self):
+        from dexpbt_isaaclab.ccrs.frontier import compare_checkpoints
+        t = self._table()
+        pts = compare_checkpoints(t, (1, 160), (5, 117),
+                                  [0.028, 0.018], n_boot=200,
+                                  expected_paired_samples=8)
+        self.assertEqual(len(pts), 2)
+        for p in pts:
+            self.assertTrue(p.reset_pairing_valid)
+            self.assertTrue(p.paired_samples_complete)
+            self.assertEqual(p.n_paired_samples, 8)
+            self.assertFalse(math.isnan(p.ci_lo))
+        by_tol = {round(p.tolerance, 3): p for p in pts}
+        self.assertLess(by_tol[0.028].diff, 0)   # B better loose
+        self.assertGreater(by_tol[0.018].diff, 0)  # A better tight
+        self.assertTrue(by_tol[0.018].practical)
+
+    def test_incomplete_paired_samples_flagged(self):
+        from dexpbt_isaaclab.ccrs.frontier import compare_checkpoints
+        t = self._table()
+        pts = compare_checkpoints(t, (1, 160), (5, 117), [0.028],
+                                  n_boot=50, expected_paired_samples=2048)
+        self.assertFalse(pts[0].paired_samples_complete)
+
+    def test_crossing_assessment(self):
+        from dexpbt_isaaclab.ccrs.frontier import assess_crossing, compare_checkpoints
+        t = self._table(crossing=True)
+        pts = compare_checkpoints(t, (1, 160), (5, 117),
+                                  [0.028, 0.021, 0.019, 0.018], n_boot=200,
+                                  expected_paired_samples=8)
+        c = assess_crossing(pts, region_b_better=[0.028, 0.021],
+                            region_a_better=[0.019, 0.018])
+        self.assertTrue(c["numerical_crossing"])
+        self.assertTrue(c["practical_crossing"])
+        c2 = assess_crossing(
+            compare_checkpoints(self._table(crossing=False), (1, 160), (5, 117),
+                                [0.028, 0.021, 0.019, 0.018], n_boot=100,
+                                expected_paired_samples=8),
+            region_b_better=[0.028, 0.021], region_a_better=[0.019, 0.018])
+        self.assertFalse(c2["numerical_crossing"])
+        self.assertFalse(c2["practical_crossing"])
+
+    def test_envelope_numerical_vs_practical_separate(self):
+        from dexpbt_isaaclab.ccrs.frontier import best_checkpoint_envelope
+        t = self._table()
+        env = best_checkpoint_envelope(
+            t, {(1, 160): "p1 tip", (5, 117): "p5 peak"},
+            [0.028, 0.018], n_boot=200)
+        by_tol = {round(e.tolerance, 3): e for e in env}
+        self.assertEqual(by_tol[0.028].best_label, "p5 peak")
+        self.assertEqual(by_tol[0.018].best_label, "p1 tip")
+        # numerical best is always defined; practical is a separate flag
+        for e in env:
+            self.assertIsInstance(e.practical, bool)
+            self.assertGreaterEqual(e.diff_best_second, 0.0)
+
+
 class TestEvaluatorSourceInvariants(unittest.TestCase):
     """Source-level checks: secondary evidence only (see module docstring)."""
 

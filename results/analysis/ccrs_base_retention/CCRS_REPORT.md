@@ -120,3 +120,70 @@ Tolerances in meters (cm shown for readability).
 ![p1_p4_difference.png](figures/p1_p4_difference.png)
 ![p5_peak_vs_tip.png](figures/p5_peak_vs_tip.png)
 ![dfc_decomposition.png](figures/dfc_decomposition.png)
+
+
+---
+
+# Final interpretation addendum (2026-07-19, supersedes raw verdict wording above)
+
+## Code provenance
+
+- training_commit (all checkpoints): `5cb2c7cdafb12e50b9b7db88fdc47e7ef1056f86`
+- recorded_runtime_HEAD (git_sha stored in ccrs_results.csv):
+  `bc749d2f792fe330ca29755754bf19293229a5e3`
+- committed_runtime_source_snapshot:
+  `2147387528e77071eba080d15b19978f2c09045f`
+
+The sweep ran while the ccrs_eval loader fix was still uncommitted; that fix
+only inlined `eval_fair` loader helpers (module-level argparse/AppLauncher
+cross-import abort) and changed no policy/environment/tolerance/metric
+semantics. Recorded git_sha values in existing CSVs are intentionally left
+unmodified. Future ccrs_eval rows additionally record `git_dirty`,
+`evaluator_source_sha256` and `analysis_protocol_version`.
+
+## Capability frontier (see CCRS_FINAL_INTERPRETATION.md for full tables)
+
+- Best checkpoint per fixed tolerance: p5 peak (it117) is numerically best
+  at 2.8-2.1 cm (leads significant but all < 0.05 practical threshold);
+  p1 tip (it160) is numerically best at 2.0-1.8 cm, with the lead practical
+  at 1.8 cm (dQ = +0.056 over p5 peak).
+- p1 tip vs p5 peak: NUMERICAL curve crossing around 2.0-2.1 cm confirmed;
+  PRACTICAL crossing not confirmed (loose-region gaps < 0.05; tight-region
+  gap practical only at 1.8 cm).
+- p1 tip reaches ~43.0 raw nsucc at fixed 2.0 cm and ~40.8 at fixed 1.8 cm:
+  this run has broken the 2 cm fixed-precision barrier.
+- Figures: figures/best_checkpoint_envelope.png,
+  figures/peak_tip_temporal_differences.png.
+
+## Corrected scientific conclusions
+
+1. p4's smaller live tolerance does not correspond to stronger
+   fixed-precision capability; p1 peak dominates p4 peak at all 8
+   tolerances. The p1/p4 Anchor-Scout hypothesis is refuted.
+2. p5 peak->tip is real policy forgetting at all 8 tolerances (all
+   significant and practical). p1 peak->tip IMPROVED in the high-precision
+   region (practical at 2.0/1.9/1.8 cm).
+3. Of the 22 evaluated exact transitions (p1/p4/p5), 21 satisfy |F| > |C|;
+   the policy-update effect F is the dominant source of capability change.
+   Criterion drift C is a minor factor in this run and must not be
+   presented as a confirmed core conclusion.
+4. The core problem is re-framed as worker-dependent long-horizon
+   capability retention.
+5. Evaluation seeds quantify fixed-checkpoint evaluation uncertainty only;
+   they are not training seeds. This is a single population run: no claims
+   about average method benefit or stability across runs.
+
+## Scope caveat for D/F/C
+
+Exact D/F/C covers only the 22 p1/p4/p5 in-band transitions. The 15 p0/p2/p3
+in-band transitions were not evaluated (exact cells deliberately excluded
+from this sweep); the F-dominated conclusion is limited to the evaluated 22.
+
+## Next-step method direction (candidate only, NOT validated)
+
+Capability-Frontier Retention: maintain multi-tolerance capability vectors
+for archived checkpoints (p5-peak-style loose-region strength and
+p1-tip-style high-precision strength are complementary and cannot be ranked
+by one live scalar); PBT promotion consults the vector, prunes dominated
+archive members, keeps complementary ones. Not implemented, not validated,
+no novelty claim.

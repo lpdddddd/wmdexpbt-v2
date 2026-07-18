@@ -48,9 +48,11 @@ from dexpbt_isaaclab.ccrs.eval_protocol import (
     EVALUATION_MODE_POLICY_ONLY,
     EVALUATION_MODE_SYSTEM_ON,
     EvalUnit,
+    git_dirty,
     is_done,
     make_result_row,
     result_path,
+    source_sha256,
     write_result_atomic,
 )
 from dexpbt_isaaclab.ccrs.rollout_collect import (
@@ -108,6 +110,27 @@ def _git_sha() -> str:
         ).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _code_provenance() -> dict:
+    """git_dirty + hash of the evaluator sources actually executing.
+
+    git_sha alone is insufficient: this sweep can legitimately run from a
+    dirty worktree, in which case HEAD does not identify the code. The
+    source hash covers ccrs_eval.py plus the ccrs protocol modules it
+    depends on for semantics.
+    """
+    here = Path(__file__).resolve()
+    ccrs_dir = here.parent.parent / "ccrs"
+    sources = [here,
+               ccrs_dir / "eval_protocol.py",
+               ccrs_dir / "rollout_collect.py"]
+    from dexpbt_isaaclab.ccrs.eval_protocol import ANALYSIS_PROTOCOL_VERSION
+    return {
+        "git_dirty": git_dirty(here.parent),
+        "evaluator_source_sha256": source_sha256(*sources),
+        "analysis_protocol_version": ANALYSIS_PROTOCOL_VERSION,
+    }
 
 
 def _ckpt_hash(path: Path, head_bytes: int = 4 * 1024 * 1024) -> str:
@@ -334,7 +357,8 @@ def run_unit(unit: EvalUnit) -> dict:
         applied_tolerance_start=tol_at_start,
         applied_tolerance_end=tol_at_end,
         extra={"steps_used": step,
-               "terminal_snapshot_hook_installed": bool(hook_ok)},
+               "terminal_snapshot_hook_installed": bool(hook_ok),
+               **_code_provenance()},
     )
 
 

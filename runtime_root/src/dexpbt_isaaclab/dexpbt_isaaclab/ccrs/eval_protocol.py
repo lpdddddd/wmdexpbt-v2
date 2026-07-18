@@ -50,6 +50,10 @@ EVALUATION_MODE_SYSTEM_ON = "system_on"  # reserved; not mixed with main results
 SCHEMA_VERSION = 2
 RESET_PROTOCOL_VERSION = "v2_first_episode_per_env"
 METRIC_PROTOCOL_VERSION = "v2_normalized_nsucc"
+# Version of the downstream analysis contract (frontier/comparisons). Recorded
+# in every raw row so results can be matched to the analysis code they were
+# interpreted with.
+ANALYSIS_PROTOCOL_VERSION = "v2.1_frontier"
 
 # Fixed-point quantization step for reset fingerprints (meters / radians /
 # quaternion components). Coarse enough to absorb float serialization noise,
@@ -118,6 +122,36 @@ class EvalUnit:
 
 def make_sample_id(reset_seed: int, env_id: int) -> str:
     return f"seed_{reset_seed}_env_{env_id:03d}"
+
+
+# ---------------------------------------------------------------------------
+# Code provenance (recorded per raw row so results remain attributable even
+# when the evaluator ran from a dirty worktree)
+# ---------------------------------------------------------------------------
+
+def git_dirty(repo_dir: Path) -> Optional[bool]:
+    """True when the worktree has uncommitted tracked changes; None when git
+    status cannot be determined."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=str(repo_dir), capture_output=True, text=True, check=True,
+        ).stdout
+        return bool(out.strip())
+    except Exception:
+        return None
+
+
+def source_sha256(*paths: Path) -> str:
+    """SHA-256 over the concatenated contents of the given source files
+    (sorted by name for stability). Identifies the ACTUAL evaluation code
+    regardless of git state."""
+    h = hashlib.sha256()
+    for p in sorted(paths, key=lambda x: str(x)):
+        h.update(str(p.name).encode())
+        h.update(Path(p).read_bytes())
+    return h.hexdigest()[:16]
 
 
 @dataclass
@@ -429,6 +463,7 @@ def make_result_row(
         "status": "ok" if complete else "incomplete",
         "reset_protocol_version": unit.reset_protocol_version,
         "metric_protocol_version": unit.metric_protocol_version,
+        "analysis_protocol_version": ANALYSIS_PROTOCOL_VERSION,
         # identity
         "run_id": unit.run_id,
         "worker_id": unit.worker_id,
