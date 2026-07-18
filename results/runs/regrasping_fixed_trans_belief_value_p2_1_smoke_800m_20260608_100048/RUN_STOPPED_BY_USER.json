@@ -1,7 +1,0 @@
-{
-  "stop_time": "2026-06-08 12:50 CST",
-  "reason": "user_requested_stop",
-  "completed_policies": [0],
-  "partial_policies": [1, 2, 3, 4, 5],
-  "note": "Trans 800M smoke stopped mid-run; checkpoints compacted via cleanup_run.sh keep_top=3"
-}

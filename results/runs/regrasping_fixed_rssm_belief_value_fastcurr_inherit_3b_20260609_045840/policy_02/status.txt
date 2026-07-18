@@ -1,5 +1,0 @@
-status=starting
-attempt=10
-attempt_name=attempt_10_2026-06-09_14-01-11
-start_time=2026-06-09T14:01:11+08:00
-checkpoint=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_belief_value_fastcurr_inherit_3b_20260609_045840/dexpbt_8gpu_ws/restart_p2/000097.pth

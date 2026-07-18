@@ -1,5 +1,0 @@
-status=starting
-attempt=1
-attempt_name=attempt_1_2026-06-09_21-39-00
-start_time=2026-06-09T21:39:00+08:00
-checkpoint=

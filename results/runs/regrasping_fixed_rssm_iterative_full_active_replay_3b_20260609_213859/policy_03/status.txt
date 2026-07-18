@@ -1,5 +1,0 @@
-status=starting
-attempt=2
-attempt_name=attempt_2_2026-06-09_22-29-31
-start_time=2026-06-09T22:29:31+08:00
-checkpoint=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_full_active_replay_3b_20260609_213859/dexpbt_8gpu_ws/restart_p3/000010.pth

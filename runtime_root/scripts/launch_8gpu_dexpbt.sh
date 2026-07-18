@@ -30,7 +30,6 @@ TASK="DexPBT-Reorientation-KukaAllegro-Direct-v0"
 RECOVER_CHECKPOINT=""
 RECOVER_POLICY_IDX=3
 PROFILE_PER_POLICY=""
-RESUME_MANIFEST=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,7 +39,6 @@ while [[ $# -gt 0 ]]; do
     --recover-checkpoint) RECOVER_CHECKPOINT="$2"; shift 2 ;;
     --recover-policy-idx) RECOVER_POLICY_IDX="$2"; shift 2 ;;
     --profile-per-policy) PROFILE_PER_POLICY="$2"; shift 2 ;;
-    --resume-manifest) RESUME_MANIFEST="$2"; shift 2 ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done
@@ -84,5 +82,4 @@ exec python -u -m dexpbt_isaaclab.scripts.launch_pbt \
   ${RECOVER_CHECKPOINT:+--recover-checkpoint="$RECOVER_CHECKPOINT"} \
   ${RECOVER_CHECKPOINT:+--recover-policy-idx="$RECOVER_POLICY_IDX"} \
   ${PROFILE_PER_POLICY:+--profile-per-policy="$PROFILE_PER_POLICY"} \
-  ${RESUME_MANIFEST:+--resume-manifest="$RESUME_MANIFEST"} \
   "${EXTRA[@]}"

@@ -27,8 +27,6 @@ from dexpbt_isaaclab.dexpbt_utils import (
 )
 from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     CurriculumControlState,
-    LateRescueControlMissingError,
-    LateRescueControlParseError,
     RollingNsuccWindow,
     WindowSample,
     SKILL_DELTA_IMPROVE_EPS,
@@ -42,25 +40,8 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     post_shrink_consolidation_active,
     qualifies_best_stable_save,
     read_curriculum_control,
-    read_curriculum_control_required,
     write_curriculum_control,
-    write_curriculum_control_dict,
     write_curriculum_resume_snapshot,
-)
-from dexpbt_isaaclab.pbt.pbt_tolerance_bridge import (
-    DEFAULT_BRIDGE_LADDER,
-    DEFAULT_RETENTION_BINS,
-    ToleranceBinRetentionTracker,
-    bridge_level_id,
-    next_bridge_tolerance,
-    parse_float_tuple,
-    previous_bridge_tolerance,
-)
-from dexpbt_isaaclab.pbt.tolerance_conditioned_archive import select_compatible_archive
-from dexpbt_isaaclab.pbt.late_degradation_rescue import (
-    control_has_collapse_signal,
-    select_late_degradation_rescue_source,
-    source_has_collapse_signal,
 )
 
 # WM imports (lazy — only needed when enable_wm=True)
@@ -84,34 +65,15 @@ from dexpbt_isaaclab.pbt.pbt_control_plane import (
     derive_lineage_frame,
     derive_pbt_iteration,
     evaluate_pbt_tick_schedule,
-    pbt_copy_allowed_for_adaptive_rescue_target,
     pbt_copy_allowed_for_live_source,
     pbt_copy_allowed_for_target,
     pbt_population_frame,
-    population_frame_target_reached,
     pbt_raw_training_frame,
     pbt_scheduler_sync_clock,
     read_latest_commit_info,
     restore_pbt_tick_state_from_workspace,
     snapshot_commit_barrier,
     validate_snapshot_commit,
-)
-from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
-    ChronicBottomState,
-    evaluate_chronic_eligibility,
-    pick_chronic_source,
-    reset_after_chronic_copy,
-    reset_on_lineage_change,
-    skill_delta_with_reason,
-    update_continuous_bottom,
-)
-from dexpbt_isaaclab.pbt.pbt_live_source_health import (
-    CommonSourceEligibility,
-    PeerCheckpointHealth,
-    PeerSnapshotHealthCache,
-    SnapshotInspectTelemetry,
-    evaluate_common_live_source_eligibility,
-    inspect_peer_snapshot_health,
 )
 
 
@@ -286,59 +248,6 @@ def _get_raw_env(algo):
             continue
         break
     return env
-
-
-
-def _decision_uses_live_source(decision: dict[str, Any]) -> bool:
-    """True when a PBT copy decision uses a live peer checkpoint.
-
-    Live sources include ``live`` and ``latest_healthy`` checkpoint types, plus
-    live-tier labels from ordinary and adaptive cascades. Archive tiers must
-    return False so they skip the live skill_delta gate.
-    """
-    if not isinstance(decision, dict):
-        return False
-    ckpt_type = str(decision.get("checkpoint_type", "") or "")
-    tier = str(decision.get("tier", "") or "")
-    live_types = {"live", "latest_healthy"}
-    live_tiers = {
-        "strict_live",
-        "strict_stable_live",
-        "usable_live",
-        "relaxed_live",
-        "late_rescue_live",
-        "adaptive_rescue_live",
-        "chronic_top_live",
-        "chronic_mid_live",
-    }
-    archive_types = {
-        "archive",
-        "best_stable_archive",
-        "best_floor_recovery_archive",
-        "late_rescue_archive",
-    }
-    archive_tiers = {
-        "adaptive_rescue_archive",
-        "adaptive_rescue_best_stable_archive",
-        "adaptive_rescue_floor_recovery_archive",
-        "adaptive_rescue_best_nsucc_archive",
-        "late_rescue_archive",
-        "best_stable_archive",
-        "best_floor_recovery_archive",
-        "best_nsucc_archive",
-    }
-    if ckpt_type in archive_types or tier in archive_tiers:
-        return False
-    if ckpt_type in live_types or tier in live_tiers:
-        return True
-    # Adaptive / ordinary source_kind markers.
-    kind = str(decision.get("adaptive_rescue_source_kind", "") or "")
-    if kind == "live":
-        return True
-    if kind == "archive":
-        return False
-    return False
-
 
 
 class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
@@ -649,125 +558,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         pbt_consolidation_stage3_hard_collapse_only: bool = True,
         pbt_consolidation_stage2_retention_threshold: float = 0.85,
         pbt_consolidation_collapse_nsucc_mean_threshold: float = 1.0,
-        frame_stop_enable: bool = False,
-        target_population_frames: int = 0,
-        frame_stop_grace_iterations: int = 2,
-        # CSER 2cm bridge.  All flags default off so legacy profiles preserve
-        # their previous control-plane behaviour.
-        same_tol_retention_enable: bool = False,
-        same_tol_retention_bins: str = "0.030,0.025,0.022,0.020,0.018",
-        same_tol_retention_min_samples: int = 3,
-        same_tol_retention_warmup_ticks: int = 3,
-        same_tol_retention_reset_on_lineage_change: bool = True,
-        same_tol_retention_reset_on_cross_copy: bool = True,
-        same_tol_retention_keep_on_rollback: bool = False,
-        bridge_curriculum_enable: bool = False,
-        bridge_curriculum_start_tol: float = 0.025,
-        bridge_curriculum_probation_tol: float = 0.0205,
-        bridge_curriculum_target_tol: float = 0.018,
-        bridge_curriculum_mode: str = "ladder",
-        bridge_tolerance_ladder: str = "0.025,0.0235,0.022,0.021,0.0205,0.020,0.0195,0.019,0.0185,0.018",
-        bridge_min_same_tol_retention: float = 0.90,
-        bridge_min_stable_ticks: int = 4,
-        bridge_min_frames_per_level: int = 150_000_000,
-        bridge_post_shrink_consolidation_frames: int = 200_000_000,
-        bridge_probation_enable: bool = False,
-        bridge_probation_entry_tol: float = 0.0205,
-        bridge_probation_frames: int = 400_000_000,
-        bridge_probation_min_ticks: int = 4,
-        bridge_probation_block_further_shrink: bool = True,
-        bridge_probation_block_ordinary_rollback: bool = True,
-        bridge_probation_allow_hard_collapse_rollback: bool = True,
-        bridge_probation_hard_collapse_mean: float = 3.0,
-        bridge_probation_hard_collapse_patience: int = 4,
-        late_degradation_rescue_enable: bool = False,
-        late_degradation_rescue_tol_threshold: float = 0.022,
-        late_degradation_rescue_peak_threshold: float = 30.0,
-        late_degradation_rescue_current_mean_threshold: float = 22.0,
-        late_degradation_rescue_retention_threshold: float = 0.65,
-        late_degradation_rescue_patience: int = 3,
-        late_degradation_rescue_max_tol_gap: float = 0.002,
-        late_degradation_rescue_cooldown_frames: int = 300_000_000,
-        late_degradation_rescue_max_per_policy: int = 1,
-        late_degradation_rescue_source_min_mean: float = 28.0,
-        late_degradation_rescue_min_source_advantage: float = 8.0,
-        late_degradation_rescue_source_min_retention: float = 0.85,
-        late_degradation_rescue_reject_collapse_source: bool = True,
-        late_degradation_rescue_require_source_control: bool = True,
-        late_degradation_rescue_bypass_elimination_burnin: bool = False,
-        # progress_refine: curriculum-progress consolidation schedule + adaptive
-        # precision probation/rescue.  Defaults keep the frames schedule so all
-        # existing profiles are unaffected.
-        pbt_consolidation_schedule_mode: str = "frames",
-        adaptive_consolidation_stage_consolidation_progress: float = 0.50,
-        adaptive_consolidation_stage_selection_progress: float = 0.85,
-        adaptive_precision_consolidation_enable: bool = False,
-        adaptive_consolidation_tolerance_log_quant: float = 0.05,
-        adaptive_probation_min_frames: int = 200_000_000,
-        adaptive_probation_min_stable_ticks: int = 4,
-        adaptive_probation_min_same_level_retention: float = 0.90,
-        adaptive_probation_block_ordinary_rollback: bool = True,
-        adaptive_probation_allow_hard_collapse_rollback: bool = True,
-        adaptive_probation_hard_collapse_mean: float = 3.0,
-        adaptive_probation_hard_collapse_patience: int = 4,
-        adaptive_rescue_enable: bool = False,
-        adaptive_rescue_retention_threshold: float = 0.70,
-        adaptive_rescue_degradation_patience: int = 3,
-        adaptive_rescue_population_quantile: float = 0.60,
-        adaptive_rescue_source_top_fraction: float | None = None,
-        adaptive_rescue_source_min_retention: float = 0.85,
-        adaptive_rescue_min_source_advantage_sigma: float = 1.0,
-        adaptive_rescue_max_log_tol_gap: float = 0.20,
-        adaptive_rescue_cooldown_frames: int = 300_000_000,
-        adaptive_rescue_max_per_lineage: int = 1,
-        adaptive_rescue_require_source_control: bool = True,
-        adaptive_rescue_reject_collapse_source: bool = True,
-        adaptive_probation_rollback_max_log_gap: float = 0.30,
-        adaptive_probation_freeze_only_max_ticks: int = 3,
-        adaptive_rescue_source_min_samples: int = 3,
-        adaptive_rescue_source_min_stable_ticks: int = 2,
-        adaptive_rescue_source_max_staleness_frames: int = 40_000_000,
-        adaptive_rescue_require_lineage_match_with_checkpoint: bool = True,
-        adaptive_rescue_archive_enable: bool = True,
-        adaptive_rescue_archive_max_age_frames: int = 1_000_000_000,
-        adaptive_rescue_archive_require_retention: bool = True,
-        adaptive_rescue_archive_min_nsucc_mean: float = 0.0,
-        adaptive_rescue_archive_min_nsucc_max: float = 0.0,
-        adaptive_rescue_archive_require_age: bool = True,
-        adaptive_rescue_archive_require_collapse_metadata: bool = True,
-        adaptive_rescue_archive_require_quality_score: bool = True,
-        adaptive_rescue_archive_min_population_samples: int = 2,
-        adaptive_rescue_archive_advantage_sigma_floor: float = 1.0,
-        adaptive_rescue_archive_min_absolute_advantage: float = 5.0,
-        adaptive_rescue_bypass_elimination_burnin: bool = False,
-        adaptive_rescue_bypass_on_hard_collapse: bool = True,
-        adaptive_rescue_min_frames_before_emergency_bypass: int = 40_000_000,
-        adaptive_rescue_emergency_require_archive_or_stable_source: bool = True,
-        adaptive_lineage_diversity_enable: bool = False,
-        adaptive_min_distinct_lineages_exploration: int = 3,
-        adaptive_min_distinct_lineages_consolidation: int = 2,
-        adaptive_min_distinct_lineages_selection: int = 1,
-        adaptive_replacement_budget_exploration: int = 1,
-        adaptive_replacement_budget_consolidation: int = 1,
-        adaptive_replacement_budget_selection: int = 2,
-        adaptive_probation_stage_aware_enable: bool = False,
-        adaptive_probation_min_frames_exploration: int = 75_000_000,
-        adaptive_probation_min_frames_other: int = 100_000_000,
-        adaptive_probation_max_frames: int = 200_000_000,
-        adaptive_probation_min_stable_ticks_exploration: int = 2,
-        adaptive_probation_min_stable_ticks_other: int = 3,
-        adaptive_probation_early_exit_retention: float = 0.97,
-        adaptive_probation_normal_exit_retention: float = 0.92,
-        adaptive_probation_early_exit_nsucc_drop_frac: float = 0.15,
-        adaptive_rescue_source_freshness_mode: str = "hard_max",
-        adaptive_rescue_source_freshness_tau_frames: int = 80_000_000,
-        adaptive_rescue_source_hard_max_age_frames: int = 160_000_000,
-        pbt_enable_chronic_bottom_exploit: bool = False,
-        pbt_chronic_min_bottom_frames: int = 200_000_000,
-        pbt_chronic_min_bottom_ticks: int = 5,
-        pbt_chronic_min_score_gap: float = 0.15,
-        pbt_chronic_cooldown_frames: int = 400_000_000,
-        pbt_chronic_max_copies_per_lineage: int = 1,
         wm_calibration_enable: bool = False,
         # Resume hooks; populated by train.py when the supervisor relaunches
         # this worker. They are None on first launch and on cold start.
@@ -806,23 +596,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.ternary_split = ternary_split
         self.r_meta_window_enabled = r_meta_window
         self.num_envs = num_envs
-        # Experiment A: chronic-bottom exploit. The feature is entirely inert
-        # unless explicitly enabled; state is persisted independently of the
-        # adaptive precision controller.
-        self.pbt_enable_chronic_bottom_exploit = bool(pbt_enable_chronic_bottom_exploit)
-        self.pbt_chronic_min_bottom_frames = int(pbt_chronic_min_bottom_frames)
-        self.pbt_chronic_min_bottom_ticks = int(pbt_chronic_min_bottom_ticks)
-        self.pbt_chronic_min_score_gap = float(pbt_chronic_min_score_gap)
-        self.pbt_chronic_cooldown_frames = int(pbt_chronic_cooldown_frames)
-        self.pbt_chronic_max_copies_per_lineage = int(
-            pbt_chronic_max_copies_per_lineage
-        )
-        self._chronic_bottom_state: dict[int, ChronicBottomState] = {}
-        self._chronic_bottom_lineage_id: dict[int, str] = {}
-        self._peer_snapshot_health_cache = PeerSnapshotHealthCache(max_per_policy=3)
-        self._last_peer_checkpoint_health: dict[int, PeerCheckpointHealth] = {}
-        self._last_snapshot_inspect_tele: dict[int, SnapshotInspectTelemetry] = {}
-        self._last_snapshot_inspect_for_log: SnapshotInspectTelemetry | None = None
 
         # Seed diversity audit (B1/B2): set by train.py after env creation
         # via set_seeding_audit(); included in every training_curve point.
@@ -1538,100 +1311,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self.workspace / "metrics" / "curriculum_safety_events.jsonl"
         )
         self._last_curriculum_safety_audit: dict[str, Any] = {}
-        self.frame_stop_enable = bool(frame_stop_enable)
-        self.target_population_frames = max(0, int(target_population_frames))
-        self.frame_stop_grace_iterations = max(0, int(frame_stop_grace_iterations))
-        self._frame_stop_triggered = False
-        self.same_tol_retention_enable = bool(same_tol_retention_enable)
-        self.same_tol_retention_bins = parse_float_tuple(
-            same_tol_retention_bins, DEFAULT_RETENTION_BINS
-        )
-        self.same_tol_retention_min_samples = max(1, int(same_tol_retention_min_samples))
-        self.same_tol_retention_warmup_ticks = max(1, int(same_tol_retention_warmup_ticks))
-        self.same_tol_retention_reset_on_lineage_change = bool(
-            same_tol_retention_reset_on_lineage_change
-        )
-        self.same_tol_retention_reset_on_cross_copy = bool(
-            same_tol_retention_reset_on_cross_copy
-        )
-        self.same_tol_retention_keep_on_rollback = bool(same_tol_retention_keep_on_rollback)
-        self._same_tol_trackers: dict[int, ToleranceBinRetentionTracker] = {}
-        self._bridge_state_restored: set[int] = set()
-        self._last_confirmed_tolerance: dict[int, float] = {}
-        self._bridge_shrink_count: dict[int, int] = {}
-        self._late_rescue_attempt_count: dict[int, int] = {}
-        self._late_rescue_selected_count: dict[int, int] = {}
-        self._late_rescue_executed_count: dict[int, int] = {}
-        self._late_rescue_blocked_count: dict[int, int] = {}
-        self._pending_late_rescue: bool = False
-        self.bridge_curriculum_enable = bool(bridge_curriculum_enable)
-        self.bridge_curriculum_start_tol = float(bridge_curriculum_start_tol)
-        self.bridge_curriculum_probation_tol = float(bridge_curriculum_probation_tol)
-        self.bridge_curriculum_target_tol = float(bridge_curriculum_target_tol)
-        self.bridge_curriculum_mode = str(bridge_curriculum_mode)
-        self.bridge_tolerance_ladder = parse_float_tuple(
-            bridge_tolerance_ladder, DEFAULT_BRIDGE_LADDER
-        )
-        self.bridge_min_same_tol_retention = float(bridge_min_same_tol_retention)
-        self.bridge_min_stable_ticks = max(1, int(bridge_min_stable_ticks))
-        self.bridge_min_frames_per_level = max(0, int(bridge_min_frames_per_level))
-        self.bridge_post_shrink_consolidation_frames = max(
-            0, int(bridge_post_shrink_consolidation_frames)
-        )
-        self.bridge_probation_enable = bool(bridge_probation_enable)
-        self.bridge_probation_entry_tol = float(bridge_probation_entry_tol)
-        self.bridge_probation_frames = max(0, int(bridge_probation_frames))
-        self.bridge_probation_min_ticks = max(1, int(bridge_probation_min_ticks))
-        self.bridge_probation_block_further_shrink = bool(bridge_probation_block_further_shrink)
-        self.bridge_probation_block_ordinary_rollback = bool(
-            bridge_probation_block_ordinary_rollback
-        )
-        self.bridge_probation_allow_hard_collapse_rollback = bool(
-            bridge_probation_allow_hard_collapse_rollback
-        )
-        self.bridge_probation_hard_collapse_mean = float(bridge_probation_hard_collapse_mean)
-        self.bridge_probation_hard_collapse_patience = max(
-            1, int(bridge_probation_hard_collapse_patience)
-        )
-        self._bridge_entry_frame: dict[int, int] = {}
-        self._bridge_level_entry_frame: dict[int, int] = {}
-        self._bridge_probation_entry_frame: dict[int, int] = {}
-        self._bridge_probation_bad_streak: dict[int, int] = {}
-        self._bridge_probation_suppressed_legacy_collapse_count: dict[int, int] = {}
-        self._bridge_probation_exit_cleared: set[int] = set()
-        self.late_degradation_rescue_enable = bool(late_degradation_rescue_enable)
-        self.late_degradation_rescue_tol_threshold = float(late_degradation_rescue_tol_threshold)
-        self.late_degradation_rescue_peak_threshold = float(late_degradation_rescue_peak_threshold)
-        self.late_degradation_rescue_current_mean_threshold = float(late_degradation_rescue_current_mean_threshold)
-        self.late_degradation_rescue_retention_threshold = float(late_degradation_rescue_retention_threshold)
-        self.late_degradation_rescue_patience = max(1, int(late_degradation_rescue_patience))
-        self.late_degradation_rescue_max_tol_gap = float(late_degradation_rescue_max_tol_gap)
-        self.late_degradation_rescue_cooldown_frames = int(late_degradation_rescue_cooldown_frames)
-        self.late_degradation_rescue_max_per_policy = max(1, int(late_degradation_rescue_max_per_policy))
-        self.late_degradation_rescue_source_min_mean = float(
-            late_degradation_rescue_source_min_mean
-        )
-        self.late_degradation_rescue_min_source_advantage = float(
-            late_degradation_rescue_min_source_advantage
-        )
-        self.late_degradation_rescue_source_min_retention = float(
-            late_degradation_rescue_source_min_retention
-        )
-        self.late_degradation_rescue_reject_collapse_source = bool(
-            late_degradation_rescue_reject_collapse_source
-        )
-        self.late_degradation_rescue_require_source_control = bool(
-            late_degradation_rescue_require_source_control
-        )
-        self.late_degradation_rescue_bypass_elimination_burnin = bool(
-            late_degradation_rescue_bypass_elimination_burnin
-        )
-        self._late_rescue_streak: dict[int, int] = {}
-        self._late_rescue_count: dict[int, int] = {}
-        self._late_rescue_frame: dict[int, int] = {}
-        self._late_rescue_last_source_control_valid = 0.0
-        self._late_rescue_last_source_collapse_rejected = 0.0
-        self._late_rescue_last_burnin_bypassed = 0.0
         self.pbt_usable_live_min_mean = float(pbt_usable_live_min_mean)
         self.pbt_usable_live_min_max = float(pbt_usable_live_min_max)
         self.pbt_usable_live_max_drop_ratio = float(
@@ -1695,10 +1374,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "archive": 0,
             "best_stable_archive": 0,
             "best_floor_recovery_archive": 0,
-            "late_rescue_live": 0,
-            "late_rescue_archive": 0,
-            "adaptive_rescue_live": 0,
-            "adaptive_rescue_archive": 0,
             "skipped": 0,
         }
         # The "checkpoint provenance" for the current tick. live|archive.
@@ -1731,229 +1406,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             collapse_nsucc_mean_threshold=float(
                 pbt_consolidation_collapse_nsucc_mean_threshold
             ),
-            schedule_mode=str(pbt_consolidation_schedule_mode),
-            stage_consolidation_progress=float(
-                adaptive_consolidation_stage_consolidation_progress
-            ),
-            stage_selection_progress=float(
-                adaptive_consolidation_stage_selection_progress
-            ),
         )
-        # progress_refine: adaptive precision consolidation controller (probation
-        # + retention-conditioned rescue).  Built lazily; state persists via the
-        # curriculum-control JSON.  Inert unless explicitly enabled.
-        self.adaptive_precision_enable = bool(adaptive_precision_consolidation_enable)
-        self._adaptive_curriculum_progress: float | None = None
-        try:
-            from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-                AdaptivePrecisionConfig,
-            )
-
-            self._adaptive_precision_cfg = AdaptivePrecisionConfig(
-                enabled=self.adaptive_precision_enable,
-                tolerance_log_quant=float(adaptive_consolidation_tolerance_log_quant),
-                stage_consolidation_start=float(
-                    adaptive_consolidation_stage_consolidation_progress
-                ),
-                stage_selection_start=float(
-                    adaptive_consolidation_stage_selection_progress
-                ),
-                probation_min_frames=int(adaptive_probation_min_frames),
-                probation_min_stable_ticks=int(adaptive_probation_min_stable_ticks),
-                probation_min_same_level_retention=float(
-                    adaptive_probation_min_same_level_retention
-                ),
-                probation_block_ordinary_rollback=bool(
-                    adaptive_probation_block_ordinary_rollback
-                ),
-                probation_allow_hard_collapse_rollback=bool(
-                    adaptive_probation_allow_hard_collapse_rollback
-                ),
-                probation_hard_collapse_mean=float(adaptive_probation_hard_collapse_mean),
-                probation_hard_collapse_patience=int(
-                    adaptive_probation_hard_collapse_patience
-                ),
-                rescue_enable=bool(adaptive_rescue_enable),
-                rescue_retention_threshold=float(adaptive_rescue_retention_threshold),
-                rescue_degradation_patience=int(adaptive_rescue_degradation_patience),
-                rescue_source_top_fraction=float(
-                    adaptive_rescue_source_top_fraction
-                    if adaptive_rescue_source_top_fraction is not None
-                    else max(0.0, min(1.0, 1.0 - float(adaptive_rescue_population_quantile)))
-                ),
-                rescue_population_quantile=float(adaptive_rescue_population_quantile),
-                rescue_source_min_retention=float(adaptive_rescue_source_min_retention),
-                rescue_min_source_advantage_sigma=float(
-                    adaptive_rescue_min_source_advantage_sigma
-                ),
-                rescue_max_log_tol_gap=float(adaptive_rescue_max_log_tol_gap),
-                rescue_cooldown_frames=int(adaptive_rescue_cooldown_frames),
-                rescue_max_per_lineage=int(adaptive_rescue_max_per_lineage),
-                rescue_require_source_control=bool(
-                    adaptive_rescue_require_source_control
-                ),
-                rescue_reject_collapse_source=bool(
-                    adaptive_rescue_reject_collapse_source
-                ),
-                rescue_source_min_samples=int(adaptive_rescue_source_min_samples),
-                rescue_source_min_stable_ticks=int(adaptive_rescue_source_min_stable_ticks),
-                rescue_source_max_staleness_frames=int(
-                    adaptive_rescue_source_max_staleness_frames
-                ),
-                rescue_require_lineage_match_with_checkpoint=bool(
-                    adaptive_rescue_require_lineage_match_with_checkpoint
-                ),
-                rescue_archive_enable=bool(adaptive_rescue_archive_enable),
-                rescue_archive_max_age_frames=int(adaptive_rescue_archive_max_age_frames),
-                rescue_archive_require_retention=bool(
-                    adaptive_rescue_archive_require_retention
-                ),
-                rescue_archive_min_nsucc_mean=float(
-                    adaptive_rescue_archive_min_nsucc_mean
-                ),
-                rescue_archive_min_nsucc_max=float(
-                    adaptive_rescue_archive_min_nsucc_max
-                ),
-                rescue_archive_require_age=bool(adaptive_rescue_archive_require_age),
-                rescue_archive_require_collapse_metadata=bool(
-                    adaptive_rescue_archive_require_collapse_metadata
-                ),
-                rescue_archive_require_quality_score=bool(
-                    adaptive_rescue_archive_require_quality_score
-                ),
-                rescue_archive_min_population_samples=int(
-                    adaptive_rescue_archive_min_population_samples
-                ),
-                rescue_archive_advantage_sigma_floor=float(
-                    adaptive_rescue_archive_advantage_sigma_floor
-                ),
-                rescue_archive_min_absolute_advantage=float(
-                    adaptive_rescue_archive_min_absolute_advantage
-                ),
-                rescue_bypass_elimination_burnin=bool(
-                    adaptive_rescue_bypass_elimination_burnin
-                ),
-                rescue_bypass_on_hard_collapse=bool(
-                    adaptive_rescue_bypass_on_hard_collapse
-                ),
-                rescue_min_frames_before_emergency_bypass=int(
-                    adaptive_rescue_min_frames_before_emergency_bypass
-                ),
-                rescue_emergency_require_archive_or_stable_source=bool(
-                    adaptive_rescue_emergency_require_archive_or_stable_source
-                ),
-                probation_rollback_max_log_gap=float(
-                    adaptive_probation_rollback_max_log_gap
-                ),
-                probation_freeze_only_max_ticks=int(
-                    adaptive_probation_freeze_only_max_ticks
-                ),
-                lineage_diversity_enable=bool(adaptive_lineage_diversity_enable),
-                min_distinct_lineages_exploration=int(
-                    adaptive_min_distinct_lineages_exploration
-                ),
-                min_distinct_lineages_consolidation=int(
-                    adaptive_min_distinct_lineages_consolidation
-                ),
-                min_distinct_lineages_selection=int(
-                    adaptive_min_distinct_lineages_selection
-                ),
-                replacement_budget_exploration=int(
-                    adaptive_replacement_budget_exploration
-                ),
-                replacement_budget_consolidation=int(
-                    adaptive_replacement_budget_consolidation
-                ),
-                replacement_budget_selection=int(adaptive_replacement_budget_selection),
-                probation_stage_aware_enable=bool(
-                    adaptive_probation_stage_aware_enable
-                ),
-                probation_min_frames_exploration=int(
-                    adaptive_probation_min_frames_exploration
-                ),
-                probation_min_frames_other=int(adaptive_probation_min_frames_other),
-                probation_max_frames=int(adaptive_probation_max_frames),
-                probation_min_stable_ticks_exploration=int(
-                    adaptive_probation_min_stable_ticks_exploration
-                ),
-                probation_min_stable_ticks_other=int(
-                    adaptive_probation_min_stable_ticks_other
-                ),
-                probation_early_exit_retention=float(
-                    adaptive_probation_early_exit_retention
-                ),
-                probation_normal_exit_retention=float(
-                    adaptive_probation_normal_exit_retention
-                ),
-                probation_early_exit_nsucc_drop_frac=float(
-                    adaptive_probation_early_exit_nsucc_drop_frac
-                ),
-                rescue_source_freshness_mode=str(adaptive_rescue_source_freshness_mode),
-                rescue_source_freshness_tau_frames=int(
-                    adaptive_rescue_source_freshness_tau_frames
-                ),
-                rescue_source_hard_max_age_frames=int(
-                    adaptive_rescue_source_hard_max_age_frames
-                ),
-            )
-        except Exception as _apc_exc:
-            _prof = str(getattr(self, "wm_strategy_profile_name", "") or "")
-            if _prof in (
-                "cser_dexpbt_progress_refine",
-                "cser_dexpbt_readiness_adaptive",
-            ):
-                raise RuntimeError(
-                    "AdaptivePrecisionConfig construction failed for formal "
-                    f"profile {_prof}: {_apc_exc}"
-                ) from _apc_exc
-            print(f"[adaptive-precision] config build failed (disabled): {_apc_exc}")
-            self._adaptive_precision_cfg = None
-            self.adaptive_precision_enable = False
-        # Per-policy adaptive precision runtime state (serialized to sidecar JSON).
-        self._adaptive_probation: dict[int, Any] = {}
-        self._adaptive_retention: dict[int, Any] = {}
-        self._adaptive_degradation_streak: dict[int, int] = {}
-        self._adaptive_last_rescue_frame: dict[int, int] = {}
-        self._adaptive_rescue_executed: dict[int, int] = {}
-        self._adaptive_rescue_executed_for_lineage: dict[int, int] = {}
-        self._adaptive_lineage_id: dict[int, str] = {}
-        self._adaptive_rescue_attempt_count: dict[int, int] = {}
-        self._adaptive_rescue_selected_count: dict[int, int] = {}
-        self._adaptive_rescue_blocked_count: dict[int, int] = {}
-        self._adaptive_rescue_last_reason: dict[int, str] = {}
-        self._adaptive_rescue_last_source: dict[int, int] = {}
-        self._adaptive_rescue_last_source_rank: dict[int, int] = {}
-        self._adaptive_rescue_last_advantage_sigma: dict[int, float] = {}
-        self._adaptive_last_audit: dict[int, dict[str, Any]] = {}
-        self._adaptive_freeze_only_streak: dict[int, int] = {}
-        self._adaptive_rollback_freeze_only_count: dict[int, int] = {}
-        self._adaptive_probation_timeout: dict[int, bool] = {}
-        self._adaptive_probation_timeout_reason: dict[int, str] = {}
-        self._adaptive_diversity_blocked_count: int = 0
-        self._adaptive_replacement_budget_blocked_count: int = 0
-        self._last_adaptive_diversity_blocked: bool = False
-        self._last_adaptive_distinct_lineage_count: int = 0
-        self._last_adaptive_min_distinct_lineages: int = 0
-        self._last_adaptive_replacement_budget: int = 0
-        self._last_adaptive_replacement_budget_used: int = 0
-        self._adaptive_hard_collapse_trigger_source: dict[int, str] = {}
-        # Per-tick hard-collapse latch: frame at which adaptive hard collapse was
-        # confirmed in `_build_curriculum_control_state`. Survives streak reset so
-        # `_ternary_pbt` emergency bypass still sees the event in the same tick.
-        self._adaptive_hard_collapse_event_frame: dict[int, int] = {}
-        self._adaptive_peer_reject_counts: dict[int, int] = {}
-        self._adaptive_rescue_live_selected: dict[int, int] = {}
-        self._adaptive_rescue_archive_selected: dict[int, int] = {}
-        self._adaptive_rescue_ordinary_fallback: dict[int, int] = {}
-        self._adaptive_rescue_last_source_kind: dict[int, str] = {}
-        self._adaptive_rescue_burnin_blocked: dict[int, int] = {}
-        self._adaptive_rescue_burnin_bypassed: dict[int, int] = {}
-        self._adaptive_rescue_emergency_bypass: dict[int, int] = {}
-        self._adaptive_last_checkpoint_frame: dict[int, int] = {}
-        self._adaptive_last_checkpoint_path: dict[int, str] = {}
-        self._adaptive_sidecar_meta: dict[int, dict[str, Any]] = {}
-        self._adaptive_last_update_frame: dict[int, int] = {}
-        self._adaptive_peer_unavailable: dict[int, str] = {}
         self.wm_calibration_enable = bool(wm_calibration_enable)
         # Last decision type the observer emitted at the current PBT tick.
         # 0=none, 1=self, 2=cross, 3=skipped. Used both for TB log and for
@@ -2053,1480 +1506,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             lineage_id=lineage_id,
         )
 
-    def _adaptive_precision_path(self, policy_idx: int) -> "Path":
-        d = self.workspace / "adaptive_precision"
-        d.mkdir(parents=True, exist_ok=True)
-        return d / f"{int(policy_idx):03d}.json"
-
-    def _chronic_bottom_path(self, policy_idx: int) -> Path:
-        return self.workspace / "chronic_bottom" / f"{int(policy_idx):03d}.json"
-
-    def _chronic_bottom_state_for(
-        self, policy_idx: int, *, lineage_id: str
-    ) -> ChronicBottomState:
-        """Restore Experiment A state and reset only its lineage quota."""
-        pidx = int(policy_idx)
-        if pidx not in self._chronic_bottom_state:
-            data: dict[str, Any] | None = None
-            path = self._chronic_bottom_path(pidx)
-            if path.exists():
-                try:
-                    raw = json.loads(path.read_text())
-                    data = raw if isinstance(raw, dict) else None
-                except Exception:
-                    data = None
-            self._chronic_bottom_state[pidx] = ChronicBottomState.from_json(data)
-            self._chronic_bottom_lineage_id[pidx] = str(
-                (data or {}).get("lineage_id", "") or ""
-            )
-        current = str(lineage_id or "")
-        if current != self._chronic_bottom_lineage_id.get(pidx, ""):
-            reset_on_lineage_change(self._chronic_bottom_state[pidx])
-            self._chronic_bottom_lineage_id[pidx] = current
-            self._persist_chronic_bottom_state(pidx)
-        return self._chronic_bottom_state[pidx]
-
-    def _persist_chronic_bottom_state(self, policy_idx: int) -> None:
-        pidx = int(policy_idx)
-        state = self._chronic_bottom_state.get(pidx)
-        if state is None:
-            return
-        path = self._chronic_bottom_path(pidx)
-        payload = state.to_json()
-        payload.update(
-            policy_idx=pidx,
-            lineage_id=str(self._chronic_bottom_lineage_id.get(pidx, "") or ""),
-        )
-        self._atomic_write_json(path, payload)
-
-    def _peer_workspace(self, policy_idx: int) -> Path:
-        return self.workspace / f"{int(policy_idx):03d}"
-
-    def _inspect_peer_checkpoint_health(
-        self, policy_idx: int, state: dict[str, Any] | None
-    ) -> PeerCheckpointHealth:
-        """Inspect peer LATEST snapshot via production ``validate_snapshot_commit``.
-
-        Uses process-local fingerprint cache so selection and post-selection
-        defense-in-depth do not re-hash the same immutable commit.
-        Does not consult ``population_frame_complete.json`` (frame-stop only).
-        """
-        cache = getattr(self, "_peer_snapshot_health_cache", None)
-        if cache is None:
-            cache = PeerSnapshotHealthCache(max_per_policy=3)
-            self._peer_snapshot_health_cache = cache
-        tele = cache.inspect(
-            policy_idx=int(policy_idx),
-            policy_workspace=self._peer_workspace(policy_idx),
-            state=state,
-            tick=int(self.interval_steps),
-        )
-        if not hasattr(self, "_last_snapshot_inspect_tele"):
-            self._last_snapshot_inspect_tele = {}
-        self._last_snapshot_inspect_tele[int(policy_idx)] = tele
-        self._last_snapshot_inspect_for_log = tele
-        return tele.health
-
-    def _log_chronic_source_checkpoint_health(
-        self,
-        *,
-        source_policy: int | None,
-        target_policy: int,
-        env_frames: int,
-        peer_health: PeerCheckpointHealth | None,
-        common_health: CommonSourceEligibility | None = None,
-        inspect_tele: SnapshotInspectTelemetry | None = None,
-    ) -> None:
-        """TB + JSONL for chronic source snapshot health (selection ticks only)."""
-        h = peer_health or PeerCheckpointHealth(final_health_reason="no_peer_health")
-        tele = inspect_tele or getattr(self, "_last_snapshot_inspect_for_log", None)
-        if (
-            tele is None
-            and source_policy is not None
-            and hasattr(self, "_last_snapshot_inspect_tele")
-        ):
-            tele = self._last_snapshot_inspect_tele.get(int(source_policy))
-        allowed = bool(h.final_health_allowed)
-        if common_health is not None:
-            allowed = bool(common_health.eligible) and allowed
-        reason = str(
-            (common_health.reason if common_health is not None else "")
-            or h.final_health_reason
-            or ""
-        )
-        cache = getattr(self, "_peer_snapshot_health_cache", None)
-        hit = bool(tele.cache_hit) if tele is not None else False
-        miss = not hit if tele is not None else True
-        latency = float(tele.validation_latency_s) if tele is not None else 0.0
-        full_hash = bool(tele.full_hash_executed) if tele is not None else True
-        inv_reason = (
-            str(tele.invalidated_reason) if tele is not None else "unknown"
-        )
-        fp = tele.fingerprint if tele is not None else None
-        if self.writer is not None:
-            try:
-                self.writer.add_scalar(
-                    "pbt/chronic_source_checkpoint_valid",
-                    1.0 if h.snapshot_commit_valid else 0.0,
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_source_lineage_valid",
-                    1.0 if h.lineage_valid else 0.0,
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_source_freshness_valid",
-                    1.0 if h.freshness_valid else 0.0,
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_source_health_allowed",
-                    1.0 if allowed else 0.0,
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_source_health_reason_hash",
-                    float(abs(hash(reason)) % 10_000),
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_snapshot_cache_hit",
-                    1.0 if hit else 0.0,
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_snapshot_cache_miss",
-                    1.0 if miss else 0.0,
-                    int(env_frames),
-                )
-                if cache is not None:
-                    self.writer.add_scalar(
-                        "pbt/chronic_snapshot_cache_hit_count",
-                        float(cache.hit_count),
-                        int(env_frames),
-                    )
-                    self.writer.add_scalar(
-                        "pbt/chronic_snapshot_cache_miss_count",
-                        float(cache.miss_count),
-                        int(env_frames),
-                    )
-                    self.writer.add_scalar(
-                        "pbt/chronic_snapshot_cache_entries",
-                        float(cache.entry_count()),
-                        int(env_frames),
-                    )
-                self.writer.add_scalar(
-                    "pbt/chronic_snapshot_validation_latency",
-                    float(latency),
-                    int(env_frames),
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_snapshot_validation_full_hash",
-                    1.0 if full_hash else 0.0,
-                    int(env_frames),
-                )
-            except Exception:
-                pass
-        try:
-            run_dir = self._policy_run_dir()
-            path = Path(run_dir) / "pbt_chronic_source_health.jsonl"
-            payload = {
-                "event": "chronic_source_checkpoint_health",
-                "source_policy": (
-                    int(source_policy) if source_policy is not None else -1
-                ),
-                "target_policy": int(target_policy),
-                "frame": int(env_frames),
-                "checkpoint_path": h.checkpoint_path,
-                "latest_commit_path": h.latest_commit_path,
-                "commit_dir": h.commit_dir,
-                "snapshot_commit_valid": bool(h.snapshot_commit_valid),
-                "snapshot_commit_reason": str(h.snapshot_commit_reason),
-                "manifest_lineage_id": h.manifest_lineage_id,
-                "state_lineage_id": h.state_lineage_id,
-                "lineage_valid": bool(h.lineage_valid),
-                "manifest_population_frame": h.manifest_population_frame,
-                "state_population_frame": h.state_population_frame,
-                "freshness_valid": bool(h.freshness_valid),
-                "freshness_reason": str(h.freshness_reason),
-                "final_health_reason": str(h.final_health_reason),
-                "common_health_reason": (
-                    str(common_health.reason) if common_health is not None else ""
-                ),
-                "cache_hit": bool(hit),
-                "cache_key_commit_id": fp.commit_id if fp is not None else "",
-                "cache_key_commit_dir": fp.commit_dir if fp is not None else "",
-                "validation_latency_s": float(latency),
-                "full_hash_executed": bool(full_hash),
-                "cache_invalidated_reason": str(inv_reason),
-            }
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, sort_keys=True) + "\n")
-        except Exception:
-            pass
-
-    def _evaluate_common_live_source_health(
-        self,
-        policy_idx: int,
-        state: dict[str, Any] | None,
-        env_frames: int,
-        *,
-        for_top: bool,
-    ) -> CommonSourceEligibility:
-        """Evaluate shared live-source health for chronic source selection."""
-        gate = (
-            self._eligible_as_source_with_reason
-            if for_top
-            else self._eligible_as_source_relaxed_with_reason
-        )
-        source_gate_ok, source_gate_reason = gate(state, env_frames)
-        fsr = self._frames_since_restart(state)
-        restart_burnin_ok = fsr >= self.min_frames_as_source_after_restart
-        restart_burnin_reason = (
-            "ok"
-            if restart_burnin_ok
-            else f"frames_since_restart<{self.min_frames_as_source_after_restart}"
-        )
-        st = state or {}
-        try:
-            ranking_score = float(
-                st.get("pbt_ranking_score", st.get("objective", float("nan")))
-            )
-        except Exception:
-            ranking_score = float("nan")
-        try:
-            nsucc_mean = float(
-                st["nsucc_mean"]
-                if st.get("nsucc_mean") is not None
-                else (st.get("curriculum") or {})["mean_prev_episode_successes"]
-            )
-        except Exception:
-            nsucc_mean = float("nan")
-
-        probation_ok: bool | None = True
-        if self.adaptive_precision_enable:
-            adaptive_state = self._adaptive_precision_state(
-                policy_idx, strict_local=False
-            )
-            probation_ok = (
-                None if adaptive_state is None else not bool(adaptive_state[1].active)
-            )
-        has_collapse, collapse_reason = self._late_rescue_source_has_collapse(
-            int(policy_idx), st
-        )
-        collapse_ok: bool | None = not bool(has_collapse)
-        if (
-            collapse_reason in ("source_control_missing", "source_control_parse_error")
-            and self.late_degradation_rescue_require_source_control
-        ):
-            collapse_ok = False
-        peer_health = self._inspect_peer_checkpoint_health(policy_idx, state)
-        self._last_peer_checkpoint_health[int(policy_idx)] = peer_health
-        return evaluate_common_live_source_eligibility(
-            has_state=state is not None,
-            ranking_score=ranking_score,
-            nsucc_mean=nsucc_mean,
-            source_gate_ok=source_gate_ok,
-            source_gate_reason=source_gate_reason,
-            restart_burnin_ok=restart_burnin_ok,
-            restart_burnin_reason=restart_burnin_reason,
-            checkpoint_exists=bool(peer_health.checkpoint_exists),
-            checkpoint_commit_ok=peer_health.checkpoint_commit_ok,
-            lineage_ok=peer_health.lineage_ok,
-            freshness_ok=peer_health.freshness_ok,
-            probation_ok=probation_ok,
-            collapse_ok=collapse_ok,
-        )
-
-    def _validate_live_source_skill_delta(
-        self,
-        source_idx: int,
-        *,
-        chronic_path: bool,
-        target_nsucc_mean: float,
-    ) -> tuple[bool, str, bool]:
-        """Validate ordinary or chronic live-source skill delta only."""
-        window = self._policy_nsucc_windows.get(int(source_idx))
-        if not chronic_path:
-            ok, reason = pbt_copy_allowed_for_live_source(
-                window, interval_steps=self.interval_steps
-            )
-            return ok, reason, False
-        delta, why = skill_delta_with_reason(
-            window, interval_steps=self.interval_steps
-        )
-        source_state = self._load_population_checkpoints().get(int(source_idx)) or {}
-        drop_ratio = (
-            float(window.drop_ratio_vs_prior(2)) if window is not None else 0.0
-        )
-        from dexpbt_isaaclab.pbt.pbt_chronic_bottom import live_source_ok_for_chronic
-
-        ok, reason, fallback = live_source_ok_for_chronic(
-            skill_delta=delta,
-            skill_delta_why=why,
-            source_nsucc_mean=self._state_nsucc_mean(source_state),
-            target_nsucc_mean=float(target_nsucc_mean),
-            source_recent_drop_ratio=drop_ratio,
-        )
-        return ok, reason, fallback
-
-    def _select_chronic_bottom_source(
-        self,
-        *,
-        sorted_policies: list[int],
-        population: dict[int, dict[str, Any] | None],
-        env_frames: int,
-        target_score: float,
-        target_nsucc_mean: float,
-        n_top: int,
-        n_mid: int,
-    ) -> dict[str, Any]:
-        """Adapt the pure chronic source decision to observer cascade shape."""
-        deltas: dict[int, tuple[float | None, str]] = {}
-        drops: dict[int, float] = {}
-        common_health_by_policy: dict[int, CommonSourceEligibility] = {}
-        ranks = {int(idx): rank for rank, idx in enumerate(sorted_policies)}
-        for idx, state in population.items():
-            if int(idx) == int(self.policy_idx):
-                continue
-            rank = ranks.get(int(idx), len(sorted_policies))
-            common_health_by_policy[int(idx)] = (
-                self._evaluate_common_live_source_health(
-                    int(idx), state, env_frames, for_top=rank < int(n_top)
-                )
-            )
-            deltas[int(idx)] = skill_delta_with_reason(
-                self._policy_nsucc_windows.get(int(idx)),
-                interval_steps=self.interval_steps,
-            )
-            window = self._policy_nsucc_windows.get(int(idx))
-            drops[int(idx)] = (
-                float(window.drop_ratio_vs_prior(2)) if window is not None else 0.0
-            )
-        chronic = pick_chronic_source(
-            sorted_policies=sorted_policies,
-            population=population,
-            target_idx=self.policy_idx,
-            target_score=target_score,
-            target_nsucc_mean=target_nsucc_mean,
-            n_top=n_top,
-            n_mid=n_mid,
-            min_score_gap=self.pbt_chronic_min_score_gap,
-            skill_delta_by_policy=deltas,
-            drop_ratio_by_policy=drops,
-            common_health_by_policy=common_health_by_policy,
-        )
-        src_for_log = (
-            int(chronic.source_policy) if chronic.source_policy is not None else None
-        )
-        peer_h = None
-        common_h = None
-        if src_for_log is not None:
-            peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(src_for_log)
-            common_h = common_health_by_policy.get(src_for_log)
-        elif common_health_by_policy:
-            # No source selected: log a representative rejected peer for diagnostics.
-            any_idx = next(iter(common_health_by_policy.keys()))
-            peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(int(any_idx))
-            common_h = common_health_by_policy.get(int(any_idx))
-            src_for_log = int(any_idx)
-        tele = None
-        if src_for_log is not None:
-            tele = getattr(self, "_last_snapshot_inspect_tele", {}).get(int(src_for_log))
-        self._log_chronic_source_checkpoint_health(
-            source_policy=src_for_log,
-            target_policy=int(self.policy_idx),
-            env_frames=int(env_frames),
-            peer_health=peer_h,
-            common_health=common_h,
-            inspect_tele=tele,
-        )
-        return {
-            "action": chronic.action,
-            "source_policy": chronic.source_policy,
-            "source_state": chronic.source_state,
-            "tier": chronic.tier,
-            "checkpoint_type": chronic.checkpoint_type,
-            "skip_reason": chronic.skip_reason,
-            "strict_candidates": [],
-            "relaxed_candidates": [],
-            "strict_filter_reasons": {},
-            "relaxed_filter_reasons": {},
-            "archive_reason": None,
-            "chronic_path": True,
-            "chronic_score_gap": chronic.score_gap,
-            "chronic_source_score": chronic.source_score,
-            "chronic_target_score": chronic.target_score,
-            "chronic_source_skill_delta": chronic.source_skill_delta,
-            "chronic_source_skill_delta_valid": chronic.source_skill_delta_valid,
-            "chronic_source_skill_delta_invalid_reason": chronic.source_skill_delta_invalid_reason,
-            "chronic_source_filter_reason": chronic.source_filter_reason,
-            "chronic_source_fallback_used": chronic.source_fallback_used,
-            "chronic_mixed_tol_fallback_used": chronic.mixed_tol_fallback_used,
-            "chronic_final_source_filter_reason": chronic.final_source_filter_reason,
-            "chronic_common_health_allowed": chronic.common_health_allowed,
-            "chronic_common_health_reason": chronic.common_health_reason,
-            "chronic_candidates_considered": chronic.candidates_considered,
-        }
-
-    def _adaptive_precision_required(self) -> bool:
-        return str(self.wm_strategy_profile_name or "") in (
-            "cser_dexpbt_progress_refine",
-            "cser_dexpbt_progress_refine_abc",
-            "cser_dexpbt_readiness_adaptive",
-        )
-
-    def _adaptive_precision_state(
-        self,
-        policy_idx: int,
-        *,
-        strict_local: bool | None = None,
-    ):
-        """Return (cfg, probation, tracker) or None when adaptive is inert.
-
-        Local formal-profile reads fail closed (``strict_local=True``). Peer
-        reads used by rescue selection stay soft (``strict_local=False``) so a
-        corrupt peer sidecar cannot abort the local worker.
-        """
-        if not self.adaptive_precision_enable:
-            return None
-        if strict_local is None:
-            strict_local = (
-                int(policy_idx) == int(self.policy_idx)
-                and self._adaptive_precision_required()
-            )
-        try:
-            self._adaptive_precision_restore(policy_idx, strict=bool(strict_local))
-        except Exception as exc:
-            if strict_local:
-                raise RuntimeError(
-                    f"adaptive precision restore failed for formal profile "
-                    f"(policy={policy_idx}): {exc}"
-                ) from exc
-            return None
-        cfg = self._adaptive_precision_cfg
-        if cfg is None:
-            if strict_local:
-                raise RuntimeError(
-                    "adaptive precision required but AdaptivePrecisionConfig is missing"
-                )
-            return None
-        probation = self._adaptive_probation.get(policy_idx)
-        tracker = self._adaptive_retention.get(policy_idx)
-        if probation is None or tracker is None:
-            if strict_local:
-                raise RuntimeError(
-                    f"adaptive precision state missing for policy {policy_idx}"
-                )
-            return None
-        return cfg, probation, tracker
-
-    def _adaptive_read_sidecar_raw(self, policy_idx: int) -> dict[str, Any] | None:
-        """Best-effort raw sidecar JSON read (no cache mutation, no raise)."""
-        path = self._adaptive_precision_path(policy_idx)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text())
-            return data if isinstance(data, dict) else None
-        except Exception:
-            return None
-
-    def _adaptive_precision_restore(self, policy_idx: int, *, strict: bool = True) -> None:
-        """Restore probation / retention / rescue state from the sidecar JSON."""
-        if policy_idx in self._adaptive_probation:
-            return
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            ADAPTIVE_SIDECAR_SCHEMA_VERSION,
-            PrecisionRetentionTracker,
-            ProbationState,
-        )
-
-        cfg = self._adaptive_precision_cfg
-        path = self._adaptive_precision_path(policy_idx)
-        data: dict[str, Any] = {}
-        if not path.exists():
-            if not strict:
-                self._adaptive_peer_unavailable[policy_idx] = (
-                    "source_adaptive_sidecar_missing"
-                )
-                raise RuntimeError(
-                    f"adaptive sidecar missing for policy {policy_idx}"
-                )
-            # Local/strict cold start: materialise empty in-memory state.
-        else:
-            last_err: Exception | None = None
-            for _attempt in range(3):
-                try:
-                    data = json.loads(path.read_text()) or {}
-                    last_err = None
-                    break
-                except Exception as exc:
-                    last_err = exc
-                    data = {}
-            if last_err is not None:
-                if strict:
-                    raise RuntimeError(
-                        f"adaptive sidecar parse failed for policy {policy_idx}: {last_err}"
-                    ) from last_err
-                self._adaptive_peer_unavailable[policy_idx] = (
-                    "source_adaptive_sidecar_parse_error"
-                )
-                raise RuntimeError(
-                    f"adaptive sidecar parse failed for policy {policy_idx}: {last_err}"
-                ) from last_err
-        self._adaptive_peer_unavailable.pop(policy_idx, None)
-        # Schema migrate: missing schema_version treated as v1 in memory.
-        if "schema_version" not in data:
-            data = dict(data)
-            data["schema_version"] = 1
-        if data.get("probation"):
-            self._adaptive_probation[policy_idx] = ProbationState.from_json(data["probation"])
-        else:
-            self._adaptive_probation[policy_idx] = ProbationState()
-        if data.get("retention"):
-            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker.from_json(
-                data["retention"]
-            )
-        else:
-            quant = float(cfg.tolerance_log_quant) if cfg is not None else 0.05
-            self._adaptive_retention[policy_idx] = PrecisionRetentionTracker(quant=quant)
-        self._adaptive_degradation_streak[policy_idx] = int(data.get("degradation_streak", 0))
-        self._adaptive_last_rescue_frame[policy_idx] = int(
-            data.get("last_rescue_frame", -(10**18))
-        )
-        self._adaptive_rescue_executed[policy_idx] = int(data.get("rescue_executed", 0))
-        self._adaptive_rescue_executed_for_lineage[policy_idx] = int(
-            data.get("rescue_executed_for_lineage", data.get("rescue_executed", 0))
-        )
-        self._adaptive_lineage_id[policy_idx] = str(data.get("adaptive_lineage_id", "") or "")
-        self._adaptive_rescue_attempt_count[policy_idx] = int(
-            data.get("rescue_attempt_count", 0)
-        )
-        self._adaptive_rescue_selected_count[policy_idx] = int(
-            data.get("rescue_selected_count", 0)
-        )
-        self._adaptive_rescue_blocked_count[policy_idx] = int(
-            data.get("rescue_blocked_count", 0)
-        )
-        self._adaptive_rescue_last_reason[policy_idx] = str(
-            data.get("rescue_last_reason", "") or ""
-        )
-        self._adaptive_rescue_last_source[policy_idx] = int(
-            data.get("rescue_last_source", -1)
-        )
-        self._adaptive_rescue_last_source_rank[policy_idx] = int(
-            data.get("rescue_last_source_rank", -1)
-        )
-        self._adaptive_rescue_last_advantage_sigma[policy_idx] = float(
-            data.get("rescue_last_advantage_sigma", 0.0) or 0.0
-        )
-        self._adaptive_prev_tol = getattr(self, "_adaptive_prev_tol", {})
-        self._adaptive_prev_tol[policy_idx] = data.get("prev_tolerance")
-        self._adaptive_eps_init = getattr(self, "_adaptive_eps_init", {})
-        self._adaptive_eps_init[policy_idx] = float(data.get("eps_init", 0.0) or 0.0)
-        self._adaptive_last_update_frame[policy_idx] = int(
-            data.get("last_update_frame", -(10**18))
-        )
-        self._adaptive_last_checkpoint_frame[policy_idx] = int(
-            data.get("last_checkpoint_frame", -1)
-        )
-        self._adaptive_last_checkpoint_path[policy_idx] = str(
-            data.get("last_checkpoint_path", "") or ""
-        )
-        self._adaptive_freeze_only_streak[policy_idx] = int(
-            data.get("freeze_only_streak", 0) or 0
-        )
-        self._adaptive_sidecar_meta[policy_idx] = {
-            "schema_version": int(
-                data.get("schema_version", ADAPTIVE_SIDECAR_SCHEMA_VERSION)
-            ),
-            "last_update_frame": int(data.get("last_update_frame", -(10**18))),
-            "last_update_timestamp": float(data.get("last_update_timestamp", 0.0) or 0.0),
-            "last_update_lineage_id": str(data.get("last_update_lineage_id", "") or ""),
-            "last_checkpoint_frame": int(data.get("last_checkpoint_frame", -1)),
-            "last_checkpoint_path": str(data.get("last_checkpoint_path", "") or ""),
-            "freeze_only_streak": int(data.get("freeze_only_streak", 0) or 0),
-        }
-
-    def _adaptive_precision_persist(self, policy_idx: int) -> None:
-        import time as _time
-
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            ADAPTIVE_SIDECAR_SCHEMA_VERSION,
-        )
-
-        path = self._adaptive_precision_path(policy_idx)
-        lineage = str(self._adaptive_lineage_id.get(policy_idx, "") or "")
-        payload = {
-            "policy_idx": int(policy_idx),
-            "schema_version": int(ADAPTIVE_SIDECAR_SCHEMA_VERSION),
-            "probation": self._adaptive_probation[policy_idx].to_json(),
-            "retention": self._adaptive_retention[policy_idx].to_json(),
-            "degradation_streak": int(self._adaptive_degradation_streak.get(policy_idx, 0)),
-            "last_rescue_frame": int(
-                self._adaptive_last_rescue_frame.get(policy_idx, -(10**18))
-            ),
-            "rescue_executed": int(self._adaptive_rescue_executed.get(policy_idx, 0)),
-            "rescue_executed_for_lineage": int(
-                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
-            ),
-            "adaptive_lineage_id": lineage,
-            "rescue_attempt_count": int(
-                self._adaptive_rescue_attempt_count.get(policy_idx, 0)
-            ),
-            "rescue_selected_count": int(
-                self._adaptive_rescue_selected_count.get(policy_idx, 0)
-            ),
-            "rescue_blocked_count": int(
-                self._adaptive_rescue_blocked_count.get(policy_idx, 0)
-            ),
-            "rescue_last_reason": str(
-                self._adaptive_rescue_last_reason.get(policy_idx, "")
-            ),
-            "rescue_last_source": int(
-                self._adaptive_rescue_last_source.get(policy_idx, -1)
-            ),
-            "rescue_last_source_rank": int(
-                self._adaptive_rescue_last_source_rank.get(policy_idx, -1)
-            ),
-            "rescue_last_advantage_sigma": float(
-                self._adaptive_rescue_last_advantage_sigma.get(policy_idx, 0.0)
-            ),
-            "prev_tolerance": getattr(self, "_adaptive_prev_tol", {}).get(policy_idx),
-            "eps_init": float(getattr(self, "_adaptive_eps_init", {}).get(policy_idx, 0.0)),
-            "last_update_frame": int(
-                self._adaptive_last_update_frame.get(policy_idx, -(10**18))
-            ),
-            "last_update_timestamp": float(_time.time()),
-            "last_update_lineage_id": lineage,
-            "last_checkpoint_frame": int(
-                self._adaptive_last_checkpoint_frame.get(policy_idx, -1)
-            ),
-            "last_checkpoint_path": str(
-                self._adaptive_last_checkpoint_path.get(policy_idx, "")
-            ),
-            "freeze_only_streak": int(
-                self._adaptive_freeze_only_streak.get(policy_idx, 0)
-            ),
-        }
-        self._adaptive_sidecar_meta[policy_idx] = {
-            "schema_version": int(ADAPTIVE_SIDECAR_SCHEMA_VERSION),
-            "last_update_frame": int(payload["last_update_frame"]),
-            "last_update_timestamp": float(payload["last_update_timestamp"]),
-            "last_update_lineage_id": lineage,
-            "last_checkpoint_frame": int(payload["last_checkpoint_frame"]),
-            "last_checkpoint_path": str(payload["last_checkpoint_path"]),
-            "freeze_only_streak": int(payload["freeze_only_streak"]),
-        }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload))
-        os.replace(str(tmp), str(path))
-
-    def _adaptive_reset_lineage_quota(self, policy_idx: int, lineage_id: str) -> None:
-        """Reset per-lineage adaptive rescue quota and degradation streak."""
-        stored = str(self._adaptive_lineage_id.get(policy_idx, "") or "")
-        current = str(lineage_id or "")
-        if current == stored:
-            return
-        self._adaptive_lineage_id[policy_idx] = current
-        self._adaptive_degradation_streak[policy_idx] = 0
-        self._adaptive_rescue_executed_for_lineage[policy_idx] = 0
-        self._adaptive_last_rescue_frame[policy_idx] = -(10**18)
-
-    def _adaptive_precision_update(
-        self, *, sample: Any, state: dict[str, Any] | None, env_frames: int
-    ) -> None:
-        """Advance the adaptive precision controller for the current policy.
-
-        Maintains per-precision-band retention, generalized post-shrink
-        probation, and the degradation streak used by rescue.  State survives
-        restart via a sidecar JSON.  Emits ``adaptive_consolidation/*`` metrics.
-        """
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            curriculum_progress as _curr_prog,
-        )
-
-        cfg = self._adaptive_precision_cfg
-        if cfg is None:
-            return
-        pidx = int(self.policy_idx)
-        self._adaptive_precision_restore(pidx, strict=True)
-
-        cur_tol = float(getattr(sample, "success_tolerance", 0.075) or 0.075)
-        nsucc_mean = float(getattr(sample, "nsucc_mean", 0.0) or 0.0)
-        lineage_id = str(getattr(sample, "lineage_id", "") or "")
-        self._adaptive_reset_lineage_quota(pidx, lineage_id)
-
-        # Target tolerance from the state's curriculum block; fall back to the
-        # configured bridge target (both default to the env target tolerance).
-        target_tol = float(self.bridge_curriculum_target_tol)
-        if isinstance(state, dict):
-            curr = state.get("curriculum") or {}
-            try:
-                target_tol = float(
-                    curr.get("target_tolerance", curr.get("target_success_tolerance", target_tol))
-                )
-            except Exception:
-                pass
-        # Initial (loosest) tolerance = monotonic max observed.
-        eps_init_map = getattr(self, "_adaptive_eps_init", {})
-        eps_init = max(float(eps_init_map.get(pidx, 0.0) or 0.0), cur_tol)
-        eps_init_map[pidx] = eps_init
-        self._adaptive_eps_init = eps_init_map
-
-        c = _curr_prog(eps_init, target_tol, cur_tol, eps=float(cfg.eps))
-        self._adaptive_curriculum_progress = float(c)
-
-        tracker = self._adaptive_retention[pidx]
-        tracker.update(
-            cur_tol,
-            nsucc_mean,
-            lineage_id=lineage_id,
-            reset_on_lineage_change=True,
-            min_retention_for_stable=float(cfg.rescue_source_min_retention),
-        )
-        snap = tracker.snapshot(cur_tol, min_samples=1)
-        retention = float(snap["retention"])
-
-        # Detect a stricter shrink -> arm probation for the new precision band.
-        prev_map = getattr(self, "_adaptive_prev_tol", {})
-        prev_tol = prev_map.get(pidx)
-        probation = self._adaptive_probation[pidx]
-        if prev_tol is not None and cur_tol < float(prev_tol) - 1e-9:
-            probation.arm(
-                tolerance=cur_tol,
-                frame=int(env_frames),
-                nsucc_mean=nsucc_mean,
-                previous_tolerance=float(prev_tol),
-            )
-        prev_map[pidx] = cur_tol
-        self._adaptive_prev_tol = prev_map
-
-        probation.update(
-            nsucc_mean=nsucc_mean,
-            same_level_retention=retention,
-            frame=int(env_frames),
-            cfg=cfg,
-        )
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            resolve_stage as _resolve_stage,
-        )
-
-        stage_name = _resolve_stage(float(c), cfg)
-        if bool(getattr(cfg, "probation_stage_aware_enable", False)):
-            exit_kind, exit_reason = probation.evaluate_exit(
-                frame=int(env_frames), stage=str(stage_name), cfg=cfg
-            )
-            if exit_kind in ("early_exit", "normal_exit"):
-                probation.active = False
-            elif exit_kind == "max_frames_timeout":
-                # Arm the same rollback/freeze path as hard-collapse.
-                self._adaptive_probation_timeout[pidx] = True
-                self._adaptive_probation_timeout_reason[pidx] = str(exit_reason)
-        else:
-            probation.maybe_exit(frame=int(env_frames), cfg=cfg)
-
-        # Degradation streak feeds retention-conditioned rescue.
-        if retention < float(cfg.rescue_retention_threshold):
-            self._adaptive_degradation_streak[pidx] = (
-                int(self._adaptive_degradation_streak.get(pidx, 0)) + 1
-            )
-        else:
-            self._adaptive_degradation_streak[pidx] = 0
-
-        self._adaptive_last_update_frame[pidx] = int(env_frames)
-        self._adaptive_precision_persist(pidx)
-
-        if self.writer is not None:
-            stage = resolve_pbt_stage(
-                int(env_frames), self.pbt_consolidation_cfg, curriculum_progress=c
-            )
-            can_shrink, shrink_block = probation.can_shrink(frame=int(env_frames), cfg=cfg)
-            for name, val in (
-                ("adaptive_consolidation/curriculum_progress", float(c)),
-                ("adaptive_consolidation/stage", float(stage_id(stage))),
-                ("adaptive_consolidation/local_retention", float(retention)),
-                ("adaptive_consolidation/probation_active", 1.0 if probation.active else 0.0),
-                (
-                    "adaptive_consolidation/probation_frames",
-                    float(max(0, int(env_frames) - int(probation.entry_frame)))
-                    if probation.active
-                    else 0.0,
-                ),
-                ("adaptive_consolidation/shrink_blocked", 0.0 if can_shrink else 1.0),
-                ("adaptive_consolidation/probation_can_shrink", 1.0 if can_shrink else 0.0),
-                (
-                    "adaptive_consolidation/hard_collapse_streak",
-                    float(probation.hard_collapse_streak),
-                ),
-                (
-                    "adaptive_consolidation/degradation_streak",
-                    float(self._adaptive_degradation_streak.get(pidx, 0)),
-                ),
-                (
-                    "adaptive_consolidation/rescue_quota_used",
-                    float(self._adaptive_rescue_executed_for_lineage.get(pidx, 0)),
-                ),
-                (
-                    "adaptive_consolidation/distinct_lineage_count",
-                    float(self._last_adaptive_distinct_lineage_count),
-                ),
-                (
-                    "adaptive_consolidation/min_distinct_lineages",
-                    float(self._last_adaptive_min_distinct_lineages),
-                ),
-                (
-                    "adaptive_consolidation/replacement_budget",
-                    float(self._last_adaptive_replacement_budget),
-                ),
-                (
-                    "adaptive_consolidation/replacement_budget_used",
-                    float(self._last_adaptive_replacement_budget_used),
-                ),
-                (
-                    "adaptive_consolidation/diversity_blocked",
-                    1.0 if self._last_adaptive_diversity_blocked else 0.0,
-                ),
-            ):
-                try:
-                    self.writer.add_scalar(name, val, int(env_frames))
-                except Exception:
-                    pass
-
-    def _adaptive_degradation_rescue_ready(
-        self,
-        *,
-        policy_idx: int,
-        tolerance: float,
-        nsucc_mean: float,
-        env_frames: int,
-        lineage_id: str,
-        hard_collapse_now: bool = False,
-    ) -> tuple[bool, str]:
-        """Retention-conditioned adaptive rescue trigger (no legacy late rescue).
-
-        When ``hard_collapse_now`` is True, hard collapse independently arms
-        adaptive rescue without retention warmup / degradation patience, while
-        still respecting lineage quota and cooldown.
-        """
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            evaluate_degradation_rescue,
-        )
-
-        state = self._adaptive_precision_state(policy_idx)
-        if state is None:
-            return False, "disabled"
-        cfg, _probation, tracker = state
-        if not bool(cfg.rescue_enable):
-            return False, "disabled"
-        self._adaptive_reset_lineage_quota(policy_idx, lineage_id)
-        last_frame = int(self._adaptive_last_rescue_frame.get(policy_idx, -(10**18)))
-        frames_since = int(env_frames) - last_frame
-        executed = int(self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0))
-        if int(executed) >= int(cfg.rescue_max_per_lineage):
-            reason = (
-                "hard_collapse_quota_exhausted"
-                if hard_collapse_now
-                else "quota_exhausted"
-            )
-            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
-            return False, str(reason)
-        if int(frames_since) < int(cfg.rescue_cooldown_frames):
-            reason = (
-                "hard_collapse_cooldown" if hard_collapse_now else "cooldown"
-            )
-            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
-            return False, str(reason)
-        if hard_collapse_now:
-            reason = "hard_collapse_ready"
-            self._adaptive_rescue_last_reason[policy_idx] = str(reason)
-            return True, str(reason)
-        snap = tracker.snapshot(float(tolerance), min_samples=1)
-        ready, reason = evaluate_degradation_rescue(
-            tolerance=float(tolerance),
-            nsucc_mean=float(nsucc_mean),
-            same_level_retention=float(snap["retention"]),
-            same_level_valid=bool(snap["valid"]),
-            degradation_streak=int(self._adaptive_degradation_streak.get(policy_idx, 0)),
-            executed_this_lineage=int(executed),
-            frames_since_last_rescue=int(frames_since),
-            cfg=cfg,
-        )
-        if ready:
-            reason = "retention_degradation_ready"
-        elif str(reason) in {
-            "retention_invalid",
-            "retention_nonfinite",
-            "retention_ok",
-            "streak_below_patience",
-        }:
-            # Keep detailed diagnostic reasons for retention path; also expose
-            # a stable not-ready token for control-plane consumers.
-            reason = str(reason)
-        self._adaptive_rescue_last_reason[policy_idx] = str(reason)
-        return bool(ready), str(reason)
-
-    def _select_adaptive_degradation_rescue_source(
-        self,
-        *,
-        sorted_policies: list[int],
-        population: dict[int, dict[str, Any] | None],
-        env_frames: int,
-        target_tolerance: float,
-        target_nsucc_mean: float,
-    ) -> dict[str, Any]:
-        """Live-only adaptive rescue source selection."""
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            evaluate_sidecar_freshness,
-            log_tolerance_gap,
-            rescue_source_top_k,
-            select_rescue_source,
-            validate_source_retention_snapshot,
-        )
-
-        empty = {
-            "action": "skip",
-            "tier": "skipped",
-            "checkpoint_type": "none",
-            "source_policy": -1,
-            "source_state": None,
-            "strict_candidates": [],
-            "relaxed_candidates": [],
-            "strict_filter_reasons": {},
-            "relaxed_filter_reasons": {},
-            "archive_reason": "no_compatible_source",
-            "adaptive_rescue_reason": "no_compatible_source",
-            "adaptive_source_rank": -1,
-            "adaptive_source_advantage_sigma": 0.0,
-        }
-        state = self._adaptive_precision_state(self.policy_idx, strict_local=True)
-        if state is None:
-            empty["adaptive_rescue_reason"] = "disabled"
-            empty["archive_reason"] = "disabled"
-            return empty
-        cfg, _probation, _tracker = state
-        candidates: list[dict[str, Any]] = []
-        pop_means: list[float] = []
-        filter_reasons: dict[int, str] = {}
-        pop_lineage = str(getattr(self, "_lineage_id", "") or "")
-        for idx in sorted_policies:
-            if int(idx) == int(self.policy_idx):
-                continue
-            st = population.get(idx)
-            if not isinstance(st, dict):
-                filter_reasons[int(idx)] = "missing_state"
-                continue
-            ckpt = st.get("checkpoint")
-            if not ckpt or not Path(str(ckpt)).is_file():
-                filter_reasons[int(idx)] = "missing_checkpoint"
-                continue
-            curr = st.get("curriculum") or {}
-            try:
-                s_mean = float(st.get("nsucc_mean", float("nan")))
-                s_tol = float(curr.get("success_tolerance", float("nan")))
-                s_rank = float(st.get("pbt_ranking_score", st.get("objective", float("nan"))))
-            except Exception:
-                filter_reasons[int(idx)] = "nonfinite"
-                continue
-            if not all(math.isfinite(x) for x in (s_mean, s_tol, s_rank)):
-                filter_reasons[int(idx)] = "nonfinite"
-                continue
-            pop_means.append(s_mean)
-            src_state = self._adaptive_precision_state(int(idx), strict_local=False)
-            if src_state is None:
-                reason = self._adaptive_peer_unavailable.get(
-                    int(idx), "source_adaptive_sidecar_missing"
-                )
-                filter_reasons[int(idx)] = str(reason)
-                self._adaptive_peer_reject_counts[int(idx)] = (
-                    int(self._adaptive_peer_reject_counts.get(int(idx), 0)) + 1
-                )
-                continue
-            _c, _p, src_tracker = src_state
-            snap = src_tracker.snapshot(
-                s_tol,
-                min_samples=int(cfg.rescue_source_min_samples),
-                min_stable_ticks=int(cfg.rescue_source_min_stable_ticks),
-            )
-            ret_ok, ret_reason = validate_source_retention_snapshot(snap, cfg=cfg)
-            if not ret_ok:
-                filter_reasons[int(idx)] = str(ret_reason)
-                self._adaptive_peer_reject_counts[int(idx)] = (
-                    int(self._adaptive_peer_reject_counts.get(int(idx), 0)) + 1
-                )
-                continue
-            raw_side = self._adaptive_read_sidecar_raw(int(idx))
-            if raw_side is None:
-                filter_reasons[int(idx)] = "source_adaptive_sidecar_missing"
-                self._adaptive_peer_reject_counts[int(idx)] = (
-                    int(self._adaptive_peer_reject_counts.get(int(idx), 0)) + 1
-                )
-                continue
-            ckpt_frame = None
-            try:
-                if "frame" in st:
-                    ckpt_frame = int(st.get("frame"))
-                elif "env_frames" in st:
-                    ckpt_frame = int(st.get("env_frames"))
-            except Exception:
-                ckpt_frame = None
-            fresh_ok, fresh_reason = evaluate_sidecar_freshness(
-                sidecar=raw_side,
-                population_frame=int(st.get("frame", env_frames) or env_frames),
-                population_lineage_id=str(
-                    st.get("lineage_id", pop_lineage) or pop_lineage
-                ),
-                checkpoint_frame=ckpt_frame,
-                interval_steps=int(self.interval_steps),
-                cfg=cfg,
-                require_freshness_fields=True,
-            )
-            if not fresh_ok:
-                filter_reasons[int(idx)] = str(fresh_reason)
-                self._adaptive_peer_reject_counts[int(idx)] = (
-                    int(self._adaptive_peer_reject_counts.get(int(idx), 0)) + 1
-                )
-                continue
-            s_ret = float(snap["retention"])
-            ctrl_path = self._curriculum_control_dir / f"{int(idx):03d}.json"
-            has_control = ctrl_path.is_file()
-            collapsed = False
-            if has_control:
-                try:
-                    control = read_curriculum_control(ctrl_path)
-                except Exception:
-                    control = None
-                if control is None:
-                    if cfg.rescue_require_source_control:
-                        filter_reasons[int(idx)] = "source_control_parse_error"
-                        continue
-                    has_control = False
-                else:
-                    collapsed, _reason = control_has_collapse_signal(control)
-            elif cfg.rescue_require_source_control:
-                filter_reasons[int(idx)] = "source_control_missing"
-                continue
-            candidates.append(
-                {
-                    "idx": int(idx),
-                    "nsucc_mean": s_mean,
-                    "retention": s_ret,
-                    "retention_valid": True,
-                    "tolerance": s_tol,
-                    "ranking_score": s_rank,
-                    "has_control": bool(has_control),
-                    "collapsed": bool(collapsed),
-                    "source_age_frames": max(
-                        0,
-                        int(env_frames)
-                        - int(raw_side.get("last_update_frame", env_frames) or env_frames),
-                    ),
-                }
-            )
-        if math.isfinite(float(target_nsucc_mean)):
-            pop_means.append(float(target_nsucc_mean))
-        top_k = rescue_source_top_k(
-            len(sorted_policies), float(cfg.rescue_source_top_fraction)
-        )
-        allowed = {int(x) for x in sorted_policies[:top_k]}
-        decision = select_rescue_source(
-            target_tolerance=float(target_tolerance),
-            target_nsucc_mean=float(target_nsucc_mean),
-            candidates=candidates,
-            population_nsucc_means=pop_means,
-            cfg=cfg,
-            allowed_source_ids=allowed,
-            sorted_population=list(sorted_policies),
-        )
-        if not decision.eligible:
-            empty["adaptive_rescue_reason"] = str(decision.reason)
-            empty["archive_reason"] = str(decision.reason)
-            empty["relaxed_filter_reasons"] = {
-                str(k): v for k, v in filter_reasons.items()
-            }
-            return empty
-        src_idx = int(decision.source_idx)
-        src_state = population.get(src_idx)
-        assert src_state is not None
-        src_tol = float(
-            (src_state.get("curriculum") or {}).get("success_tolerance", float("nan"))
-        )
-        return {
-            "action": "copy",
-            "tier": "adaptive_rescue_live",
-            "checkpoint_type": "live",
-            "source_policy": src_idx,
-            "source_state": src_state,
-            "strict_candidates": [src_idx],
-            "relaxed_candidates": [c["idx"] for c in candidates],
-            "strict_filter_reasons": {},
-            "relaxed_filter_reasons": {
-                str(k): v for k, v in filter_reasons.items()
-            },
-            "archive_reason": str(decision.reason),
-            "adaptive_rescue_reason": "selected",
-            "adaptive_source_rank": int(decision.source_rank),
-            "adaptive_source_advantage_sigma": float(decision.source_advantage_sigma),
-            "adaptive_log_tolerance_gap": float(
-                log_tolerance_gap(src_tol, target_tolerance, eps=cfg.eps)
-                if math.isfinite(src_tol)
-                else float("nan")
-            ),
-        }
-
-    def _select_adaptive_archive_rescue_source(
-        self,
-        *,
-        env_frames: int,
-        target_tolerance: float,
-        target_nsucc_mean: float,
-        population_nsucc_means: list[float] | None = None,
-    ) -> dict[str, Any]:
-        """Try best_stable / floor_recovery / best_nsucc archives for adaptive rescue."""
-        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-            log_tolerance_gap,
-        )
-
-        empty = {
-            "action": "skip",
-            "tier": "skipped",
-            "checkpoint_type": "none",
-            "source_policy": -1,
-            "source_state": None,
-            "strict_candidates": [],
-            "relaxed_candidates": [],
-            "strict_filter_reasons": {},
-            "relaxed_filter_reasons": {},
-            "archive_reason": "no_compatible_archive",
-            "adaptive_rescue_reason": "no_compatible_archive",
-            "adaptive_rescue_source_kind": "none",
-            "adaptive_source_rank": -1,
-            "adaptive_source_advantage_sigma": 0.0,
-        }
-        state = self._adaptive_precision_state(self.policy_idx, strict_local=True)
-        if state is None:
-            empty["adaptive_rescue_reason"] = "disabled"
-            return empty
-        cfg, _probation, _tracker = state
-        if not bool(cfg.rescue_archive_enable):
-            empty["adaptive_rescue_reason"] = "archive_disabled"
-            return empty
-
-        means = [
-            float(x)
-            for x in (population_nsucc_means or [])
-            if isinstance(x, (int, float)) and math.isfinite(float(x))
-        ]
-        min_pop_samples = int(cfg.rescue_archive_min_population_samples)
-        if len(means) < min_pop_samples:
-            empty["archive_reason"] = "archive_population_stats_insufficient"
-            empty["adaptive_rescue_reason"] = "archive_population_stats_insufficient"
-            empty["adaptive_population_nsucc_sample_count"] = int(len(means))
-            empty["adaptive_population_nsucc_sigma"] = 0.0
-            empty["adaptive_population_nsucc_effective_sigma"] = 0.0
-            empty["adaptive_source_absolute_advantage"] = 0.0
-            empty["adaptive_source_advantage_sigma"] = 0.0
-            return empty
-        if len(means) >= 2:
-            mu = sum(means) / float(len(means))
-            var = sum((m - mu) ** 2 for m in means) / float(len(means) - 1)
-            pop_sigma = math.sqrt(max(0.0, var))
-        else:
-            pop_sigma = 0.0
-        sigma_floor = float(cfg.rescue_archive_advantage_sigma_floor)
-        effective_sigma = max(float(pop_sigma), float(sigma_floor))
-
-        tiers = (
-            (
-                "adaptive_rescue_best_stable_archive",
-                "best_stable_archive",
-                self._select_best_stable_recovery_source,
-            ),
-            (
-                "adaptive_rescue_floor_recovery_archive",
-                "best_floor_recovery_archive",
-                self._select_best_floor_recovery_recovery_source,
-            ),
-            (
-                "adaptive_rescue_best_nsucc_archive",
-                "archive",
-                self._select_best_nsucc_recovery_source,
-            ),
-        )
-        reject_reasons: list[str] = []
-        collapse_keys = (
-            "collapse_rollback_active",
-            "hard_collapse_triggered",
-            "collapsed",
-            "adaptive_probation_hard_collapse",
-        )
-        quality_keys = (
-            "pbt_ranking_score",
-            "ranking_score",
-            "archive_quality_score",
-            "r_meta_raw",
-            "objective",
-        )
-        for tier_label, ckpt_type, selector in tiers:
-            synth, reason = selector(int(env_frames))
-            if synth is None:
-                reject_reasons.append(f"{tier_label}:{reason}")
-                continue
-            ckpt = synth.get("checkpoint")
-            if not ckpt or not Path(str(ckpt)).is_file():
-                reject_reasons.append(f"{tier_label}:checkpoint_missing")
-                continue
-            try:
-                s_tol = float(
-                    (synth.get("curriculum") or {}).get(
-                        "success_tolerance",
-                        synth.get("success_tolerance", float("nan")),
-                    )
-                )
-                s_mean = float(synth.get("nsucc_mean", float("nan")))
-                s_max = float(
-                    synth.get(
-                        "nsucc_max",
-                        (synth.get("curriculum") or {}).get(
-                            "max_prev_episode_successes", float("nan")
-                        ),
-                    )
-                )
-            except Exception:
-                reject_reasons.append(f"{tier_label}:nonfinite")
-                continue
-            if not all(math.isfinite(x) for x in (s_tol, s_mean, s_max)):
-                reject_reasons.append(f"{tier_label}:nonfinite")
-                continue
-            if s_tol <= 0.0:
-                reject_reasons.append(f"{tier_label}:tolerance_incompatible")
-                continue
-            if s_mean < float(cfg.rescue_archive_min_nsucc_mean):
-                reject_reasons.append(f"{tier_label}:nsucc_below_min")
-                continue
-            if s_max < float(cfg.rescue_archive_min_nsucc_max):
-                reject_reasons.append(f"{tier_label}:nsucc_max_below_min")
-                continue
-            quality = float("nan")
-            for qk in quality_keys:
-                if qk in synth:
-                    try:
-                        quality = float(synth.get(qk))
-                    except Exception:
-                        quality = float("nan")
-                    break
-                curr = synth.get("curriculum") or {}
-                if qk in curr:
-                    try:
-                        quality = float(curr.get(qk))
-                    except Exception:
-                        quality = float("nan")
-                    break
-            if bool(cfg.rescue_archive_require_quality_score):
-                if not math.isfinite(quality):
-                    reject_reasons.append(f"{tier_label}:quality_score_missing")
-                    continue
-            gap = log_tolerance_gap(s_tol, target_tolerance, eps=cfg.eps)
-            if gap > float(cfg.rescue_max_log_tol_gap) + 1e-12:
-                reject_reasons.append(f"{tier_label}:log_gap")
-                continue
-            ret = float("nan")
-            ret_valid = False
-            for key in (
-                "same_tol_retention_at_save",
-                "source_retention_at_save",
-                "same_tol_retention",
-                "retention",
-            ):
-                if key in synth:
-                    try:
-                        ret = float(synth.get(key))
-                    except Exception:
-                        ret = float("nan")
-                    break
-                curr = synth.get("curriculum") or {}
-                if key in curr:
-                    try:
-                        ret = float(curr.get(key))
-                    except Exception:
-                        ret = float("nan")
-                    break
-            if "same_tol_retention_valid_at_save" in synth:
-                ret_valid = bool(synth.get("same_tol_retention_valid_at_save"))
-            elif math.isfinite(ret):
-                ret_valid = True
-            if bool(cfg.rescue_archive_require_retention):
-                if (not ret_valid) or (not math.isfinite(ret)):
-                    reject_reasons.append(f"{tier_label}:retention_missing")
-                    continue
-                if ret < float(cfg.rescue_source_min_retention):
-                    reject_reasons.append(f"{tier_label}:retention_below_min")
-                    continue
-            age_frame = None
-            age_parse_failed = False
-            for key in ("env_frames", "frame", "population_frame", "saved_frame"):
-                if key in synth:
-                    try:
-                        age_frame = int(synth.get(key))
-                    except Exception:
-                        age_frame = None
-                        age_parse_failed = True
-                    break
-            age_known = False
-            age_frames = -1
-            if age_parse_failed:
-                reject_reasons.append(f"{tier_label}:archive_age_nonfinite")
-                continue
-            if age_frame is None:
-                if bool(cfg.rescue_archive_require_age):
-                    reject_reasons.append(f"{tier_label}:archive_age_missing")
-                    continue
-                # require_age=False: skip age gate; do not invent age=0.
-                age_known = False
-                age_frames = -1
-            else:
-                age = int(env_frames) - int(age_frame)
-                if age < 0:
-                    reject_reasons.append(f"{tier_label}:archive_age_from_future")
-                    continue
-                if age > int(cfg.rescue_archive_max_age_frames):
-                    reject_reasons.append(f"{tier_label}:archive_too_old")
-                    continue
-                age_known = True
-                age_frames = int(age)
-            has_collapse_meta = any(k in synth for k in collapse_keys)
-            if bool(cfg.rescue_archive_require_collapse_metadata) and not has_collapse_meta:
-                reject_reasons.append(f"{tier_label}:collapse_metadata_missing")
-                continue
-            collapsed = bool(
-                synth.get("collapse_rollback_active")
-                or synth.get("hard_collapse_triggered")
-                or synth.get("collapsed")
-                or synth.get("adaptive_probation_hard_collapse")
-            )
-            if bool(cfg.rescue_reject_collapse_source) and collapsed:
-                reject_reasons.append(f"{tier_label}:collapsed")
-                continue
-            absolute_advantage = float(s_mean) - float(target_nsucc_mean)
-            if absolute_advantage < float(cfg.rescue_archive_min_absolute_advantage):
-                reject_reasons.append(f"{tier_label}:low_absolute_advantage")
-                continue
-            adv_sigma = float(absolute_advantage) / float(effective_sigma)
-            if (not math.isfinite(adv_sigma)) or adv_sigma < float(
-                cfg.rescue_min_source_advantage_sigma
-            ):
-                reject_reasons.append(f"{tier_label}:low_advantage")
-                continue
-            return {
-                "action": "copy",
-                "tier": tier_label,
-                "checkpoint_type": ckpt_type,
-                "source_policy": int(synth.get("policy_idx", -1)),
-                "source_state": synth,
-                "strict_candidates": [],
-                "relaxed_candidates": [],
-                "strict_filter_reasons": {},
-                "relaxed_filter_reasons": {},
-                "archive_reason": "ok",
-                "adaptive_rescue_reason": "selected_archive",
-                "adaptive_rescue_source_kind": "archive",
-                "adaptive_source_rank": -1,
-                "adaptive_source_advantage_sigma": float(adv_sigma),
-                "adaptive_source_absolute_advantage": float(absolute_advantage),
-                "adaptive_population_nsucc_sample_count": int(len(means)),
-                "adaptive_population_nsucc_sigma": float(pop_sigma),
-                "adaptive_population_nsucc_effective_sigma": float(effective_sigma),
-                "adaptive_archive_age_known": bool(age_known),
-                "adaptive_archive_age_frames": int(age_frames),
-                "adaptive_log_tolerance_gap": float(gap),
-                "adaptive_rescue_archive_tier": tier_label,
-            }
-        empty["archive_reason"] = ";".join(reject_reasons) or "no_compatible_archive"
-        empty["adaptive_rescue_reason"] = empty["archive_reason"]
-        return empty
-
-    def _select_adaptive_rescue_source_cascade(
-        self,
-        *,
-        sorted_policies: list[int],
-        population: dict[int, dict[str, Any] | None],
-        env_frames: int,
-        target_tolerance: float,
-        target_nsucc_mean: float,
-        n_top: int,
-    ) -> dict[str, Any]:
-        """Cascade: live adaptive -> archive adaptive -> ordinary fallback."""
-        pidx = int(self.policy_idx)
-        pop_means: list[float] = []
-        for st in (population or {}).values():
-            if not st:
-                continue
-            try:
-                m = float(st.get("nsucc_mean", float("nan")))
-            except Exception:
-                continue
-            if math.isfinite(m):
-                pop_means.append(m)
-        live = self._select_adaptive_degradation_rescue_source(
-            sorted_policies=sorted_policies,
-            population=population,
-            env_frames=env_frames,
-            target_tolerance=target_tolerance,
-            target_nsucc_mean=target_nsucc_mean,
-        )
-        if live.get("action") == "copy":
-            live = dict(live)
-            live["adaptive_rescue_source_kind"] = "live"
-            live.setdefault("adaptive_rescue_fallback_to_ordinary", False)
-            return live
-        state = self._adaptive_precision_state(pidx, strict_local=True)
-        cfg = state[0] if state is not None else None
-        if cfg is not None and bool(cfg.rescue_archive_enable):
-            arch = self._select_adaptive_archive_rescue_source(
-                env_frames=env_frames,
-                target_tolerance=target_tolerance,
-                target_nsucc_mean=target_nsucc_mean,
-                population_nsucc_means=pop_means,
-            )
-            if arch.get("action") == "copy":
-                arch = dict(arch)
-                arch["adaptive_rescue_source_kind"] = "archive"
-                arch.setdefault("adaptive_rescue_fallback_to_ordinary", False)
-                return arch
-        ordinary = self._select_source(
-            sorted_policies=sorted_policies,
-            population=population,
-            env_frames=env_frames,
-            n_top=n_top,
-        )
-        if ordinary.get("action") == "copy":
-            ordinary = dict(ordinary)
-            ordinary["adaptive_rescue_fallback_to_ordinary"] = True
-            ordinary["adaptive_rescue_reason"] = "ordinary_fallback"
-            ordinary["adaptive_rescue_source_kind"] = "ordinary_fallback"
-            return ordinary
-        skip = {
-            "action": "skip",
-            "tier": "skipped",
-            "checkpoint_type": "none",
-            "source_policy": -1,
-            "source_state": None,
-            "strict_candidates": [],
-            "relaxed_candidates": [],
-            "strict_filter_reasons": {},
-            "relaxed_filter_reasons": {},
-            "archive_reason": str(live.get("archive_reason", "no_compatible_source")),
-            "adaptive_rescue_reason": str(
-                live.get("adaptive_rescue_reason", "no_compatible_source")
-            ),
-            "adaptive_rescue_source_kind": "none",
-            "adaptive_source_rank": -1,
-            "adaptive_source_advantage_sigma": 0.0,
-        }
-        return skip
-
     def _update_curriculum_windows_and_control(
         self,
         population: dict[int, dict[str, Any] | None],
@@ -3539,94 +1518,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._shrink_issued_this_window = {
                 i: False for i in range(self.num_policies)
             }
-            self._last_adaptive_diversity_blocked = False
         self._curriculum_control_dir.mkdir(parents=True, exist_ok=True)
         for policy_idx in range(self.num_policies):
             state = population.get(policy_idx)
             window = self._policy_window(policy_idx)
             if state is not None:
-                sample = self._window_sample_from_state(
-                    state,
-                    env_frames=env_frames,
-                    pbt_iteration=self.pbt_iteration,
+                window.append(
+                    self._window_sample_from_state(
+                        state,
+                        env_frames=env_frames,
+                        pbt_iteration=self.pbt_iteration,
+                    )
                 )
-                window.append(sample)
-                if self.adaptive_precision_enable and policy_idx == self.policy_idx:
-                    try:
-                        self._adaptive_precision_update(
-                            sample=sample, state=state, env_frames=int(env_frames)
-                        )
-                    except Exception as _apc_exc:
-                        if self._adaptive_precision_required():
-                            raise RuntimeError(
-                                f"adaptive precision update failed for formal profile: {_apc_exc}"
-                            ) from _apc_exc
-                        print(f"[adaptive-precision] update failed (ignored): {_apc_exc}")
-                if self.same_tol_retention_enable:
-                    self._maybe_restore_bridge_state(policy_idx)
-                    tracker = self._same_tol_trackers.setdefault(
-                        policy_idx,
-                        ToleranceBinRetentionTracker(
-                            bins=self.same_tol_retention_bins,
-                            ladder=(
-                                self.bridge_tolerance_ladder
-                                if self.bridge_curriculum_enable else ()
-                            ),
-                        ),
-                    )
-                    if self.bridge_curriculum_enable and not tracker.ladder:
-                        tracker.ladder = self.bridge_tolerance_ladder
-                    prev_tol = self._last_confirmed_tolerance.get(policy_idx)
-                    cur_sample_tol = float(sample.success_tolerance)
-                    if (
-                        self.bridge_curriculum_enable
-                        and prev_tol is not None
-                        and cur_sample_tol < float(prev_tol) - 1e-9
-                    ):
-                        # Tolerance actually moved stricter: stamp level timer now.
-                        self._bridge_level_entry_frame[policy_idx] = int(env_frames)
-                        self._bridge_probation_bad_streak[policy_idx] = 0
-                        self._repeated_collapse_count[policy_idx] = 0
-                        self._bridge_shrink_count[policy_idx] = (
-                            int(self._bridge_shrink_count.get(policy_idx, 0)) + 1
-                        )
-                    prev_lineage = tracker.lineage_id
-                    tracker.update(
-                        tolerance=sample.success_tolerance,
-                        nsucc_mean=sample.nsucc_mean,
-                        frame=env_frames,
-                        lineage_id=sample.lineage_id,
-                        reset_on_lineage_change=self.same_tol_retention_reset_on_lineage_change,
-                        use_bridge_levels=bool(self.bridge_curriculum_enable),
-                    )
-                    if (
-                        self.same_tol_retention_reset_on_lineage_change
-                        and prev_lineage is not None
-                        and sample.lineage_id is not None
-                        and str(prev_lineage) != str(sample.lineage_id)
-                    ):
-                        # Cross-copy / lineage change: ordinary rollback streak
-                        # must not carry into the new lineage.
-                        self._repeated_collapse_count[policy_idx] = 0
-                        self._bridge_probation_bad_streak[policy_idx] = 0
-                    self._last_confirmed_tolerance[policy_idx] = cur_sample_tol
-                    if (
-                        self.bridge_curriculum_enable
-                        and prev_tol is not None
-                        and abs(cur_sample_tol - float(prev_tol)) > 1e-9
-                    ):
-                        # Level change (any direction) clears probation bad streak.
-                        level_now = bridge_level_id(
-                            cur_sample_tol, self.bridge_tolerance_ladder
-                        )
-                        level_prev = bridge_level_id(
-                            float(prev_tol), self.bridge_tolerance_ladder
-                        )
-                        if level_now != level_prev:
-                            self._bridge_probation_bad_streak[policy_idx] = 0
-                            self._repeated_collapse_count[policy_idx] = 0
-                            # Lineage-local ordinary rollback streak must not
-                            # carry across ladder rungs after a real shrink.
                 nm = window.samples[-1].nsucc_mean
                 peak = self._recent_peak_nsucc_mean.get(policy_idx, 0.0)
                 if nm > peak:
@@ -3836,8 +1739,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         env_frames: int,
         population: dict[int, dict[str, Any] | None] | None = None,
     ) -> CurriculumControlState:
-        # Per-tick transient: do not inherit a prior tick's hard-collapse latch.
-        self._adaptive_hard_collapse_event_frame[int(policy_idx)] = -1
         gate_pass, consec_count, blocked_reason = evaluate_mastery_gate(
             window,
             mastery_mean=self.mastery_nsucc_mean,
@@ -3851,27 +1752,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         drop_ratio = window.drop_ratio_vs_prior(2)
         forced_tolerance = 0.0
         collapse_rollback_active = False
-        adaptive_probation_active = False
-        adaptive_probation_can_shrink = True
-        adaptive_probation_block_reason = ""
-        adaptive_probation_ordinary_rollback_blocked = False
-        adaptive_probation_hard_collapse = False
-        adaptive_probation_rollback_triggered = False
-        adaptive_probation_rollback_from_tol = 0.0
-        adaptive_probation_rollback_to_tol = 0.0
-        adaptive_probation_hard_collapse_streak = 0
-        adaptive_probation_entry_tolerance = 0.0
-        adaptive_probation_entry_frame = -1
-        adaptive_probation_hard_collapse_trigger_source = ""
-        adaptive_probation_hard_collapse_independent = False
-        adaptive_probation_legacy_collapse_also_active = False
-        adaptive_probation_freeze_only_streak = 0
-        adaptive_rollback_target_source = ""
-        adaptive_rollback_log_gap = 0.0
-        adaptive_precision_active = bool(self.adaptive_precision_enable)
-        adaptive_curriculum_progress = float(
-            getattr(self, "_adaptive_curriculum_progress", 0.0) or 0.0
-        )
         rollback_cooldown_active = False
         rollback_reason = ""
         rollback_count = int(self._rollback_count.get(policy_idx, 0))
@@ -3890,57 +1770,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         cur_tol = (
             float(window.samples[-1].success_tolerance) if window.samples else 0.075
         )
-        same_tol = self._same_tol_retention_snapshot(policy_idx, cur_tol)
-        # In bridge mode all ordinary curriculum decisions use only the
-        # current ladder level (or coarse bin when bridge is off).  During
-        # warmup retention is deliberately invalid, never a synthetic low.
-        decision_retention = (
-            float(same_tol["retention"]) if bool(same_tol["valid"]) else 1.0
-        )
-        if self.same_tol_retention_enable:
-            global_retention = decision_retention
-            global_nsucc_mean = (
-                float(window.samples[-1].nsucc_mean) if window.samples else 0.0
-            )
-            long_peak = float(same_tol["peak"])
-        if (
-            self.bridge_curriculum_enable and self.bridge_probation_enable
-            and cur_tol <= self.bridge_probation_entry_tol + 1e-9
-            and policy_idx not in self._bridge_probation_entry_frame
-        ):
-            self._bridge_probation_entry_frame[policy_idx] = int(env_frames)
-        probation_entry_early = int(self._bridge_probation_entry_frame.get(policy_idx, -1))
-        probation_active_early = bool(
-            self.bridge_probation_enable
-            and probation_entry_early >= 0
-            and int(env_frames) - probation_entry_early < self.bridge_probation_frames
-        )
-        probation_ordinary_block = bool(
-            self.bridge_probation_block_ordinary_rollback
-            and probation_active_early
-        )
-        adaptive_state = (
-            self._adaptive_precision_state(policy_idx)
-            if self.adaptive_precision_enable
-            else None
-        )
-        adaptive_ordinary_block = False
-        if adaptive_state is not None:
-            _acfg, _aprob, _atrack = adaptive_state
-            adaptive_probation_active = bool(_aprob.active)
-            adaptive_probation_entry_tolerance = float(_aprob.entry_tolerance)
-            adaptive_probation_entry_frame = int(_aprob.entry_frame)
-            adaptive_probation_hard_collapse_streak = int(_aprob.hard_collapse_streak)
-            adaptive_ordinary_block = bool(
-                _aprob.active
-                and _acfg.probation_block_ordinary_rollback
-                and not _aprob.hard_collapsed(_acfg)
-            )
-            adaptive_probation_ordinary_rollback_blocked = bool(adaptive_ordinary_block)
-        legacy_hard_collapse = False
-        bridge_probation_hard_collapse = False
-        bridge_probation_legacy_collapse_suppressed = False
-        bridge_probation_rollback_reason = ""
         danger_zone = bool(
             self.curriculum_danger_zone_enable
             and cur_tol <= self.curriculum_danger_tol + 1e-9
@@ -3966,147 +1795,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 patience=self.collapse_patience,
                 recent_peak=recent_peak,
             )
-            legacy_hard_collapse = bool(hard_collapse_detected)
             if hard_collapse_detected:
                 collapse_detected = True
                 drop_ratio = hard_drop
-
-            # Bridge probation: evaluate same-level hard-collapse BEFORE
-            # mutating ordinary repeated_collapse_count, so a suppressed
-            # cross-tol peak cannot accumulate toward post-probation rollback.
-            if probation_active_early:
-                nsucc_now = (
-                    float(window.samples[-1].nsucc_mean) if window.samples else 0.0
-                )
-                level_warm = bool(same_tol["valid"])
-                if nsucc_now < self.bridge_probation_hard_collapse_mean and level_warm:
-                    self._bridge_probation_bad_streak[policy_idx] = (
-                        int(self._bridge_probation_bad_streak.get(policy_idx, 0)) + 1
-                    )
-                else:
-                    if level_warm:
-                        self._bridge_probation_bad_streak[policy_idx] = 0
-                bad_streak = int(self._bridge_probation_bad_streak.get(policy_idx, 0))
-                if (
-                    self.bridge_probation_allow_hard_collapse_rollback
-                    and level_warm
-                    and bad_streak >= self.bridge_probation_hard_collapse_patience
-                ):
-                    bridge_probation_hard_collapse = True
-                    hard_collapse_detected = True
-                    bridge_probation_rollback_reason = "bridge_probation_hard_collapse"
-                if legacy_hard_collapse and not bridge_probation_hard_collapse:
-                    bridge_probation_legacy_collapse_suppressed = True
-                    hard_collapse_detected = False
-                    self._bridge_probation_suppressed_legacy_collapse_count[policy_idx] = (
-                        int(
-                            self._bridge_probation_suppressed_legacy_collapse_count.get(
-                                policy_idx, 0
-                            )
-                        )
-                        + 1
-                    )
-                    # Diagnostic freeze only; do not advance ordinary rollback streak.
-                    self._collapse_detected_this_tick = True
-                    self._collapse_freeze_until[policy_idx] = (
-                        int(env_frames) + self.collapse_freeze_env_frames
-                    )
-                    collapse_detected = True
-                    self._append_curriculum_safety_event({
-                        "event_type": "bridge_probation_legacy_collapse_suppressed",
-                        "bridge_probation/legacy_collapse_suppressed": True,
-                        "bridge_probation/suppressed_legacy_collapse_count": int(
-                            self._bridge_probation_suppressed_legacy_collapse_count[
-                                policy_idx
-                            ]
-                        ),
-                        "bridge_probation/ordinary_repeated_count": int(
-                            self._repeated_collapse_count.get(policy_idx, 0)
-                        ),
-                        "bridge_probation/bad_streak": int(
-                            self._bridge_probation_bad_streak.get(policy_idx, 0)
-                        ),
-                        "env_frames": int(env_frames),
-                        "success_tolerance": float(cur_tol),
-                    })
-
-            if collapse_detected and not (
-                probation_active_early
-                and legacy_hard_collapse
-                and not bridge_probation_hard_collapse
-            ):
+            if collapse_detected:
                 self._collapse_detected_this_tick = True
                 self._collapse_freeze_until[policy_idx] = (
                     int(env_frames) + self.collapse_freeze_env_frames
                 )
                 repeated_collapse_count += 1
                 self._repeated_collapse_count[policy_idx] = repeated_collapse_count
-            elif (
-                probation_active_early
-                and legacy_hard_collapse
-                and not bridge_probation_hard_collapse
-            ):
-                # Keep local view of ordinary count unchanged (no += above).
-                repeated_collapse_count = int(
-                    self._repeated_collapse_count.get(policy_idx, 0)
-                )
-
-            # Adaptive hard-collapse is independent of the legacy/bridge signal.
-            adaptive_hard_collapse_now = False
-            _acfg = None
-            _aprob = None
-            if adaptive_state is not None:
-                _acfg, _aprob, _atrack = adaptive_state
-                timeout_armed = bool(
-                    self._adaptive_probation_timeout.pop(policy_idx, False)
-                )
-                if (
-                    _aprob.active
-                    and _acfg.probation_allow_hard_collapse_rollback
-                    and (
-                        _aprob.hard_collapsed(_acfg)
-                        or timeout_armed
-                    )
-                ):
-                    adaptive_hard_collapse_now = True
-                    adaptive_probation_hard_collapse = True
-                    adaptive_ordinary_block = False
-                    adaptive_probation_ordinary_rollback_blocked = False
-                    # Latch before any streak reset so ternary emergency bypass
-                    # still observes hard collapse on this tick.
-                    self._adaptive_hard_collapse_event_frame[int(policy_idx)] = int(
-                        env_frames
-                    )
-                    if timeout_armed:
-                        bridge_probation_rollback_reason = str(
-                            self._adaptive_probation_timeout_reason.pop(
-                                policy_idx, "probation_max_frames"
-                            )
-                        )
-            legacy_hard_collapse_now = bool(hard_collapse_detected)
-            if bridge_probation_hard_collapse:
-                adaptive_probation_hard_collapse_trigger_source = "bridge"
-            elif adaptive_hard_collapse_now and legacy_hard_collapse:
-                adaptive_probation_hard_collapse_trigger_source = "adaptive_and_legacy"
-            elif adaptive_hard_collapse_now:
-                adaptive_probation_hard_collapse_trigger_source = "adaptive_only"
-            elif hard_collapse_detected:
-                adaptive_probation_hard_collapse_trigger_source = "legacy_only"
-            adaptive_probation_hard_collapse_independent = bool(
-                adaptive_hard_collapse_now and not legacy_hard_collapse
-            )
-            adaptive_probation_legacy_collapse_also_active = bool(
-                adaptive_hard_collapse_now and legacy_hard_collapse
-            )
-            self._adaptive_hard_collapse_trigger_source[policy_idx] = (
-                adaptive_probation_hard_collapse_trigger_source
-            )
-            adaptive_probation_freeze_only_streak = int(
-                self._adaptive_freeze_only_streak.get(policy_idx, 0)
-            )
-
-            need_rollback_eval = bool(hard_collapse_detected or adaptive_hard_collapse_now)
-            if need_rollback_eval:
+            if hard_collapse_detected:
                 rollback_cooldown_active = (
                     int(env_frames) - last_rollback_frame
                     < self.curriculum_rollback_cooldown_frames
@@ -4115,135 +1814,25 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 allow_by_shrink = (
                     int(self._shrinks_since_rollback.get(policy_idx, 0)) > 0
                 )
-                # During probation only bridge/adaptive hard-collapse may set forced tol.
-                allow_forced = True
-                if (
-                    probation_active_early
-                    and not bridge_probation_hard_collapse
-                    and not adaptive_hard_collapse_now
-                ):
-                    allow_forced = False
-                    bridge_probation_legacy_collapse_suppressed = True
-                    bridge_probation_rollback_reason = (
-                        bridge_probation_rollback_reason
-                        or "legacy_hard_collapse_suppressed"
+                if allow_by_cooldown or allow_by_shrink:
+                    forced_tolerance = float(
+                        self._last_mastered_tolerance.get(policy_idx, 0.075)
                     )
-                if adaptive_ordinary_block and not adaptive_hard_collapse_now:
-                    allow_forced = False
-                    adaptive_probation_ordinary_rollback_blocked = True
-                if allow_forced and (
-                    allow_by_cooldown
-                    or allow_by_shrink
-                    or adaptive_hard_collapse_now
-                ):
-                    if bridge_probation_hard_collapse:
-                        forced_tolerance = float(
-                            previous_bridge_tolerance(
-                                cur_tol, ladder=self.bridge_tolerance_ladder
-                            )
-                        )
-                        rollback_reason = "bridge_probation_hard_collapse"
-                        bridge_probation_rollback_reason = rollback_reason
-                    elif adaptive_hard_collapse_now:
-                        from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-                            select_adaptive_rollback_target,
-                        )
-
-                        decision = select_adaptive_rollback_target(
-                            current_tolerance=float(cur_tol),
-                            previous_tolerance_before_entry=(
-                                float(_aprob.previous_tolerance_before_entry)
-                                if float(getattr(_aprob, "previous_tolerance_before_entry", 0.0) or 0.0) > 0
-                                else None
-                            ),
-                            source_tolerance=(
-                                float(_aprob.source_tolerance)
-                                if float(getattr(_aprob, "source_tolerance", 0.0) or 0.0) > 0
-                                else None
-                            ),
-                            last_mastered_safe_tolerance=(
-                                float(self._last_mastered_safe_tolerance.get(policy_idx, 0.0) or 0.0)
-                                or None
-                            ),
-                            initial_tolerance=(
-                                float(getattr(self, "_adaptive_eps_init", {}).get(policy_idx, 0.0) or 0.0)
-                                or None
-                            ),
-                            shrink_factor=float(self.curriculum_shrink_factor)
-                            if getattr(self, "curriculum_shrink_factor", 0)
-                            else 0.95,
-                            max_log_gap=float(_acfg.probation_rollback_max_log_gap),
-                            eps=float(_acfg.eps),
-                        )
-                        adaptive_rollback_target_source = str(decision.source)
-                        adaptive_rollback_log_gap = float(decision.log_gap)
-                        if decision.eligible:
-                            forced_tolerance = float(decision.target_tolerance)
-                            rollback_reason = (
-                                f"adaptive_probation_hard_collapse:{decision.source}"
-                            )
-                            adaptive_probation_rollback_triggered = True
-                            adaptive_probation_rollback_from_tol = float(cur_tol)
-                            adaptive_probation_rollback_to_tol = float(forced_tolerance)
-                            _aprob.hard_collapse_streak = 0
-                            self._adaptive_freeze_only_streak[policy_idx] = 0
-                            adaptive_probation_freeze_only_streak = 0
-                        else:
-                            allow_forced = False
-                            forced_tolerance = 0.0
-                            rollback_reason = (
-                                f"adaptive_probation_hard_collapse_freeze_only:{decision.reason}"
-                            )
-                            adaptive_probation_hard_collapse = True
-                            self._adaptive_freeze_only_streak[policy_idx] = (
-                                int(self._adaptive_freeze_only_streak.get(policy_idx, 0)) + 1
-                            )
-                            adaptive_probation_freeze_only_streak = int(
-                                self._adaptive_freeze_only_streak[policy_idx]
-                            )
-                            self._adaptive_rollback_freeze_only_count[policy_idx] = (
-                                int(
-                                    self._adaptive_rollback_freeze_only_count.get(
-                                        policy_idx, 0
-                                    )
-                                )
-                                + 1
-                            )
-                            self._collapse_freeze_until[policy_idx] = (
-                                int(env_frames) + int(self.collapse_freeze_env_frames)
-                            )
-                            collapse_detected = True
-                    else:
-                        forced_tolerance = float(
-                            self._last_mastered_tolerance.get(policy_idx, 0.075)
-                        )
-                        rollback_reason = (
-                            "cooldown_elapsed"
-                            if allow_by_cooldown
-                            else "shrink_after_last_rollback"
-                        )
-                    if allow_forced and float(forced_tolerance) > 0:
-                        collapse_rollback_active = True
-                        self._last_rollback_frame[policy_idx] = int(env_frames)
-                        last_rollback_frame = int(env_frames)
-                        self._rollback_count[policy_idx] = rollback_count + 1
-                        rollback_count += 1
-                        self._shrinks_since_rollback[policy_idx] = 0
-                        rollback_and_freeze_same_tick = collapse_detected
-                        if bridge_probation_hard_collapse:
-                            self._bridge_probation_bad_streak[policy_idx] = 0
-                            self._repeated_collapse_count[policy_idx] = 0
-                            repeated_collapse_count = 0
-                        if adaptive_hard_collapse_now and adaptive_probation_rollback_triggered:
-                            self._repeated_collapse_count[policy_idx] = 0
-                            repeated_collapse_count = 0
-                elif allow_forced:
+                    collapse_rollback_active = True
+                    self._last_rollback_frame[policy_idx] = int(env_frames)
+                    last_rollback_frame = int(env_frames)
+                    self._rollback_count[policy_idx] = rollback_count + 1
+                    rollback_count += 1
+                    self._shrinks_since_rollback[policy_idx] = 0
+                    rollback_reason = (
+                        "cooldown_elapsed" if allow_by_cooldown else "shrink_after_last_rollback"
+                    )
+                    rollback_and_freeze_same_tick = collapse_detected
+                else:
                     rollback_reason = "cooldown_blocked"
             if (
                 self.curriculum_rollback_on_repeated_collapse
                 and self.curriculum_rollback_to_last_mastered
-                and not probation_ordinary_block
-                and not adaptive_ordinary_block
                 and danger_zone
                 and repeated_collapse_count
                 >= self.curriculum_rollback_collapse_patience
@@ -4530,75 +2119,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         else:
             shrink_reason = "normal_mode"
 
-        # 2cm bridge: below the bridge entry no multiplicative factor may
-        # choose the next tolerance.  A level needs local evidence and time
-        # before moving to exactly one stricter rung.
-        bridge_active = bool(
-            self.bridge_curriculum_enable
-            and cur_tol <= self.bridge_curriculum_start_tol + 1e-9
-            and cur_tol > self.bridge_curriculum_target_tol + 1e-9
-        )
-        bridge_entry = self._bridge_entry_frame.get(policy_idx, -1)
-        level_entry = self._bridge_level_entry_frame.get(policy_idx, -1)
-        if bridge_active and bridge_entry < 0:
-            bridge_entry = level_entry = int(env_frames)
-            self._bridge_entry_frame[policy_idx] = bridge_entry
-            self._bridge_level_entry_frame[policy_idx] = level_entry
-        probation_entry = self._bridge_probation_entry_frame.get(policy_idx, -1)
-        if (
-            bridge_active and self.bridge_probation_enable
-            and cur_tol <= self.bridge_probation_entry_tol + 1e-9
-            and probation_entry < 0
-        ):
-            probation_entry = int(env_frames)
-            self._bridge_probation_entry_frame[policy_idx] = probation_entry
-        probation_active = bool(
-            probation_entry >= 0
-            and int(env_frames) - probation_entry < self.bridge_probation_frames
-        )
-        if (
-            probation_entry >= 0
-            and not probation_active
-            and policy_idx not in self._bridge_probation_exit_cleared
-        ):
-            # Probation ended cleanly: drop ordinary streak so post-probation
-            # ticks cannot fire on suppressed legacy collapses.
-            self._repeated_collapse_count[policy_idx] = 0
-            repeated_collapse_count = 0
-            self._bridge_probation_exit_cleared.add(policy_idx)
-        elif probation_active and policy_idx in self._bridge_probation_exit_cleared:
-            self._bridge_probation_exit_cleared.discard(policy_idx)
-        bridge_next_tol = 0.0
-        bridge_block_reason = ""
-        if bridge_active and shrink_token:
-            level_frames = max(0, int(env_frames) - max(level_entry, 0))
-            if probation_active and self.bridge_probation_block_further_shrink:
-                shrink_token = allow_shrink = False
-                bridge_block_reason = "probation_active"
-            elif not bool(same_tol["valid"]):
-                shrink_token = allow_shrink = False
-                bridge_block_reason = "same_tol_retention_warmup"
-            elif float(same_tol["retention"]) < self.bridge_min_same_tol_retention:
-                shrink_token = allow_shrink = False
-                bridge_block_reason = "same_tol_retention"
-            elif int(same_tol["stable_ticks"]) < self.bridge_min_stable_ticks:
-                shrink_token = allow_shrink = False
-                bridge_block_reason = "same_tol_stability"
-            elif level_frames < self.bridge_min_frames_per_level:
-                shrink_token = allow_shrink = False
-                bridge_block_reason = "min_frames_per_level"
-            else:
-                bridge_next_tol = next_bridge_tolerance(
-                    cur_tol, ladder=self.bridge_tolerance_ladder,
-                    mode=self.bridge_curriculum_mode,
-                )
-                adaptive_consolidation_frames = max(
-                    adaptive_consolidation_frames,
-                    self.bridge_post_shrink_consolidation_frames,
-                )
-                # Do NOT stamp _bridge_level_entry_frame here.  Safety / WM /
-                # pre-floor gates may still clear shrink_token later; the
-                # level timer advances only after tolerance actually changes.
         tol_stable = window.tolerance_stable_for_intervals(1)
         last_tol = self._last_mastered_tolerance.get(policy_idx, 0.075)
         if gate_pass and window.samples:
@@ -4810,12 +2330,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             recent_peak=recent_peak,
             forced_tolerance=forced_tolerance,
         )
-        if late_floor_retention.get("rollback_applied") and adaptive_ordinary_block:
-            # Adaptive probation owns ordinary rollback; undo late-floor force.
-            late_floor_retention = dict(late_floor_retention)
-            late_floor_retention["rollback_applied"] = False
-            forced_tolerance = 0.0
-            adaptive_probation_ordinary_rollback_blocked = True
         if late_floor_retention.get("rollback_applied"):
             collapse_rollback_active = True
             curriculum_rollback_triggered = True
@@ -4843,78 +2357,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 if cur > 0:
                     self._shrinks_since_rollback[policy_idx] = cur - 1
             shrinks_in_window = 0
-
-        # Adaptive probation shrink gate: may only clear an already-issued token.
-        if adaptive_state is not None and shrink_token:
-            _acfg, _aprob, _atrack = adaptive_state
-            can_shrink, block_reason = _aprob.can_shrink(
-                frame=int(env_frames), cfg=_acfg
-            )
-            adaptive_probation_can_shrink = bool(can_shrink)
-            adaptive_probation_block_reason = str(block_reason)
-            adaptive_probation_active = bool(_aprob.active)
-            if not can_shrink:
-                shrink_token = False
-                allow_shrink = False
-                shrink_blocked_reason = f"adaptive_{block_reason}"
-                shrink_reason = f"adaptive_{block_reason}"
-                if (
-                    self.pbt_single_shrink_per_window
-                    and self._shrink_issued_this_window.get(policy_idx, False)
-                ):
-                    self._shrink_issued_this_window[policy_idx] = False
-                    current = int(self._shrinks_since_rollback.get(policy_idx, 0))
-                    if current > 0:
-                        self._shrinks_since_rollback[policy_idx] = current - 1
-                shrinks_in_window = 0
-        elif adaptive_state is not None:
-            _acfg, _aprob, _atrack = adaptive_state
-            can_shrink, block_reason = _aprob.can_shrink(
-                frame=int(env_frames), cfg=_acfg
-            )
-            adaptive_probation_can_shrink = bool(can_shrink)
-            adaptive_probation_block_reason = str(block_reason)
-            adaptive_probation_active = bool(_aprob.active)
-
-        self._adaptive_last_audit[policy_idx] = {
-            "adaptive_precision_active": bool(adaptive_precision_active),
-            "adaptive_curriculum_progress": float(adaptive_curriculum_progress),
-            "adaptive_probation_active": bool(adaptive_probation_active),
-            "adaptive_probation_entry_tolerance": float(adaptive_probation_entry_tolerance),
-            "adaptive_probation_entry_frame": int(adaptive_probation_entry_frame),
-            "adaptive_probation_can_shrink": bool(adaptive_probation_can_shrink),
-            "adaptive_probation_block_reason": str(adaptive_probation_block_reason),
-            "adaptive_probation_ordinary_rollback_blocked": bool(
-                adaptive_probation_ordinary_rollback_blocked
-            ),
-            "adaptive_probation_hard_collapse": bool(adaptive_probation_hard_collapse),
-            "adaptive_probation_hard_collapse_streak": int(
-                adaptive_probation_hard_collapse_streak
-            ),
-            "adaptive_probation_rollback_triggered": bool(
-                adaptive_probation_rollback_triggered
-            ),
-            "adaptive_probation_rollback_from_tol": float(
-                adaptive_probation_rollback_from_tol
-            ),
-            "adaptive_probation_rollback_to_tol": float(
-                adaptive_probation_rollback_to_tol
-            ),
-            "adaptive_probation_hard_collapse_trigger_source": str(
-                adaptive_probation_hard_collapse_trigger_source
-            ),
-            "adaptive_probation_hard_collapse_independent": bool(
-                adaptive_probation_hard_collapse_independent
-            ),
-            "adaptive_probation_legacy_collapse_also_active": bool(
-                adaptive_probation_legacy_collapse_also_active
-            ),
-            "adaptive_probation_freeze_only_streak": int(
-                adaptive_probation_freeze_only_streak
-            ),
-            "adaptive_rollback_target_source": str(adaptive_rollback_target_source),
-            "adaptive_rollback_log_gap": float(adaptive_rollback_log_gap),
-        }
 
         wm_payload = self._load_policy_wm_imagined_eval(policy_idx) or {}
         wm_imagined_valid = bool(wm_payload.get("imagined_valid", False))
@@ -5096,151 +2538,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 pre_floor_peak.get("stable_ticks", 0)
             ),
             pre_floor_peak_guard_reason=str(pre_floor_peak.get("reason", "")),
-            same_tol_bin_id=int(same_tol["bin_id"]),
-            same_tol_retention=float(same_tol["retention"]),
-            same_tol_retention_valid=bool(same_tol["valid"]),
-            same_tol_peak_nsucc_mean=float(same_tol["peak"]),
-            same_tol_sample_count=int(same_tol["samples"]),
-            same_tol_stable_ticks=int(same_tol["stable_ticks"]),
-            retention_reference_tolerance=float(cur_tol),
-            cross_tol_peak_ignored=bool(self.same_tol_retention_enable),
-            retention_tracker=(
-                same_tol["tracker"].to_json()
-                if self.same_tol_retention_enable else {}
-            ),
-            bridge_active=bridge_active,
-            bridge_level=(
-                bridge_level_id(cur_tol, self.bridge_tolerance_ladder)
-                if self.bridge_curriculum_enable and self.bridge_tolerance_ladder
-                else -1
-            ),
-            bridge_entry_frame=bridge_entry,
-            bridge_level_entry_frame=int(
-                self._bridge_level_entry_frame.get(policy_idx, level_entry)
-            ),
-            bridge_shrink_count=int(self._bridge_shrink_count.get(policy_idx, 0)),
-            bridge_next_tolerance=bridge_next_tol,
-            bridge_shrink_blocked=bool(bridge_block_reason),
-            bridge_block_reason=bridge_block_reason,
-            bridge_probation_active=probation_active,
-            bridge_probation_entry_frame=probation_entry,
-            bridge_probation_rollback_blocked=probation_ordinary_block,
-            bridge_probation_hard_collapse=bool(bridge_probation_hard_collapse),
-            bridge_probation_exit=bool(
-                probation_entry >= 0 and not probation_active
-            ),
-            bridge_probation_legacy_collapse_suppressed=bool(
-                bridge_probation_legacy_collapse_suppressed
-            ),
-            bridge_probation_hard_collapse_triggered=bool(
-                bridge_probation_hard_collapse
-            ),
-            bridge_probation_bad_streak=int(
-                self._bridge_probation_bad_streak.get(policy_idx, 0)
-            ),
-            bridge_probation_rollback_reason=str(bridge_probation_rollback_reason),
-            bridge_probation_suppressed_legacy_collapse_count=int(
-                self._bridge_probation_suppressed_legacy_collapse_count.get(
-                    policy_idx, 0
-                )
-            ),
-            bridge_pending_next_tolerance=float(bridge_next_tol),
-            bridge_level_timer_pending=bool(bridge_next_tol > 1e-9),
-            late_rescue_attempt_count=int(
-                self._late_rescue_attempt_count.get(policy_idx, 0)
-            ),
-            late_rescue_selected_count=int(
-                self._late_rescue_selected_count.get(policy_idx, 0)
-            ),
-            late_rescue_executed_count=int(
-                self._late_rescue_executed_count.get(policy_idx, 0)
-            ),
-            late_rescue_blocked_count=int(
-                self._late_rescue_blocked_count.get(policy_idx, 0)
-            ),
-            late_rescue_streak=int(self._late_rescue_streak.get(policy_idx, 0)),
-            late_rescue_last_frame=int(self._late_rescue_frame.get(policy_idx, -1)),
-            adaptive_precision_active=bool(adaptive_precision_active),
-            adaptive_curriculum_progress=float(adaptive_curriculum_progress),
-            adaptive_probation_active=bool(adaptive_probation_active),
-            adaptive_probation_entry_tolerance=float(adaptive_probation_entry_tolerance),
-            adaptive_probation_entry_frame=int(adaptive_probation_entry_frame),
-            adaptive_probation_can_shrink=bool(adaptive_probation_can_shrink),
-            adaptive_probation_block_reason=str(adaptive_probation_block_reason),
-            adaptive_probation_ordinary_rollback_blocked=bool(
-                adaptive_probation_ordinary_rollback_blocked
-            ),
-            adaptive_probation_hard_collapse=bool(adaptive_probation_hard_collapse),
-            adaptive_probation_hard_collapse_streak=int(
-                adaptive_probation_hard_collapse_streak
-            ),
-            adaptive_probation_hard_collapse_event_frame=(
-                int(env_frames) if adaptive_probation_hard_collapse else -1
-            ),
-            adaptive_probation_rollback_triggered=bool(
-                adaptive_probation_rollback_triggered
-            ),
-            adaptive_probation_rollback_from_tol=float(
-                adaptive_probation_rollback_from_tol
-            ),
-            adaptive_probation_rollback_to_tol=float(
-                adaptive_probation_rollback_to_tol
-            ),
-            adaptive_probation_hard_collapse_trigger_source=str(
-                adaptive_probation_hard_collapse_trigger_source
-            ),
-            adaptive_probation_hard_collapse_independent=bool(
-                adaptive_probation_hard_collapse_independent
-            ),
-            adaptive_probation_legacy_collapse_also_active=bool(
-                adaptive_probation_legacy_collapse_also_active
-            ),
-            adaptive_probation_freeze_only_streak=int(
-                adaptive_probation_freeze_only_streak
-            ),
-            adaptive_rollback_target_source=str(adaptive_rollback_target_source),
-            adaptive_rollback_log_gap=float(adaptive_rollback_log_gap),
-            adaptive_rescue_ready=bool(
-                self._adaptive_rescue_last_reason.get(policy_idx, "")
-                in (
-                    "ready",
-                    "retention_degradation_ready",
-                    "hard_collapse_ready",
-                )
-            ),
-            adaptive_rescue_reason=str(
-                self._adaptive_rescue_last_reason.get(policy_idx, "")
-            ),
-            adaptive_rescue_attempt_count=int(
-                self._adaptive_rescue_attempt_count.get(policy_idx, 0)
-            ),
-            adaptive_rescue_selected_count=int(
-                self._adaptive_rescue_selected_count.get(policy_idx, 0)
-            ),
-            adaptive_rescue_executed_count=int(
-                self._adaptive_rescue_executed.get(policy_idx, 0)
-            ),
-            adaptive_rescue_blocked_count=int(
-                self._adaptive_rescue_blocked_count.get(policy_idx, 0)
-            ),
-            adaptive_rescue_source_policy=int(
-                self._adaptive_rescue_last_source.get(policy_idx, -1)
-            ),
-            adaptive_rescue_source_rank=int(
-                self._adaptive_rescue_last_source_rank.get(policy_idx, -1)
-            ),
-            adaptive_rescue_source_advantage_sigma=float(
-                self._adaptive_rescue_last_advantage_sigma.get(policy_idx, 0.0)
-            ),
-            adaptive_rescue_last_frame=int(
-                self._adaptive_last_rescue_frame.get(policy_idx, -1)
-            ),
-            adaptive_rescue_lineage_id=str(
-                self._adaptive_lineage_id.get(policy_idx, "")
-            ),
-            adaptive_rescue_executed_for_lineage=int(
-                self._adaptive_rescue_executed_for_lineage.get(policy_idx, 0)
-            ),
         )
 
     def _log_curriculum_control_scalars(
@@ -5308,95 +2605,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             1.0 if control.shrink_token else 0.0,
             env_frames,
         )
-        if self.adaptive_precision_enable:
-            self.writer.add_scalar(
-                "adaptive_consolidation/probation_can_shrink",
-                1.0 if control.adaptive_probation_can_shrink else 0.0,
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/ordinary_rollback_blocked",
-                1.0 if control.adaptive_probation_ordinary_rollback_blocked else 0.0,
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/hard_collapse_rollback",
-                1.0 if control.adaptive_probation_rollback_triggered else 0.0,
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_blocked_count",
-                float(control.adaptive_rescue_blocked_count),
-                env_frames,
-            )
-            trig = str(
-                getattr(control, "adaptive_probation_hard_collapse_trigger_source", "")
-                or ""
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/hard_collapse_adaptive_only",
-                1.0 if trig == "adaptive_only" else 0.0,
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/hard_collapse_legacy_only",
-                1.0 if trig == "legacy_only" else 0.0,
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/hard_collapse_both",
-                1.0 if trig == "adaptive_and_legacy" else 0.0,
-                env_frames,
-            )
-            src_id = {
-                "": 0,
-                "none": 0,
-                "previous_tolerance": 1,
-                "source_tolerance": 2,
-                "last_mastered_safe": 3,
-                "scale_fallback": 4,
-            }.get(str(getattr(control, "adaptive_rollback_target_source", "") or ""), -1)
-            self.writer.add_scalar(
-                "adaptive_consolidation/rollback_target_source_id",
-                float(src_id),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/freeze_only_streak",
-                float(getattr(control, "adaptive_probation_freeze_only_streak", 0) or 0),
-                env_frames,
-            )
-            pidx = int(self.policy_idx)
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_live_selected",
-                float(self._adaptive_rescue_live_selected.get(pidx, 0)),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_archive_selected",
-                float(self._adaptive_rescue_archive_selected.get(pidx, 0)),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_ordinary_fallback",
-                float(self._adaptive_rescue_ordinary_fallback.get(pidx, 0)),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_burnin_blocked",
-                float(self._adaptive_rescue_burnin_blocked.get(pidx, 0)),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_burnin_bypassed",
-                float(self._adaptive_rescue_burnin_bypassed.get(pidx, 0)),
-                env_frames,
-            )
-            self.writer.add_scalar(
-                "adaptive_consolidation/rescue_emergency_bypass",
-                float(self._adaptive_rescue_emergency_bypass.get(pidx, 0)),
-                env_frames,
-            )
         self.writer.add_scalar(
             "dexpbt/post_shrink_consolidation_active",
             1.0
@@ -5427,86 +2635,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self.writer.add_scalar(
             "dexpbt/hard_collapse_triggered",
             1.0 if control.hard_collapse_triggered else 0.0,
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "bridge_probation/legacy_collapse_suppressed",
-            1.0 if control.bridge_probation_legacy_collapse_suppressed else 0.0,
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "bridge_probation/suppressed_legacy_collapse_count",
-            float(control.bridge_probation_suppressed_legacy_collapse_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "bridge_probation/ordinary_repeated_count",
-            float(control.curriculum_repeated_collapse_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "bridge_probation/bad_streak",
-            float(control.bridge_probation_bad_streak),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_source_min_mean",
-            float(self.late_degradation_rescue_source_min_mean),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_min_source_advantage",
-            float(self.late_degradation_rescue_min_source_advantage),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_source_min_retention",
-            float(self.late_degradation_rescue_source_min_retention),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_reject_collapse_source",
-            1.0 if self.late_degradation_rescue_reject_collapse_source else 0.0,
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_attempt_count",
-            float(control.late_rescue_attempt_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_selected_count",
-            float(control.late_rescue_selected_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_executed_count",
-            float(control.late_rescue_executed_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_blocked_count",
-            float(control.late_rescue_blocked_count),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_last_frame",
-            float(control.late_rescue_last_frame),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_source_control_valid",
-            float(self._late_rescue_last_source_control_valid),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_source_collapse_rejected",
-            float(self._late_rescue_last_source_collapse_rejected),
-            env_frames,
-        )
-        self.writer.add_scalar(
-            "pbt/late_rescue_burnin_bypassed",
-            float(self._late_rescue_last_burnin_bypassed),
             env_frames,
         )
         self.writer.add_scalar(
@@ -6084,700 +3212,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return 1.0, cur, peak
         return cur / peak, cur, peak
 
-    def _same_tol_retention_snapshot(
-        self, policy_idx: int, tolerance: float
-    ) -> dict[str, Any]:
-        """Single source of truth for all 2cm retention decisions."""
-        if not self.same_tol_retention_enable:
-            return {
-                "bin_id": -1, "retention": 1.0, "valid": True, "peak": 0.0,
-                "samples": 0, "stable_ticks": 0, "first_frame": -1, "last_frame": -1,
-                "level_id": -1,
-            }
-        self._maybe_restore_bridge_state(policy_idx)
-        tracker = self._same_tol_trackers.setdefault(
-            policy_idx,
-            ToleranceBinRetentionTracker(
-                bins=self.same_tol_retention_bins,
-                ladder=(
-                    self.bridge_tolerance_ladder
-                    if self.bridge_curriculum_enable else ()
-                ),
-            ),
-        )
-        if self.bridge_curriculum_enable and not tracker.ladder:
-            tracker.ladder = self.bridge_tolerance_ladder
-        use_levels = bool(self.bridge_curriculum_enable and tracker.ladder)
-        state = tracker.state(tolerance, use_bridge_levels=use_levels)
-        return {
-            "bin_id": tracker.current_bin(tolerance),
-            "level_id": tracker.current_level(tolerance) if use_levels else -1,
-            "retention": tracker.retention(tolerance, use_bridge_levels=use_levels),
-            "valid": tracker.is_valid(
-                tolerance,
-                min_samples=self.same_tol_retention_min_samples,
-                warmup_ticks=self.same_tol_retention_warmup_ticks,
-                use_bridge_levels=use_levels,
-            ),
-            "peak": state.peak_nsucc_mean,
-            "samples": state.sample_count,
-            "stable_ticks": state.stable_ticks,
-            "first_frame": state.first_frame,
-            "last_frame": state.last_frame,
-            "tracker": tracker,
-        }
-
-    def _maybe_restore_bridge_state(self, policy_idx: int) -> None:
-        """Restore tracker / probation / late-rescue state from control JSON."""
-        if policy_idx in self._bridge_state_restored:
-            return
-        self._bridge_state_restored.add(policy_idx)
-        if not (self.same_tol_retention_enable or self.bridge_curriculum_enable
-                or self.late_degradation_rescue_enable):
-            return
-        path = self._curriculum_control_dir / f"{policy_idx:03d}.json"
-        control = read_curriculum_control(path)
-        if control is None:
-            return
-        try:
-            lineage = None
-            window = self._policy_nsucc_windows.get(policy_idx)
-            if window and window.samples:
-                lineage = getattr(window.samples[-1], "lineage_id", None)
-            tracker_data = getattr(control, "retention_tracker", None) or {}
-            if isinstance(tracker_data, dict) and tracker_data:
-                restored = ToleranceBinRetentionTracker.from_json(tracker_data)
-                if self.bridge_curriculum_enable and not restored.ladder:
-                    restored.ladder = self.bridge_tolerance_ladder
-                saved_lineage = restored.lineage_id
-                if (
-                    self.same_tol_retention_reset_on_lineage_change
-                    and lineage is not None
-                    and saved_lineage is not None
-                    and lineage != saved_lineage
-                ):
-                    restored.states.clear()
-                    restored.lineage_id = lineage
-                    restored.last_bridge_level_id = -1
-                self._same_tol_trackers[policy_idx] = restored
-            if int(getattr(control, "bridge_entry_frame", -1)) >= 0:
-                self._bridge_entry_frame[policy_idx] = int(control.bridge_entry_frame)
-            if int(getattr(control, "bridge_level_entry_frame", -1)) >= 0:
-                self._bridge_level_entry_frame[policy_idx] = int(
-                    control.bridge_level_entry_frame
-                )
-            if int(getattr(control, "bridge_probation_entry_frame", -1)) >= 0:
-                self._bridge_probation_entry_frame[policy_idx] = int(
-                    control.bridge_probation_entry_frame
-                )
-            self._bridge_probation_bad_streak[policy_idx] = int(
-                getattr(control, "bridge_probation_bad_streak", 0) or 0
-            )
-            self._bridge_probation_suppressed_legacy_collapse_count[policy_idx] = int(
-                getattr(
-                    control, "bridge_probation_suppressed_legacy_collapse_count", 0
-                )
-                or 0
-            )
-            self._bridge_shrink_count[policy_idx] = int(
-                getattr(control, "bridge_shrink_count", 0) or 0
-            )
-            self._late_rescue_streak[policy_idx] = int(
-                getattr(control, "late_rescue_streak", 0) or 0
-            )
-            # Prefer executed count as the quota-consuming counter.
-            executed = int(getattr(control, "late_rescue_executed_count", 0) or 0)
-            legacy = int(self._late_rescue_count.get(policy_idx, 0))
-            self._late_rescue_executed_count[policy_idx] = max(executed, legacy)
-            self._late_rescue_count[policy_idx] = self._late_rescue_executed_count[
-                policy_idx
-            ]
-            self._late_rescue_attempt_count[policy_idx] = int(
-                getattr(control, "late_rescue_attempt_count", 0) or 0
-            )
-            self._late_rescue_selected_count[policy_idx] = int(
-                getattr(control, "late_rescue_selected_count", 0) or 0
-            )
-            self._late_rescue_blocked_count[policy_idx] = int(
-                getattr(control, "late_rescue_blocked_count", 0) or 0
-            )
-            last_frame = int(getattr(control, "late_rescue_last_frame", -1) or -1)
-            if last_frame >= 0:
-                self._late_rescue_frame[policy_idx] = last_frame
-            ref_tol = float(getattr(control, "retention_reference_tolerance", 0.0) or 0.0)
-            if ref_tol > 1e-9:
-                self._last_confirmed_tolerance[policy_idx] = ref_tol
-        except Exception as exc:
-            print(
-                f"[PBT] bridge state restore skipped for policy {policy_idx}: {exc}"
-            )
-
-    def _late_degradation_rescue_ready(
-        self, policy_idx: int, *, tolerance: float, nsucc_mean: float, env_frames: int
-    ) -> bool:
-        if not self.late_degradation_rescue_enable:
-            return False
-        same = self._same_tol_retention_snapshot(policy_idx, tolerance)
-        executed = int(
-            self._late_rescue_executed_count.get(
-                policy_idx, self._late_rescue_count.get(policy_idx, 0)
-            )
-        )
-        eligible = (
-            bool(same["valid"])
-            and tolerance <= self.late_degradation_rescue_tol_threshold
-            and float(same["peak"]) >= self.late_degradation_rescue_peak_threshold
-            and nsucc_mean <= self.late_degradation_rescue_current_mean_threshold
-            and float(same["retention"]) <= self.late_degradation_rescue_retention_threshold
-            and executed < self.late_degradation_rescue_max_per_policy
-            and env_frames - self._late_rescue_frame.get(policy_idx, -10**18)
-            >= self.late_degradation_rescue_cooldown_frames
-        )
-        self._late_rescue_streak[policy_idx] = (
-            self._late_rescue_streak.get(policy_idx, 0) + 1 if eligible else 0
-        )
-        return self._late_rescue_streak[policy_idx] >= self.late_degradation_rescue_patience
-
-    def _late_rescue_source_has_collapse(
-        self,
-        source_policy_idx: int,
-        source_state: dict[str, Any],
-    ) -> tuple[bool, str]:
-        """Authoritative collapse gate using curriculum_control JSON."""
-        path = self._curriculum_control_dir / f"{int(source_policy_idx):03d}.json"
-        if not path.is_file():
-            self._late_rescue_last_source_control_valid = 0.0
-            if self.late_degradation_rescue_require_source_control:
-                self._late_rescue_last_source_collapse_rejected = 1.0
-                self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_source_control_missing",
-                    "source_policy": int(source_policy_idx),
-                    "target_policy": int(self.policy_idx),
-                })
-                return True, "source_control_missing"
-            # Compatibility: fall back to population meta only.
-            if source_has_collapse_signal(source_state):
-                self._late_rescue_last_source_collapse_rejected = 1.0
-                return True, "collapse_signal"
-            return False, "ok_no_control"
-        try:
-            control = read_curriculum_control(path)
-        except Exception:
-            control = None
-        if control is None:
-            self._late_rescue_last_source_control_valid = 0.0
-            if self.late_degradation_rescue_require_source_control:
-                self._late_rescue_last_source_collapse_rejected = 1.0
-                self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_source_control_parse_error",
-                    "source_policy": int(source_policy_idx),
-                    "target_policy": int(self.policy_idx),
-                })
-                return True, "source_control_parse_error"
-            if source_has_collapse_signal(source_state):
-                self._late_rescue_last_source_collapse_rejected = 1.0
-                return True, "collapse_signal"
-            return False, "ok_parse_failed_compat"
-        self._late_rescue_last_source_control_valid = 1.0
-        collapsed, reason = control_has_collapse_signal(control)
-        if collapsed:
-            self._late_rescue_last_source_collapse_rejected = 1.0
-            self._write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_source_collapse_rejected",
-                "source_policy": int(source_policy_idx),
-                "target_policy": int(self.policy_idx),
-                "reason": reason,
-            })
-            return True, reason
-        self._late_rescue_last_source_collapse_rejected = 0.0
-        return False, "ok"
-
-    def _persist_late_rescue_runtime_state(
-        self,
-        policy_idx: int,
-        *,
-        env_frames: int,
-    ) -> None:
-        """Atomically persist late-rescue quota/cooldown into curriculum_control.
-
-        Fail-closed: missing or unparseable target control must not be replaced
-        with an empty ``CurriculumControlState`` (would wipe retention / bridge /
-        probation / consolidation history).
-        """
-        path = self._curriculum_control_dir / f"{int(policy_idx):03d}.json"
-        try:
-            control, raw = read_curriculum_control_required(path)
-        except LateRescueControlMissingError:
-            self._safe_write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_target_control_missing",
-                "policy_idx": int(policy_idx),
-                "env_frames": int(env_frames),
-                "path": str(path),
-            })
-            raise
-        except LateRescueControlParseError:
-            self._safe_write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_target_control_parse_error",
-                "policy_idx": int(policy_idx),
-                "env_frames": int(env_frames),
-                "path": str(path),
-            })
-            raise
-        control.late_rescue_attempt_count = int(
-            self._late_rescue_attempt_count.get(policy_idx, 0)
-        )
-        control.late_rescue_selected_count = int(
-            self._late_rescue_selected_count.get(policy_idx, 0)
-        )
-        control.late_rescue_executed_count = int(
-            self._late_rescue_executed_count.get(
-                policy_idx, self._late_rescue_count.get(policy_idx, 0)
-            )
-        )
-        control.late_rescue_blocked_count = int(
-            self._late_rescue_blocked_count.get(policy_idx, 0)
-        )
-        control.late_rescue_streak = int(self._late_rescue_streak.get(policy_idx, 0))
-        control.late_rescue_last_frame = int(
-            self._late_rescue_frame.get(policy_idx, -1)
-        )
-        # Preserve unknown JSON fields; only overwrite late-rescue keys.
-        raw.update(control.to_json())
-        write_curriculum_control_dict(path, raw)
-        self._safe_write_pbt_copy_event({
-            "event_type": "late_degradation_rescue_state_persisted",
-            "policy_idx": int(policy_idx),
-            "env_frames": int(env_frames),
-            "late_rescue_attempt_count": int(control.late_rescue_attempt_count),
-            "late_rescue_selected_count": int(control.late_rescue_selected_count),
-            "late_rescue_executed_count": int(control.late_rescue_executed_count),
-            "late_rescue_blocked_count": int(control.late_rescue_blocked_count),
-            "late_rescue_streak": int(control.late_rescue_streak),
-            "late_rescue_last_frame": int(control.late_rescue_last_frame),
-            "path": str(path),
-        })
-
-    def _snapshot_restart_runtime_state(self) -> dict[str, Any]:
-        pidx = int(self.policy_idx)
-        last_rollback = getattr(self, "_last_rollback_frame", {}) or {}
-        shrinks = getattr(self, "_shrinks_since_rollback", {}) or {}
-        rollback_reason = getattr(self, "_rollback_reason", {}) or {}
-        return {
-            "last_mutation_frame": int(getattr(self, "last_mutation_frame", -10**18)),
-            "restart_count": int(getattr(self, "_restart_count", 0)),
-            "frames_at_restart": int(getattr(self, "_frames_at_restart", -10**18)),
-            "last_rollback_frame": int(last_rollback.get(pidx, -10**18)),
-            "shrinks_since_rollback": int(shrinks.get(pidx, 0)),
-            "rollback_reason": str(rollback_reason.get(pidx, "")),
-            "lineage_id": str(getattr(self, "_lineage_id", "")),
-            "lineage_start_pf": int(getattr(self, "_lineage_start_pf", 0)),
-            "weight_age_frame": int(getattr(self, "_weight_age_frame", 0)),
-            "recovery_restart_count": int(getattr(self, "_recovery_restart_count", 0)),
-            "last_recovery_frame": int(getattr(self, "_last_recovery_frame", -10**18)),
-            "last_restart_type": int(getattr(self, "_last_restart_type", 0)),
-            "cross_restart_count": int(getattr(self, "_cross_restart_count", 0)),
-            "self_restart_count": int(getattr(self, "_self_restart_count", 0)),
-            "last_self_restart_frame": int(
-                getattr(self, "_last_self_restart_frame", -10**18)
-            ),
-            "wm_strategy_profile_generation": int(
-                getattr(self, "_wm_strategy_profile_generation", 0)
-            ),
-            "wm_strategy_profile_parent": int(
-                getattr(self, "_wm_strategy_profile_parent", -1)
-            ),
-            "wm_strategy_profile_copied_from_source": bool(
-                getattr(self, "_wm_strategy_profile_copied_from_source", False)
-            ),
-            "last_profile_copy_frame": int(
-                getattr(self, "_last_profile_copy_frame", -10**18)
-            ),
-            "late_rescue_executed_count": int(
-                getattr(self, "_late_rescue_executed_count", {}).get(pidx, 0)
-            ),
-            "late_rescue_frame": int(
-                getattr(self, "_late_rescue_frame", {}).get(pidx, -10**18)
-            ),
-            "late_rescue_count": int(
-                getattr(self, "_late_rescue_count", {}).get(pidx, 0)
-            ),
-            "late_rescue_selected_count": int(
-                getattr(self, "_late_rescue_selected_count", {}).get(pidx, 0)
-            ),
-            "adaptive_degradation_streak": int(
-                getattr(self, "_adaptive_degradation_streak", {}).get(pidx, 0)
-            ),
-            "adaptive_last_rescue_frame": int(
-                getattr(self, "_adaptive_last_rescue_frame", {}).get(pidx, -(10**18))
-            ),
-            "adaptive_rescue_executed": int(
-                getattr(self, "_adaptive_rescue_executed", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_executed_for_lineage": int(
-                getattr(self, "_adaptive_rescue_executed_for_lineage", {}).get(pidx, 0)
-            ),
-            "adaptive_lineage_id": str(
-                getattr(self, "_adaptive_lineage_id", {}).get(pidx, "")
-            ),
-            "adaptive_rescue_attempt_count": int(
-                getattr(self, "_adaptive_rescue_attempt_count", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_selected_count": int(
-                getattr(self, "_adaptive_rescue_selected_count", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_blocked_count": int(
-                getattr(self, "_adaptive_rescue_blocked_count", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_last_reason": str(
-                getattr(self, "_adaptive_rescue_last_reason", {}).get(pidx, "")
-            ),
-            "adaptive_rescue_last_source": int(
-                getattr(self, "_adaptive_rescue_last_source", {}).get(pidx, -1)
-            ),
-            "adaptive_rescue_last_source_rank": int(
-                getattr(self, "_adaptive_rescue_last_source_rank", {}).get(pidx, -1)
-            ),
-            "adaptive_rescue_last_advantage_sigma": float(
-                getattr(self, "_adaptive_rescue_last_advantage_sigma", {}).get(pidx, 0.0)
-            ),
-            "adaptive_freeze_only_streak": int(
-                getattr(self, "_adaptive_freeze_only_streak", {}).get(pidx, 0)
-            ),
-            "adaptive_rollback_freeze_only_count": int(
-                getattr(self, "_adaptive_rollback_freeze_only_count", {}).get(pidx, 0)
-            ),
-            "adaptive_hard_collapse_trigger_source": str(
-                getattr(self, "_adaptive_hard_collapse_trigger_source", {}).get(pidx, "")
-            ),
-            "adaptive_rescue_live_selected": int(
-                getattr(self, "_adaptive_rescue_live_selected", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_archive_selected": int(
-                getattr(self, "_adaptive_rescue_archive_selected", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_ordinary_fallback": int(
-                getattr(self, "_adaptive_rescue_ordinary_fallback", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_last_source_kind": str(
-                getattr(self, "_adaptive_rescue_last_source_kind", {}).get(pidx, "none")
-            ),
-            "adaptive_rescue_burnin_blocked": int(
-                getattr(self, "_adaptive_rescue_burnin_blocked", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_burnin_bypassed": int(
-                getattr(self, "_adaptive_rescue_burnin_bypassed", {}).get(pidx, 0)
-            ),
-            "adaptive_rescue_emergency_bypass": int(
-                getattr(self, "_adaptive_rescue_emergency_bypass", {}).get(pidx, 0)
-            ),
-            "adaptive_last_checkpoint_frame": int(
-                getattr(self, "_adaptive_last_checkpoint_frame", {}).get(pidx, -1)
-            ),
-            "adaptive_last_checkpoint_path": str(
-                getattr(self, "_adaptive_last_checkpoint_path", {}).get(pidx, "")
-            ),
-            "adaptive_last_update_frame": int(
-                getattr(self, "_adaptive_last_update_frame", {}).get(pidx, -(10**18))
-            ),
-        }
-
-    def _restore_restart_runtime_state(self, snap: dict[str, Any]) -> None:
-        pidx = int(self.policy_idx)
-        self.last_mutation_frame = int(snap["last_mutation_frame"])
-        self._restart_count = int(snap["restart_count"])
-        self._frames_at_restart = int(snap["frames_at_restart"])
-        if not hasattr(self, "_last_rollback_frame"):
-            self._last_rollback_frame = {}
-        if not hasattr(self, "_shrinks_since_rollback"):
-            self._shrinks_since_rollback = {}
-        if not hasattr(self, "_rollback_reason"):
-            self._rollback_reason = {}
-        self._last_rollback_frame[pidx] = int(snap["last_rollback_frame"])
-        self._shrinks_since_rollback[pidx] = int(snap["shrinks_since_rollback"])
-        self._rollback_reason[pidx] = str(snap["rollback_reason"])
-        self._lineage_id = str(snap["lineage_id"])
-        self._lineage_start_pf = int(snap["lineage_start_pf"])
-        self._weight_age_frame = int(snap["weight_age_frame"])
-        self._recovery_restart_count = int(snap["recovery_restart_count"])
-        self._last_recovery_frame = int(snap["last_recovery_frame"])
-        self._last_restart_type = int(snap["last_restart_type"])
-        self._cross_restart_count = int(snap["cross_restart_count"])
-        self._self_restart_count = int(snap["self_restart_count"])
-        self._last_self_restart_frame = int(snap["last_self_restart_frame"])
-        self._wm_strategy_profile_generation = int(
-            snap["wm_strategy_profile_generation"]
-        )
-        self._wm_strategy_profile_parent = int(snap["wm_strategy_profile_parent"])
-        self._wm_strategy_profile_copied_from_source = bool(
-            snap["wm_strategy_profile_copied_from_source"]
-        )
-        self._last_profile_copy_frame = int(snap["last_profile_copy_frame"])
-        if not hasattr(self, "_late_rescue_executed_count"):
-            self._late_rescue_executed_count = {}
-        if not hasattr(self, "_late_rescue_frame"):
-            self._late_rescue_frame = {}
-        if not hasattr(self, "_late_rescue_count"):
-            self._late_rescue_count = {}
-        if not hasattr(self, "_late_rescue_selected_count"):
-            self._late_rescue_selected_count = {}
-        self._late_rescue_executed_count[pidx] = int(
-            snap["late_rescue_executed_count"]
-        )
-        self._late_rescue_frame[pidx] = int(snap["late_rescue_frame"])
-        self._late_rescue_count[pidx] = int(snap["late_rescue_count"])
-        self._late_rescue_selected_count[pidx] = int(
-            snap["late_rescue_selected_count"]
-        )
-        for attr, default in (
-            ("_adaptive_degradation_streak", {}),
-            ("_adaptive_last_rescue_frame", {}),
-            ("_adaptive_rescue_executed", {}),
-            ("_adaptive_rescue_executed_for_lineage", {}),
-            ("_adaptive_lineage_id", {}),
-            ("_adaptive_rescue_attempt_count", {}),
-            ("_adaptive_rescue_selected_count", {}),
-            ("_adaptive_rescue_blocked_count", {}),
-            ("_adaptive_rescue_last_reason", {}),
-            ("_adaptive_rescue_last_source", {}),
-            ("_adaptive_rescue_last_source_rank", {}),
-            ("_adaptive_rescue_last_advantage_sigma", {}),
-            ("_adaptive_freeze_only_streak", {}),
-            ("_adaptive_rollback_freeze_only_count", {}),
-            ("_adaptive_hard_collapse_trigger_source", {}),
-            ("_adaptive_rescue_live_selected", {}),
-            ("_adaptive_rescue_archive_selected", {}),
-            ("_adaptive_rescue_ordinary_fallback", {}),
-            ("_adaptive_rescue_last_source_kind", {}),
-            ("_adaptive_rescue_burnin_blocked", {}),
-            ("_adaptive_rescue_burnin_bypassed", {}),
-            ("_adaptive_rescue_emergency_bypass", {}),
-            ("_adaptive_last_checkpoint_frame", {}),
-            ("_adaptive_last_checkpoint_path", {}),
-            ("_adaptive_last_update_frame", {}),
-            ("_adaptive_sidecar_meta", {}),
-            ("_adaptive_peer_unavailable", {}),
-            ("_adaptive_peer_reject_counts", {}),
-        ):
-            if not hasattr(self, attr):
-                setattr(self, attr, default if isinstance(default, dict) else {})
-        self._adaptive_degradation_streak[pidx] = int(
-            snap.get("adaptive_degradation_streak", 0)
-        )
-        self._adaptive_last_rescue_frame[pidx] = int(
-            snap.get("adaptive_last_rescue_frame", -(10**18))
-        )
-        self._adaptive_rescue_executed[pidx] = int(
-            snap.get("adaptive_rescue_executed", 0)
-        )
-        self._adaptive_rescue_executed_for_lineage[pidx] = int(
-            snap.get("adaptive_rescue_executed_for_lineage", 0)
-        )
-        self._adaptive_lineage_id[pidx] = str(snap.get("adaptive_lineage_id", ""))
-        self._adaptive_rescue_attempt_count[pidx] = int(
-            snap.get("adaptive_rescue_attempt_count", 0)
-        )
-        self._adaptive_rescue_selected_count[pidx] = int(
-            snap.get("adaptive_rescue_selected_count", 0)
-        )
-        self._adaptive_rescue_blocked_count[pidx] = int(
-            snap.get("adaptive_rescue_blocked_count", 0)
-        )
-        self._adaptive_rescue_last_reason[pidx] = str(
-            snap.get("adaptive_rescue_last_reason", "")
-        )
-        self._adaptive_rescue_last_source[pidx] = int(
-            snap.get("adaptive_rescue_last_source", -1)
-        )
-        self._adaptive_rescue_last_source_rank[pidx] = int(
-            snap.get("adaptive_rescue_last_source_rank", -1)
-        )
-        self._adaptive_rescue_last_advantage_sigma[pidx] = float(
-            snap.get("adaptive_rescue_last_advantage_sigma", 0.0)
-        )
-        self._adaptive_freeze_only_streak[pidx] = int(
-            snap.get("adaptive_freeze_only_streak", 0)
-        )
-        self._adaptive_rollback_freeze_only_count[pidx] = int(
-            snap.get("adaptive_rollback_freeze_only_count", 0)
-        )
-        self._adaptive_hard_collapse_trigger_source[pidx] = str(
-            snap.get("adaptive_hard_collapse_trigger_source", "")
-        )
-        self._adaptive_rescue_live_selected[pidx] = int(
-            snap.get("adaptive_rescue_live_selected", 0)
-        )
-        self._adaptive_rescue_archive_selected[pidx] = int(
-            snap.get("adaptive_rescue_archive_selected", 0)
-        )
-        self._adaptive_rescue_ordinary_fallback[pidx] = int(
-            snap.get("adaptive_rescue_ordinary_fallback", 0)
-        )
-        self._adaptive_rescue_last_source_kind[pidx] = str(
-            snap.get("adaptive_rescue_last_source_kind", "none")
-        )
-        self._adaptive_rescue_burnin_blocked[pidx] = int(
-            snap.get("adaptive_rescue_burnin_blocked", 0)
-        )
-        self._adaptive_rescue_burnin_bypassed[pidx] = int(
-            snap.get("adaptive_rescue_burnin_bypassed", 0)
-        )
-        self._adaptive_rescue_emergency_bypass[pidx] = int(
-            snap.get("adaptive_rescue_emergency_bypass", 0)
-        )
-        self._adaptive_last_checkpoint_frame[pidx] = int(
-            snap.get("adaptive_last_checkpoint_frame", -1)
-        )
-        self._adaptive_last_checkpoint_path[pidx] = str(
-            snap.get("adaptive_last_checkpoint_path", "")
-        )
-        self._adaptive_last_update_frame[pidx] = int(
-            snap.get("adaptive_last_update_frame", -(10**18))
-        )
-        # Drop in-memory adaptive objects so restore reloads sidecar bytes.
-        self._adaptive_probation.pop(pidx, None)
-        self._adaptive_retention.pop(pidx, None)
-        self._adaptive_sidecar_meta.pop(pidx, None)
-        self._adaptive_peer_unavailable.pop(pidx, None)
-
-    def _cleanup_failed_restart_artifacts(self) -> None:
-        tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
-        if tmp_dir.exists():
-            try:
-                shutil.rmtree(tmp_dir)
-            except Exception:
-                pass
-        try:
-            supervisor_run_dir = self.train_dir.parent
-            manifest_path = supervisor_run_dir / self.RESTART_MANIFEST
-            if manifest_path.exists():
-                manifest_path.unlink()
-            for tmp in supervisor_run_dir.glob(f"{Path(self.RESTART_MANIFEST).stem}*.tmp"):
-                try:
-                    tmp.unlink()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _snapshot_restart_persistent_state(self) -> dict[str, Any]:
-        """Byte-level snapshot of control JSON + restart manifest.
-
-        Restoring raw bytes preserves unknown JSON fields and avoids
-        reconstructing ``CurriculumControlState`` (which drops extras).
-        """
-        control_path = (
-            self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
-        )
-        manifest_path = Path(self.train_dir).parent / self.RESTART_MANIFEST
-        adaptive_path = self._adaptive_precision_path(int(self.policy_idx))
-        control_existed = control_path.is_file()
-        manifest_existed = manifest_path.is_file()
-        adaptive_existed = adaptive_path.is_file()
-        return {
-            "control_path": control_path,
-            "control_existed": bool(control_existed),
-            "control_bytes": control_path.read_bytes() if control_existed else None,
-            "manifest_path": manifest_path,
-            "manifest_existed": bool(manifest_existed),
-            "manifest_bytes": (
-                manifest_path.read_bytes() if manifest_existed else None
-            ),
-            "adaptive_path": adaptive_path,
-            "adaptive_existed": bool(adaptive_existed),
-            "adaptive_bytes": (
-                adaptive_path.read_bytes() if adaptive_existed else None
-            ),
-        }
-
-    @staticmethod
-    def _atomic_restore_file_bytes(
-        path: Path,
-        *,
-        existed: bool,
-        data: bytes | None,
-    ) -> None:
-        """Restore a file from a byte snapshot (or delete if it did not exist)."""
-        path = Path(path)
-        if existed:
-            assert data is not None
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.parent / (
-                f"{path.stem}.{os.getpid()}.{_uuid_mod.uuid4().hex[:8]}.restore.tmp"
-            )
-            tmp.write_bytes(data)
-            os.replace(str(tmp), str(path))
-            return
-        if path.exists():
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-    def _restore_restart_persistent_state(self, snapshot: dict[str, Any]) -> None:
-        self._atomic_restore_file_bytes(
-            Path(snapshot["control_path"]),
-            existed=bool(snapshot["control_existed"]),
-            data=snapshot.get("control_bytes"),
-        )
-        self._atomic_restore_file_bytes(
-            Path(snapshot["manifest_path"]),
-            existed=bool(snapshot["manifest_existed"]),
-            data=snapshot.get("manifest_bytes"),
-        )
-        if "adaptive_path" in snapshot:
-            self._atomic_restore_file_bytes(
-                Path(snapshot["adaptive_path"]),
-                existed=bool(snapshot.get("adaptive_existed")),
-                data=snapshot.get("adaptive_bytes"),
-            )
-            # Force next adaptive access to re-read restored bytes.
-            pidx = int(self.policy_idx)
-            self._adaptive_probation.pop(pidx, None)
-            self._adaptive_retention.pop(pidx, None)
-
-    def _abort_restart_transaction(
-        self,
-        *,
-        runtime_snap: dict[str, Any],
-        persistent_snap: dict[str, Any],
-        source_policy: int,
-        env_frames: int,
-        late_rescue: bool,
-        reason: str,
-        adaptive_rescue: bool = False,
-    ) -> None:
-        """Single rollback owner: restore memory + files, cleanup, one audit."""
-        try:
-            self._restore_restart_runtime_state(runtime_snap)
-        except Exception as exc:
-            print(f"[PBT] restart runtime restore failed: {exc}")
-        try:
-            self._restore_restart_persistent_state(persistent_snap)
-        except Exception as exc:
-            print(f"[PBT] restart persistent restore failed: {exc}")
-        try:
-            self._cleanup_failed_restart_artifacts()
-        except Exception as exc:
-            print(f"[PBT] restart artifact cleanup failed: {exc}")
-        self._safe_write_pbt_copy_event({
-            "event_type": "pbt_restart_transaction_rolled_back",
-            "source_policy": int(source_policy),
-            "target_policy": int(self.policy_idx),
-            "late_rescue": bool(late_rescue),
-            "adaptive_rescue": bool(adaptive_rescue),
-            "env_frames": int(env_frames),
-            "reason": str(reason),
-        })
-        if adaptive_rescue:
-            self._safe_write_pbt_copy_event({
-                "event_type": "adaptive_degradation_rescue_rolled_back",
-                "rescue_mode": "adaptive",
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "env_frames": int(env_frames),
-                "reason": str(reason),
-            })
-
     @staticmethod
     def _recent_slope(window: RollingNsuccWindow, n: int) -> float:
         xs = window.last_n(max(2, int(n)))
@@ -6948,11 +3382,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             float(self.pbt_hard_floor_tol_threshold),
         )
         current_nsucc = float(window.samples[-1].nsucc_mean)
-        same_tol = self._same_tol_retention_snapshot(policy_idx, cur_tol)
-        if self.same_tol_retention_enable and not bool(same_tol["valid"]):
-            out["reason"] = "same_tol_retention_warmup"
-            return out
-        peak = float(same_tol["peak"]) if self.same_tol_retention_enable else float(recent_peak)
+        peak = float(recent_peak)
         if peak <= 1e-9:
             peak = max(float(s.nsucc_mean) for s in window.samples)
         retention = current_nsucc / peak if peak > 1e-9 else 1.0
@@ -7030,11 +3460,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return out, new_forced
 
         current_nsucc = float(window.samples[-1].nsucc_mean)
-        same_tol = self._same_tol_retention_snapshot(policy_idx, cur_tol)
-        if self.same_tol_retention_enable and not bool(same_tol["valid"]):
-            out["reason"] = "same_tol_retention_warmup"
-            return out, new_forced
-        peak = float(same_tol["peak"]) if self.same_tol_retention_enable else float(recent_peak)
+        peak = float(recent_peak)
         if peak <= 1e-9:
             peak = max(float(s.nsucc_mean) for s in window.samples)
         retention = current_nsucc / peak if peak > 1e-9 else 1.0
@@ -7332,7 +3758,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "archive",
             "best_stable_archive",
             "best_floor_recovery_archive",
-            "late_rescue_archive",
         )
         is_live_cross_copy = not archive_like
         src_tol = float(meta.get("source_success_tolerance", float("nan")))
@@ -7459,13 +3884,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 fh.write(json.dumps(payload) + "\n")
         except Exception as exc:  # pragma: no cover - best effort
             print(f"[pbt-copy-events] write failed: {exc}")
-
-    def _safe_write_pbt_copy_event(self, payload: dict[str, Any]) -> None:
-        """Best-effort audit write; never raises into restart rollback paths."""
-        try:
-            self._write_pbt_copy_event(payload)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[pbt-copy-events] safe write failed: {exc}")
 
     def _write_profile_copy_event(self, payload: dict[str, Any]) -> None:
         try:
@@ -7739,97 +4157,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         synth["checkpoint"] = str(pth)
         synth["_source_checkpoint_type"] = "best_floor_recovery_archive"
         return synth, "ok"
-
-    def _select_tolerance_compatible_archive(
-        self, *, target_tolerance: float, max_gap: float, min_mean: float,
-        min_retention: float, require_retention_metadata: bool = False,
-    ) -> tuple[dict[str, Any] | None, str]:
-        """Reuse existing best_* checkpoint files, filtered by saved tolerance."""
-        reject_log: list[dict[str, Any]] = []
-        for directory, kind in (
-            (self.best_floor_recovery_workspace, "best_floor_recovery_archive"),
-            (self.best_stable_workspace, "best_stable_archive"),
-            (self.best_nsucc_workspace, "archive"),
-        ):
-            state = select_compatible_archive(
-                directory, target_tolerance=target_tolerance, max_gap=max_gap,
-                min_mean=min_mean, min_retention=min_retention,
-                require_retention_metadata=require_retention_metadata,
-                reject_log=reject_log,
-            )
-            if state is None:
-                continue
-            checkpoint = Path(str(state.get("checkpoint", "")))
-            # Archived metadata retains the original live path; derive the
-            # colocated archive PTH from its JSON filename when needed.
-            if not checkpoint.exists():
-                meta = Path(str(state.get("_archive_metadata_path", "")))
-                checkpoint = meta.with_suffix(".pth")
-            if not checkpoint.exists():
-                reject_log.append({
-                    "path": str(state.get("_archive_metadata_path", "")),
-                    "reason": "checkpoint_missing",
-                })
-                continue
-            state["checkpoint"] = str(checkpoint)
-            state["_source_checkpoint_type"] = kind
-            state["_archive_reject_log"] = reject_log
-            return state, "ok"
-        return None, "no_compatible_archive"
-
-    def _select_late_degradation_rescue_source(
-        self,
-        *,
-        sorted_policies: list[int],
-        population: dict[int, dict[str, Any] | None],
-        env_frames: int,
-        n_top: int,
-        target_tolerance: float,
-        target_nsucc_mean: float,
-    ) -> dict[str, Any]:
-        """Tolerance → quality → ranking. ``sorted_policies`` is ``list[int]``."""
-
-        def _retention(src_idx: int, src_tol: float) -> float:
-            snap = self._same_tol_retention_snapshot(int(src_idx), float(src_tol))
-            if not bool(snap.get("valid", False)):
-                return 0.0
-            return float(snap.get("retention", 0.0))
-
-        def _eligible(state: dict[str, Any], frames: int) -> tuple[bool, str]:
-            return self._eligible_as_source_with_reason(state, frames)
-
-        def _archive() -> tuple[dict[str, Any] | None, str]:
-            return self._select_tolerance_compatible_archive(
-                target_tolerance=target_tolerance,
-                max_gap=float(self.late_degradation_rescue_max_tol_gap),
-                min_mean=float(self.late_degradation_rescue_source_min_mean),
-                min_retention=float(self.late_degradation_rescue_source_min_retention),
-                require_retention_metadata=True,
-            )
-
-        def _collapse(src_idx: int, state: dict[str, Any]) -> tuple[bool, str]:
-            return self._late_rescue_source_has_collapse(int(src_idx), state)
-
-        return select_late_degradation_rescue_source(
-            sorted_policies=list(sorted_policies),
-            population=population,
-            target_policy_idx=int(self.policy_idx),
-            target_tolerance=float(target_tolerance),
-            target_nsucc_mean=float(target_nsucc_mean),
-            env_frames=int(env_frames),
-            n_top=int(n_top),
-            max_tol_gap=float(self.late_degradation_rescue_max_tol_gap),
-            source_min_mean=float(self.late_degradation_rescue_source_min_mean),
-            min_source_advantage=float(self.late_degradation_rescue_min_source_advantage),
-            source_min_retention=float(self.late_degradation_rescue_source_min_retention),
-            reject_collapse_source=bool(
-                self.late_degradation_rescue_reject_collapse_source
-            ),
-            source_retention_fn=_retention,
-            eligible_fn=_eligible,
-            archive_fn=_archive,
-            source_collapse_fn=_collapse,
-        )
 
     def _log_best_stable_recovery_outcome(
         self,
@@ -9282,7 +5609,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     initial_delay=self.initial_delay,
                     interval_steps=self.interval_steps,
                     cfg=self.pbt_consolidation_cfg,
-                    curriculum_progress=self._adaptive_curriculum_progress,
                 )
             )
             if self.writer is not None:
@@ -9365,38 +5691,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         assert_pbt_clock_invariants(self.algo, tick=self.interval_steps)
 
         own_state = self._save_workspace_checkpoint()
-        if (
-            self.frame_stop_enable
-            and population_frame_target_reached(
-                population_frame, self.target_population_frames, self.interval_steps
-            )
-        ):
-            tick = max(int(self.interval_steps), 1)
-            target = int(self.target_population_frames)
-            effective_target = ((target + tick - 1) // tick) * tick
-            payload = {
-                "policy_idx": int(self.policy_idx),
-                "population_frame": int(population_frame),
-                "target_population_frames": target,
-                "effective_target_population_frames": int(effective_target),
-                "pbt_iteration": int(self.pbt_iteration),
-                "completed_at": time.time(),
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
-                "checkpoint": str(own_state.get("checkpoint", "")),
-            }
-            self._write_population_frame_complete_markers(payload)
-            self._frame_stop_triggered = True
-            # Normal runner termination on the next epoch boundary; do not
-            # write pbt_restart.json or enter source selection.
-            self.algo.max_epochs = int(getattr(self.algo, "epoch_num", 0)) + 1
-            if self.writer is not None:
-                self.writer.add_scalar("training/frame_stop_triggered", 1.0, population_frame)
-            print(
-                "[PBT] population_frame_target_reached "
-                f"policy={self.policy_idx} frame={population_frame} "
-                f"target={self.target_population_frames}"
-            )
-            return
         population = self._load_population_checkpoints()
         population[self.policy_idx] = own_state
         self._update_curriculum_windows_and_control(population, env_frames)
@@ -10200,41 +6494,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if self.writer is not None:
             self.writer.add_scalar("pbt/dexpbt_tier_rank", float(rank), env_frames)
 
-        if self.pbt_enable_chronic_bottom_exploit:
-            own_for_chronic = population.get(self.policy_idx) or {}
-            chronic_lineage = str(
-                own_for_chronic.get("lineage_id")
-                or getattr(self, "_lineage_id", "")
-                or ""
-            )
-            chronic_state = self._chronic_bottom_state_for(
-                self.policy_idx, lineage_id=chronic_lineage
-            )
-            update_continuous_bottom(
-                chronic_state,
-                tier=tier,
-                env_frames=env_frames,
-                interval_steps=self.interval_steps,
-            )
-            self._persist_chronic_bottom_state(self.policy_idx)
-            if self.writer is not None:
-                self.writer.add_scalar(
-                    "pbt/chronic_continuous_bottom_frames",
-                    float(chronic_state.continuous_bottom_frames),
-                    env_frames,
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_continuous_bottom_ticks",
-                    float(chronic_state.continuous_bottom_ticks),
-                    env_frames,
-                )
-                self.writer.add_scalar(
-                    "pbt/chronic_copy_count",
-                    float(chronic_state.chronic_copy_count),
-                    env_frames,
-                )
-                self.writer.add_scalar("pbt/chronic_candidate", 0.0, env_frames)
-
         self._maybe_save_best_policy(population[sorted_policies[0]])
 
         # Phase A4 P4 (2026-06-09): cache hard-collapse signal for the
@@ -10271,13 +6530,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
 
         # Phase A4 P3 (2026-06-09): mid-tier promising protection update so
         # workers earn protection before they get pushed into bottom.
-        late_rescue = False
-        adaptive_rescue = False
-        rescue_mode = "none"
-        rescue_active = False
-        adaptive_rescue_reason = "disabled"
-        chronic_path = False
-        chronic_eligibility = None
         if tier == "mid":
             self._maybe_enter_promising_protection(
                 self.policy_idx,
@@ -10292,88 +6544,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 hard_collapse=own_hard_collapse_signal,
             )
 
-        _pending_replacement_handle = None
-        _replacement_ledger = None
-
         if tier == "bottom":
-            own_window_for_rescue = self._policy_window(self.policy_idx)
-            own_rescue_nsucc = float(
-                own_window_for_rescue.samples[-1].nsucc_mean
-                if own_window_for_rescue.samples else 0.0
-            )
-            own_rescue_tol = float(
-                (own_curriculum_for_floor or {}).get("success_tolerance", 0.075)
-            )
-            late_rescue = self._late_degradation_rescue_ready(
-                self.policy_idx, tolerance=own_rescue_tol,
-                nsucc_mean=own_rescue_nsucc, env_frames=env_frames,
-            )
-            own_lineage = str(
-                ((population.get(self.policy_idx) or {}).get("lineage_id"))
-                or getattr(self, "_lineage_id", "")
-                or ""
-            )
-            if self.adaptive_precision_enable:
-                latch_frame_for_ready = int(
-                    self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
-                )
-                ctrl_event_for_ready = -1
-                if own_ctrl_for_floor is not None:
-                    ctrl_event_for_ready = int(
-                        getattr(
-                            own_ctrl_for_floor,
-                            "adaptive_probation_hard_collapse_event_frame",
-                            -1,
-                        )
-                        or -1
-                    )
-                adaptive_hard_collapse_this_tick = bool(
-                    latch_frame_for_ready == int(env_frames)
-                    or ctrl_event_for_ready == int(env_frames)
-                )
-                adaptive_rescue, adaptive_rescue_reason = (
-                    self._adaptive_degradation_rescue_ready(
-                        policy_idx=self.policy_idx,
-                        tolerance=own_rescue_tol,
-                        nsucc_mean=own_rescue_nsucc,
-                        env_frames=env_frames,
-                        lineage_id=own_lineage,
-                        hard_collapse_now=adaptive_hard_collapse_this_tick,
-                    )
-                )
-            else:
-                adaptive_rescue, adaptive_rescue_reason = False, "disabled"
-            if adaptive_rescue:
-                rescue_mode = "adaptive"
-            elif late_rescue:
-                rescue_mode = "legacy"
-            else:
-                rescue_mode = "none"
-            rescue_active = rescue_mode != "none"
-            # Keep legacy bool for legacy-only accounting; shared gates use rescue_active.
-            late_rescue = bool(rescue_mode == "legacy")
-            adaptive_rescue = bool(rescue_mode == "adaptive")
-            if self.writer is not None:
-                self.writer.add_scalar(
-                    "pbt/late_degradation_rescue_triggered",
-                    1.0 if late_rescue else 0.0, env_frames,
-                )
-                self.writer.add_scalar(
-                    "pbt/late_degradation_rescue_count",
-                    float(self._late_rescue_count.get(self.policy_idx, 0)),
-                    env_frames,
-                )
-                self.writer.add_scalar(
-                    "adaptive_consolidation/rescue_ready",
-                    1.0 if adaptive_rescue else 0.0,
-                    env_frames,
-                )
-                reason_hash = float(abs(hash(adaptive_rescue_reason)) % 10_000)
-                self.writer.add_scalar(
-                    "adaptive_consolidation/rescue_reason_hash",
-                    reason_hash,
-                    env_frames,
-                )
             # Phase A4 P3 (2026-06-09): promising-worker anti-churn gate.
             # If THIS bottom worker is currently inside a promising
             # protection window, skip replacement entirely. Hard collapse
@@ -10386,7 +6557,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._collapse_freeze_until.get(self.policy_idx, 0)
                 > int(env_frames)
             )
-            if protected and not rescue_active and not (override_allowed and collapse_override):
+            if protected and not (override_allowed and collapse_override):
                 print(
                     f"Policy {self.policy_idx}: skip restart (promising "
                     f"protection until env_frames="
@@ -10426,7 +6597,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             fr_protected, fr_reason = self._is_floor_recovery_protected(
                 self.policy_idx, env_frames
             )
-            if fr_protected and not rescue_active and not (override_allowed and collapse_override):
+            if fr_protected and not (override_allowed and collapse_override):
                 print(
                     f"Policy {self.policy_idx}: skip restart (floor recovery "
                     f"protection until env_frames="
@@ -10472,13 +6643,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     else 0.0
                 )
                 cons_stage = resolve_pbt_stage(
-                    env_frames,
-                    self.pbt_consolidation_cfg,
-                    curriculum_progress=self._adaptive_curriculum_progress,
-                )
-                own_tol = float(
-                    ((population.get(self.policy_idx) or {}).get("curriculum") or {})
-                    .get("success_tolerance", 0.075)
+                    env_frames, self.pbt_consolidation_cfg
                 )
                 cons_ctx = BottomRestartContext(
                     promising_protected=bool(protected),
@@ -10490,7 +6655,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                         self._recent_peak_nsucc_mean.get(self.policy_idx, 0.0)
                     ),
                     tier="bottom",
-                    late_degradation_rescue=rescue_active,
                 )
                 cons_allow, cons_reason = should_allow_bottom_restart(
                     stage=cons_stage,
@@ -10517,113 +6681,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     self._last_restart_type = 3
                     return
             own_window = self._policy_window(self.policy_idx)
-            adaptive_hard_collapse_for_gate = False
-            if rescue_mode == "adaptive":
-                latch_frame = int(
-                    self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
-                )
-                ctrl_event_frame = -1
-                if own_ctrl_for_floor is not None:
-                    ctrl_event_frame = int(
-                        getattr(
-                            own_ctrl_for_floor,
-                            "adaptive_probation_hard_collapse_event_frame",
-                            -1,
-                        )
-                        or -1
-                    )
-                # Same-tick only: latch or control event_frame == env_frames.
-                # Stale adaptive_probation_hard_collapse bool must not arm gates.
-                adaptive_hard_collapse_for_gate = bool(
-                    latch_frame == int(env_frames)
-                    or ctrl_event_frame == int(env_frames)
-                )
-                allowed, reason, d_self = pbt_copy_allowed_for_adaptive_rescue_target(
-                    own_window,
-                    interval_steps=self.interval_steps,
-                    hard_collapse=adaptive_hard_collapse_for_gate,
-                )
-            else:
-                allowed, reason, d_self = pbt_copy_allowed_for_target(
-                    own_window,
-                    interval_steps=self.interval_steps,
-                )
-            chronic_path = False
-            chronic_eligibility = None
-            ordinary_target_gate_reason = str(reason)
-            if not rescue_active and self.pbt_enable_chronic_bottom_exploit:
-                chronic_state = self._chronic_bottom_state_for(
-                    self.policy_idx, lineage_id=own_lineage
-                )
-                chronic_probation = False
-                adaptive_state = self._adaptive_precision_state(
-                    self.policy_idx,
-                    strict_local=bool(self._adaptive_precision_required()),
-                )
-                if adaptive_state is not None:
-                    _chronic_cfg, chronic_probation_state, _chronic_tracker = adaptive_state
-                    chronic_probation = bool(
-                        getattr(chronic_probation_state, "active", False)
-                    )
-                own_population_state = population.get(self.policy_idx)
-                ranked_scores: dict[int, float] = {}
-                for pidx, pstate in population.items():
-                    if pstate is None:
-                        continue
-                    try:
-                        ranked_scores[int(pidx)] = float(
-                            pstate.get(
-                                "pbt_ranking_score",
-                                pstate.get("objective", float("-inf")),
-                            )
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                target_score = float(
-                    ranked_scores.get(self.policy_idx, float("-inf"))
-                )
-                chronic_eligibility = evaluate_chronic_eligibility(
-                    tier=tier,
-                    state=chronic_state,
-                    env_frames=env_frames,
-                    promising_protected=bool(protected),
-                    in_elimination_burnin=not self._is_eligible_for_elimination(
-                        own_population_state, env_frames
-                    ),
-                    in_probation=chronic_probation,
-                    target_score=target_score,
-                    ranked_scores=ranked_scores,
-                    target_idx=self.policy_idx,
-                    min_bottom_frames=self.pbt_chronic_min_bottom_frames,
-                    min_bottom_ticks=self.pbt_chronic_min_bottom_ticks,
-                    min_score_gap=self.pbt_chronic_min_score_gap,
-                    max_copies_per_lineage=self.pbt_chronic_max_copies_per_lineage,
-                )
-                if chronic_eligibility.eligible and not allowed:
-                    allowed = True
-                    chronic_path = True
-                    reason = "chronic_bottom_override"
-                if self.writer is not None:
-                    self.writer.add_scalar(
-                        "pbt/chronic_candidate",
-                        1.0 if chronic_eligibility.eligible else 0.0,
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/chronic_score_gap",
-                        float(chronic_eligibility.score_gap),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/chronic_bottom_frames",
-                        float(chronic_eligibility.continuous_bottom_frames),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/chronic_bottom_ticks",
-                        float(chronic_eligibility.continuous_bottom_ticks),
-                        env_frames,
-                    )
+            allowed, reason, d_self = pbt_copy_allowed_for_target(
+                own_window,
+                interval_steps=self.interval_steps,
+            )
             if self.algo is not None:
                 self.algo._pbt_skill_delta = (
                     float(d_self) if d_self is not None else 0.0
@@ -10639,38 +6700,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     1.0 if d_self is not None else 0.0,
                     env_frames,
                 )
-                if rescue_mode == "adaptive":
-                    self.writer.add_scalar(
-                        "pbt/adaptive_target_gate_allowed",
-                        1.0 if allowed else 0.0,
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/adaptive_target_skill_delta",
-                        float(d_self) if d_self is not None else -999.0,
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/adaptive_target_skill_delta_valid",
-                        1.0 if d_self is not None else 0.0,
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "pbt/adaptive_target_gate_reason_hash",
-                        float(abs(hash(str(reason))) % 10_000),
-                        env_frames,
-                    )
-                else:
-                    self.writer.add_scalar(
-                        "pbt/skill_delta_copy_allowed",
-                        1.0 if allowed else 0.0,
-                        env_frames,
-                    )
+                self.writer.add_scalar(
+                    "pbt/skill_delta_copy_allowed",
+                    1.0 if allowed else 0.0,
+                    env_frames,
+                )
             if not allowed:
                 print(
                     f"Policy {self.policy_idx}: skip restart "
-                    f"({'adaptive_target' if rescue_mode == 'adaptive' else 'skill_delta'} "
-                    f"gate: {reason})"
+                    f"(skill_delta gate: {reason})"
                 )
                 self._last_restart_type = 3
                 return
@@ -10679,59 +6717,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "pbt/protected_by_skill_delta_gate", 0.0, env_frames
                 )
             # Patch G (2026-05-31): tiered source selection cascade.
-            # Late degradation rescue filters by tolerance compatibility
-            # *before* quality ranking so a slightly worse but compatible
-            # source beats an incompatible top-ranked source.
-            if rescue_mode == "adaptive":
-                self._adaptive_rescue_attempt_count[self.policy_idx] = (
-                    int(self._adaptive_rescue_attempt_count.get(self.policy_idx, 0)) + 1
-                )
-                decision = self._select_adaptive_rescue_source_cascade(
-                    sorted_policies=sorted_policies,
-                    population=population,
-                    env_frames=env_frames,
-                    target_tolerance=own_rescue_tol,
-                    target_nsucc_mean=own_rescue_nsucc,
-                    n_top=n_top,
-                )
-            elif rescue_mode == "legacy":
-                self._late_rescue_attempt_count[self.policy_idx] = (
-                    int(self._late_rescue_attempt_count.get(self.policy_idx, 0)) + 1
-                )
-                decision = self._select_late_degradation_rescue_source(
-                    sorted_policies=sorted_policies,
-                    population=population,
-                    env_frames=env_frames,
-                    n_top=n_top,
-                    target_tolerance=own_rescue_tol,
-                    target_nsucc_mean=own_rescue_nsucc,
-                )
-            elif chronic_path:
-                decision = self._select_chronic_bottom_source(
-                    sorted_policies=sorted_policies,
-                    population=population,
-                    env_frames=env_frames,
-                    target_score=float(
-                        (population.get(self.policy_idx) or {}).get(
-                            "pbt_ranking_score",
-                            objectives.get(self.policy_idx, float("-inf")),
-                        )
-                    ),
-                    target_nsucc_mean=own_rescue_nsucc,
-                    n_top=n_top,
-                    n_mid=n_mid,
-                )
-                decision["chronic_target_gate_reason"] = ordinary_target_gate_reason
-                decision["chronic_eligibility_reason"] = str(
-                    chronic_eligibility.reason if chronic_eligibility is not None else ""
-                )
-            else:
-                decision = self._select_source(
-                    sorted_policies=sorted_policies,
-                    population=population,
-                    env_frames=env_frames,
-                    n_top=n_top,
-                )
+            # `_select_source` produces a fully audited decision dict
+            # covering L1 strict / L2 relaxed / L3 archive / L4 skip.
+            decision = self._select_source(
+                sorted_policies=sorted_policies,
+                population=population,
+                env_frames=env_frames,
+                n_top=n_top,
+            )
             self._last_source_tier_label = str(decision["tier"])
             self._last_source_checkpoint_type = str(decision["checkpoint_type"])
             tier_label = self._last_source_tier_label
@@ -10752,15 +6745,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     "archive",
                     "best_stable_archive",
                     "best_floor_recovery_archive",
-                    "late_rescue_live",
-                    "late_rescue_archive",
-                    "adaptive_rescue_live",
-                    "adaptive_rescue_archive",
-                    "adaptive_rescue_best_stable_archive",
-                    "adaptive_rescue_floor_recovery_archive",
-                    "adaptive_rescue_best_nsucc_archive",
-                    "chronic_top_live",
-                    "chronic_mid_live",
                     "skipped",
                 )
                 for k in tier_one_hot:
@@ -10856,259 +6840,41 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             if decision["action"] == "skip":
                 # IMPORTANT: do not call _restart_process_with_new_params;
                 # the bottom worker keeps training in place.
-                if tier_label in self._source_tier_counts:
-                    self._source_tier_counts[tier_label] += 1
-                if late_rescue:
-                    self._late_rescue_blocked_count[self.policy_idx] = (
-                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                if adaptive_rescue:
-                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
-                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                    self._adaptive_rescue_last_reason[self.policy_idx] = str(
-                        decision.get("adaptive_rescue_reason", "no_compatible_source")
-                    )
                 self._last_restart_type = 3  # skipped
                 return
 
-            if _decision_uses_live_source(decision):
+            if str(decision.get("checkpoint_type", "live")) == "live":
                 src_idx = int(decision["source_policy"])
-                src_state = population.get(src_idx)
-                if chronic_path:
-                    tier_s = str(decision.get("tier", ""))
-                    for_top = (
-                        tier_s.endswith("top_live")
-                        or "strict" in tier_s
-                        or tier_s in ("strict_live", "strict_stable_live")
-                    )
-                    if "mid_live" in tier_s:
-                        for_top = False
-                    elif "top_live" in tier_s:
-                        for_top = True
-                    health = self._evaluate_common_live_source_health(
-                        src_idx, src_state, env_frames, for_top=for_top
-                    )
-                    peer_h = getattr(self, "_last_peer_checkpoint_health", {}).get(
-                        int(src_idx)
-                    )
-                    self._log_chronic_source_checkpoint_health(
-                        source_policy=int(src_idx),
-                        target_policy=int(self.policy_idx),
-                        env_frames=int(env_frames),
-                        peer_health=peer_h,
-                        common_health=health,
-                    )
-                    decision["chronic_common_health_allowed"] = bool(health.eligible)
-                    decision["chronic_common_health_reason"] = str(health.reason)
-                    if not health.eligible:
-                        print(
-                            f"Policy {self.policy_idx}: skip restart "
-                            f"(chronic_common_health:{health.reason})"
-                        )
-                        self._last_restart_type = 3
-                        return
-                    delta, why = skill_delta_with_reason(
-                        self._policy_nsucc_windows.get(src_idx),
-                        interval_steps=self.interval_steps,
-                    )
-                    window = self._policy_nsucc_windows.get(src_idx)
-                    drop_ratio = (
-                        float(window.drop_ratio_vs_prior(2))
-                        if window is not None
-                        else 0.0
-                    )
-                    from dexpbt_isaaclab.pbt.pbt_chronic_bottom import (
-                        live_source_ok_for_chronic,
-                    )
-
-                    src_ok, src_reason, fallback = live_source_ok_for_chronic(
-                        skill_delta=delta,
-                        skill_delta_why=why,
-                        source_nsucc_mean=self._state_nsucc_mean(src_state),
-                        target_nsucc_mean=own_rescue_nsucc,
-                        source_recent_drop_ratio=drop_ratio,
-                    )
-                    decision["chronic_source_skill_delta_invalid_reason"] = (
-                        "" if delta is not None else str(why)
-                    )
-                    decision["chronic_mixed_tol_fallback_used"] = bool(fallback)
-                    decision["chronic_final_source_filter_reason"] = str(src_reason)
-                else:
-                    # Preserve ordinary PBT's existing live skill-delta gate.
-                    src_ok, src_reason, _ = self._validate_live_source_skill_delta(
-                        src_idx,
-                        chronic_path=False,
-                        target_nsucc_mean=own_rescue_nsucc,
-                    )
+                src_ok, src_reason = pbt_copy_allowed_for_live_source(
+                    self._policy_nsucc_windows.get(src_idx),
+                    interval_steps=self.interval_steps,
+                )
                 if not src_ok:
                     print(
                         f"Policy {self.policy_idx}: skip restart "
                         f"({src_reason})"
                     )
-                    if late_rescue:
-                        self._late_rescue_blocked_count[self.policy_idx] = (
-                            int(self._late_rescue_blocked_count.get(self.policy_idx, 0))
-                            + 1
-                        )
-                    if adaptive_rescue:
-                        self._adaptive_rescue_blocked_count[self.policy_idx] = (
-                            int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0))
-                            + 1
-                        )
                     self._last_restart_type = 3
                     return
 
             source_policy = int(decision["source_policy"])
             source_state = decision["source_state"]
             assert source_state is not None
-
-            # Population-level reservation is initialized in the outer ternary scope.
-            # Local abort gates below may still return without consuming budget.
-
-            if rescue_mode == "legacy":
-                source_tol = float(
-                    (source_state.get("curriculum") or {}).get(
-                        "success_tolerance", float("nan")
-                    )
-                )
-                if (
-                    not math.isfinite(source_tol)
-                    or abs(source_tol - own_rescue_tol)
-                    > self.late_degradation_rescue_max_tol_gap
-                ):
-                    print(
-                        "Policy %s: skip restart (late_degradation_no_compatible_source)"
-                        % self.policy_idx
-                    )
-                    self._late_rescue_blocked_count[self.policy_idx] = (
-                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                    self._last_restart_type = 3
-                    return
             source_params = source_state.get("params") or {}
             checkpoint_to_load = source_state["checkpoint"]
-            if not checkpoint_to_load or not Path(str(checkpoint_to_load)).is_file():
-                print(
-                    f"Policy {self.policy_idx}: skip restart "
-                    f"(source checkpoint missing: {checkpoint_to_load})"
-                )
-                if late_rescue:
-                    self._late_rescue_blocked_count[self.policy_idx] = (
-                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                if adaptive_rescue:
-                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
-                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                self._last_restart_type = 3
-                return
 
             # Elimination-cooldown: block restarting THIS worker too soon
             # after its last restart, regardless of source tier. This is
             # an anti-churn guard on the *bottom worker*, distinct from
             # the source-side eligibility above.
             own_state = population.get(self.policy_idx)
-            historical_archive_types = (
-                "archive",
-                "best_stable_archive",
-                "best_floor_recovery_archive",
-                "late_rescue_archive",
-            )
-            archive_recovery_bypass = (
-                str(decision.get("checkpoint_type", "")) in historical_archive_types
-                or tier_label in historical_archive_types
-            ) and self.pbt_recovery_bypass_elimination_burnin
-            live_late_rescue_bypass = (
-                tier_label == "late_rescue_live"
-                and self.late_degradation_rescue_bypass_elimination_burnin
-            )
-            adaptive_stable_tiers = (
-                "adaptive_rescue_live",
-                "adaptive_rescue_archive",
-                "adaptive_rescue_best_stable_archive",
-                "adaptive_rescue_floor_recovery_archive",
-                "adaptive_rescue_best_nsucc_archive",
-            )
-            adaptive_hard_collapse_active = False
-            adapt_cfg = None
-            st_adapt = self._adaptive_precision_state(
-                self.policy_idx, strict_local=bool(self._adaptive_precision_required())
-            )
-            if st_adapt is not None:
-                adapt_cfg, aprob, _ = st_adapt
-                latch_frame = int(
-                    self._adaptive_hard_collapse_event_frame.get(self.policy_idx, -1)
-                )
-                ctrl_event_frame = -1
-                if own_ctrl_for_floor is not None:
-                    ctrl_event_frame = int(
-                        getattr(
-                            own_ctrl_for_floor,
-                            "adaptive_probation_hard_collapse_event_frame",
-                            -1,
-                        )
-                        or -1
-                    )
-                # Same-tick event only. Stale bool / residual streak after
-                # rollback must not trigger emergency burn-in bypass.
-                adaptive_hard_collapse_active = bool(
-                    latch_frame == int(env_frames)
-                    or ctrl_event_frame == int(env_frames)
-                )
-            frames_since_restart = int(env_frames) - int(self._frames_at_restart)
-            decision_source_is_stable = bool(
-                tier_label in adaptive_stable_tiers
-                or str(decision.get("checkpoint_type", ""))
-                in (
-                    "live",
-                    "best_stable_archive",
-                    "best_floor_recovery_archive",
-                    "archive",
-                )
-            )
-            if adapt_cfg is not None and bool(
-                adapt_cfg.rescue_emergency_require_archive_or_stable_source
-            ):
-                decision_source_is_stable = bool(tier_label in adaptive_stable_tiers)
-            adaptive_emergency_bypass = bool(
-                adaptive_rescue
-                and adapt_cfg is not None
-                and bool(adapt_cfg.rescue_bypass_elimination_burnin)
-                and bool(adapt_cfg.rescue_bypass_on_hard_collapse)
-                and adaptive_hard_collapse_active
-                and frames_since_restart
-                >= int(adapt_cfg.rescue_min_frames_before_emergency_bypass)
-                and decision_source_is_stable
-            )
-            if adaptive_emergency_bypass:
-                self._adaptive_rescue_emergency_bypass[self.policy_idx] = (
-                    int(self._adaptive_rescue_emergency_bypass.get(self.policy_idx, 0))
-                    + 1
-                )
-                self._adaptive_rescue_burnin_bypassed[self.policy_idx] = (
-                    int(self._adaptive_rescue_burnin_bypassed.get(self.policy_idx, 0))
-                    + 1
-                )
-            bypass_burnin = bool(
-                archive_recovery_bypass
-                or live_late_rescue_bypass
-                or adaptive_emergency_bypass
-            )
-            self._late_rescue_last_burnin_bypassed = (
-                1.0 if (late_rescue and bypass_burnin) else 0.0
-            )
             recovery_tier = tier_label in (
                 "archive",
                 "best_stable_archive",
                 "best_floor_recovery_archive",
-                "late_rescue_archive",
-                "late_rescue_live",
-                "adaptive_rescue_live",
-                "adaptive_rescue_archive",
-                "adaptive_rescue_best_stable_archive",
-                "adaptive_rescue_floor_recovery_archive",
-                "adaptive_rescue_best_nsucc_archive",
+            )
+            bypass_burnin = (
+                recovery_tier and self.pbt_recovery_bypass_elimination_burnin
             )
             if not bypass_burnin and not self._is_eligible_for_elimination(
                 own_state, env_frames
@@ -11118,35 +6884,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     f"frames_since_restart < min_frames_between_restarts="
                     f"{self.min_frames_between_restarts}"
                 )
-                if late_rescue:
-                    self._late_rescue_blocked_count[self.policy_idx] = (
-                        int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                    self._write_pbt_copy_event({
-                        "event_type": "late_degradation_rescue_target_burnin_blocked",
-                        "source_policy": source_policy,
-                        "target_policy": self.policy_idx,
-                        "tier": tier_label,
-                        "env_frames": int(env_frames),
-                    })
-                if adaptive_rescue:
-                    self._adaptive_rescue_blocked_count[self.policy_idx] = (
-                        int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                    )
-                    self._adaptive_rescue_burnin_blocked[self.policy_idx] = (
-                        int(
-                            self._adaptive_rescue_burnin_blocked.get(self.policy_idx, 0)
-                        )
-                        + 1
-                    )
-                    self._write_pbt_copy_event({
-                        "event_type": "adaptive_degradation_rescue_target_burnin_blocked",
-                        "rescue_mode": "adaptive",
-                        "source_policy": source_policy,
-                        "target_policy": self.policy_idx,
-                        "tier": tier_label,
-                        "env_frames": int(env_frames),
-                    })
                 if tier_label == "best_stable_archive":
                     self._best_stable_recovery_skipped_count += 1
                     self._log_best_stable_recovery_outcome(
@@ -11162,350 +6899,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._last_restart_type = 3  # skipped
                 return
 
-            # selected_count only after all gates that can still abort without
-            # attempting a restart (tol/quality already done; burn-in passed).
-            if late_rescue:
-                self._late_rescue_selected_count[self.policy_idx] = (
-                    int(self._late_rescue_selected_count.get(self.policy_idx, 0)) + 1
-                )
-                source_tol = float(
-                    (source_state.get("curriculum") or {}).get(
-                        "success_tolerance", float("nan")
-                    )
-                )
-                self._write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_selected",
-                    "source_type": str(decision.get("checkpoint_type", "live")),
-                    "source_policy": source_policy,
-                    "target_policy": self.policy_idx,
-                    "source_tol": source_tol,
-                    "target_tol": own_rescue_tol,
-                    "tol_gap": abs(source_tol - own_rescue_tol),
-                    "source_nsucc_mean": float(
-                        source_state.get("nsucc_mean", float("nan"))
-                    ),
-                    "target_nsucc_mean": float(own_rescue_nsucc),
-                    "source_advantage": float(
-                        float(source_state.get("nsucc_mean", float("nan")))
-                        - float(own_rescue_nsucc)
-                    ),
-                    "source_same_tol_retention": self._same_tol_retention_snapshot(
-                        source_policy, source_tol
-                    )["retention"] if math.isfinite(source_tol) else float("nan"),
-                    "target_same_tol_retention": self._same_tol_retention_snapshot(
-                        self.policy_idx, own_rescue_tol
-                    )["retention"],
-                    "source_control_valid": float(
-                        self._late_rescue_last_source_control_valid
-                    ),
-                    "source_collapse_rejected": float(
-                        self._late_rescue_last_source_collapse_rejected
-                    ),
-                    "checkpoint_type": str(decision.get("checkpoint_type", "live")),
-                    "rescue_selected_count": self._late_rescue_selected_count[
-                        self.policy_idx
-                    ],
-                    "env_frames": int(env_frames),
-                })
-
-            if adaptive_rescue:
-                source_tol = float(
-                    (source_state.get("curriculum") or {}).get(
-                        "success_tolerance", float("nan")
-                    )
-                )
-                src_ret = float("nan")
-                tgt_ret = float("nan")
-                src_adapt = self._adaptive_precision_state(int(source_policy))
-                if src_adapt is not None and math.isfinite(source_tol):
-                    _c, _p, tr = src_adapt
-                    src_ret = float(tr.snapshot(source_tol, min_samples=1)["retention"])
-                tgt_adapt = self._adaptive_precision_state(int(self.policy_idx))
-                if tgt_adapt is not None:
-                    _c, _p, tr = tgt_adapt
-                    tgt_ret = float(tr.snapshot(own_rescue_tol, min_samples=1)["retention"])
-                self._adaptive_rescue_last_source[self.policy_idx] = int(source_policy)
-                self._adaptive_rescue_last_source_rank[self.policy_idx] = int(
-                    decision.get("adaptive_source_rank", -1)
-                )
-                self._adaptive_rescue_last_advantage_sigma[self.policy_idx] = float(
-                    decision.get("adaptive_source_advantage_sigma", 0.0)
-                )
-                self._adaptive_rescue_last_reason[self.policy_idx] = "selected"
-                source_kind = str(
-                    decision.get("adaptive_rescue_source_kind", "none") or "none"
-                )
-                self._adaptive_rescue_last_source_kind[self.policy_idx] = source_kind
-                self._write_pbt_copy_event({
-                    "event_type": "adaptive_degradation_rescue_selected",
-                    "rescue_mode": "adaptive",
-                    "adaptive_rescue_source_kind": source_kind,
-                    "adaptive_rescue_fallback_to_ordinary": bool(
-                        decision.get("adaptive_rescue_fallback_to_ordinary", False)
-                    ),
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "source_tolerance": source_tol,
-                    "target_tolerance": float(own_rescue_tol),
-                    "log_tolerance_gap": float(
-                        decision.get("adaptive_log_tolerance_gap", float("nan"))
-                    ),
-                    "source_retention": src_ret,
-                    "target_retention": tgt_ret,
-                    "source_rank": int(decision.get("adaptive_source_rank", -1)),
-                    "source_advantage_sigma": float(
-                        decision.get("adaptive_source_advantage_sigma", 0.0)
-                    ),
-                    "env_frames": int(env_frames),
-                })
-                if self.writer is not None:
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_source_policy",
-                        float(source_policy),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_source_rank",
-                        float(decision.get("adaptive_source_rank", -1)),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_source_advantage_sigma",
-                        float(decision.get("adaptive_source_advantage_sigma", 0.0)),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_attempt_count",
-                        float(self._adaptive_rescue_attempt_count.get(self.policy_idx, 0)),
-                        env_frames,
-                    )
-
-
             if tier_label in self._source_tier_counts:
                 self._source_tier_counts[tier_label] += 1
-
-            # Profile 23: population-level ordinary replacement reservation + lineage
-            # diversity in one flock-serialized transaction (after local abort gates).
-            _ap_cfg = getattr(self, "_adaptive_precision_cfg", None)
-            _is_ordinary_bottom = (
-                str(tier) == "bottom"
-                and not bool(adaptive_rescue)
-                and not bool(late_rescue)
-                and not str(tier_label).startswith("adaptive_rescue")
-            )
-            _hard_collapse_bypass = bool(adaptive_hard_collapse_for_gate)
-            if (
-                _ap_cfg is not None
-                and bool(getattr(_ap_cfg, "enabled", False))
-                and (
-                    bool(getattr(_ap_cfg, "lineage_diversity_enable", False))
-                    or _is_ordinary_bottom
-                )
-            ):
-                from dexpbt_isaaclab.pbt.adaptive_precision_consolidation import (
-                    count_distinct_lineages,
-                    resolve_peer_lineage_for_reservation,
-                    resolve_stage as _rs,
-                    stage_min_distinct_lineages,
-                    stage_replacement_budget,
-                )
-                from dexpbt_isaaclab.pbt.replacement_reservation import (
-                    PopulationReplacementLedger,
-                )
-
-                c_prog = float(self._adaptive_curriculum_progress or 0.0)
-                stage_name = _rs(c_prog, _ap_cfg)
-                budget = int(stage_replacement_budget(stage_name, _ap_cfg))
-                min_distinct = int(stage_min_distinct_lineages(stage_name, _ap_cfg))
-                tick_id = int(getattr(self, "pbt_iteration", 0) or 0)
-                lineages: dict[int, str] = {}
-                lineage_reasons: dict[int, str] = {}
-                for pi in range(int(self.num_policies)):
-                    st = population.get(pi) or {}
-                    side = None
-                    if not str(st.get("lineage_id") or "").strip():
-                        side = self._adaptive_read_sidecar_raw(pi)
-                    lin, lin_reason = resolve_peer_lineage_for_reservation(
-                        population_state=st,
-                        sidecar=side if isinstance(side, dict) else None,
-                        interval_steps=int(self.interval_steps),
-                        cfg=_ap_cfg,
-                    )
-                    lineages[int(pi)] = lin
-                    lineage_reasons[int(pi)] = lin_reason
-                self._last_adaptive_lineage_resolve_reasons = dict(lineage_reasons)
-                if self.writer is not None:
-                    for reason_key in (
-                        "lineage_population_missing",
-                        "lineage_peer_frame_missing",
-                        "lineage_sidecar_stale",
-                        "lineage_sidecar_future",
-                        "lineage_sidecar_mismatch",
-                        "lineage_sidecar_schema_error",
-                    ):
-                        try:
-                            self.writer.add_scalar(
-                                f"adaptive_consolidation/{reason_key}",
-                                float(
-                                    sum(
-                                        1
-                                        for r in lineage_reasons.values()
-                                        if r == reason_key
-                                    )
-                                ),
-                                env_frames,
-                            )
-                        except Exception:
-                            pass
-                self._last_adaptive_replacement_budget = budget
-                self._last_adaptive_distinct_lineage_count = count_distinct_lineages(
-                    list(lineages.values())
-                )
-                self._last_adaptive_min_distinct_lineages = min_distinct
-                _replacement_ledger = PopulationReplacementLedger(self.workspace)
-                if _is_ordinary_bottom and not _hard_collapse_bypass:
-                    src_lin = str(
-                        (source_state.get("lineage_id") if source_state else None)
-                        or lineages.get(int(source_policy), "")
-                        or ""
-                    )
-                    resv = _replacement_ledger.try_reserve_ordinary(
-                        tick_id=tick_id,
-                        stage=stage_name,
-                        budget=budget,
-                        min_distinct_lineages=min_distinct,
-                        population_lineages=lineages,
-                        num_policies=int(self.num_policies),
-                        target_idx=int(self.policy_idx),
-                        source_idx=int(source_policy),
-                        source_lineage=src_lin,
-                        owner_policy=int(self.policy_idx),
-                    )
-                    for k, v in (resv.telemetry or {}).items():
-                        if self.writer is not None:
-                            try:
-                                self.writer.add_scalar(str(k), float(v), env_frames)
-                            except Exception:
-                                pass
-                    self._last_adaptive_replacement_budget_used = float(
-                        (resv.telemetry or {}).get(
-                            "adaptive_consolidation/replacement_budget_used", 0.0
-                        )
-                    )
-                    if not resv.ok:
-                        if resv.reason == "diversity_blocked":
-                            self._last_adaptive_diversity_blocked = True
-                            self._adaptive_diversity_blocked_count += 1
-                        else:
-                            self._adaptive_replacement_budget_blocked_count += 1
-                        # Prefer a concrete peer lineage reason when reservation
-                        # fails closed on missing lineages.
-                        detail = str(resv.reason)
-                        if detail in ("lineage_missing", "projected_lineage_missing"):
-                            missing_reasons = sorted(
-                                {
-                                    lineage_reasons[i]
-                                    for i in range(int(self.num_policies))
-                                    if not lineages.get(i)
-                                }
-                            )
-                            if missing_reasons:
-                                detail = f"{detail}:{','.join(missing_reasons)}"
-                        print(
-                            f"Policy {self.policy_idx}: skip restart "
-                            f"(population_reservation:{detail})"
-                        )
-                        self._last_restart_type = 3
-                        return
-                    _pending_replacement_handle = resv.handle
-                elif (
-                    bool(adaptive_rescue)
-                    or bool(late_rescue)
-                    or _hard_collapse_bypass
-                ):
-                    if adaptive_rescue:
-                        bypass_reason = "adaptive_rescue"
-                    elif late_rescue:
-                        bypass_reason = "late_rescue"
-                    else:
-                        bypass_reason = "hard_collapse_rescue"
-                    tele = _replacement_ledger.record_bypass(
-                        tick_id=tick_id,
-                        stage=stage_name,
-                        budget=budget,
-                        target_idx=int(self.policy_idx),
-                        reason=bypass_reason,
-                    )
-                    if self.writer is not None:
-                        for k, v in tele.items():
-                            try:
-                                self.writer.add_scalar(str(k), float(v), env_frames)
-                            except Exception:
-                                pass
-
-            # Snapshot before recovery / adaptive kind accounting so a failed
-            # restart rolls back quota, cooldown, and selected counters.
-            restart_txn_snap = self._snapshot_restart_runtime_state()
-
-            if adaptive_rescue:
-                self._adaptive_rescue_selected_count[self.policy_idx] = (
-                    int(self._adaptive_rescue_selected_count.get(self.policy_idx, 0)) + 1
-                )
-                source_kind = str(
-                    decision.get("adaptive_rescue_source_kind", "none") or "none"
-                )
-                if source_kind == "live":
-                    self._adaptive_rescue_live_selected[self.policy_idx] = (
-                        int(self._adaptive_rescue_live_selected.get(self.policy_idx, 0))
-                        + 1
-                    )
-                elif source_kind == "archive":
-                    self._adaptive_rescue_archive_selected[self.policy_idx] = (
-                        int(
-                            self._adaptive_rescue_archive_selected.get(self.policy_idx, 0)
-                        )
-                        + 1
-                    )
-                elif source_kind == "ordinary_fallback":
-                    # Conservative: ordinary fallback still consumes adaptive
-                    # quota/cooldown on success; count separately from live/archive.
-                    self._adaptive_rescue_ordinary_fallback[self.policy_idx] = (
-                        int(
-                            self._adaptive_rescue_ordinary_fallback.get(
-                                self.policy_idx, 0
-                            )
-                        )
-                        + 1
-                    )
-                if self.writer is not None:
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_selected_count",
-                        float(self._adaptive_rescue_selected_count[self.policy_idx]),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_live_selected",
-                        float(
-                            self._adaptive_rescue_live_selected.get(self.policy_idx, 0)
-                        ),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_archive_selected",
-                        float(
-                            self._adaptive_rescue_archive_selected.get(self.policy_idx, 0)
-                        ),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_ordinary_fallback_selected",
-                        float(
-                            self._adaptive_rescue_ordinary_fallback.get(
-                                self.policy_idx, 0
-                            )
-                        ),
-                        env_frames,
-                    )
 
             # Account based on the tier of this replacement.
             if recovery_tier:
@@ -11523,7 +6918,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 self._cross_restart_count += 1
                 self._last_restart_type = 2  # cross
         else:
-            restart_txn_snap = self._snapshot_restart_runtime_state()
             # Patch F (2026-05-31): mid-tier self-mutation governor. The
             # legacy path mutated own params + relaunched on every tick
             # which produced 100% self-restart churn. Default behaviour now
@@ -11639,7 +7033,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # otherwise 100M (configurable).
         recovery_consolidation_source = ""
         recovery_consolidation_frames = 0
-        source_safe_apply: dict[str, Any] | None = None
         # Mid-tier self-restart copies from self -> self; treat it like a
         # legacy event for inheritance purposes. The bottom-tier branch is
         # the only one that crosses worker boundaries.
@@ -11713,17 +7106,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                     inherit_audit.get("strong_live_inherit_exact", False)
                 ),
             }
-            # Defer control JSON mutation until inside the restart transaction
-            # so a failed manifest/checkpoint path can restore raw bytes.
-            source_safe_apply = {
-                "path": ctrl_path,
-                "consolidation_env_frames": recovery_consolidation_frames,
-                "consolidation_source": recovery_consolidation_source,
-                "num_envs": int(self.num_envs),
-                "inherited_tolerance": float(tol_after),
-                "inheritance_audit": audit_payload,
-                "require_existing": bool(late_rescue),
-            }
+            apply_source_safe_consolidation_on_copy(
+                ctrl_path,
+                consolidation_env_frames=recovery_consolidation_frames,
+                consolidation_source=recovery_consolidation_source,
+                num_envs=int(self.num_envs),
+                inherited_tolerance=float(tol_after),
+                inheritance_audit=audit_payload,
+            )
         # Persist a copy-event record for downstream analysis. Note that
         # ``tier_label`` is only defined when the bottom-tier source-selection
         # cascade ran; mid-tier self-restarts log a synthetic label.
@@ -11787,35 +7177,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 "promising_protect_until": int(
                     self._promising_protect_until.get(self.policy_idx, 0)
                 ),
-                "chronic_path": bool(tier == "bottom" and chronic_path),
-                "chronic_target_gate_reason": (
-                    str(decision.get("chronic_target_gate_reason", ""))
-                    if tier == "bottom" and chronic_path
-                    else ""
-                ),
-                "target_gate_reason": (
-                    str(decision.get("chronic_target_gate_reason", ""))
-                    if tier == "bottom" and chronic_path
-                    else ""
-                ),
-                "chronic_eligibility_reason": (
-                    str(decision.get("chronic_eligibility_reason", ""))
-                    if tier == "bottom" and chronic_path
-                    else ""
-                ),
-                "chronic_score_gap": (
-                    _coerce_finite(decision.get("chronic_score_gap", 0.0))
-                    if tier == "bottom" and chronic_path
-                    else 0.0
-                ),
-                "chronic_source_filter_reason": (
-                    str(decision.get("chronic_source_filter_reason", ""))
-                    if tier == "bottom" and chronic_path
-                    else ""
-                ),
-                "mutation_applied": bool(
-                    not (tier == "bottom" and chronic_path)
-                ),
             }
         )
         if self.writer is not None:
@@ -11856,15 +7217,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         mutation_frozen = int(env_frames) < self._mutation_frozen_until.get(
             self.policy_idx, 0
         )
-        if chronic_path or rescue_active or mutation_frozen:
-            # Rescue restores a compatible policy; never mutate params.
+        if mutation_frozen:
             new_params = dict(source_params)
         else:
-            cons_stage = resolve_pbt_stage(
-                env_frames,
-                self.pbt_consolidation_cfg,
-                curriculum_progress=self._adaptive_curriculum_progress,
-            )
+            cons_stage = resolve_pbt_stage(env_frames, self.pbt_consolidation_cfg)
             eff_mut_rate = effective_mutation_rate(
                 self.mutation_rate, cons_stage, self.pbt_consolidation_cfg
             )
@@ -11883,200 +7239,15 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             )
             or 0
         )
-        # Transaction owner is `_restart_process_with_new_params`. Caller only
-        # reacts to the boolean; do NOT restore/cleanup/emit rollback here.
-        if _pending_replacement_handle is not None and _replacement_ledger is not None:
-            def _restart_body() -> bool:
-                return bool(
-                    self._restart_process_with_new_params(
-                        new_params,
-                        checkpoint_to_load,
-                        source_policy,
-                        env_frames,
-                        tier,
-                        source_curriculum=source_curriculum,
-                        source_weight_age_frame=source_weight_age,
-                        late_rescue=bool(late_rescue),
-                        late_rescue_decision=decision if late_rescue else None,
-                        adaptive_rescue=bool(adaptive_rescue),
-                        adaptive_rescue_decision=decision if adaptive_rescue else None,
-                        runtime_snap=restart_txn_snap,
-                        source_safe_apply=source_safe_apply,
-                    )
-                )
-
-            result = self._run_restart_with_reservation(
-                ledger=_replacement_ledger,
-                handle=_pending_replacement_handle,
-                restart_fn=_restart_body,
-                env_frames=int(env_frames),
-            )
-            restart_ok = bool(result.restart_ok)
-            if bool(result.applied_but_unrecorded):
-                self._adaptive_ledger_unhealthy_this_tick = True
-            if result.restart_exception is not None:
-                raise result.restart_exception
-        else:
-            restart_ok = self._restart_process_with_new_params(
-                new_params,
-                checkpoint_to_load,
-                source_policy,
-                env_frames,
-                tier,
-                source_curriculum=source_curriculum,
-                source_weight_age_frame=source_weight_age,
-                late_rescue=bool(late_rescue),
-                late_rescue_decision=decision if late_rescue else None,
-                adaptive_rescue=bool(adaptive_rescue),
-                adaptive_rescue_decision=decision if adaptive_rescue else None,
-                runtime_snap=restart_txn_snap,
-                source_safe_apply=source_safe_apply,
-            )
-        if not restart_ok:
-            if late_rescue:
-                self._late_rescue_blocked_count[self.policy_idx] = (
-                    int(self._late_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                )
-                self._safe_write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_restart_failed",
-                    "source_policy": source_policy,
-                    "target_policy": self.policy_idx,
-                    "env_frames": int(env_frames),
-                })
-            if adaptive_rescue:
-                self._adaptive_rescue_blocked_count[self.policy_idx] = (
-                    int(self._adaptive_rescue_blocked_count.get(self.policy_idx, 0)) + 1
-                )
-                self._safe_write_pbt_copy_event({
-                    "event_type": "adaptive_degradation_rescue_restart_failed",
-                    "rescue_mode": "adaptive",
-                    "source_policy": source_policy,
-                    "target_policy": self.policy_idx,
-                    "env_frames": int(env_frames),
-                })
-            self._last_restart_type = 3
-            return
-        if chronic_path:
-            chronic_state = self._chronic_bottom_state_for(
-                self.policy_idx, lineage_id=own_lineage
-            )
-            trigger_frames = int(chronic_state.continuous_bottom_frames)
-            trigger_ticks = int(chronic_state.continuous_bottom_ticks)
-            reset_after_chronic_copy(
-                chronic_state,
-                env_frames=env_frames,
-                cooldown=self.pbt_chronic_cooldown_frames,
-            )
-            chronic_state.last_chronic_source = int(source_policy)
-            chronic_state.last_reason = str(
-                decision.get("chronic_eligibility_reason", "selected")
-            )
-            self._persist_chronic_bottom_state(self.policy_idx)
-            self._safe_write_pbt_copy_event(
-                {
-                    "event_type": "chronic_bottom_copy_committed",
-                    "target_policy": int(self.policy_idx),
-                    "source_policy": int(source_policy),
-                    "env_frames": int(env_frames),
-                    "tier": str(tier_label),
-                    "target_gate_reason": str(
-                        decision.get("chronic_target_gate_reason", "")
-                    ),
-                    "trigger_score_gap": float(
-                        decision.get("chronic_score_gap", 0.0)
-                    ),
-                    "score_gap": float(decision.get("chronic_score_gap", 0.0)),
-                    "trigger_continuous_bottom_frames": trigger_frames,
-                    "trigger_continuous_bottom_ticks": trigger_ticks,
-                    "trigger_frames": trigger_frames,
-                    "trigger_ticks": trigger_ticks,
-                    "post_copy_bottom_frames": int(
-                        chronic_state.continuous_bottom_frames
-                    ),
-                    "post_copy_bottom_ticks": int(
-                        chronic_state.continuous_bottom_ticks
-                    ),
-                    "post_copy_frames": int(
-                        chronic_state.continuous_bottom_frames
-                    ),
-                    "post_copy_ticks": int(
-                        chronic_state.continuous_bottom_ticks
-                    ),
-                    "continuous_bottom_frames": trigger_frames,
-                    "continuous_bottom_ticks": trigger_ticks,
-                    "cooldown_until": int(
-                        chronic_state.chronic_copy_cooldown_until
-                    ),
-                    "selected_source": int(source_policy),
-                    "source_filter_reason": str(
-                        decision.get("chronic_final_source_filter_reason")
-                        or decision.get("chronic_source_filter_reason", "")
-                    ),
-                    "mixed_tol_fallback_used": bool(
-                        decision.get("chronic_mixed_tol_fallback_used", False)
-                    ),
-                    "chronic_copy_count": int(chronic_state.chronic_copy_count),
-                }
-            )
-
-    def _run_restart_with_reservation(
-        self,
-        *,
-        ledger,
-        handle,
-        restart_fn,
-        env_frames: int,
-        heartbeat_interval_s: float | None = None,
-    ):
-        """Shared ordinary-replacement orchestration used by runtime and tests.
-
-        Priority: preserve body exception > finalize release/commit > heartbeat
-        telemetry. Heartbeat never replaces a restart exception.
-        """
-        from dexpbt_isaaclab.pbt.replacement_reservation import (
-            run_observer_restart_with_reservation,
+        self._restart_process_with_new_params(
+            new_params,
+            checkpoint_to_load,
+            source_policy,
+            env_frames,
+            tier,
+            source_curriculum=source_curriculum,
+            source_weight_age_frame=source_weight_age,
         )
-
-        def _add_scalar(name: str, value: float, frame: int) -> None:
-            if self.writer is None:
-                return
-            try:
-                self.writer.add_scalar(str(name), float(value), int(frame))
-            except Exception:
-                pass
-
-        return run_observer_restart_with_reservation(
-            ledger,
-            handle,
-            restart_fn,
-            env_frames=int(env_frames),
-            write_event=self._safe_write_pbt_copy_event,
-            add_scalar=_add_scalar,
-            heartbeat_interval_s=heartbeat_interval_s,
-            critical_log=print,
-        )
-
-    def _policy_run_dir(self) -> Path:
-        """Supervisor RUN_DIR for this worker: ``.../policy_XX``."""
-        return self.workspace.parent / f"policy_{self.policy_idx:02d}"
-
-    def _population_frame_complete_marker_paths(self) -> tuple[Path, Path]:
-        """Return (workspace policy marker, supervisor policy_run_dir marker)."""
-        ws_marker = self.curr_policy_workspace / "population_frame_complete.json"
-        run_marker = self._policy_run_dir() / "population_frame_complete.json"
-        return ws_marker, run_marker
-
-    @staticmethod
-    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, indent=2))
-        tmp.replace(path)
-
-    def _write_population_frame_complete_markers(self, payload: dict[str, Any]) -> None:
-        ws_marker, run_marker = self._population_frame_complete_marker_paths()
-        self._atomic_write_json(ws_marker, payload)
-        self._atomic_write_json(run_marker, payload)
 
     def _policy_checkpoint_prefix(self, iteration: int) -> str:
         return f"{iteration:06d}"
@@ -12262,137 +7433,54 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return
         mode = _bc.decide_consume_mode(bridge is not None)
         if mode == _bc.CONSUME_LIVE:
-            try:
-                payload = _bc.load_payload(meta)
-                if payload is None:
-                    raise RuntimeError("broadcast_payload_missing_or_unreadable")
-                query_tol = None
-                try:
-                    own_curr = self._read_curriculum_state() or {}
-                    query_tol = float(
-                        own_curr.get("success_tolerance", float("nan"))
-                    )
-                except Exception:
-                    query_tol = None
-                if hasattr(cfg, "query_success_tolerance"):
-                    cfg.query_success_tolerance = query_tol
-                summary = _bc.merge_payload_into_bridge(
-                    bridge,
-                    payload,
-                    cfg=cfg,
-                    query_success_tolerance=query_tol,
-                )
-                recovery_entries = int(
-                    summary.get(
-                        "recovery_bank_merged_entries",
-                        summary.get("merged_entries", 0),
-                    )
-                )
-                snippet_entries = int(summary.get("snippet_bank_merged_entries", 0))
-                total_entries = recovery_entries + snippet_entries
-                diagnostics = dict(summary.get("bank_diagnostics") or {})
-                _bc.mark_consumed(
-                    self.workspace,
-                    self.policy_idx,
-                    frame=int(meta.get("frame", 0)),
-                    source_policy=int(meta.get("source_policy", -1)),
-                    mode=mode,
-                    merged_entries=total_entries,
-                )
-                self._eir_bank_merge_count += total_entries
-                consumed = 1.0
-                event = {
+            payload = _bc.load_payload(meta)
+            summary = (
+                _bc.merge_payload_into_bridge(bridge, payload, cfg=cfg)
+                if payload is not None else {"merged_entries": 0}
+            )
+            _bc.mark_consumed(
+                self.workspace, self.policy_idx,
+                frame=int(meta.get("frame", 0)),
+                source_policy=int(meta.get("source_policy", -1)),
+                mode=mode,
+                merged_entries=int(summary.get("merged_entries", 0)),
+            )
+            self._eir_bank_merge_count += int(summary.get("merged_entries", 0))
+            consumed = 1.0
+            _bc.append_broadcast_event(
+                self._metrics_dir,
+                {
                     "event": "consume",
                     "source": int(meta.get("source_policy", -1)),
                     "target": int(self.policy_idx),
                     "frame": int(env_frames),
-                    "entries": total_entries,
-                    "recovery_bank_merged_entries": recovery_entries,
-                    "snippet_bank_merged_entries": snippet_entries,
-                    "broadcast_rejected_incompatible": bool(
-                        summary.get("broadcast_rejected_incompatible", False)
-                    ),
-                    "bank_diagnostics": diagnostics,
+                    "entries": int(summary.get("merged_entries", 0)),
                     "mode": mode,
                     "consumed": True,
-                }
-                _bc.append_broadcast_event(self._metrics_dir, event)
-                if self.writer is not None:
-                    self.writer.add_scalar(
-                        "eir_pbt/broadcast_consumed_source_policy",
-                        float(meta.get("source_policy", -1)),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "eir_pbt/broadcast_consumed_bank_entries",
-                        float(total_entries),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "eir_pbt/recovery_bank_merged_entries",
-                        float(recovery_entries),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "eir_pbt/snippet_bank_merged_entries",
-                        float(snippet_entries),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "eir_pbt/broadcast_rejected_incompatible",
-                        1.0
-                        if summary.get("broadcast_rejected_incompatible")
-                        else 0.0,
-                        env_frames,
-                    )
-                    for key, value in diagnostics.items():
-                        try:
-                            self.writer.add_scalar(
-                                f"eir_pbt/snippet_{key}",
-                                float(value),
-                                env_frames,
-                            )
-                        except (TypeError, ValueError):
-                            continue
-                    self.writer.add_scalar(
-                        "eir_pbt/bank_merge_count",
-                        float(self._eir_bank_merge_count),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "eir_pbt/residual_head_copied",
-                        1.0 if summary.get("residual_copied") else 0.0,
-                        env_frames,
-                    )
-                rejection = (
-                    " rejected_incompatible"
-                    if summary.get("broadcast_rejected_incompatible")
-                    else ""
+                },
+            )
+            if self.writer is not None:
+                self.writer.add_scalar(
+                    "eir_pbt/broadcast_consumed_source_policy",
+                    float(meta.get("source_policy", -1)), env_frames,
                 )
-                print(
-                    f"[EIR-broadcast] policy {self.policy_idx} consumed "
-                    f"recovery={recovery_entries} snippet={snippet_entries} "
-                    f"from policy {meta.get('source_policy')} (mode={mode}){rejection}"
+                self.writer.add_scalar(
+                    "eir_pbt/broadcast_consumed_bank_entries",
+                    float(summary.get("merged_entries", 0)), env_frames,
                 )
-            except Exception as exc:
-                failure_reason = f"{type(exc).__name__}:{exc}"
-                _bc.append_broadcast_event(
-                    self._metrics_dir,
-                    {
-                        "event": "consume",
-                        "source": int(meta.get("source_policy", -1)),
-                        "target": int(self.policy_idx),
-                        "frame": int(env_frames),
-                        "entries": 0,
-                        "mode": mode,
-                        "consumed": False,
-                        "failure_reason": failure_reason,
-                    },
+                self.writer.add_scalar(
+                    "eir_pbt/bank_merge_count",
+                    float(self._eir_bank_merge_count), env_frames,
                 )
-                print(
-                    f"[EIR-broadcast] policy {self.policy_idx} consume failed: "
-                    f"{failure_reason}"
+                self.writer.add_scalar(
+                    "eir_pbt/residual_head_copied",
+                    1.0 if summary.get("residual_copied") else 0.0, env_frames,
                 )
+            print(
+                f"[EIR-broadcast] policy {self.policy_idx} consumed "
+                f"{summary.get('merged_entries', 0)} entries from policy "
+                f"{meta.get('source_policy')} (mode={mode})"
+            )
         else:
             # forced-restart hand-off: leave the payload for the next process
             # incarnation to consume on startup; record the deferral.
@@ -12462,12 +7550,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             _wm_cal = getattr(eir_bridge, "wm_calibration_state", None)
             if isinstance(_wm_cal, dict) and _wm_cal:
                 algo_state["wm_calibration_state"] = dict(_wm_cal)
-            _ra_st = getattr(eir_bridge, "readiness_adaptive_state", None)
-            if _ra_st is not None:
-                if isinstance(_ra_st, dict):
-                    algo_state["readiness_adaptive_state"] = dict(_ra_st)
-                elif hasattr(_ra_st, "to_dict"):
-                    algo_state["readiness_adaptive_state"] = _ra_st.to_dict()
         awr_bridge = getattr(self.algo, "_awr_bridge", None)
         sidecar_saved_path: Path | None = None
         if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
@@ -12564,16 +7646,6 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 retention_at_save = end_mean_w / peak_in_window
             else:
                 retention_at_save = 1.0
-        tol_at_save = float(curriculum.get("success_tolerance", 0.075) or 0.075)
-        same_tol_at_save = self._same_tol_retention_snapshot(self.policy_idx, tol_at_save)
-        retention_valid_at_save = bool(same_tol_at_save.get("valid", False))
-        if self.same_tol_retention_enable:
-            if retention_valid_at_save:
-                retention_at_save = float(same_tol_at_save["retention"])
-            else:
-                # Do not serialize NaN into archive JSON; strict late rescue
-                # keys off same_tol_retention_valid_at_save instead.
-                retention_at_save = None
         last_mastered_at_save = float(
             self._last_mastered_tolerance.get(self.policy_idx, 0.075)
         )
@@ -12582,10 +7654,9 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # own gate using the raw fields below; this is a convenience hint.
         try:
             source_safe_at_save = bool(
-                retention_at_save is not None
-                and math.isfinite(float(retention_at_save))
+                (not math.isnan(retention_at_save))
                 and nsucc_mean >= 20.0
-                and float(retention_at_save) >= 0.7
+                and retention_at_save >= 0.7
             )
         except Exception:
             source_safe_at_save = False
@@ -12601,16 +7672,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "ranking_metric_mode": self.pbt_ranking_metric,
             "nsucc_zero_cap": self.pbt_nsucc_zero_cap,
             # Phase A4 P3 (2026-06-09): source-safe metadata.
-            "source_retention_at_save": (
-                float(retention_at_save) if retention_at_save is not None else None
-            ),
-            "tolerance_bin_at_save": int(same_tol_at_save["bin_id"]),
-            "same_tol_retention_at_save": (
-                float(same_tol_at_save["retention"])
-                if retention_valid_at_save else None
-            ),
-            "same_tol_retention_valid_at_save": bool(retention_valid_at_save),
-            "same_tol_peak_nsucc_mean_at_save": float(same_tol_at_save["peak"]),
+            "source_retention_at_save": float(retention_at_save),
             "last_mastered_tolerance_at_save": float(last_mastered_at_save),
             "source_safe_for_curriculum_at_save": bool(source_safe_at_save),
             # Patch B (rev 3, 2026-05-30): low-nsucc cap params persisted
@@ -13068,111 +8130,7 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         tier: str,
         source_curriculum: dict[str, float | int] | None = None,
         source_weight_age_frame: int = 0,
-        late_rescue: bool = False,
-        late_rescue_decision: dict[str, Any] | None = None,
-        adaptive_rescue: bool = False,
-        adaptive_rescue_decision: dict[str, Any] | None = None,
-        runtime_snap: dict[str, Any] | None = None,
-        source_safe_apply: dict[str, Any] | None = None,
-    ) -> bool:
-        """Own the full restart transaction (memory + control + manifest).
-
-        Commit order (documented intentionally):
-          1. snapshot runtime + persistent (control/manifest bytes)
-          2. apply source-safe consolidation to control (if requested)
-          3. prepare checkpoint / train_args / memory mutations
-          4. late-rescue: bump executed + persist quota/cooldown into control
-          5. atomic commit restart manifest
-          6. mark committed — post-commit audit/writer are best-effort only
-          7. SIGKILL / exit
-
-        Any failure before step 6 restores runtime + persistent bytes, cleans
-        restart artifacts, and emits exactly one
-        ``pbt_restart_transaction_rolled_back`` event. Callers must not also
-        restore/cleanup/emit that event.
-        """
-        snap = (
-            runtime_snap
-            if runtime_snap is not None
-            else self._snapshot_restart_runtime_state()
-        )
-        persistent_snap = self._snapshot_restart_persistent_state()
-        # Mutable commit flag shared with impl so post-commit exceptions do
-        # not enter the rollback branch.
-        txn = {"committed": False}
-        try:
-            if source_safe_apply is not None:
-                apply_kwargs = dict(source_safe_apply)
-                apply_path = Path(apply_kwargs.pop("path"))
-                apply_source_safe_consolidation_on_copy(apply_path, **apply_kwargs)
-            ok = self._restart_process_with_new_params_impl(
-                new_params,
-                checkpoint_path,
-                source_policy,
-                env_frames,
-                tier,
-                source_curriculum=source_curriculum,
-                source_weight_age_frame=source_weight_age_frame,
-                late_rescue=late_rescue,
-                late_rescue_decision=late_rescue_decision,
-                adaptive_rescue=adaptive_rescue,
-                adaptive_rescue_decision=adaptive_rescue_decision,
-                txn=txn,
-            )
-            if not ok and not txn["committed"]:
-                self._abort_restart_transaction(
-                    runtime_snap=snap,
-                    persistent_snap=persistent_snap,
-                    source_policy=int(source_policy),
-                    env_frames=int(env_frames),
-                    late_rescue=bool(late_rescue),
-                    adaptive_rescue=bool(adaptive_rescue),
-                    reason="restart_returned_false",
-                )
-            return bool(ok) or bool(txn["committed"])
-        except Exception as exc:
-            print(
-                f"[PBT] restart manifest failed for policy {self.policy_idx}: {exc}"
-            )
-            if txn["committed"]:
-                # Commit point already passed; do not roll back durable state.
-                self._safe_write_pbt_copy_event({
-                    "event_type": "pbt_restart_post_commit_error",
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "late_rescue": bool(late_rescue),
-                    "adaptive_rescue": bool(adaptive_rescue),
-                    "env_frames": int(env_frames),
-                    "reason": f"exception:{type(exc).__name__}",
-                    "error": str(exc),
-                })
-                return True
-            self._abort_restart_transaction(
-                runtime_snap=snap,
-                persistent_snap=persistent_snap,
-                source_policy=int(source_policy),
-                env_frames=int(env_frames),
-                late_rescue=bool(late_rescue),
-                adaptive_rescue=bool(adaptive_rescue),
-                reason=f"exception:{type(exc).__name__}",
-            )
-            return False
-
-    def _restart_process_with_new_params_impl(
-        self,
-        new_params: dict[str, float | int],
-        checkpoint_path: str,
-        source_policy: int,
-        env_frames: int,
-        tier: str,
-        source_curriculum: dict[str, float | int] | None = None,
-        source_weight_age_frame: int = 0,
-        late_rescue: bool = False,
-        late_rescue_decision: dict[str, Any] | None = None,
-        adaptive_rescue: bool = False,
-        adaptive_rescue_decision: dict[str, Any] | None = None,
-        txn: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> None:
         src = Path(checkpoint_path).resolve()
         tmp_dir = self.workspace / f"restart_p{self.policy_idx}"
         if tmp_dir.exists():
@@ -13460,25 +8418,8 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # config is env frames; env stores simulation steps (Scheme A).
         freeze_env_frames = (
             self.curriculum_freeze_on_recovery_frames
-            if (
-                self._last_source_checkpoint_type
-                in (
-                    "archive",
-                    "best_stable_archive",
-                    "best_floor_recovery_archive",
-                    "late_rescue_archive",
-                )
-                or self._last_source_tier_label
-                in (
-                    "late_rescue_live",
-                    "late_rescue_archive",
-                    "adaptive_rescue_live",
-                    "adaptive_rescue_archive",
-                    "adaptive_rescue_best_stable_archive",
-                    "adaptive_rescue_floor_recovery_archive",
-                    "adaptive_rescue_best_nsucc_archive",
-                )
-            )
+            if self._last_source_checkpoint_type
+            in ("archive", "best_stable_archive")
             else self.curriculum_freeze_frames
         )
         freeze_steps = env_frames_to_sim_steps(freeze_env_frames, self.num_envs)
@@ -13833,230 +8774,52 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             "wm_strategy_profile_copied_from_source": bool(
                 self._wm_strategy_profile_copied_from_source
             ),
-            "late_rescue": bool(late_rescue),
-            "late_rescue_attempt_count": int(
-                self._late_rescue_attempt_count.get(self.policy_idx, 0)
-            ),
-            "late_rescue_selected_count": int(
-                self._late_rescue_selected_count.get(self.policy_idx, 0)
-            ),
-            "late_rescue_executed_count": int(
-                self._late_rescue_executed_count.get(self.policy_idx, 0)
-            ),
-            "late_rescue_blocked_count": int(
-                self._late_rescue_blocked_count.get(self.policy_idx, 0)
-            ),
-            "late_rescue_last_frame": int(
-                self._late_rescue_frame.get(self.policy_idx, -1)
-            ),
-            "late_rescue_streak": int(
-                self._late_rescue_streak.get(self.policy_idx, 0)
-            ),
         }
 
-        # ------------------------------------------------------------------
-        # Commit point preparation.
-        # Order: (optional source-safe already applied) → late-rescue control
-        # persist → atomic manifest → mark committed → best-effort audit /
-        # writer → SIGKILL. Any failure before committed triggers full
-        # rollback of runtime + persistent byte snapshots.
-        # ------------------------------------------------------------------
-        if late_rescue:
-            # Fail-closed if target control is missing/corrupt before we touch
-            # executed_count or write a supervisor-consumable manifest.
-            ctrl_path = (
-                self._curriculum_control_dir / f"{int(self.policy_idx):03d}.json"
-            )
-            try:
-                read_curriculum_control_required(ctrl_path)
-            except LateRescueControlMissingError:
-                self._safe_write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_target_control_missing",
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "env_frames": int(env_frames),
-                    "path": str(ctrl_path),
-                })
-                raise
-            except LateRescueControlParseError:
-                self._safe_write_pbt_copy_event({
-                    "event_type": "late_degradation_rescue_target_control_parse_error",
-                    "source_policy": int(source_policy),
-                    "target_policy": int(self.policy_idx),
-                    "env_frames": int(env_frames),
-                    "path": str(ctrl_path),
-                })
-                raise
-            prev_executed = int(
-                self._late_rescue_executed_count.get(self.policy_idx, 0)
-            )
-            self._late_rescue_executed_count[self.policy_idx] = prev_executed + 1
-            self._late_rescue_count[self.policy_idx] = self._late_rescue_executed_count[
-                self.policy_idx
-            ]
-            self._late_rescue_frame[self.policy_idx] = int(env_frames)
-            manifest["late_rescue_executed_count"] = int(
-                self._late_rescue_executed_count[self.policy_idx]
-            )
-            manifest["late_rescue_last_frame"] = int(env_frames)
-            # Persist quota/cooldown into control BEFORE manifest so a persist
-            # failure never leaves a consumable restart without durable quota.
-            self._persist_late_rescue_runtime_state(
-                self.policy_idx, env_frames=int(env_frames)
-            )
-
-        if adaptive_rescue:
-            prev_executed = int(
-                self._adaptive_rescue_executed.get(self.policy_idx, 0)
-            )
-            self._adaptive_rescue_executed[self.policy_idx] = prev_executed + 1
-            self._adaptive_rescue_executed_for_lineage[self.policy_idx] = int(
-                self._adaptive_rescue_executed_for_lineage.get(self.policy_idx, 0)
-            ) + 1
-            self._adaptive_last_rescue_frame[self.policy_idx] = int(env_frames)
-            self._adaptive_rescue_last_reason[self.policy_idx] = "executed"
-            manifest["adaptive_rescue"] = True
-            manifest["adaptive_rescue_executed_count"] = int(
-                self._adaptive_rescue_executed[self.policy_idx]
-            )
-            manifest["adaptive_rescue_executed_for_lineage"] = int(
-                self._adaptive_rescue_executed_for_lineage[self.policy_idx]
-            )
-            manifest["adaptive_rescue_last_frame"] = int(env_frames)
-            # Persist adaptive sidecar BEFORE manifest so a persist failure
-            # never leaves a consumable restart without durable quota.
-            self._adaptive_precision_persist(self.policy_idx)
-
-        # Atomic manifest write (commit step for supervisor consumption).
-        manifest_tmp = manifest_path.with_suffix(
-            f".{os.getpid()}.{_uuid_mod.uuid4().hex[:8]}.tmp"
-        )
+        # Atomic manifest write
+        manifest_tmp = manifest_path.with_suffix(".tmp")
         manifest_tmp.write_text(json.dumps(manifest))
-        os.replace(str(manifest_tmp), str(manifest_path))
-
-        if txn is not None:
-            txn["committed"] = True
-
-        # ---- Post-commit: best-effort only; must not trigger rollback. ----
-        if late_rescue:
-            self._safe_write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_restart_manifest_committed",
-                "source_type": str(
-                    (late_rescue_decision or {}).get("checkpoint_type", "live")
-                ),
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "env_frames": int(env_frames),
-                "manifest_path": str(manifest_path),
-            })
-            self._safe_write_pbt_copy_event({
-                "event_type": "late_degradation_rescue_executed",
-                "source_type": str(
-                    (late_rescue_decision or {}).get("checkpoint_type", "live")
-                ),
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "mutation_disabled": True,
-                "rescue_executed_count": self._late_rescue_executed_count[
-                    self.policy_idx
-                ],
-                "late_rescue_last_frame": int(env_frames),
-                "env_frames": int(env_frames),
-            })
-
-        if adaptive_rescue:
-            self._safe_write_pbt_copy_event({
-                "event_type": "adaptive_degradation_rescue_restart_manifest_committed",
-                "rescue_mode": "adaptive",
-                "source_type": str(
-                    (adaptive_rescue_decision or {}).get("checkpoint_type", "live")
-                ),
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "env_frames": int(env_frames),
-                "manifest_path": str(manifest_path),
-            })
-            self._safe_write_pbt_copy_event({
-                "event_type": "adaptive_degradation_rescue_executed",
-                "rescue_mode": "adaptive",
-                "source_type": str(
-                    (adaptive_rescue_decision or {}).get("checkpoint_type", "live")
-                ),
-                "source_policy": int(source_policy),
-                "target_policy": int(self.policy_idx),
-                "mutation_disabled": True,
-                "rescue_executed_count": int(
-                    self._adaptive_rescue_executed[self.policy_idx]
-                ),
-                "rescue_executed_for_lineage": int(
-                    self._adaptive_rescue_executed_for_lineage[self.policy_idx]
-                ),
-                "adaptive_rescue_last_frame": int(env_frames),
-                "env_frames": int(env_frames),
-            })
-            if self.writer is not None:
-                try:
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_executed_count",
-                        float(self._adaptive_rescue_executed[self.policy_idx]),
-                        env_frames,
-                    )
-                    self.writer.add_scalar(
-                        "adaptive_consolidation/rescue_quota_used",
-                        float(
-                            self._adaptive_rescue_executed_for_lineage[self.policy_idx]
-                        ),
-                        env_frames,
-                    )
-                except Exception:
-                    pass
-
+        manifest_tmp.replace(manifest_path)
 
         self.mutable_params = dict(new_params)
         self.mutable_params["wm_strategy"] = selected_strategy
-        try:
-            if self.writer is not None:
-                # M4: restart-related scalars
-                self.writer.add_scalar("pbt/source_policy", float(source_policy), env_frames)
-                self.writer.add_scalar("pbt/tier_bottom", float(tier == "bottom"), env_frames)
-                self.writer.add_scalar("pbt/restart_source_policy_idx", float(source_policy), env_frames)
-                if "success_tolerance" in sc:
-                    self.writer.add_scalar(
-                        "pbt/restart_loaded_success_tolerance",
-                        float(sc["success_tolerance"]),
-                        env_frames,
-                    )
-                # Patch F (2026-05-31): emit restart_type + lifetime counters
-                # for the soon-to-die process. The relaunched worker will pick
-                # up the resume hooks and continue incrementing these.
+        if self.writer is not None:
+            # M4: restart-related scalars
+            self.writer.add_scalar("pbt/source_policy", float(source_policy), env_frames)
+            self.writer.add_scalar("pbt/tier_bottom", float(tier == "bottom"), env_frames)
+            self.writer.add_scalar("pbt/restart_source_policy_idx", float(source_policy), env_frames)
+            if "success_tolerance" in sc:
                 self.writer.add_scalar(
-                    "pbt/restart_type", float(self._last_restart_type), env_frames
-                )
-                self.writer.add_scalar(
-                    "pbt/self_restart_count",
-                    float(self._self_restart_count),
+                    "pbt/restart_loaded_success_tolerance",
+                    float(sc["success_tolerance"]),
                     env_frames,
                 )
-                self.writer.add_scalar(
-                    "pbt/cross_restart_count",
-                    float(self._cross_restart_count),
-                    env_frames,
-                )
-                self.writer.flush()
-                self.writer.close()
-        except Exception as writer_exc:
-            print(f"[PBT] post-commit writer failed (ignored): {writer_exc}")
+            # Patch F (2026-05-31): emit restart_type + lifetime counters
+            # for the soon-to-die process. The relaunched worker will pick
+            # up the resume hooks and continue incrementing these.
+            self.writer.add_scalar(
+                "pbt/restart_type", float(self._last_restart_type), env_frames
+            )
+            self.writer.add_scalar(
+                "pbt/self_restart_count",
+                float(self._self_restart_count),
+                env_frames,
+            )
+            self.writer.add_scalar(
+                "pbt/cross_restart_count",
+                float(self._cross_restart_count),
+                env_frames,
+            )
+            self.writer.flush()
+            self.writer.close()
 
         print(
             f"Policy {self.policy_idx}: DexPBT {tier} restart from policy {source_policy} "
             f"with checkpoint {restart_checkpoint} — "
             f"requesting supervisor restart (exit code {self.RESTART_EXIT_CODE})"
         )
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
+        sys.stdout.flush()
+        sys.stderr.flush()
 
         # NOTE: We intentionally do NOT close env or SimulationApp here.
         # Isaac Sim's close() deadlocks when called from within an RL callback.
@@ -14066,48 +8829,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # Use SIGKILL to guarantee the process dies — os._exit() alone can be
         # blocked by native extensions (Omniverse/Carb) that install atexit
         # handlers or hold internal locks during shutdown.
-        # Return True for unit tests that mock process exit; production never
-        # observes the return because the process is killed immediately after.
         import signal as _signal
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
+        sys.stdout.flush()
+        sys.stderr.flush()
         try:
             _signal.raise_signal(_signal.SIGKILL)
         except Exception:
             pass
-        try:
-            os._exit(self.RESTART_EXIT_CODE)
-        except Exception:
-            return True
-        return True
+        os._exit(self.RESTART_EXIT_CODE)
 
     def after_print_stats(self, frame, epoch_num, total_time):
         super().after_print_stats(frame, epoch_num, total_time)
-        if (
-            self.frame_stop_enable
-            and self.target_population_frames > 0
-            and self.algo is not None
-        ):
-            population_frame = pbt_population_frame(self.algo)
-            progress = min(1.0, population_frame / float(self.target_population_frames))
-            if self.writer is not None:
-                self.writer.add_scalar("training/population_frame", float(population_frame), population_frame)
-                self.writer.add_scalar("training/frame_target", float(self.target_population_frames), population_frame)
-                self.writer.add_scalar("training/frame_target_progress", progress, population_frame)
-            if (
-                not self._frame_stop_triggered
-                and population_frame >= self.target_population_frames
-            ):
-                # rl_games checks max_epochs at its next epoch boundary.  Do
-                # not call os._exit: that would bypass normal checkpoint and
-                # observer teardown.
-                self._frame_stop_triggered = True
-                self.algo.max_epochs = int(epoch_num) + self.frame_stop_grace_iterations
-                if self.writer is not None:
-                    self.writer.add_scalar("training/frame_stop_triggered", 1.0, population_frame)
 
     # ------------------------------------------------------------------
     # WM / Counterfactual helper methods

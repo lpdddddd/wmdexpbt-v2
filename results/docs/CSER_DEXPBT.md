@@ -4,15 +4,6 @@ CSER-v0 upgrades the **Unified Elite-WM DexPBT** (basev2) substrate with three
 additive modules and a staged low-churn PBT schedule. It does not replace
 existing profiles or launchers.
 
-> **Method status.** `cser_dexpbt_2cm_bridge` (id 21) is **retained for
-> reproducibility** of the fixed 2 cm tolerance-ladder experiments.
-> `cser_dexpbt_progress_refine` (id 22) is the **generalized formal method**:
-> it replaces the hand-tuned ladder / fixed-threshold rescue with scale
-> -invariant, progress-conditioned refinement and adaptive curriculum-progress
-> consolidation. See `CSER_DEXPBT_PROGRESS_REFINE.md`. All CSER profiles
-> (`cser_dexpbt`, `cser_dexpbt_conservative`, `cser_dexpbt_2cm_bridge`) remain
-> fully usable and unchanged.
-
 ## Method definition
 
 ```

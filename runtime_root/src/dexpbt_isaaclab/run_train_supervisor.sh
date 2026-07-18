@@ -311,23 +311,6 @@ print(' '.join(args))
     if grep -qE 'Traceback \(most recent call last\)|RuntimeError:' "$attempt_log" 2>/dev/null; then
       echo "[SUPERVISOR] exit code 0 but log contains Python error — treating as crash"
       exit_code=1
-    elif [[ -f "$RUN_DIR/population_frame_complete.json" ]]; then
-      {
-        echo "status=completed_population_frame"
-        echo "attempt=${attempt}"
-        echo "end_time=$(date --iso-8601=seconds)"
-        echo "exit_code=0"
-        echo "marker=$RUN_DIR/population_frame_complete.json"
-      } > "$STATUS_FILE"
-      echo "[SUPERVISOR] worker completed population-frame target (marker file)"
-    elif grep -qF '[PBT] population_frame_target_reached' "$attempt_log" 2>/dev/null; then
-      {
-        echo "status=completed_population_frame"
-        echo "attempt=${attempt}"
-        echo "end_time=$(date --iso-8601=seconds)"
-        echo "exit_code=0"
-      } > "$STATUS_FILE"
-      echo "[SUPERVISOR] worker completed population-frame target (log marker)"
     elif grep -qE 'epoch: [0-9]+/[0-9]+' "$attempt_log" 2>/dev/null; then
       epoch_line="$(grep -oE 'epoch: [0-9]+/[0-9]+' "$attempt_log" | tail -1)"
       last_epoch="$(echo "$epoch_line" | grep -oE '[0-9]+' | head -1)"

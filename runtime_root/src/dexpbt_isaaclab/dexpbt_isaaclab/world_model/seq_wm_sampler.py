@@ -194,62 +194,10 @@ class SequenceSampler:
 
     # ----- index sampling -----
 
-    @staticmethod
-    def _validate_env_index_mask(
-        env_index_mask: Optional[torch.Tensor],
-        N: int,
-        device: torch.device,
-    ) -> Optional[torch.Tensor]:
-        """Return bool ``(N,)`` on ``device``, or ``None`` if unrestricted.
-
-        Raises ``ValueError`` on shape / empty-mask errors (caller fail-closed).
-        """
-        if env_index_mask is None:
-            return None
-        if not isinstance(env_index_mask, torch.Tensor):
-            raise ValueError(
-                f"env_index_mask must be a Tensor or None, got {type(env_index_mask)}"
-            )
-        m = env_index_mask.detach().to(device=device)
-        if m.ndim != 1 or int(m.shape[0]) != int(N):
-            raise ValueError(
-                f"env_index_mask must have shape (N,)={(N,)}; got {tuple(m.shape)}"
-            )
-        m = m.bool()
-        if int(m.sum().item()) <= 0:
-            raise ValueError("env_index_mask selects zero env slots")
-        return m
-
-    def _sample_env_indices(
-        self,
-        N: int,
-        B: int,
-        env_index_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Sample ``B`` env indices, optionally restricted to ``env_index_mask``."""
-        if env_index_mask is None:
-            return torch.randint(
-                low=0,
-                high=N,
-                size=(B,),
-                device=self.device,
-                generator=self._gen,
-            )
-        allowed = env_index_mask.nonzero(as_tuple=False).reshape(-1)
-        pick = torch.randint(
-            low=0,
-            high=int(allowed.numel()),
-            size=(B,),
-            device=self.device,
-            generator=self._gen,
-        )
-        return allowed[pick].long()
-
     def _sample_indices(
         self,
         H: int,
         N: int,
-        env_index_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (t_idx, e_idx) of shape (T, B) on self.device."""
         T = self.seq_len
@@ -259,8 +207,14 @@ class SequenceSampler:
                 f"seq_len ({T}) cannot exceed horizon_length ({H}); pass a "
                 f"smaller --seq_wm_seq_len or extend the PPO rollout."
             )
-        mask = self._validate_env_index_mask(env_index_mask, N, self.device)
-        env_idx = self._sample_env_indices(N, B, mask)
+        # env indices: uniform with replacement (B may be > N).
+        env_idx = torch.randint(
+            low=0,
+            high=N,
+            size=(B,),
+            device=self.device,
+            generator=self._gen,
+        )
         # start_t: uniform in [0, H-T].
         if H == T:
             start_t = torch.zeros(B, dtype=torch.long, device=self.device)
@@ -328,11 +282,6 @@ class SequenceSampler:
         # Optional pre-computed aux scalar tensor (T-only); when provided,
         # already shape (H, N, A) and bypasses the field-by-field assemble.
         aux_scalars_full: Optional[torch.Tensor] = None,
-        # Held-out / train partition: bool (N,) selecting allowed env slots.
-        # None preserves legacy unrestricted sampling.
-        env_index_mask: Optional[torch.Tensor] = None,
-        return_source_ids: bool = False,
-        partition_worker_rank: int = 0,
     ) -> SequenceBatch:
         # Shape sanity & normalisation.
         if obs_full.ndim != 3:
@@ -374,12 +323,9 @@ class SequenceSampler:
             failure_full=failure_full,
             success_count_full=success_count_full,
             d_hat_full=d_hat_full,
-            env_index_mask=env_index_mask,
         )
         T, B = t_idx.shape
         assert T == self.seq_len and B == self.seq_batch_size
-        start_t = t_idx[0].detach().clone()
-        env_ids = e_idx[0].detach().clone()
 
         # Gather windowed tensors.
         obs_w     = _gather_seq(obs_full,     t_idx, e_idx)   # (T, B, D_obs)
@@ -442,33 +388,6 @@ class SequenceSampler:
             _push(closest_w)
             aux_scalars_w = torch.cat(aux_components, dim=-1)
 
-        meta: dict = {
-            "horizon_length": int(H),
-            "num_actors": int(N),
-            "obs_dim": int(D_obs),
-            "seq_len": int(T),
-            "seq_batch_size": int(B),
-            "replay_prioritized": bool(self.prioritize_floor_recovery),
-            "aux_dim": int(aux_scalars_w.shape[-1])
-            if aux_scalars_w is not None else 0,
-            "env_indices": env_ids.detach().cpu(),
-            "start_t": start_t.detach().cpu(),
-            "partition_restricted": bool(env_index_mask is not None),
-        }
-        if return_source_ids:
-            # (B, 4): worker_rank, env_index, sequence_start, rollout_generation
-            # generation is 0 for single-rollout experience buffers.
-            wr = int(partition_worker_rank)
-            src = torch.stack(
-                [
-                    torch.full((B,), wr, dtype=torch.long),
-                    env_ids.detach().cpu().long(),
-                    start_t.detach().cpu().long(),
-                    torch.zeros(B, dtype=torch.long),
-                ],
-                dim=1,
-            )
-            meta["source_ids"] = src
         return SequenceBatch(
             obs=obs_w,
             action=action_w,
@@ -489,7 +408,16 @@ class SequenceSampler:
             picked=picked_w,
             dropped=dropped_w,
             closest_d_hat=closest_w,
-            meta=meta,
+            meta={
+                "horizon_length": int(H),
+                "num_actors": int(N),
+                "obs_dim": int(D_obs),
+                "seq_len": int(T),
+                "seq_batch_size": int(B),
+                "replay_prioritized": bool(self.prioritize_floor_recovery),
+                "aux_dim": int(aux_scalars_w.shape[-1])
+                if aux_scalars_w is not None else 0,
+            },
         )
 
     def _sample_indices_prioritized(
@@ -501,7 +429,6 @@ class SequenceSampler:
         failure_full: Optional[torch.Tensor],
         success_count_full: Optional[torch.Tensor],
         d_hat_full: Optional[torch.Tensor],
-        env_index_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Phase A4 P4 (2026-06-09): replay prioritization (Part F).
 
@@ -514,16 +441,15 @@ class SequenceSampler:
         uniform draws so the prior over the data does not collapse.
         """
         if not self.prioritize_floor_recovery:
-            return self._sample_indices(H, N, env_index_mask=env_index_mask)
+            return self._sample_indices(H, N)
         T = self.seq_len
         B = self.seq_batch_size
         if T > H:
-            return self._sample_indices(H, N, env_index_mask=env_index_mask)
-        mask = self._validate_env_index_mask(env_index_mask, N, self.device)
+            return self._sample_indices(H, N)
         n_uniform = max(1, int(round(self.uniform_floor * B)))
         n_prio = max(0, B - n_uniform)
         # Uniform pool first (re-use legacy logic):
-        t_idx_u, e_idx_u = self._sample_indices(H, N, env_index_mask=mask)
+        t_idx_u, e_idx_u = self._sample_indices(H, N)
         if n_uniform == B or n_prio == 0:
             return t_idx_u, e_idx_u
         # Build per-(t_start, env) weights. We work on shape (H_eff, N)
@@ -531,9 +457,6 @@ class SequenceSampler:
         H_eff = max(1, H - T + 1)
         device = self.device
         weights = torch.ones(H_eff, N, device=device, dtype=torch.float32)
-        if mask is not None:
-            # Zero disallowed env columns so multinomial never picks them.
-            weights = weights * mask.to(device=device, dtype=torch.float32).unsqueeze(0)
         # Floor stage from per-step success_tolerance averaged over
         # window. Missing -> uniform.
         if success_tolerance_full is not None:
@@ -557,8 +480,6 @@ class SequenceSampler:
                     + (self.hard_floor_weight - 1.0) * hard_mask
                     + (self.floor_weight - 1.0) * floor_mask
                 )
-                if mask is not None:
-                    weights[ts] = weights[ts] * mask.to(dtype=weights.dtype)
         # Drop-near-success: failure_full sees a positive within window
         # AND success_count rises within same window.
         if failure_full is not None and success_count_full is not None:
@@ -576,8 +497,6 @@ class SequenceSampler:
                 weights[ts] = (
                     weights[ts] + (self.drop_near_success_weight - 1.0) * near_success
                 )
-                if mask is not None:
-                    weights[ts] = weights[ts] * mask.to(dtype=weights.dtype)
         # Positive slope: d_hat trends down within the window.
         if d_hat_full is not None:
             d_hat = d_hat_full.to(device=device, dtype=torch.float32)
@@ -589,14 +508,8 @@ class SequenceSampler:
                 weights[ts] = (
                     weights[ts] + (self.positive_slope_weight - 1.0) * (slope > 1e-6).float()
                 )
-                if mask is not None:
-                    weights[ts] = weights[ts] * mask.to(dtype=weights.dtype)
         # Sample prioritized indices via 1D multinomial.
         flat = weights.reshape(-1)
-        flat_sum = float(flat.sum().item())
-        if flat_sum <= 0.0:
-            # Mask wiped all mass — fall back to restricted uniform.
-            return self._sample_indices(H, N, env_index_mask=mask)
         flat = flat / (flat.sum() + 1e-9)
         idx = torch.multinomial(flat, num_samples=n_prio, replacement=True)
         ts_p = (idx // N).long()

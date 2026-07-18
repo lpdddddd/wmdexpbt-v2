@@ -1,5 +1,0 @@
-status=stopped
-attempt=10
-attempt_name=attempt_10_2026-06-08_12-46-56
-start_time=2026-06-08T12:46:56+08:00
-checkpoint=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_trans_belief_value_p2_1_smoke_800m_20260608_100048/dexpbt_8gpu_ws/restart_p1/000035.pth

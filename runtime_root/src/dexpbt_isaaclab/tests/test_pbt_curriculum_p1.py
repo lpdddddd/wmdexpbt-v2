@@ -1,36 +1,9 @@
 """Patch P1 (2026-06-01): curriculum / stability helpers + observer tier cascade."""
 
 import json
-import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
-
-
-def _stub_rl_games() -> None:
-    if "rl_games.common.algo_observer" in sys.modules and hasattr(
-        sys.modules["rl_games.common.algo_observer"], "IsaacAlgoObserver"
-    ):
-        return
-    for key in list(sys.modules):
-        if key == "rl_games" or key.startswith("rl_games."):
-            del sys.modules[key]
-    m = types.ModuleType("rl_games")
-    c = types.ModuleType("rl_games.common")
-    a = types.ModuleType("rl_games.common.algo_observer")
-
-    class IsaacAlgoObserver:  # pragma: no cover - stub
-        def __init__(self, *args, **kwargs):
-            pass
-
-    a.IsaacAlgoObserver = IsaacAlgoObserver
-    sys.modules["rl_games"] = m
-    sys.modules["rl_games.common"] = c
-    sys.modules["rl_games.common.algo_observer"] = a
-
-
-_stub_rl_games()
 
 from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     RollingNsuccWindow,
@@ -248,17 +221,14 @@ class StableSourceTierTest(unittest.TestCase):
 
     def test_l2_usable_when_stable_fails(self):
         obs = _make_observer(self.workspace)
-        # usable_live requires nsucc_max >= pbt_usable_live_min_max (default 20),
-        # while stable_live needs higher mean. Use max>=20 so L2 can fire after
-        # stable fails on mean; latest_healthy remains a live source category.
         self._seed_window(
             obs,
             1,
-            [_sample(mean=1.5, max_=22.0)],
+            [_sample(mean=1.5, max_=12.0)],
         )
         population = {
             0: _state(policy_idx=0, nsucc_mean=1.0, nsucc_max=5.0),
-            1: _state(policy_idx=1, nsucc_mean=1.5, nsucc_max=22.0),
+            1: _state(policy_idx=1, nsucc_mean=1.5, nsucc_max=12.0),
             2: _state(policy_idx=2, nsucc_mean=0.0, nsucc_max=0.0),
         }
         d = obs._select_source(
@@ -269,7 +239,6 @@ class StableSourceTierTest(unittest.TestCase):
         )
         self.assertEqual(d["tier"], "usable_live")
         self.assertEqual(d["source_policy"], 1)
-        self.assertEqual(d["checkpoint_type"], "latest_healthy")
 
     def test_legacy_cascade_when_stable_mode_off(self):
         obs = _make_observer(

@@ -16,247 +16,6 @@ parser.add_argument("--task", type=str, default="DexPBT-Reorientation-KukaAllegr
 parser.add_argument("--num_envs", type=int, default=None)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--max_iterations", type=int, default=None)
-parser.add_argument("--frame_stop_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--target_population_frames", type=int, default=0)
-parser.add_argument("--frame_stop_all_workers", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--frame_stop_grace_iterations", type=int, default=2)
-# CSER 2cm bridge control plane. Defaults are opt-in for backward compatibility.
-parser.add_argument("--same_tol_retention_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--same_tol_retention_bins", type=str, default="0.030,0.025,0.022,0.020,0.018")
-parser.add_argument("--same_tol_retention_min_samples", type=int, default=3)
-parser.add_argument("--same_tol_retention_warmup_ticks", type=int, default=3)
-parser.add_argument("--same_tol_retention_reset_on_lineage_change", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--same_tol_retention_reset_on_cross_copy", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--same_tol_retention_keep_on_rollback", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--bridge_curriculum_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--bridge_curriculum_start_tol", type=float, default=0.025)
-parser.add_argument("--bridge_curriculum_probation_tol", type=float, default=0.0205)
-parser.add_argument("--bridge_curriculum_target_tol", type=float, default=0.018)
-parser.add_argument("--bridge_curriculum_mode", choices=["ladder", "micro_factor"], default="ladder")
-parser.add_argument("--bridge_tolerance_ladder", type=str, default="0.025,0.0235,0.022,0.021,0.0205,0.020,0.0195,0.019,0.0185,0.018")
-parser.add_argument("--bridge_min_same_tol_retention", type=float, default=0.90)
-parser.add_argument("--bridge_min_stable_ticks", type=int, default=4)
-parser.add_argument("--bridge_min_frames_per_level", type=int, default=150_000_000)
-parser.add_argument("--bridge_post_shrink_consolidation_frames", type=int, default=200_000_000)
-parser.add_argument("--bridge_probation_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--bridge_probation_entry_tol", type=float, default=0.0205)
-parser.add_argument("--bridge_probation_frames", type=int, default=400_000_000)
-parser.add_argument("--bridge_probation_min_ticks", type=int, default=4)
-parser.add_argument("--bridge_probation_block_further_shrink", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--bridge_probation_block_ordinary_rollback", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--bridge_probation_allow_hard_collapse_rollback", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--bridge_probation_hard_collapse_mean", type=float, default=3.0)
-parser.add_argument("--bridge_probation_hard_collapse_patience", type=int, default=4)
-parser.add_argument("--late_degradation_rescue_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--late_degradation_rescue_tol_threshold", type=float, default=0.022)
-parser.add_argument("--late_degradation_rescue_peak_threshold", type=float, default=30.0)
-parser.add_argument("--late_degradation_rescue_current_mean_threshold", type=float, default=22.0)
-parser.add_argument("--late_degradation_rescue_retention_threshold", type=float, default=0.65)
-parser.add_argument("--late_degradation_rescue_patience", type=int, default=3)
-parser.add_argument("--late_degradation_rescue_max_tol_gap", type=float, default=0.002)
-parser.add_argument("--late_degradation_rescue_cooldown_frames", type=int, default=300000000)
-parser.add_argument("--late_degradation_rescue_max_per_policy", type=int, default=1)
-parser.add_argument("--late_degradation_rescue_source_min_mean", type=float, default=28.0)
-parser.add_argument("--late_degradation_rescue_min_source_advantage", type=float, default=8.0)
-parser.add_argument("--late_degradation_rescue_source_min_retention", type=float, default=0.85)
-parser.add_argument(
-    "--late_degradation_rescue_reject_collapse_source",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--late_degradation_rescue_require_source_control",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--late_degradation_rescue_bypass_elimination_burnin",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-)
-# ---------------------------------------------------------------------------
-# Progress-conditioned refinement (cser_dexpbt_progress_refine). All flags are
-# opt-in (disabled by default) so every existing profile / launcher is byte-for
-# -byte unaffected.
-# ---------------------------------------------------------------------------
-parser.add_argument("--progress_refinement_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--progress_refinement_history_steps", type=int, default=8)
-parser.add_argument("--progress_refinement_eps", type=float, default=1e-6)
-parser.add_argument("--progress_refinement_proximity_temperature", type=float, default=1.0)
-parser.add_argument("--progress_refinement_progress_margin", type=float, default=0.02)
-parser.add_argument("--progress_refinement_progress_temperature", type=float, default=0.05)
-parser.add_argument("--progress_refinement_oscillation_enable", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--progress_refinement_oscillation_center", type=float, default=0.10)
-parser.add_argument("--progress_refinement_oscillation_temperature", type=float, default=0.05)
-parser.add_argument("--progress_refinement_start_after_frames", type=int, default=300_000_000)
-parser.add_argument("--progress_refinement_ramp_frames", type=int, default=300_000_000)
-parser.add_argument("--progress_refinement_only_lifted", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--progress_refinement_min_gate_for_retrieval", type=float, default=0.05)
-parser.add_argument("--progress_refinement_max_active_fraction", type=float, default=0.35)
-parser.add_argument("--progress_refinement_max_active_rows", type=int, default=0)
-parser.add_argument("--progress_refinement_teacher_margin_temperature", type=float, default=0.05)
-parser.add_argument("--progress_refinement_min_teacher_confidence", type=float, default=0.05)
-parser.add_argument("--progress_refinement_detach_gate", action=argparse.BooleanOptionalAction, default=True)
-# Recovery-label margin generalization for the EIR scorer / target builder.
-parser.add_argument("--eir_dhat_margin_mode", choices=["absolute", "relative_tol"], default="absolute")
-parser.add_argument("--eir_dhat_improve_margin_relative", type=float, default=0.25)
-parser.add_argument("--eir_drop_dhat_margin_relative", type=float, default=0.50)
-parser.add_argument("--eir_dhat_improve_margin_min_abs", type=float, default=0.0)
-parser.add_argument("--eir_drop_dhat_margin_min_abs", type=float, default=0.0)
-# Continuous log-relative snippet retrieval.
-parser.add_argument("--snippet_tolerance_compatibility_mode", choices=["absolute", "log_relative"], default="absolute")
-parser.add_argument("--snippet_tolerance_max_log_gap", type=float, default=0.20)
-parser.add_argument("--snippet_tolerance_log_soft_scale", type=float, default=0.10)
-parser.add_argument("--snippet_retrieve_lambda_sim", type=float, default=1.0)
-parser.add_argument("--snippet_retrieve_lambda_priority", type=float, default=0.5)
-parser.add_argument("--snippet_retrieve_lambda_tol", type=float, default=0.5)
-parser.add_argument("--snippet_retrieve_lambda_progress", type=float, default=0.0)
-parser.add_argument("--snippet_progress_priority_weight", type=float, default=0.0)
-# Adaptive curriculum-aware population consolidation.
-parser.add_argument("--adaptive_precision_consolidation_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--pbt_consolidation_schedule_mode", choices=["frames", "curriculum_progress"], default="frames")
-parser.add_argument("--adaptive_consolidation_stage_consolidation_progress", type=float, default=0.50)
-parser.add_argument("--adaptive_consolidation_stage_selection_progress", type=float, default=0.85)
-parser.add_argument("--adaptive_consolidation_tolerance_log_quant", type=float, default=0.05)
-parser.add_argument("--adaptive_probation_min_frames", type=int, default=200_000_000)
-parser.add_argument("--adaptive_probation_min_stable_ticks", type=int, default=4)
-parser.add_argument("--adaptive_probation_min_same_level_retention", type=float, default=0.90)
-parser.add_argument("--adaptive_probation_block_ordinary_rollback", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--adaptive_probation_allow_hard_collapse_rollback", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--adaptive_probation_hard_collapse_mean", type=float, default=3.0)
-parser.add_argument("--adaptive_probation_hard_collapse_patience", type=int, default=4)
-parser.add_argument("--adaptive_rescue_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--adaptive_rescue_retention_threshold", type=float, default=0.70)
-parser.add_argument("--adaptive_rescue_degradation_patience", type=int, default=3)
-parser.add_argument("--adaptive_rescue_population_quantile", type=float, default=0.60)
-parser.add_argument("--adaptive_rescue_source_top_fraction", type=float, default=None)
-parser.add_argument("--adaptive_rescue_source_min_retention", type=float, default=0.85)
-parser.add_argument("--adaptive_rescue_min_source_advantage_sigma", type=float, default=1.0)
-parser.add_argument("--adaptive_rescue_max_log_tol_gap", type=float, default=0.20)
-parser.add_argument("--adaptive_rescue_cooldown_frames", type=int, default=300_000_000)
-parser.add_argument("--adaptive_rescue_max_per_lineage", type=int, default=1)
-parser.add_argument("--adaptive_rescue_require_source_control", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--adaptive_rescue_reject_collapse_source", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--adaptive_probation_rollback_max_log_gap", type=float, default=0.30)
-parser.add_argument("--adaptive_probation_freeze_only_max_ticks", type=int, default=3)
-parser.add_argument("--adaptive_rescue_source_min_samples", type=int, default=3)
-parser.add_argument("--adaptive_rescue_source_min_stable_ticks", type=int, default=2)
-parser.add_argument("--adaptive_rescue_source_max_staleness_frames", type=int, default=40_000_000)
-parser.add_argument(
-    "--adaptive_rescue_require_lineage_match_with_checkpoint",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument("--adaptive_rescue_archive_enable", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument("--adaptive_rescue_archive_max_age_frames", type=int, default=1_000_000_000)
-parser.add_argument(
-    "--adaptive_rescue_archive_require_retention",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument("--adaptive_rescue_archive_min_nsucc_mean", type=float, default=0.0)
-parser.add_argument("--adaptive_rescue_archive_min_nsucc_max", type=float, default=0.0)
-parser.add_argument(
-    "--adaptive_rescue_archive_require_age",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--adaptive_rescue_archive_require_collapse_metadata",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--adaptive_rescue_archive_require_quality_score",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--adaptive_rescue_archive_min_population_samples",
-    type=int,
-    default=2,
-)
-parser.add_argument(
-    "--adaptive_rescue_archive_advantage_sigma_floor",
-    type=float,
-    default=1.0,
-)
-parser.add_argument(
-    "--adaptive_rescue_archive_min_absolute_advantage",
-    type=float,
-    default=5.0,
-)
-parser.add_argument(
-    "--adaptive_rescue_bypass_elimination_burnin",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-)
-parser.add_argument(
-    "--adaptive_rescue_bypass_on_hard_collapse",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-parser.add_argument(
-    "--adaptive_rescue_min_frames_before_emergency_bypass",
-    type=int,
-    default=40_000_000,
-)
-parser.add_argument(
-    "--adaptive_rescue_emergency_require_archive_or_stable_source",
-    action=argparse.BooleanOptionalAction,
-    default=True,
-)
-
-# ---------------------------------------------------------------------------
-# Readiness-Adaptive CSER-DexPBT (cser_dexpbt_readiness_adaptive / Profile 23).
-# Defaults OFF so Profile 22 and all earlier profiles remain unchanged.
-# ---------------------------------------------------------------------------
-parser.add_argument("--readiness_adaptive_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--readiness_min_frames", type=int, default=100_000_000)
-parser.add_argument("--readiness_bank_size_low", type=int, default=1000)
-parser.add_argument("--readiness_bank_size_full", type=int, default=3000)
-parser.add_argument("--readiness_coverage_target", type=float, default=0.20)
-parser.add_argument("--readiness_coverage_ema_beta", type=float, default=0.9)
-parser.add_argument("--readiness_enter_threshold", type=float, default=0.50)
-parser.add_argument("--readiness_exit_threshold", type=float, default=0.20)
-parser.add_argument("--readiness_required_windows", type=int, default=2)
-parser.add_argument("--readiness_ramp_frames", type=int, default=150_000_000)
-parser.add_argument("--readiness_eval_interval_frames", type=int, default=10_000_000)
-parser.add_argument("--readiness_shadow_retrieval_fraction", type=float, default=0.05)
-parser.add_argument("--wm_graduation_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--wm_graduation_required_passes", type=int, default=2)
-parser.add_argument("--wm_graduation_early_until_frames", type=int, default=500_000_000)
-parser.add_argument("--wm_graduation_early_eval_interval_frames", type=int, default=25_000_000)
-parser.add_argument("--wm_graduation_late_eval_interval_frames", type=int, default=50_000_000)
-parser.add_argument("--wm_graduation_early_beta_up", type=float, default=0.7)
-parser.add_argument("--wm_graduation_late_beta_up", type=float, default=0.9)
-parser.add_argument("--wm_graduation_beta_down", type=float, default=0.5)
-parser.add_argument("--wm_graduation_early_alpha_cap", type=float, default=0.5)
-parser.add_argument("--wm_graduation_late_alpha_cap", type=float, default=1.0)
-parser.add_argument("--wm_graduation_min_valid_prediction_frac", type=float, default=0.90)
-parser.add_argument("--readiness_bootstrap_distill_weight", type=float, default=0.001)
-parser.add_argument("--readiness_calibrated_distill_weight", type=float, default=0.0015)
-parser.add_argument("--readiness_ess_target", type=float, default=128.0)
-parser.add_argument("--readiness_ess_min_for_update", type=float, default=8.0)
-parser.add_argument("--adaptive_lineage_diversity_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--adaptive_min_distinct_lineages_exploration", type=int, default=3)
-parser.add_argument("--adaptive_min_distinct_lineages_consolidation", type=int, default=2)
-parser.add_argument("--adaptive_min_distinct_lineages_selection", type=int, default=1)
-parser.add_argument("--adaptive_replacement_budget_exploration", type=int, default=1)
-parser.add_argument("--adaptive_replacement_budget_consolidation", type=int, default=1)
-parser.add_argument("--adaptive_replacement_budget_selection", type=int, default=2)
-parser.add_argument("--adaptive_probation_stage_aware_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--adaptive_probation_min_frames_exploration", type=int, default=75_000_000)
-parser.add_argument("--adaptive_probation_min_frames_other", type=int, default=100_000_000)
-parser.add_argument("--adaptive_probation_max_frames", type=int, default=200_000_000)
-parser.add_argument("--adaptive_probation_min_stable_ticks_exploration", type=int, default=2)
-parser.add_argument("--adaptive_probation_min_stable_ticks_other", type=int, default=3)
-parser.add_argument("--adaptive_probation_early_exit_retention", type=float, default=0.97)
-parser.add_argument("--adaptive_probation_normal_exit_retention", type=float, default=0.92)
-parser.add_argument("--adaptive_probation_early_exit_nsucc_drop_frac", type=float, default=0.15)
-parser.add_argument("--adaptive_rescue_source_freshness_mode", type=str, default="hard_max", choices=["hard_max", "exp_decay"])
-parser.add_argument("--adaptive_rescue_source_freshness_tau_frames", type=int, default=80_000_000)
-parser.add_argument("--adaptive_rescue_source_hard_max_age_frames", type=int, default=160_000_000)
 parser.add_argument("--checkpoint", type=str, default=None)
 parser.add_argument("--train_root", type=str, default=None)
 parser.add_argument("--experiment_name", type=str, default=None)
@@ -371,43 +130,6 @@ parser.add_argument(
     help="Legacy escape hatch: when True overrides --pbt_disable_self_restart "
     "and re-enables the mid-tier self-mutation + restart path subject to "
     "the count/cooldown gates below.",
-)
-# Experiment A: chronic-bottom PBT exploit (independent of adaptive rescue).
-parser.add_argument(
-    "--pbt_enable_chronic_bottom_exploit",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Enable chronic-bottom exploit path for long-stuck bottom workers.",
-)
-parser.add_argument(
-    "--pbt_chronic_min_bottom_frames",
-    type=int,
-    default=200_000_000,
-    help="Min continuous bottom frames before chronic exploit may fire.",
-)
-parser.add_argument(
-    "--pbt_chronic_min_bottom_ticks",
-    type=int,
-    default=5,
-    help="Min continuous bottom PBT ticks before chronic exploit may fire.",
-)
-parser.add_argument(
-    "--pbt_chronic_min_score_gap",
-    type=float,
-    default=0.15,
-    help="Min ranking-score gap (source - target) for chronic sources.",
-)
-parser.add_argument(
-    "--pbt_chronic_cooldown_frames",
-    type=int,
-    default=400_000_000,
-    help="Cooldownoldown frames after a chronic copy for the same worker.",
-)
-parser.add_argument(
-    "--pbt_chronic_max_copies_per_lineage",
-    type=int,
-    default=1,
-    help="Max chronic copies allowed per lineage on a target worker.",
 )
 parser.add_argument(
     "--pbt_max_self_restarts_per_policy",
@@ -1826,15 +1548,31 @@ parser.add_argument("--allegro_actions_penalty_scale", type=float, default=None)
 parser.add_argument("--sigma", type=str, default=None)
 parser.add_argument("--test", action="store_true", default=False, help="Run in play / evaluation mode.")
 # ---- World Model (WM) args ----
-# Keep CLI choices in sync with PROFILE_IDS so new profiles (e.g. Profile24 ABC)
-# are launchable without a second hardcoded list.
-from dexpbt_isaaclab.world_model.wm_strategy_profiles import PROFILE_IDS as _WM_PROFILE_IDS  # noqa: E402
-
 parser.add_argument(
     "--wm_strategy_profile",
     type=str,
     default="legacy",
-    choices=sorted(_WM_PROFILE_IDS.keys()),
+    choices=[
+        "legacy",
+        "ppo_only",
+        "rssm_mppi_actor_distill",
+        "wm_curriculum_controller",
+        "wm_pbt_source_selector",
+        "elite_bank_actor_distill",
+        "conservative_rssm_planner_distill",
+        "light_rssm_mppi_actor_distill",
+        "wm_pbt_source_selector_v2",
+        "light_conservative_rssm_planner_distill",
+        "elite_bank_actor_distill_fast",
+        "elite_bank_actor_distill_strong",
+        "elite_bank_actor_distill_fast_awr",
+        "wm_pbt_source_selector_awr",
+        "elite_bank_actor_distill_awr",
+        "elite_bank_actor_distill_strong_awr",
+        "unified_elite_wm_pbt",
+        "cser_dexpbt",
+        "cser_dexpbt_conservative",
+    ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
 )
@@ -2305,14 +2043,6 @@ parser.add_argument("--elite_snippet_sample_pool", type=int, default=4096)
 parser.add_argument("--elite_snippet_knn_topk", type=int, default=32)
 parser.add_argument("--elite_snippet_min_priority", type=float, default=1.0)
 parser.add_argument("--snippet_distill_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--snippet_adjacent_stage_mixing_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--snippet_primary_stage_fraction", type=float, default=0.70)
-parser.add_argument("--snippet_adjacent_stage_fraction", type=float, default=0.30)
-parser.add_argument("--snippet_tolerance_compatibility_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument("--snippet_tolerance_max_gap", type=float, default=0.004)
-parser.add_argument("--snippet_tolerance_soft_scale", type=float, default=0.002)
-parser.add_argument("--snippet_min_primary_candidates", type=int, default=8)
-parser.add_argument("--snippet_fallback_to_adjacent_when_sparse", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--snippet_distill_weight", type=float, default=0.001)
 parser.add_argument("--snippet_distill_loss_cap", type=float, default=0.05)
 parser.add_argument("--snippet_distill_start_after_frames", type=int, default=300000000)
@@ -2323,13 +2053,6 @@ parser.add_argument("--snippet_distill_tol_start", type=float, default=0.070)
 parser.add_argument("--snippet_distill_tol_full", type=float, default=0.045)
 parser.add_argument("--snippet_distill_ramp_frames", type=int, default=200000000)
 parser.add_argument("--snippet_wm_rerank_enable", action=argparse.BooleanOptionalAction, default=False)
-parser.add_argument(
-    "--eir_enable_belief_for_snippet_wm_rerank",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="When True, build the RSSM belief cache if snippet WM rerank is on, "
-    "even when MPPI planner / RSSM-MPPI reranker are disabled.",
-)
 parser.add_argument("--snippet_wm_rerank_w_rec", type=float, default=0.3)
 parser.add_argument("--snippet_wm_rerank_w_success", type=float, default=0.2)
 parser.add_argument("--snippet_wm_rerank_w_drop", type=float, default=0.4)
@@ -2340,7 +2063,6 @@ parser.add_argument("--wm_calibration_enable", action=argparse.BooleanOptionalAc
 parser.add_argument("--wm_calibration_eval_interval_frames", type=int, default=50000000)
 parser.add_argument("--wm_calibration_min_samples", type=int, default=512)
 parser.add_argument("--wm_calibration_heldout_fraction", type=float, default=0.2)
-parser.add_argument("--wm_calibration_heldout_partition_seed", type=int, default=0)
 parser.add_argument("--wm_calibration_alpha_min", type=float, default=0.0)
 parser.add_argument("--wm_calibration_alpha_max", type=float, default=1.0)
 parser.add_argument("--wm_calibration_gate_auc_recovery", type=float, default=0.55)
@@ -2568,21 +2290,6 @@ parser.add_argument("--eir_mppi_ensemble_uncertainty_allow_margin", type=float, 
 # PBT elite broadcast (consumed in pbt_observer Phase D; flags defined here so
 # launchers can set them ahead of Phase D wiring).
 parser.add_argument("--eir_pbt_broadcast_elite_bank", action=argparse.BooleanOptionalAction, default=True)
-parser.add_argument(
-    "--eir_tolerance_aware_bank_broadcast",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="Filter broadcast snippet entries by log-relative tolerance "
-    "compatibility before merge; reject whole overwrite when none compatible.",
-)
-parser.add_argument(
-    "--eir_preserve_local_bank_fraction",
-    type=float,
-    default=0.20,
-    help="Soft reserve fraction of bank capacity for local snippets when "
-    "tolerance-aware broadcast merge is enabled (unused slots fill with "
-    "compatible foreign entries).",
-)
 parser.add_argument("--eir_pbt_broadcast_threshold_nsucc_mean", type=float, default=38.0)
 parser.add_argument("--eir_pbt_broadcast_gap_over_pop_mean", type=float, default=6.0)
 parser.add_argument("--eir_pbt_broadcast_to_bottom_k", type=int, default=3)
@@ -2924,11 +2631,6 @@ from dexpbt_isaaclab.world_model.rssm_mppi_planner import (
     RSSMMPPIPlanner,
 )
 from dexpbt_isaaclab.world_model.rssm_belief_provider import build_rssm_belief_cache
-from dexpbt_isaaclab.world_model.eir_belief import (
-    int_or_missing,
-    need_eir_belief_cache,
-    need_eir_belief_false_reason,
-)
 from dexpbt_isaaclab.world_model.rssm_ensemble import (
     RSSMEnsembleConfig,
     RSSMEnsembleManager,
@@ -3902,38 +3604,12 @@ def _patch_actor_train_for_seq_wm(
             # (deterministic full-rollout encode). compute_eir_loss slices it
             # per minibatch; we never re-encode the RSSM per minibatch. Cleanly
             # invalidated to a fallback cache on any failure / non-RSSM backbone.
-            _need_belief = need_eir_belief_cache(
-                rssm_planner_present=getattr(eir_bridge, "rssm_planner", None) is not None,
-                rssm_reranker_present=getattr(eir_bridge, "rssm_reranker", None) is not None,
-                snippet_belief_flag=bool(
-                    getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False)
-                ),
-                snippet_wm_rerank_enabled=bool(
-                    getattr(args_cli, "snippet_wm_rerank_enable", False)
-                ),
-                bridge_snippet_rerank_enabled=bool(
-                    getattr(
-                        getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
-                        "enabled",
-                        False,
-                    )
-                ),
+            _need_belief = (
+                getattr(eir_bridge, "rssm_planner", None) is not None
+                or getattr(eir_bridge, "rssm_reranker", None) is not None
             )
-            eir_bridge.last_need_belief = bool(_need_belief)
-            eir_bridge.last_belief_build_attempted = False
-            eir_bridge.last_belief_build_success = False
-            eir_bridge.last_belief_failure_reason = ""
-            eir_bridge.last_belief_cache_valid = False
-            eir_bridge.last_belief_shape = ""
-            eir_bridge.last_belief_build_latency = 0.0
-            eir_bridge.last_belief_numel = 0
-            eir_bridge.last_belief_ndim = 0
             if _need_belief:
                 try:
-                    import time as _time_belief
-
-                    eir_bridge.last_belief_build_attempted = True
-                    _t_belief0 = _time_belief.perf_counter()
                     T_b = int(actor.horizon_length)
                     N_b = int(actor.num_actors * actor.num_agents)
                     _returns_flat = bd.get("returns")
@@ -3972,52 +3648,9 @@ def _patch_actor_train_for_seq_wm(
                         enabled=True,
                         ensemble_models=_ens_models_for_cache,
                     )
-                    eir_bridge.last_belief_build_latency = float(
-                        _time_belief.perf_counter() - _t_belief0
-                    )
-                    _cache = eir_bridge.rssm_belief_cache
-                    _ok = _cache is not None and bool(getattr(_cache, "valid", True))
-                    # Some caches expose `.belief` / `.h` tensors
-                    _bel = None
-                    if _cache is not None:
-                        _bel = getattr(_cache, "belief", None)
-                        if _bel is None:
-                            _bel = getattr(_cache, "h", None)
-                    if _bel is not None and hasattr(_bel, "shape"):
-                        eir_bridge.last_belief_shape = str(tuple(_bel.shape))
-                        try:
-                            eir_bridge.last_belief_numel = int(_bel.numel())
-                            eir_bridge.last_belief_ndim = int(_bel.ndim)
-                        except Exception:
-                            pass
-                    eir_bridge.last_belief_build_success = bool(_ok)
-                    eir_bridge.last_belief_cache_valid = bool(_ok)
-                    if not _ok:
-                        eir_bridge.last_belief_failure_reason = "cache_invalid"
                 except Exception as _bc_exc:
                     print(f"[EIR-belief] cache build failed: {_bc_exc}")
                     eir_bridge.rssm_belief_cache = None
-                    eir_bridge.last_belief_build_success = False
-                    eir_bridge.last_belief_cache_valid = False
-                    eir_bridge.last_belief_failure_reason = f"build_exc:{type(_bc_exc).__name__}"
-            else:
-                eir_bridge.last_belief_failure_reason = need_eir_belief_false_reason(
-                    rssm_planner_present=getattr(eir_bridge, "rssm_planner", None) is not None,
-                    rssm_reranker_present=getattr(eir_bridge, "rssm_reranker", None) is not None,
-                    snippet_belief_flag=bool(
-                        getattr(args_cli, "eir_enable_belief_for_snippet_wm_rerank", False)
-                    ),
-                    snippet_wm_rerank_enabled=bool(
-                        getattr(args_cli, "snippet_wm_rerank_enable", False)
-                    ),
-                    bridge_snippet_rerank_enabled=bool(
-                        getattr(
-                            getattr(eir_bridge, "snippet_wm_rerank_cfg", None),
-                            "enabled",
-                            False,
-                        )
-                    ),
-                )
 
         if seq_distill_bridge is not None:
             seq_distill_bridge.rollout_generation = rollout_state["generation"]
@@ -4142,28 +3775,6 @@ def _patch_actor_train_for_seq_wm(
                     _cal_state = WMCalibrationState.from_dict(
                         _cal_state if isinstance(_cal_state, dict) else {}
                     )
-                # Dynamic cal eval interval under graduation (before eval gate).
-                if bool(getattr(seq_wm_trainer, "_wm_graduation_enable", False)):
-                    _ev_cfg = getattr(_wm_cal_ev, "cfg", None)
-                    if _ev_cfg is not None:
-                        if int(frames) < int(
-                            getattr(seq_wm_trainer, "_wm_graduation_early_until_frames", 0)
-                        ):
-                            _ev_cfg.eval_interval_frames = int(
-                                getattr(
-                                    seq_wm_trainer,
-                                    "_wm_graduation_early_eval_interval_frames",
-                                    25_000_000,
-                                )
-                            )
-                        else:
-                            _ev_cfg.eval_interval_frames = int(
-                                getattr(
-                                    seq_wm_trainer,
-                                    "_wm_graduation_late_eval_interval_frames",
-                                    50_000_000,
-                                )
-                            )
                 _cal_state = seq_wm_trainer.run_wm_calibration_eval(
                     experience_buffer=actor.experience_buffer,
                     frames=frames,
@@ -4174,69 +3785,6 @@ def _patch_actor_train_for_seq_wm(
                     last_d_hat=last_d_hat,
                     last_success_count=last_success_count,
                 )
-                # Profile 23: WM graduation overrides alpha_wm; force 0 in phase 1.
-                _ra_cfg = getattr(_eir_bridge_cal, "readiness_adaptive_cfg", None) or getattr(
-                    seq_wm_trainer, "_readiness_adaptive_cfg", None
-                )
-                _ra_st = getattr(_eir_bridge_cal, "readiness_adaptive_state", None) or getattr(
-                    seq_wm_trainer, "_readiness_adaptive_state", None
-                )
-                if (
-                    _ra_cfg is not None
-                    and bool(getattr(_ra_cfg, "wm_graduation_enable", False))
-                    and _ra_st is not None
-                ):
-                    from dexpbt_isaaclab.world_model.readiness_adaptive import (
-                        PHASE_PRIORITY_BOOTSTRAP,
-                        ReadinessAdaptiveState,
-                        apply_wm_graduation,
-                        sync_phase,
-                    )
-
-                    if isinstance(_ra_st, dict):
-                        _ra_st = ReadinessAdaptiveState.from_dict(_ra_st)
-                    _metrics = dict(getattr(_cal_state, "last_metrics", {}) or {})
-                    # Only advance graduation when a calibration eval ran this step.
-                    if int(getattr(_cal_state, "last_eval_frame", -1)) == int(frames):
-                        from dexpbt_isaaclab.world_model.wm_head_probs import (
-                            graduation_outcome_mode,
-                        )
-
-                        _eval_valid = float(_metrics.get("wm_cal/eval_valid", 0.0)) > 0.5
-                        _fail_id = float(_metrics.get("wm_cal/failure_reason_id", 0.0))
-                        _cal_pass = float(_metrics.get("wm_cal/calibration_pass", 0.0)) > 0.5
-                        # Prefer authoritative outcome_mode when present.
-                        _mode = str(_metrics.get("wm_cal/outcome_mode", "") or "").strip()
-                        if _mode not in (
-                            "structural",
-                            "insufficient",
-                            "valid",
-                            "metric_fail",
-                        ):
-                            _mode = graduation_outcome_mode(
-                                eval_valid=_eval_valid,
-                                failure_reason_id=_fail_id,
-                                calibration_pass=_cal_pass,
-                            )
-                        _metrics["wm_cal/outcome_mode"] = str(_mode)
-                        _r_bank = float(
-                            getattr(_ra_st, "last_bank_readiness", 0.0) or 0.0
-                        )
-                        _ra_st, _alpha_eff = apply_wm_graduation(
-                            _ra_st,
-                            frames=int(frames),
-                            metrics=_metrics,
-                            mode=_mode,
-                            cfg=_ra_cfg,
-                            r_bank=_r_bank,
-                        )
-                        _ra_st = sync_phase(_ra_st)
-                        if int(_ra_st.phase) == PHASE_PRIORITY_BOOTSTRAP:
-                            _alpha_eff = 0.0
-                            _ra_st.last_alpha_effective = 0.0
-                        _cal_state.alpha_wm = float(_alpha_eff)
-                        _eir_bridge_cal.readiness_adaptive_state = _ra_st
-                        seq_wm_trainer._readiness_adaptive_state = _ra_st
                 _eir_bridge_cal.wm_calibration_state = _cal_state.to_dict()
 
             # ---- ensemble member training (MPPI scoring ensemble only) ----
@@ -4577,144 +4125,12 @@ def _patch_actor_train_for_seq_wm(
                         "snippet_wm_rerank/wm_term_mean": float(
                             xb.last_snippet_wm_rerank_wm_term_mean
                         ),
-                        "snippet_wm_rerank/valid_frac": float(
-                            getattr(xb, "last_snippet_wm_rerank_valid_frac", 0.0)
-                        ),
-                        "snippet_wm_rerank/fallback_frac": float(
-                            getattr(xb, "last_snippet_wm_rerank_fallback_frac", 0.0)
-                        ),
-                        "snippet_wm_rerank/predict_error_count": float(
-                            getattr(xb, "last_snippet_wm_rerank_predict_error_count", 0.0)
-                        ),
                     }
                     for k, v in _snippet_scalars.items():
                         try:
                             tb_writer.add_scalar(k, float(v), frames)
                         except Exception:
                             pass
-                    # Experiment C: belief-cache observability (one set per rollout
-                    # via last_* fields; also mirrored in eir_belief_events.jsonl).
-                    _belief_fail = str(
-                        getattr(xb, "last_belief_failure_reason", "") or ""
-                    )
-                    for k, v in {
-                        "eir_wm/need_belief": float(
-                            getattr(xb, "last_need_belief", False)
-                        ),
-                        "eir_wm/belief_build_attempted": float(
-                            getattr(xb, "last_belief_build_attempted", False)
-                        ),
-                        "eir_wm/belief_build_success": float(
-                            getattr(xb, "last_belief_build_success", False)
-                        ),
-                        "eir_wm/belief_cache_valid": float(
-                            getattr(xb, "last_belief_cache_valid", False)
-                        ),
-                        "eir_wm/belief_build_latency": float(
-                            getattr(xb, "last_belief_build_latency", 0.0) or 0.0
-                        ),
-                        "eir_wm/belief_numel": float(
-                            getattr(xb, "last_belief_numel", 0) or 0
-                        ),
-                        "eir_wm/belief_ndim": float(
-                            getattr(xb, "last_belief_ndim", 0) or 0
-                        ),
-                        "eir_wm/belief_failure_reason_hash": float(
-                            abs(hash(_belief_fail)) % 10_000
-                        ),
-                    }.items():
-                        try:
-                            tb_writer.add_scalar(k, float(v), frames)
-                        except Exception:
-                            pass
-                    # One structured belief event per train step (not minibatch).
-                    try:
-                        if not bool(getattr(xb, "_belief_event_written_frame", None) == frames):
-                            _wcs = getattr(xb, "wm_calibration_state", None) or {}
-                            _cache = getattr(xb, "rssm_belief_cache", None)
-                            _gen_raw = (
-                                getattr(_cache, "generation", None)
-                                if _cache is not None
-                                else None
-                            )
-                            _reason_raw = getattr(
-                                xb, "last_snippet_wm_rerank_reason_id", None
-                            )
-                            _ev = {
-                                "event": "belief_cache",
-                                "frame": int(frames),
-                                "generation": int_or_missing(_gen_raw, missing=-1),
-                                "policy_idx": int(getattr(args_cli, "policy_idx", -1)),
-                                "need_belief": bool(getattr(xb, "last_need_belief", False)),
-                                "belief_build_attempted": bool(
-                                    getattr(xb, "last_belief_build_attempted", False)
-                                ),
-                                "belief_build_success": bool(
-                                    getattr(xb, "last_belief_build_success", False)
-                                ),
-                                "belief_cache_valid": bool(
-                                    getattr(xb, "last_belief_cache_valid", False)
-                                ),
-                                "belief_failure_reason": _belief_fail,
-                                "belief_shape": str(
-                                    getattr(xb, "last_belief_shape", "")
-                                ),
-                                "belief_build_latency": float(
-                                    getattr(xb, "last_belief_build_latency", 0.0) or 0.0
-                                ),
-                                "belief_numel": int(
-                                    getattr(xb, "last_belief_numel", 0) or 0
-                                ),
-                                "belief_ndim": int(
-                                    getattr(xb, "last_belief_ndim", 0) or 0
-                                ),
-                                "alpha_wm": float(_wcs.get("alpha_wm", 0.0) or 0.0),
-                                "calibration_pass": bool(
-                                    _wcs.get("pass", _wcs.get("calibration_pass", False))
-                                ),
-                                "calibration_reject_reason": str(
-                                    _wcs.get(
-                                        "reject_reason",
-                                        _wcs.get("calibration_reject_reason", ""),
-                                    )
-                                ),
-                                "rerank_reason_id": int_or_missing(
-                                    _reason_raw, missing=-1
-                                ),
-                                "changed_frac": float(
-                                    getattr(xb, "last_snippet_wm_rerank_changed_frac", 0.0)
-                                    or 0.0
-                                ),
-                                "fallback_frac": float(
-                                    getattr(xb, "last_snippet_wm_rerank_fallback_frac", 0.0)
-                                    or 0.0
-                                ),
-                            }
-                            _md = Path(getattr(args_cli, "workspace", ".")) / "metrics"
-                            _md.mkdir(parents=True, exist_ok=True)
-                            with (_md / "eir_belief_events.jsonl").open(
-                                "a", encoding="utf-8"
-                            ) as _bf:
-                                _bf.write(json.dumps(_ev) + "\n")
-                            xb._belief_event_written_frame = int(frames)
-                    except Exception as _belief_log_exc:
-                        print(f"[EIR-belief] event log failed: {_belief_log_exc}")
-                    # Progress-conditioned refinement scalars (only present when
-                    # the progress_refine path produced a step).
-                    _pr = getattr(xb, "last_progress_refine", None)
-                    if isinstance(_pr, dict) and _pr:
-                        for k, v in _pr.items():
-                            try:
-                                tb_writer.add_scalar(str(k), float(v), frames)
-                            except Exception:
-                                pass
-                    _ra = getattr(xb, "last_readiness_adaptive", None)
-                    if isinstance(_ra, dict) and _ra:
-                        for k, v in _ra.items():
-                            try:
-                                tb_writer.add_scalar(str(k), float(v), frames)
-                            except Exception:
-                                pass
                     for k, v in {
                         "actor_distill_fallback_with_snippet_used": float(
                             getattr(xb, "last_actor_distill_fallback_with_snippet_used", 0.0)
@@ -5390,17 +4806,6 @@ def _wm_safe_restore(
         if isinstance(wcs, dict):
             eir_bridge.wm_calibration_state = wcs
             print(f"[WM-cal] restore: alpha_wm={wcs.get('alpha_wm', 0.0)}")
-        ras = ckpt.get("readiness_adaptive_state")
-        if isinstance(ras, dict):
-            from dexpbt_isaaclab.world_model.readiness_adaptive import (
-                ReadinessAdaptiveState,
-            )
-
-            eir_bridge.readiness_adaptive_state = ReadinessAdaptiveState.from_dict(ras)
-            print(
-                f"[readiness] restore: phase="
-                f"{getattr(eir_bridge.readiness_adaptive_state, 'phase', 0)}"
-            )
 
     awr_bridge = getattr(agent, "_awr_bridge", None)
     if awr_bridge is not None and getattr(awr_bridge, "buffer", None) is not None:
@@ -6311,23 +5716,6 @@ class _WmEnabledRunner(Runner):
                 eir_bridge.snippet_wm_rerank_cfg = getattr(
                     self.seq_wm_trainer, "_snippet_wm_rerank_cfg", None
                 )
-                _rerank = eir_bridge.snippet_wm_rerank_cfg
-                eir_bridge.wm_horizon_steps = tuple(
-                    getattr(
-                        _rerank,
-                        "horizon_steps",
-                        getattr(getattr(self.seq_wm_trainer, "cfg", None), "horizon_steps", (4, 8)),
-                    )
-                )
-                eir_bridge.progress_refine_cfg = getattr(
-                    self.seq_wm_trainer, "_progress_refine_cfg", None
-                )
-                eir_bridge.readiness_adaptive_cfg = getattr(
-                    self.seq_wm_trainer, "_readiness_adaptive_cfg", None
-                )
-                eir_bridge.readiness_adaptive_state = getattr(
-                    self.seq_wm_trainer, "_readiness_adaptive_state", None
-                )
                 eir_bridge.wm_calibration_enable = (
                     getattr(self.seq_wm_trainer, "_wm_calibration_evaluator", None)
                     is not None
@@ -7026,7 +6414,6 @@ def main():
             eval_interval_frames=int(args_cli.wm_calibration_eval_interval_frames),
             min_samples=int(args_cli.wm_calibration_min_samples),
             heldout_fraction=float(args_cli.wm_calibration_heldout_fraction),
-            heldout_partition_seed=int(args_cli.wm_calibration_heldout_partition_seed),
             alpha_min=float(args_cli.wm_calibration_alpha_min),
             alpha_max=float(args_cli.wm_calibration_alpha_max),
             gate_auc_recovery=float(args_cli.wm_calibration_gate_auc_recovery),
@@ -7041,14 +6428,9 @@ def main():
                 args_cli.wm_calibration_eval_tol_min_samples_for_stats
             ),
         )
-        _wm_cal_ev = (
+        seq_wm_trainer._wm_calibration_evaluator = (
             WMCalibrationEvaluator(_wm_cal_cfg) if _wm_cal_cfg.enabled else None
         )
-        seq_wm_trainer.configure_wm_partition(
-            evaluator=_wm_cal_ev,
-            worker_rank=int(args_cli.policy_idx),
-        )
-        seq_wm_trainer._wm_calibration_evaluator = _wm_cal_ev
 
         # ------------------------------------------------------------------
         # Full RSSM ensemble (MPPI scoring only). Member 0 is the primary
@@ -7082,10 +6464,6 @@ def main():
                     cfg=seq_cfg,
                     device=rl_device,
                     strategy=args_cli.wm_strategy,
-                )
-                _member_trainer.configure_wm_partition(
-                    evaluator=_wm_cal_ev,
-                    worker_rank=int(args_cli.policy_idx),
                 )
                 ensemble_trainers.append(_member_trainer)
             seq_wm_trainer._rssm_ensemble_manager = RSSMEnsembleManager(
@@ -7156,11 +6534,6 @@ def main():
             min_risky_fraction=float(args_cli.eir_min_risky_fraction),
             feature_dim=_eir_feature_dim,
             action_dim=int(action_dim),
-            dhat_margin_mode=str(args_cli.eir_dhat_margin_mode),
-            dhat_improve_margin_relative=float(args_cli.eir_dhat_improve_margin_relative),
-            drop_dhat_margin_relative=float(args_cli.eir_drop_dhat_margin_relative),
-            dhat_improve_margin_min_abs=float(args_cli.eir_dhat_improve_margin_min_abs),
-            drop_dhat_margin_min_abs=float(args_cli.eir_drop_dhat_margin_min_abs),
         )
         eir_cfg = EIRConfig(
             enabled=eir_enabled,
@@ -7282,26 +6655,6 @@ def main():
             guidance_bank_tol=float(args_cli.eir_guidance_bank_tol),
             guidance_mid_near_success_mult=float(args_cli.eir_guidance_mid_near_success_mult),
             guidance_mid_priority_scale=float(args_cli.eir_guidance_mid_priority_scale),
-            adjacent_stage_mixing_enable=bool(args_cli.snippet_adjacent_stage_mixing_enable),
-            primary_stage_fraction=float(args_cli.snippet_primary_stage_fraction),
-            adjacent_stage_fraction=float(args_cli.snippet_adjacent_stage_fraction),
-            tolerance_compatibility_enable=bool(
-                args_cli.snippet_tolerance_compatibility_enable
-            ),
-            tolerance_max_gap=float(args_cli.snippet_tolerance_max_gap),
-            tolerance_soft_scale=float(args_cli.snippet_tolerance_soft_scale),
-            min_primary_candidates=int(args_cli.snippet_min_primary_candidates),
-            fallback_to_adjacent_when_sparse=bool(
-                args_cli.snippet_fallback_to_adjacent_when_sparse
-            ),
-            tolerance_compatibility_mode=str(args_cli.snippet_tolerance_compatibility_mode),
-            tolerance_max_log_gap=float(args_cli.snippet_tolerance_max_log_gap),
-            tolerance_log_soft_scale=float(args_cli.snippet_tolerance_log_soft_scale),
-            retrieve_lambda_sim=float(args_cli.snippet_retrieve_lambda_sim),
-            retrieve_lambda_priority=float(args_cli.snippet_retrieve_lambda_priority),
-            retrieve_lambda_tol=float(args_cli.snippet_retrieve_lambda_tol),
-            retrieve_lambda_progress=float(args_cli.snippet_retrieve_lambda_progress),
-            progress_priority_weight=float(args_cli.snippet_progress_priority_weight),
         )
         snippet_distill_cfg = SnippetDistillConfig(
             enabled=eir_enabled and bool(args_cli.snippet_distill_enable),
@@ -7322,12 +6675,7 @@ def main():
             w_unc=float(args_cli.snippet_wm_rerank_w_unc),
             w_delta=float(args_cli.snippet_wm_rerank_w_delta),
             score_cap=float(args_cli.snippet_wm_rerank_score_cap),
-            horizon_steps=tuple(int(h) for h in seq_cfg.horizon_steps),
         )
-        # Keep calibration score weights identical to the live snippet reranker.
-        _wm_cal_ev = getattr(seq_wm_trainer, "_wm_calibration_evaluator", None)
-        if _wm_cal_ev is not None:
-            _wm_cal_ev.cfg.apply_snippet_rerank_weights(snippet_wm_rerank_cfg)
         eir_residual_cfg = RecoveryResidualConfig(
             enabled=eir_enabled and bool(args_cli.eir_use_recovery_residual),
             feature_dim=_eir_feature_dim,
@@ -7429,120 +6777,20 @@ def main():
             min_frames_between_broadcasts_per_target=int(
                 args_cli.eir_pbt_min_frames_between_broadcasts_per_target
             ),
-            tolerance_aware_bank_broadcast=bool(
-                args_cli.eir_tolerance_aware_bank_broadcast
-            ),
-            preserve_local_bank_fraction=float(
-                args_cli.eir_preserve_local_bank_fraction
-            ),
-            target_policy_idx=int(args_cli.policy_idx),
         )
-        from dexpbt_isaaclab.world_model.progress_conditioned_refinement import (
-            ProgressRefinementConfig,
-        )
-
-        progress_refine_cfg = ProgressRefinementConfig(
-            enabled=eir_enabled and bool(args_cli.progress_refinement_enable),
-            history_steps=int(args_cli.progress_refinement_history_steps),
-            eps=float(args_cli.progress_refinement_eps),
-            proximity_temperature=float(args_cli.progress_refinement_proximity_temperature),
-            progress_margin=float(args_cli.progress_refinement_progress_margin),
-            progress_temperature=float(args_cli.progress_refinement_progress_temperature),
-            oscillation_enable=bool(args_cli.progress_refinement_oscillation_enable),
-            oscillation_center=float(args_cli.progress_refinement_oscillation_center),
-            oscillation_temperature=float(args_cli.progress_refinement_oscillation_temperature),
-            start_after_frames=int(args_cli.progress_refinement_start_after_frames),
-            ramp_frames=int(args_cli.progress_refinement_ramp_frames),
-            only_lifted=bool(args_cli.progress_refinement_only_lifted),
-            min_gate_for_retrieval=float(args_cli.progress_refinement_min_gate_for_retrieval),
-            max_active_fraction=float(args_cli.progress_refinement_max_active_fraction),
-            max_active_rows=int(args_cli.progress_refinement_max_active_rows),
-            teacher_margin_temperature=float(args_cli.progress_refinement_teacher_margin_temperature),
-            min_teacher_confidence=float(args_cli.progress_refinement_min_teacher_confidence),
-            detach_gate=bool(args_cli.progress_refinement_detach_gate),
-        )
-        from dexpbt_isaaclab.world_model.readiness_adaptive import (
-            ReadinessAdaptiveConfig,
-            ReadinessAdaptiveState,
-        )
-
-        readiness_adaptive_cfg = ReadinessAdaptiveConfig(
-            readiness_adaptive_enable=bool(args_cli.readiness_adaptive_enable),
-            readiness_min_frames=int(args_cli.readiness_min_frames),
-            readiness_bank_size_low=int(args_cli.readiness_bank_size_low),
-            readiness_bank_size_full=int(args_cli.readiness_bank_size_full),
-            readiness_coverage_target=float(args_cli.readiness_coverage_target),
-            readiness_coverage_ema_beta=float(args_cli.readiness_coverage_ema_beta),
-            readiness_enter_threshold=float(args_cli.readiness_enter_threshold),
-            readiness_exit_threshold=float(args_cli.readiness_exit_threshold),
-            readiness_required_windows=int(args_cli.readiness_required_windows),
-            readiness_ramp_frames=int(args_cli.readiness_ramp_frames),
-            readiness_eval_interval_frames=int(args_cli.readiness_eval_interval_frames),
-            readiness_shadow_retrieval_fraction=float(
-                args_cli.readiness_shadow_retrieval_fraction
-            ),
-            wm_graduation_enable=bool(args_cli.wm_graduation_enable),
-            wm_graduation_required_passes=int(args_cli.wm_graduation_required_passes),
-            wm_graduation_early_until_frames=int(args_cli.wm_graduation_early_until_frames),
-            wm_graduation_early_eval_interval_frames=int(
-                args_cli.wm_graduation_early_eval_interval_frames
-            ),
-            wm_graduation_late_eval_interval_frames=int(
-                args_cli.wm_graduation_late_eval_interval_frames
-            ),
-            wm_graduation_early_beta_up=float(args_cli.wm_graduation_early_beta_up),
-            wm_graduation_late_beta_up=float(args_cli.wm_graduation_late_beta_up),
-            wm_graduation_beta_down=float(args_cli.wm_graduation_beta_down),
-            wm_graduation_early_alpha_cap=float(args_cli.wm_graduation_early_alpha_cap),
-            wm_graduation_late_alpha_cap=float(args_cli.wm_graduation_late_alpha_cap),
-            wm_graduation_min_valid_prediction_frac=float(
-                args_cli.wm_graduation_min_valid_prediction_frac
-            ),
-            readiness_bootstrap_distill_weight=float(
-                args_cli.readiness_bootstrap_distill_weight
-            ),
-            readiness_calibrated_distill_weight=float(
-                args_cli.readiness_calibrated_distill_weight
-            ),
-            readiness_ess_target=float(args_cli.readiness_ess_target),
-            readiness_ess_min_for_update=float(args_cli.readiness_ess_min_for_update),
-        )
-        readiness_adaptive_state = ReadinessAdaptiveState()
-        # Dynamic cal eval interval when WM graduation is enabled.
-        if bool(args_cli.wm_graduation_enable):
-            _early_until = int(args_cli.wm_graduation_early_until_frames)
-            # Interval is applied dynamically in the train loop via evaluator.cfg.
-            seq_wm_trainer._wm_graduation_enable = True
-            seq_wm_trainer._wm_graduation_early_until_frames = _early_until
-            seq_wm_trainer._wm_graduation_early_eval_interval_frames = int(
-                args_cli.wm_graduation_early_eval_interval_frames
-            )
-            seq_wm_trainer._wm_graduation_late_eval_interval_frames = int(
-                args_cli.wm_graduation_late_eval_interval_frames
-            )
-        else:
-            seq_wm_trainer._wm_graduation_enable = False
-        seq_wm_trainer._readiness_adaptive_cfg = readiness_adaptive_cfg
-        seq_wm_trainer._readiness_adaptive_state = readiness_adaptive_state
         seq_wm_trainer._eir_cfg = eir_cfg
         seq_wm_trainer._eir_scorer_cfg = eir_scorer_cfg
         seq_wm_trainer._eir_bank_cfg = eir_bank_cfg
         seq_wm_trainer._eir_snippet_bank_cfg = eir_snippet_bank_cfg
         seq_wm_trainer._snippet_distill_cfg = snippet_distill_cfg
         seq_wm_trainer._snippet_wm_rerank_cfg = snippet_wm_rerank_cfg
-        seq_wm_trainer._progress_refine_cfg = progress_refine_cfg
         seq_wm_trainer._eir_residual_cfg = eir_residual_cfg
         seq_wm_trainer._eir_rssm_cfg = eir_rssm_cfg
         seq_wm_trainer._eir_mppi_cfg = eir_mppi_cfg
         seq_wm_trainer._eir_broadcast_cfg = eir_broadcast_cfg
         seq_wm_trainer._eir_bridge = None
         seq_wm_trainer._eir_target_builder = (
-            ERDTargetBuilder(
-                eir_scorer_cfg,
-                progress_cfg=progress_refine_cfg if progress_refine_cfg.enabled else None,
-            )
-            if eir_enabled
-            else None
+            ERDTargetBuilder(eir_scorer_cfg) if eir_enabled else None
         )
         seq_wm_trainer._snippet_target_builder = (
             SnippetTargetBuilder(
@@ -8033,17 +7281,6 @@ def main():
             # Patch F (2026-05-31): mid-tier self-restart governor.
             pbt_disable_self_restart=args_cli.pbt_disable_self_restart,
             pbt_allow_mid_self_mutation=args_cli.pbt_allow_mid_self_mutation,
-            # Experiment A: chronic-bottom exploit (off by default).
-            pbt_enable_chronic_bottom_exploit=(
-                args_cli.pbt_enable_chronic_bottom_exploit
-            ),
-            pbt_chronic_min_bottom_frames=args_cli.pbt_chronic_min_bottom_frames,
-            pbt_chronic_min_bottom_ticks=args_cli.pbt_chronic_min_bottom_ticks,
-            pbt_chronic_min_score_gap=args_cli.pbt_chronic_min_score_gap,
-            pbt_chronic_cooldown_frames=args_cli.pbt_chronic_cooldown_frames,
-            pbt_chronic_max_copies_per_lineage=(
-                args_cli.pbt_chronic_max_copies_per_lineage
-            ),
             pbt_max_self_restarts_per_policy=(
                 args_cli.pbt_max_self_restarts_per_policy
             ),
@@ -8499,264 +7736,6 @@ def main():
             ),
             pbt_consolidation_collapse_nsucc_mean_threshold=(
                 args_cli.pbt_consolidation_collapse_nsucc_mean_threshold
-            ),
-            frame_stop_enable=args_cli.frame_stop_enable,
-            target_population_frames=args_cli.target_population_frames,
-            frame_stop_grace_iterations=args_cli.frame_stop_grace_iterations,
-            same_tol_retention_enable=args_cli.same_tol_retention_enable,
-            same_tol_retention_bins=args_cli.same_tol_retention_bins,
-            same_tol_retention_min_samples=args_cli.same_tol_retention_min_samples,
-            same_tol_retention_warmup_ticks=args_cli.same_tol_retention_warmup_ticks,
-            same_tol_retention_reset_on_lineage_change=(
-                args_cli.same_tol_retention_reset_on_lineage_change
-            ),
-            same_tol_retention_reset_on_cross_copy=(
-                args_cli.same_tol_retention_reset_on_cross_copy
-            ),
-            same_tol_retention_keep_on_rollback=args_cli.same_tol_retention_keep_on_rollback,
-            bridge_curriculum_enable=args_cli.bridge_curriculum_enable,
-            bridge_curriculum_start_tol=args_cli.bridge_curriculum_start_tol,
-            bridge_curriculum_probation_tol=args_cli.bridge_curriculum_probation_tol,
-            bridge_curriculum_target_tol=args_cli.bridge_curriculum_target_tol,
-            bridge_curriculum_mode=args_cli.bridge_curriculum_mode,
-            bridge_tolerance_ladder=args_cli.bridge_tolerance_ladder,
-            bridge_min_same_tol_retention=args_cli.bridge_min_same_tol_retention,
-            bridge_min_stable_ticks=args_cli.bridge_min_stable_ticks,
-            bridge_min_frames_per_level=args_cli.bridge_min_frames_per_level,
-            bridge_post_shrink_consolidation_frames=(
-                args_cli.bridge_post_shrink_consolidation_frames
-            ),
-            bridge_probation_enable=args_cli.bridge_probation_enable,
-            bridge_probation_entry_tol=args_cli.bridge_probation_entry_tol,
-            bridge_probation_frames=args_cli.bridge_probation_frames,
-            bridge_probation_min_ticks=args_cli.bridge_probation_min_ticks,
-            bridge_probation_block_further_shrink=(
-                args_cli.bridge_probation_block_further_shrink
-            ),
-            bridge_probation_block_ordinary_rollback=(
-                args_cli.bridge_probation_block_ordinary_rollback
-            ),
-            bridge_probation_allow_hard_collapse_rollback=(
-                args_cli.bridge_probation_allow_hard_collapse_rollback
-            ),
-            bridge_probation_hard_collapse_mean=(
-                args_cli.bridge_probation_hard_collapse_mean
-            ),
-            bridge_probation_hard_collapse_patience=(
-                args_cli.bridge_probation_hard_collapse_patience
-            ),
-            late_degradation_rescue_enable=args_cli.late_degradation_rescue_enable,
-            late_degradation_rescue_tol_threshold=args_cli.late_degradation_rescue_tol_threshold,
-            late_degradation_rescue_peak_threshold=args_cli.late_degradation_rescue_peak_threshold,
-            late_degradation_rescue_current_mean_threshold=(
-                args_cli.late_degradation_rescue_current_mean_threshold
-            ),
-            late_degradation_rescue_retention_threshold=(
-                args_cli.late_degradation_rescue_retention_threshold
-            ),
-            late_degradation_rescue_patience=args_cli.late_degradation_rescue_patience,
-            late_degradation_rescue_max_tol_gap=args_cli.late_degradation_rescue_max_tol_gap,
-            late_degradation_rescue_cooldown_frames=(
-                args_cli.late_degradation_rescue_cooldown_frames
-            ),
-            late_degradation_rescue_max_per_policy=(
-                args_cli.late_degradation_rescue_max_per_policy
-            ),
-            late_degradation_rescue_source_min_mean=(
-                args_cli.late_degradation_rescue_source_min_mean
-            ),
-            late_degradation_rescue_min_source_advantage=(
-                args_cli.late_degradation_rescue_min_source_advantage
-            ),
-            late_degradation_rescue_source_min_retention=(
-                args_cli.late_degradation_rescue_source_min_retention
-            ),
-            late_degradation_rescue_reject_collapse_source=(
-                args_cli.late_degradation_rescue_reject_collapse_source
-            ),
-            late_degradation_rescue_require_source_control=(
-                args_cli.late_degradation_rescue_require_source_control
-            ),
-            late_degradation_rescue_bypass_elimination_burnin=(
-                args_cli.late_degradation_rescue_bypass_elimination_burnin
-            ),
-            pbt_consolidation_schedule_mode=str(args_cli.pbt_consolidation_schedule_mode),
-            adaptive_consolidation_stage_consolidation_progress=float(
-                args_cli.adaptive_consolidation_stage_consolidation_progress
-            ),
-            adaptive_consolidation_stage_selection_progress=float(
-                args_cli.adaptive_consolidation_stage_selection_progress
-            ),
-            adaptive_precision_consolidation_enable=bool(
-                args_cli.adaptive_precision_consolidation_enable
-            ),
-            adaptive_consolidation_tolerance_log_quant=float(
-                args_cli.adaptive_consolidation_tolerance_log_quant
-            ),
-            adaptive_probation_min_frames=int(args_cli.adaptive_probation_min_frames),
-            adaptive_probation_min_stable_ticks=int(
-                args_cli.adaptive_probation_min_stable_ticks
-            ),
-            adaptive_probation_min_same_level_retention=float(
-                args_cli.adaptive_probation_min_same_level_retention
-            ),
-            adaptive_probation_block_ordinary_rollback=bool(
-                args_cli.adaptive_probation_block_ordinary_rollback
-            ),
-            adaptive_probation_allow_hard_collapse_rollback=bool(
-                args_cli.adaptive_probation_allow_hard_collapse_rollback
-            ),
-            adaptive_probation_hard_collapse_mean=float(
-                args_cli.adaptive_probation_hard_collapse_mean
-            ),
-            adaptive_probation_hard_collapse_patience=int(
-                args_cli.adaptive_probation_hard_collapse_patience
-            ),
-            adaptive_rescue_enable=bool(args_cli.adaptive_rescue_enable),
-            adaptive_rescue_retention_threshold=float(
-                args_cli.adaptive_rescue_retention_threshold
-            ),
-            adaptive_rescue_degradation_patience=int(
-                args_cli.adaptive_rescue_degradation_patience
-            ),
-            adaptive_rescue_population_quantile=float(
-                args_cli.adaptive_rescue_population_quantile
-            ),
-            adaptive_rescue_source_top_fraction=(
-                float(args_cli.adaptive_rescue_source_top_fraction)
-                if args_cli.adaptive_rescue_source_top_fraction is not None
-                else None
-            ),
-            adaptive_rescue_source_min_retention=float(
-                args_cli.adaptive_rescue_source_min_retention
-            ),
-            adaptive_rescue_min_source_advantage_sigma=float(
-                args_cli.adaptive_rescue_min_source_advantage_sigma
-            ),
-            adaptive_rescue_max_log_tol_gap=float(args_cli.adaptive_rescue_max_log_tol_gap),
-            adaptive_rescue_cooldown_frames=int(args_cli.adaptive_rescue_cooldown_frames),
-            adaptive_rescue_max_per_lineage=int(args_cli.adaptive_rescue_max_per_lineage),
-            adaptive_rescue_require_source_control=bool(
-                args_cli.adaptive_rescue_require_source_control
-            ),
-            adaptive_rescue_reject_collapse_source=bool(
-                args_cli.adaptive_rescue_reject_collapse_source
-            ),
-            adaptive_probation_rollback_max_log_gap=float(
-                args_cli.adaptive_probation_rollback_max_log_gap
-            ),
-            adaptive_probation_freeze_only_max_ticks=int(
-                args_cli.adaptive_probation_freeze_only_max_ticks
-            ),
-            adaptive_rescue_source_min_samples=int(
-                args_cli.adaptive_rescue_source_min_samples
-            ),
-            adaptive_rescue_source_min_stable_ticks=int(
-                args_cli.adaptive_rescue_source_min_stable_ticks
-            ),
-            adaptive_rescue_source_max_staleness_frames=int(
-                args_cli.adaptive_rescue_source_max_staleness_frames
-            ),
-            adaptive_rescue_require_lineage_match_with_checkpoint=bool(
-                args_cli.adaptive_rescue_require_lineage_match_with_checkpoint
-            ),
-            adaptive_rescue_archive_enable=bool(args_cli.adaptive_rescue_archive_enable),
-            adaptive_rescue_archive_max_age_frames=int(
-                args_cli.adaptive_rescue_archive_max_age_frames
-            ),
-            adaptive_rescue_archive_require_retention=bool(
-                args_cli.adaptive_rescue_archive_require_retention
-            ),
-            adaptive_rescue_archive_min_nsucc_mean=float(
-                args_cli.adaptive_rescue_archive_min_nsucc_mean
-            ),
-            adaptive_rescue_archive_min_nsucc_max=float(
-                args_cli.adaptive_rescue_archive_min_nsucc_max
-            ),
-            adaptive_rescue_archive_require_age=bool(
-                args_cli.adaptive_rescue_archive_require_age
-            ),
-            adaptive_rescue_archive_require_collapse_metadata=bool(
-                args_cli.adaptive_rescue_archive_require_collapse_metadata
-            ),
-            adaptive_rescue_archive_require_quality_score=bool(
-                args_cli.adaptive_rescue_archive_require_quality_score
-            ),
-            adaptive_rescue_archive_min_population_samples=int(
-                args_cli.adaptive_rescue_archive_min_population_samples
-            ),
-            adaptive_rescue_archive_advantage_sigma_floor=float(
-                args_cli.adaptive_rescue_archive_advantage_sigma_floor
-            ),
-            adaptive_rescue_archive_min_absolute_advantage=float(
-                args_cli.adaptive_rescue_archive_min_absolute_advantage
-            ),
-            adaptive_rescue_bypass_elimination_burnin=bool(
-                args_cli.adaptive_rescue_bypass_elimination_burnin
-            ),
-            adaptive_rescue_bypass_on_hard_collapse=bool(
-                args_cli.adaptive_rescue_bypass_on_hard_collapse
-            ),
-            adaptive_rescue_min_frames_before_emergency_bypass=int(
-                args_cli.adaptive_rescue_min_frames_before_emergency_bypass
-            ),
-            adaptive_rescue_emergency_require_archive_or_stable_source=bool(
-                args_cli.adaptive_rescue_emergency_require_archive_or_stable_source
-            ),
-            adaptive_lineage_diversity_enable=bool(
-                args_cli.adaptive_lineage_diversity_enable
-            ),
-            adaptive_min_distinct_lineages_exploration=int(
-                args_cli.adaptive_min_distinct_lineages_exploration
-            ),
-            adaptive_min_distinct_lineages_consolidation=int(
-                args_cli.adaptive_min_distinct_lineages_consolidation
-            ),
-            adaptive_min_distinct_lineages_selection=int(
-                args_cli.adaptive_min_distinct_lineages_selection
-            ),
-            adaptive_replacement_budget_exploration=int(
-                args_cli.adaptive_replacement_budget_exploration
-            ),
-            adaptive_replacement_budget_consolidation=int(
-                args_cli.adaptive_replacement_budget_consolidation
-            ),
-            adaptive_replacement_budget_selection=int(
-                args_cli.adaptive_replacement_budget_selection
-            ),
-            adaptive_probation_stage_aware_enable=bool(
-                args_cli.adaptive_probation_stage_aware_enable
-            ),
-            adaptive_probation_min_frames_exploration=int(
-                args_cli.adaptive_probation_min_frames_exploration
-            ),
-            adaptive_probation_min_frames_other=int(
-                args_cli.adaptive_probation_min_frames_other
-            ),
-            adaptive_probation_max_frames=int(args_cli.adaptive_probation_max_frames),
-            adaptive_probation_min_stable_ticks_exploration=int(
-                args_cli.adaptive_probation_min_stable_ticks_exploration
-            ),
-            adaptive_probation_min_stable_ticks_other=int(
-                args_cli.adaptive_probation_min_stable_ticks_other
-            ),
-            adaptive_probation_early_exit_retention=float(
-                args_cli.adaptive_probation_early_exit_retention
-            ),
-            adaptive_probation_normal_exit_retention=float(
-                args_cli.adaptive_probation_normal_exit_retention
-            ),
-            adaptive_probation_early_exit_nsucc_drop_frac=float(
-                args_cli.adaptive_probation_early_exit_nsucc_drop_frac
-            ),
-            adaptive_rescue_source_freshness_mode=str(
-                args_cli.adaptive_rescue_source_freshness_mode
-            ),
-            adaptive_rescue_source_freshness_tau_frames=int(
-                args_cli.adaptive_rescue_source_freshness_tau_frames
-            ),
-            adaptive_rescue_source_hard_max_age_frames=int(
-                args_cli.adaptive_rescue_source_hard_max_age_frames
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )

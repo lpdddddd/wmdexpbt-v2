@@ -1,6 +1,0 @@
-status=stopped
-attempt=4
-attempt_name=attempt_4_2026-06-08_01-28-38
-end_time=2026-06-08T01:28:38+08:00
-exit_code=2
-checkpoint=

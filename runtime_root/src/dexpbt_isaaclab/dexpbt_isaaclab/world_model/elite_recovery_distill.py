@@ -68,16 +68,6 @@ class ERDConfig:
     drop_dhat_margin: float = 0.01
     near_success_mult: float = 2.0
 
-    # Recovery-label margin generalization.  ``absolute`` keeps the legacy
-    # fixed-distance behaviour (used by all pre-existing profiles).  ``relative_tol``
-    # scales the improvement / drop margins with the per-row success tolerance so
-    # the labels are curriculum-scale invariant (used by progress_refine).
-    dhat_margin_mode: str = "absolute"  # absolute | relative_tol
-    dhat_improve_margin_relative: float = 0.25
-    drop_dhat_margin_relative: float = 0.50
-    dhat_improve_margin_min_abs: float = 0.0
-    drop_dhat_margin_min_abs: float = 0.0
-
     max_grad_ratio: float = 0.2
     auto_scale_by_grad_ratio: bool = True
     only_lifted: bool = True
@@ -139,13 +129,6 @@ class ERDTargetCache:
     d_hat_flat: Optional[torch.Tensor] = None
     success_tol_flat: Optional[torch.Tensor] = None
     lifted_flat: Optional[torch.Tensor] = None
-    # Progress-conditioned refinement context (flat[n * T + t] layout, aligned to
-    # PPODataset.last_range).  ``None`` unless a progress config is supplied so the
-    # legacy profiles keep their exact cache contents.
-    normalized_error_flat: Optional[torch.Tensor] = None
-    recent_progress_flat: Optional[torch.Tensor] = None
-    oscillation_flat: Optional[torch.Tensor] = None
-    progress_history_valid_flat: Optional[torch.Tensor] = None
     pos_rate: dict[str, float] = field(default_factory=dict)
     valid_fraction: dict[str, float] = field(default_factory=dict)
     degenerate: dict[str, bool] = field(default_factory=dict)
@@ -162,11 +145,8 @@ class ERDTargetCache:
 
 
 class ERDTargetBuilder:
-    def __init__(self, cfg: ERDConfig, progress_cfg: Optional[Any] = None) -> None:
+    def __init__(self, cfg: ERDConfig) -> None:
         self.cfg = cfg
-        # Optional ProgressRefinementConfig; when enabled the cache is populated
-        # with the scale-invariant progress context for the refinement gate.
-        self.progress_cfg = progress_cfg
 
     @staticmethod
     def _horizon_valid_mask(dones: torch.Tensor, horizon: int) -> torch.Tensor:
@@ -220,7 +200,6 @@ class ERDTargetBuilder:
             denom = max(float(valid_steps.sum().item()), 1.0)
             cache.tol_mean = float((success_tol * valid_steps).sum().item() / denom)
 
-        relative_margin = str(getattr(cfg, "dhat_margin_mode", "absolute")) == "relative_tol"
         for h in cfg.horizons:
             h = int(h)
             valid = self._horizon_valid_mask(dones, h)
@@ -232,27 +211,12 @@ class ERDTargetBuilder:
                     continue
                 fut = slice(t + 1, t + h + 1)
                 dh_future = d_hat[fut]
-                # Per-row improvement / drop margins.  ``relative_tol`` scales with
-                # the current success tolerance (curriculum-scale invariant);
-                # ``absolute`` reproduces the legacy fixed margins exactly.
-                if relative_margin:
-                    m_impr = torch.clamp(
-                        float(cfg.dhat_improve_margin_relative) * success_tol[t],
-                        min=float(cfg.dhat_improve_margin_min_abs),
-                    )
-                    m_drop = torch.clamp(
-                        float(cfg.drop_dhat_margin_relative) * success_tol[t],
-                        min=float(cfg.drop_dhat_margin_min_abs),
-                    )
-                else:
-                    m_impr = cfg.dhat_improve_margin
-                    m_drop = cfg.drop_dhat_margin
                 succ[t] = (success_cnt[fut] > success_cnt[t]).any(dim=0).float()
                 impr[t] = (
                     dh_future.min(dim=0).values
-                    <= (d_hat[t] - m_impr)
+                    <= (d_hat[t] - cfg.dhat_improve_margin)
                 ).float()
-                dhat_rise = ((dh_future - d_hat[t]) >= m_drop).any(dim=0)
+                dhat_rise = ((dh_future - d_hat[t]) >= cfg.drop_dhat_margin).any(dim=0)
                 fail_future = (
                     (failure[fut] > 0.5).any(dim=0)
                     if failure is not None
@@ -279,21 +243,6 @@ class ERDTargetBuilder:
                     cache.pos_rate[key] = pos
                     cache.valid_fraction[key] = msum / float(max(T * N, 1))
                     cache.degenerate[key] = (pos <= 1e-6) or (pos >= 1.0 - 1e-6)
-
-        pcfg = self.progress_cfg
-        if pcfg is not None and bool(getattr(pcfg, "enabled", False)):
-            from .progress_conditioned_refinement import build_progress_context_tn
-
-            ctx = build_progress_context_tn(
-                d_hat_tn=d_hat,
-                success_tol_tn=success_tol,
-                dones_tn=dones,
-                cfg=pcfg,
-            )
-            cache.normalized_error_flat = ctx["normalized_error_flat"]
-            cache.recent_progress_flat = ctx["recent_progress_flat"]
-            cache.oscillation_flat = ctx["oscillation_flat"]
-            cache.progress_history_valid_flat = ctx["progress_history_valid_flat"]
         return cache
 
 

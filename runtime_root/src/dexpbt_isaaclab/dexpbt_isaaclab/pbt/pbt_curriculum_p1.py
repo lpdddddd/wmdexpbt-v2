@@ -266,135 +266,9 @@ class CurriculumControlState:
     pre_floor_peak_guard_recent_peak: float = 0.0
     pre_floor_peak_guard_stable_ticks: int = 0
     pre_floor_peak_guard_reason: str = ""
-    # CSER 2cm bridge audit/control.  Defaults keep existing profiles inert.
-    same_tol_bin_id: int = -1
-    same_tol_retention: float = 1.0
-    same_tol_retention_valid: bool = False
-    same_tol_peak_nsucc_mean: float = 0.0
-    same_tol_sample_count: int = 0
-    same_tol_stable_ticks: int = 0
-    retention_reference_tolerance: float = 0.0
-    cross_tol_peak_ignored: bool = False
-    retention_tracker: dict[str, Any] = field(default_factory=dict)
-    bridge_active: bool = False
-    bridge_level: int = -1
-    bridge_entry_frame: int = -1
-    bridge_level_entry_frame: int = -1
-    bridge_shrink_count: int = 0
-    bridge_next_tolerance: float = 0.0
-    bridge_shrink_blocked: bool = False
-    bridge_block_reason: str = ""
-    bridge_probation_active: bool = False
-    bridge_probation_entry_frame: int = -1
-    bridge_probation_rollback_blocked: bool = False
-    bridge_probation_hard_collapse: bool = False
-    bridge_probation_exit: bool = False
-    # Bridge probation collapse audit (defaults inert for non-bridge profiles).
-    bridge_probation_legacy_collapse_suppressed: bool = False
-    bridge_probation_hard_collapse_triggered: bool = False
-    bridge_probation_bad_streak: int = 0
-    bridge_probation_rollback_reason: str = ""
-    bridge_probation_suppressed_legacy_collapse_count: int = 0
-    bridge_pending_next_tolerance: float = 0.0
-    bridge_level_timer_pending: bool = False
-    late_rescue_attempt_count: int = 0
-    late_rescue_selected_count: int = 0
-    late_rescue_executed_count: int = 0
-    late_rescue_blocked_count: int = 0
-    late_rescue_streak: int = 0
-    late_rescue_last_frame: int = -1
-    # Progress-refine adaptive precision audit (defaults inert for legacy).
-    adaptive_precision_active: bool = False
-    adaptive_curriculum_progress: float = 0.0
-    adaptive_probation_active: bool = False
-    adaptive_probation_entry_tolerance: float = 0.0
-    adaptive_probation_entry_frame: int = -1
-    adaptive_probation_can_shrink: bool = True
-    adaptive_probation_block_reason: str = ""
-    adaptive_probation_ordinary_rollback_blocked: bool = False
-    adaptive_probation_hard_collapse: bool = False
-    adaptive_probation_hard_collapse_streak: int = 0
-    # Same-tick event frame for adaptive hard collapse (-1 = not this tick).
-    adaptive_probation_hard_collapse_event_frame: int = -1
-    adaptive_probation_rollback_triggered: bool = False
-    adaptive_probation_rollback_from_tol: float = 0.0
-    adaptive_probation_rollback_to_tol: float = 0.0
-    adaptive_rescue_ready: bool = False
-    adaptive_rescue_reason: str = ""
-    adaptive_rescue_attempt_count: int = 0
-    adaptive_rescue_selected_count: int = 0
-    adaptive_rescue_executed_count: int = 0
-    adaptive_rescue_blocked_count: int = 0
-    adaptive_rescue_source_policy: int = -1
-    adaptive_rescue_source_rank: int = -1
-    adaptive_rescue_source_advantage_sigma: float = 0.0
-    adaptive_rescue_last_frame: int = -1
-    adaptive_rescue_lineage_id: str = ""
-    adaptive_rescue_executed_for_lineage: int = 0
-    adaptive_probation_hard_collapse_trigger_source: str = ""
-    adaptive_probation_hard_collapse_independent: bool = False
-    adaptive_probation_legacy_collapse_also_active: bool = False
-    adaptive_probation_freeze_only_streak: int = 0
-    adaptive_rollback_target_source: str = ""
-    adaptive_rollback_log_gap: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
-
-
-class LateRescueControlMissingError(RuntimeError):
-    """Target curriculum_control JSON is missing during a restart transaction."""
-
-
-class LateRescueControlParseError(RuntimeError):
-    """Target curriculum_control JSON cannot be parsed during a restart transaction."""
-
-
-def _atomic_write_text(
-    path: Path,
-    payload: str,
-    *,
-    max_retries: int = 3,
-    retry_sleep_s: float = 0.05,
-) -> None:
-    """Atomically write text via unique tmp + os.replace with retries."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    last_err: Exception | None = None
-    for attempt in range(max(1, int(max_retries))):
-        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
-        try:
-            tmp.write_text(payload)
-            os.replace(str(tmp), str(path))
-            return
-        except (FileNotFoundError, OSError) as err:
-            last_err = err
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
-            if attempt + 1 < int(max_retries):
-                time.sleep(float(retry_sleep_s))
-                continue
-            raise
-    if last_err is not None:
-        raise last_err  # pragma: no cover (defensive)
-
-
-def write_curriculum_control_dict(
-    path: Path,
-    data: dict[str, Any],
-    *,
-    max_retries: int = 3,
-    retry_sleep_s: float = 0.05,
-) -> None:
-    """Atomically write a full control JSON dict (preserves unknown fields)."""
-    _atomic_write_text(
-        path,
-        json.dumps(data, indent=2),
-        max_retries=max_retries,
-        retry_sleep_s=retry_sleep_s,
-    )
 
 
 def write_curriculum_control(
@@ -421,12 +295,28 @@ def write_curriculum_control(
       * Up to ``max_retries`` attempts on transient ``OSError`` /
         ``FileNotFoundError`` (e.g. someone else just renamed our tmp).
     """
-    _atomic_write_text(
-        path,
-        json.dumps(state.to_json(), indent=2),
-        max_retries=max_retries,
-        retry_sleep_s=retry_sleep_s,
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(state.to_json(), indent=2)
+    last_err: Exception | None = None
+    for attempt in range(max(1, int(max_retries))):
+        tmp = path.parent / f"{path.stem}.{os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(payload)
+            os.replace(str(tmp), str(path))
+            return
+        except (FileNotFoundError, OSError) as err:
+            last_err = err
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            if attempt + 1 < int(max_retries):
+                time.sleep(float(retry_sleep_s))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err  # pragma: no cover (defensive)
 
 
 def read_curriculum_control(path: Path) -> CurriculumControlState | None:
@@ -438,34 +328,6 @@ def read_curriculum_control(path: Path) -> CurriculumControlState | None:
         return CurriculumControlState(**{k: v for k, v in data.items() if k in known})
     except Exception:
         return None
-
-
-def read_curriculum_control_required(path: Path) -> tuple[CurriculumControlState, dict[str, Any]]:
-    """Fail-closed read for restart / late-rescue transactions.
-
-    Returns ``(typed_state, raw_dict)`` so callers can update known fields while
-    preserving unknown JSON keys on write-back.
-    """
-    if not path.is_file():
-        raise LateRescueControlMissingError(
-            f"curriculum_control missing: {path}"
-        )
-    try:
-        raw = path.read_text()
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise LateRescueControlParseError(
-                f"curriculum_control is not a JSON object: {path}"
-            )
-    except LateRescueControlParseError:
-        raise
-    except Exception as exc:
-        raise LateRescueControlParseError(
-            f"curriculum_control parse failed: {path}: {exc}"
-        ) from exc
-    known = {f.name for f in CurriculumControlState.__dataclass_fields__.values()}
-    control = CurriculumControlState(**{k: v for k, v in data.items() if k in known})
-    return control, data
 
 
 def post_shrink_consolidation_active(
@@ -484,7 +346,6 @@ def apply_source_safe_consolidation_on_copy(
     num_envs: int,
     inherited_tolerance: float,
     inheritance_audit: dict[str, Any] | None = None,
-    require_existing: bool = False,
 ) -> None:
     """Phase A4 P3 (2026-06-09): on a source_safe cross/recovery copy.
 
@@ -502,17 +363,10 @@ def apply_source_safe_consolidation_on_copy(
 
     The control JSON is the single source of truth for the env loop
     (`apply_env_tolerance_curriculum`); we do NOT add any --*_resume flag.
-
-    When ``require_existing`` is True (restart / late-rescue transactions),
-    missing or unparseable control fails closed instead of creating defaults.
     """
     from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
 
-    if require_existing:
-        control, raw = read_curriculum_control_required(path)
-    else:
-        raw = None
-        control = read_curriculum_control(path) or CurriculumControlState()
+    control = read_curriculum_control(path) or CurriculumControlState()
     control.post_shrink_consolidation_until_restart_step = 0
     control.blocked_by_consolidation = False
     freeze_steps = env_frames_to_sim_steps(
@@ -528,12 +382,7 @@ def apply_source_safe_consolidation_on_copy(
         for k, v in inheritance_audit.items():
             if hasattr(control, k):
                 setattr(control, k, v)
-    if raw is not None:
-        # Preserve unknown fields from the original JSON document.
-        raw.update(control.to_json())
-        write_curriculum_control_dict(path, raw)
-    else:
-        write_curriculum_control(path, control)
+    write_curriculum_control(path, control)
 
 
 def mark_shrink_consumed(
@@ -561,14 +410,6 @@ def mark_shrink_consumed(
         control.pre_shrink_tolerance = float(pre_shrink_tolerance)
     if post_shrink_tolerance > 0.0:
         control.post_shrink_tolerance = float(post_shrink_tolerance)
-    # Confirm bridge shrink consumption so the observer may advance the
-    # per-level timer only after tolerance actually changed.
-    if float(getattr(control, "bridge_next_tolerance", 0.0) or 0.0) > 1e-9:
-        control.bridge_shrink_count = int(getattr(control, "bridge_shrink_count", 0) or 0) + 1
-        control.bridge_next_tolerance = 0.0
-        control.bridge_pending_next_tolerance = 0.0
-        control.bridge_level_timer_pending = False
-        control.just_shrank = True
     write_curriculum_control(path, control)
 
 
@@ -664,26 +505,6 @@ def apply_env_tolerance_curriculum(
 
     use_token = bool(pbt_single_shrink_per_window)
     may_shrink = control.shrink_token if use_token else control.allow_shrink
-
-    # The bridge value is observer-authoritative.  It is deliberately applied
-    # before multiplicative adaptive-fast logic so a rung cannot be skipped by
-    # a stale factor in a restarted worker.
-    if may_shrink and control.bridge_next_tolerance > 1e-9:
-        bridged = max(float(control.bridge_next_tolerance), target_tolerance)
-        bridged = min(bridged, initial_tolerance)
-        if bridged < float(success_tolerance) - 1e-12:
-            mark_shrink_consumed(
-                curriculum_control_path,
-                frames_since_restart=frames_since_restart,
-                consolidation_env_frames=max(
-                    int(post_shrink_consolidation_env_frames),
-                    int(control.adaptive_consolidation_frames or 0),
-                ),
-                num_envs=num_envs,
-                pre_shrink_tolerance=float(success_tolerance),
-                post_shrink_tolerance=bridged,
-            )
-            return bridged, frames_since_restart
 
     # Phase A4 P2 (2026-06-08): adaptive-fast may override the shrink factor
     # and consolidation length per-tick via the observer-written control

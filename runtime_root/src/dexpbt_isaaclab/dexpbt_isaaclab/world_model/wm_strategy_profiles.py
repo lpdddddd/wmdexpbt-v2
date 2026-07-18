@@ -28,9 +28,6 @@ PROFILE_IDS: dict[str, int] = {
     # Strategy Zoo v1.3 elite-centered performance profiles.
     "elite_bank_actor_distill_fast": 10,
     "elite_bank_actor_distill_strong": 11,
-    # Strategy Zoo v1.4/v1.5 elite clip-validation profiles.
-    "elite_bank_actor_distill_fast_v2": 12,
-    "elite_bank_actor_distill_strong_v2": 13,
     # Strategy Zoo v1.7 Online Elite-AWR profiles.
     "elite_bank_actor_distill_fast_awr": 14,
     "wm_pbt_source_selector_awr": 15,
@@ -40,13 +37,6 @@ PROFILE_IDS: dict[str, int] = {
     "unified_elite_wm_pbt": 18,
     "cser_dexpbt": 19,
     "cser_dexpbt_conservative": 20,
-    "cser_dexpbt_2cm_bridge": 21,
-    # Progress-Conditioned CSER-DexPBT — generalized, curriculum-agnostic method.
-    "cser_dexpbt_progress_refine": 22,
-    # Readiness-Adaptive CSER-DexPBT — bank-readiness / WM-graduation control.
-    "cser_dexpbt_readiness_adaptive": 23,
-    # Profile22 + chronic-bottom exploit / tolerance-aware bank / snippet WM belief.
-    "cser_dexpbt_progress_refine_abc": 24,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -76,12 +66,6 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
     "elite_bank_actor_distill_strong": (
         "Strong elite/archive actor distill for v1.3 performance runs (no MPPI)."
     ),
-    "elite_bank_actor_distill_fast_v2": (
-        "v1.4/v1.5 clip-mode elite distill (fast) with diagnostic 0.06 guidance band."
-    ),
-    "elite_bank_actor_distill_strong_v2": (
-        "v1.4/v1.5 clip-mode elite distill (strong) with diagnostic 0.06 guidance band."
-    ),
     "elite_bank_actor_distill_fast_awr": (
         "v1.3 fast elite distill + Online Elite-AWR (conservative lambda)."
     ),
@@ -107,21 +91,6 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "CSER-v0 conservative: same as cser_dexpbt but keeps low-weight "
         "EliteBank actor distill (elite,archive) as early fallback."
     ),
-    "cser_dexpbt_2cm_bridge": (
-        "CSER conservative with tolerance-local retention, 2cm ladder/probation, "
-        "and conservative late-degradation rescue."
-    ),
-    "cser_dexpbt_progress_refine": (
-        "CSER with row-wise progress-conditioned refinement, continuous "
-        "tolerance-conditioned retrieval, and adaptive curriculum-aware "
-        "population consolidation."
-    ),
-    "cser_dexpbt_readiness_adaptive": "Readiness-Adaptive CSER-DexPBT",
-    "cser_dexpbt_progress_refine_abc": (
-        "Profile22 + Experiment ABC: chronic-bottom PBT exploit, "
-        "tolerance-aware EliteSnippetBank broadcast merge, and snippet-WM "
-        "belief cache (flags independently ablatable)."
-    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -144,10 +113,6 @@ PROFILE_FAMILY: dict[str, str] = {
     "unified_elite_wm_pbt": "unified",
     "cser_dexpbt": "unified",
     "cser_dexpbt_conservative": "unified",
-    "cser_dexpbt_2cm_bridge": "unified",
-    "cser_dexpbt_progress_refine": "unified",
-    "cser_dexpbt_readiness_adaptive": "unified",
-    "cser_dexpbt_progress_refine_abc": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -170,9 +135,6 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "unified_elite_wm_pbt": 1.0,
     "cser_dexpbt": 1.0,
     "cser_dexpbt_conservative": 1.0,
-    "cser_dexpbt_progress_refine": 1.0,
-    "cser_dexpbt_readiness_adaptive": 1.0,
-    "cser_dexpbt_progress_refine_abc": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -636,38 +598,6 @@ _ELITE_BANK_ACTOR_DISTILL_STRONG: dict[str, Any] = {
     "eir_residual_apply_to_rollout": False,
 }
 
-_ELITE_BANK_ACTOR_DISTILL_FAST_V2: dict[str, Any] = {
-    **_ELITE_BANK_ACTOR_DISTILL_FAST,
-    "eir_actor_distill_large_delta_mode": "clip",
-    "eir_actor_distill_max_delta": 1.0,
-    "eir_actor_distill_target_delta_clip": 0.35,
-    "eir_actor_distill_min_margin": 0.0,
-    "eir_actor_distill_weight": 0.002,
-    "eir_actor_distill_loss_cap": 0.03,
-    "eir_residual_apply_to_rollout": False,
-    # Strategy Zoo v1.5 clip-validation: temporarily widen the guidance/bank band
-    # to 0.06 so the elite bank can fill (and teachers/soft-gate engage) before
-    # tol reaches the 0.04 floor. Diagnostic only; residual rollout stays OFF.
-    "eir_guidance_start_tol": 0.06,
-    "eir_guidance_bank_tol": 0.06,
-    "eir_guidance_apply_tol": 0.06,
-}
-
-_ELITE_BANK_ACTOR_DISTILL_STRONG_V2: dict[str, Any] = {
-    **_ELITE_BANK_ACTOR_DISTILL_STRONG,
-    "eir_actor_distill_large_delta_mode": "clip",
-    "eir_actor_distill_max_delta": 1.0,
-    "eir_actor_distill_target_delta_clip": 0.50,
-    "eir_actor_distill_min_margin": 0.0,
-    "eir_actor_distill_weight": 0.003,
-    "eir_actor_distill_loss_cap": 0.03,
-    "eir_residual_apply_to_rollout": False,
-    # Strategy Zoo v1.5 clip-validation: same diagnostic widening as fast_v2.
-    "eir_guidance_start_tol": 0.06,
-    "eir_guidance_bank_tol": 0.06,
-    "eir_guidance_apply_tol": 0.06,
-}
-
 # Strategy Zoo v1.7 — v13 exact + Online Elite-AWR (conservative first-run lambdas).
 _ELITE_BANK_ACTOR_DISTILL_FAST_AWR: dict[str, Any] = {
     **_ELITE_BANK_ACTOR_DISTILL_FAST,
@@ -806,250 +736,6 @@ _CSER_DEXPBT_CONSERVATIVE: dict[str, Any] = {
     "pre_floor_peak_guard_freeze_frames": 200_000_000,
 }
 
-_CSER_DEXPBT_2CM_BRIDGE: dict[str, Any] = {
-    **_CSER_DEXPBT_CONSERVATIVE,
-    "same_tol_retention_enable": True,
-    "same_tol_retention_bins": "0.030,0.025,0.022,0.020,0.018",
-    "same_tol_retention_min_samples": 3,
-    "same_tol_retention_warmup_ticks": 3,
-    "same_tol_retention_reset_on_lineage_change": True,
-    "same_tol_retention_reset_on_cross_copy": True,
-    "same_tol_retention_keep_on_rollback": False,
-    "bridge_curriculum_enable": True,
-    "bridge_curriculum_start_tol": 0.025,
-    "bridge_curriculum_probation_tol": 0.0205,
-    "bridge_curriculum_target_tol": 0.018,
-    "bridge_curriculum_mode": "ladder",
-    "bridge_tolerance_ladder": "0.025,0.0235,0.022,0.021,0.0205,0.020,0.0195,0.019,0.0185,0.018",
-    "bridge_min_same_tol_retention": 0.90,
-    "bridge_min_stable_ticks": 4,
-    "bridge_min_frames_per_level": 150_000_000,
-    "bridge_post_shrink_consolidation_frames": 200_000_000,
-    "bridge_probation_enable": True,
-    "bridge_probation_entry_tol": 0.0205,
-    "bridge_probation_frames": 400_000_000,
-    "bridge_probation_min_ticks": 4,
-    "bridge_probation_block_further_shrink": True,
-    "bridge_probation_block_ordinary_rollback": True,
-    "bridge_probation_allow_hard_collapse_rollback": True,
-    "bridge_probation_hard_collapse_mean": 3.0,
-    "bridge_probation_hard_collapse_patience": 4,
-    "snippet_adjacent_stage_mixing_enable": True,
-    "snippet_primary_stage_fraction": 0.70,
-    "snippet_adjacent_stage_fraction": 0.30,
-    "snippet_tolerance_compatibility_enable": True,
-    "snippet_tolerance_max_gap": 0.004,
-    "snippet_tolerance_soft_scale": 0.002,
-    "snippet_min_primary_candidates": 8,
-    "snippet_fallback_to_adjacent_when_sparse": True,
-    "late_degradation_rescue_enable": True,
-    "late_degradation_rescue_tol_threshold": 0.022,
-    "late_degradation_rescue_peak_threshold": 30.0,
-    "late_degradation_rescue_current_mean_threshold": 22.0,
-    "late_degradation_rescue_retention_threshold": 0.65,
-    "late_degradation_rescue_patience": 3,
-    "late_degradation_rescue_max_tol_gap": 0.002,
-    "late_degradation_rescue_cooldown_frames": 300_000_000,
-    "late_degradation_rescue_max_per_policy": 1,
-    "late_degradation_rescue_source_min_mean": 28.0,
-    "late_degradation_rescue_min_source_advantage": 8.0,
-    "late_degradation_rescue_source_min_retention": 0.85,
-    "late_degradation_rescue_reject_collapse_source": True,
-    "late_degradation_rescue_require_source_control": True,
-    "late_degradation_rescue_bypass_elimination_burnin": False,
-    # These are enforced by the new launcher; retaining the hard-off values
-    # here makes profile expansion restart-safe.
-    "pbt_allow_mid_self_mutation": False,
-    "pbt_wm_profile_copy_enable": False,
-    "awr_enable": False,
-    "eir_residual_apply_to_rollout": False,
-    "eir_use_rssm_mppi": False,
-    "eir_mppi_mode": "off",
-}
-
-_CSER_DEXPBT_PROGRESS_REFINE: dict[str, Any] = {
-    # Inherit the *generic* conservative substrate (elite snippet bank, first-step
-    # distillation, WM calibration rerank, actor-distill fallback, PBT source
-    # safety, conservative consolidation, hard safety flags) but NOT the 2cm
-    # bridge / fixed-ladder / fixed-threshold rescue control plane.
-    **_CSER_DEXPBT_CONSERVATIVE,
-    # --- turn OFF the fixed-ladder / fixed-threshold control plane ---
-    "bridge_curriculum_enable": False,
-    "bridge_probation_enable": False,
-    "same_tol_retention_enable": False,
-    "late_degradation_rescue_enable": False,
-    "late_floor_retention_gate_enable": False,
-    "pre_floor_peak_guard_enable": False,
-    "snippet_adjacent_stage_mixing_enable": False,
-    # --- progress-conditioned refinement gate ---
-    "progress_refinement_enable": True,
-    "progress_refinement_history_steps": 8,
-    "progress_refinement_proximity_temperature": 1.0,
-    "progress_refinement_progress_margin": 0.02,
-    "progress_refinement_progress_temperature": 0.05,
-    "progress_refinement_oscillation_enable": True,
-    "progress_refinement_oscillation_center": 0.10,
-    "progress_refinement_oscillation_temperature": 0.05,
-    "progress_refinement_start_after_frames": 300_000_000,
-    "progress_refinement_ramp_frames": 300_000_000,
-    "progress_refinement_only_lifted": True,
-    "progress_refinement_min_gate_for_retrieval": 0.05,
-    "progress_refinement_max_active_fraction": 0.35,
-    "progress_refinement_teacher_margin_temperature": 0.05,
-    "progress_refinement_min_teacher_confidence": 0.05,
-    "progress_refinement_detach_gate": True,
-    # --- relative-tolerance recovery labels ---
-    "eir_dhat_margin_mode": "relative_tol",
-    "eir_dhat_improve_margin_relative": 0.25,
-    "eir_drop_dhat_margin_relative": 0.50,
-    # --- continuous log-relative tolerance retrieval ---
-    "snippet_tolerance_compatibility_enable": True,
-    "snippet_tolerance_compatibility_mode": "log_relative",
-    "snippet_tolerance_max_log_gap": 0.20,
-    "snippet_tolerance_log_soft_scale": 0.10,
-    "snippet_retrieve_lambda_sim": 1.0,
-    "snippet_retrieve_lambda_priority": 0.5,
-    "snippet_retrieve_lambda_tol": 0.5,
-    "snippet_retrieve_lambda_progress": 0.25,
-    "snippet_progress_priority_weight": 0.5,
-    # --- adaptive curriculum-progress consolidation + probation + rescue ---
-    "adaptive_precision_consolidation_enable": True,
-    "pbt_consolidation_schedule_mode": "curriculum_progress",
-    "adaptive_consolidation_stage_consolidation_progress": 0.50,
-    "adaptive_consolidation_stage_selection_progress": 0.85,
-    "adaptive_probation_min_frames": 200_000_000,
-    "adaptive_probation_min_stable_ticks": 4,
-    "adaptive_probation_min_same_level_retention": 0.90,
-    "adaptive_rescue_enable": True,
-    "adaptive_rescue_retention_threshold": 0.70,
-    "adaptive_rescue_degradation_patience": 3,
-    # Top 40% of ranked population may be adaptive rescue sources
-    # (6 policies → ceil(0.40*6)=3). CLI alias adaptive_rescue_population_quantile
-    # still maps to top_fraction = 1 - quantile when only the alias is set.
-    "adaptive_rescue_source_top_fraction": 0.40,
-    "adaptive_rescue_population_quantile": 0.60,
-    "adaptive_rescue_source_min_retention": 0.85,
-    "adaptive_rescue_min_source_advantage_sigma": 1.0,
-    "adaptive_rescue_max_log_tol_gap": 0.20,
-    "adaptive_rescue_cooldown_frames": 300_000_000,
-    "adaptive_rescue_max_per_lineage": 1,
-    "adaptive_probation_rollback_max_log_gap": 0.30,
-    "adaptive_probation_freeze_only_max_ticks": 3,
-    "adaptive_rescue_source_min_samples": 3,
-    "adaptive_rescue_source_min_stable_ticks": 2,
-    "adaptive_rescue_source_max_staleness_frames": 40_000_000,
-    "adaptive_rescue_require_lineage_match_with_checkpoint": True,
-    "adaptive_rescue_archive_enable": True,
-    "adaptive_rescue_archive_max_age_frames": 1_000_000_000,
-    "adaptive_rescue_archive_require_retention": True,
-    "adaptive_rescue_archive_min_nsucc_mean": 0.0,
-    "adaptive_rescue_archive_min_nsucc_max": 5.0,
-    "adaptive_rescue_archive_require_age": True,
-    "adaptive_rescue_archive_require_collapse_metadata": True,
-    "adaptive_rescue_archive_require_quality_score": True,
-    "adaptive_rescue_archive_min_population_samples": 2,
-    "adaptive_rescue_archive_advantage_sigma_floor": 1.0,
-    "adaptive_rescue_archive_min_absolute_advantage": 5.0,
-    "adaptive_rescue_bypass_elimination_burnin": False,
-    "adaptive_rescue_bypass_on_hard_collapse": True,
-    "adaptive_rescue_min_frames_before_emergency_bypass": 40_000_000,
-    "adaptive_rescue_emergency_require_archive_or_stable_source": True,
-    # --- hard-off guards (defense in depth vs restart pollution) ---
-    "pbt_allow_mid_self_mutation": False,
-    "pbt_wm_profile_copy_enable": False,
-    "awr_enable": False,
-    "eir_residual_apply_to_rollout": False,
-    "eir_use_rssm_mppi": False,
-    "eir_mppi_mode": "off",
-    # Experiment ABC remain OFF on Profile22 (ablation safety / restart purity).
-    "pbt_enable_chronic_bottom_exploit": False,
-    "eir_tolerance_aware_bank_broadcast": False,
-    "eir_enable_belief_for_snippet_wm_rerank": False,
-}
-
-_CSER_DEXPBT_PROGRESS_REFINE_ABC: dict[str, Any] = {
-    **_CSER_DEXPBT_PROGRESS_REFINE,
-    # Experiment A — chronic-bottom PBT exploit (independent of adaptive rescue).
-    "pbt_enable_chronic_bottom_exploit": True,
-    "pbt_chronic_min_bottom_frames": 200_000_000,
-    "pbt_chronic_min_bottom_ticks": 5,
-    "pbt_chronic_min_score_gap": 0.15,
-    "pbt_chronic_cooldown_frames": 400_000_000,
-    "pbt_chronic_max_copies_per_lineage": 1,
-    # Experiment B — tolerance-aware elite snippet bank broadcast consume.
-    "eir_tolerance_aware_bank_broadcast": True,
-    "eir_preserve_local_bank_fraction": 0.20,
-    # Experiment C — build RSSM belief when snippet WM rerank is enabled.
-    "eir_enable_belief_for_snippet_wm_rerank": True,
-}
-
-_CSER_DEXPBT_READINESS_ADAPTIVE: dict[str, Any] = {
-    **_CSER_DEXPBT_PROGRESS_REFINE,
-    # readiness
-    "readiness_adaptive_enable": True,
-    "readiness_min_frames": 100_000_000,
-    "readiness_bank_size_low": 1000,
-    "readiness_bank_size_full": 3000,
-    "readiness_coverage_target": 0.20,
-    "readiness_coverage_ema_beta": 0.9,
-    "readiness_enter_threshold": 0.50,
-    "readiness_exit_threshold": 0.20,
-    "readiness_required_windows": 2,
-    "readiness_ramp_frames": 150_000_000,
-    "readiness_eval_interval_frames": 10_000_000,
-    "readiness_shadow_retrieval_fraction": 0.05,
-    # disable fixed 300M start/ramp for progress refine — readiness drives ramp via override
-    "progress_refinement_start_after_frames": 0,
-    "progress_refinement_ramp_frames": 1,  # ramp replaced by r_refine override when readiness on
-    # WM graduation
-    "wm_graduation_enable": True,
-    "wm_graduation_required_passes": 2,
-    "wm_graduation_early_until_frames": 500_000_000,
-    "wm_graduation_early_eval_interval_frames": 25_000_000,
-    "wm_graduation_late_eval_interval_frames": 50_000_000,
-    "wm_graduation_early_beta_up": 0.7,
-    "wm_graduation_late_beta_up": 0.9,
-    "wm_graduation_beta_down": 0.5,
-    "wm_graduation_early_alpha_cap": 0.5,
-    "wm_graduation_late_alpha_cap": 1.0,
-    "wm_graduation_min_valid_prediction_frac": 0.90,
-    # ESS distill
-    "readiness_bootstrap_distill_weight": 0.001,
-    "readiness_calibrated_distill_weight": 0.0015,
-    "readiness_ess_target": 128.0,
-    "readiness_ess_min_for_update": 8.0,
-    # Adaptive PBT accelerate
-    "adaptive_consolidation_stage_consolidation_progress": 0.45,
-    "adaptive_consolidation_stage_selection_progress": 0.80,
-    "adaptive_lineage_diversity_enable": True,
-    "adaptive_min_distinct_lineages_exploration": 3,
-    "adaptive_min_distinct_lineages_consolidation": 2,
-    "adaptive_min_distinct_lineages_selection": 1,
-    "adaptive_replacement_budget_exploration": 1,
-    "adaptive_replacement_budget_consolidation": 1,
-    "adaptive_replacement_budget_selection": 2,
-    "adaptive_probation_stage_aware_enable": True,
-    "adaptive_probation_min_frames_exploration": 75_000_000,
-    "adaptive_probation_min_frames_other": 100_000_000,
-    "adaptive_probation_max_frames": 200_000_000,
-    "adaptive_probation_min_stable_ticks_exploration": 2,
-    "adaptive_probation_min_stable_ticks_other": 3,
-    "adaptive_probation_early_exit_retention": 0.97,
-    "adaptive_probation_normal_exit_retention": 0.92,
-    # also set legacy probation fields to exploration defaults for safety
-    "adaptive_probation_min_frames": 75_000_000,
-    "adaptive_probation_min_stable_ticks": 2,
-    "adaptive_probation_min_same_level_retention": 0.92,
-    "adaptive_rescue_degradation_patience": 2,
-    "adaptive_rescue_cooldown_frames": 150_000_000,
-    "adaptive_rescue_max_per_lineage": 1,
-    "adaptive_rescue_source_freshness_mode": "exp_decay",
-    "adaptive_rescue_source_freshness_tau_frames": 80_000_000,
-    "adaptive_rescue_source_hard_max_age_frames": 160_000_000,
-    # Keep max_staleness aligned with hard max for peer sidecar gate
-    "adaptive_rescue_source_max_staleness_frames": 160_000_000,
-}
-
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -1063,8 +749,6 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "light_conservative_rssm_planner_distill": _LIGHT_CONSERVATIVE_RSSM_PLANNER,
     "elite_bank_actor_distill_fast": _ELITE_BANK_ACTOR_DISTILL_FAST,
     "elite_bank_actor_distill_strong": _ELITE_BANK_ACTOR_DISTILL_STRONG,
-    "elite_bank_actor_distill_fast_v2": _ELITE_BANK_ACTOR_DISTILL_FAST_V2,
-    "elite_bank_actor_distill_strong_v2": _ELITE_BANK_ACTOR_DISTILL_STRONG_V2,
     "elite_bank_actor_distill_fast_awr": _ELITE_BANK_ACTOR_DISTILL_FAST_AWR,
     "wm_pbt_source_selector_awr": _WM_PBT_SOURCE_SELECTOR_AWR,
     "elite_bank_actor_distill_awr": _ELITE_BANK_ACTOR_DISTILL_AWR,
@@ -1072,10 +756,6 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "unified_elite_wm_pbt": _UNIFIED_ELITE_WM_PBT,
     "cser_dexpbt": _CSER_DEXPBT,
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
-    "cser_dexpbt_2cm_bridge": _CSER_DEXPBT_2CM_BRIDGE,
-    "cser_dexpbt_progress_refine": _CSER_DEXPBT_PROGRESS_REFINE,
-    "cser_dexpbt_readiness_adaptive": _CSER_DEXPBT_READINESS_ADAPTIVE,
-    "cser_dexpbt_progress_refine_abc": _CSER_DEXPBT_PROGRESS_REFINE_ABC,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

@@ -1,6 +1,0 @@
-status=stopped
-attempt=2
-attempt_name=attempt_2_2026-06-09_18-35-24
-end_time=2026-06-09T19:40:19+08:00
-exit_code=0
-checkpoint=/root/autodl-tmp/wmdexpbt/results/regrasping_fixed_rssm_iterative_shadow_800m_20260609_165636/policy_02/rl_games/attempt_2_2026-06-09_18-35-24/nn/last_DexPBTKukaAllegroLSTMPPO_ep_6112_rew__51589.484_.pth

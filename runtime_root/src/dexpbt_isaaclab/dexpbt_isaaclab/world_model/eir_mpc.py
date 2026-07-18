@@ -15,9 +15,8 @@ comes from elite / archive memory rather than Gaussian noise.
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -823,7 +822,6 @@ class EIRBridge:
     snippet_wm_rerank_cfg: Any = None
     wm_calibration_enable: bool = False
     wm_calibration_state: Any = None
-    wm_horizon_steps: tuple = (4, 8)
     rssm_reranker: Any = None
     capture: Any = None  # ERDCapture (actor_mlp forward output)
     agent_ref: Any = None
@@ -902,17 +900,6 @@ class EIRBridge:
     last_snippet_distill_active_frac: float = 0.0
     last_snippet_wm_rerank_changed_frac: float = 0.0
     last_snippet_wm_rerank_wm_term_mean: float = 0.0
-    last_snippet_wm_rerank_valid_frac: float = 0.0
-    last_snippet_wm_rerank_fallback_frac: float = 0.0
-    last_snippet_wm_rerank_predict_error_count: float = 0.0
-    last_snippet_nonfinite_candidate_row_frac: float = 0.0
-    # Progress-conditioned refinement telemetry.
-    progress_refine_cfg: Any = None
-    last_progress_refine: dict = field(default_factory=dict)
-    # Profile 23 readiness-adaptive control (defaults OFF / inert).
-    readiness_adaptive_cfg: Any = None
-    readiness_adaptive_state: Any = None
-    last_readiness_adaptive: dict = field(default_factory=dict)
     last_bank_metrics: dict = field(default_factory=dict)
     last_bank_update_diagnostics: dict = field(default_factory=dict)
     last_bank_feature_source: int = 0
@@ -1231,639 +1218,11 @@ def _belief_for_risky_rows(
     return None
 
 
-@contextmanager
-def _temporary_bank_tolerance_cfg(
-    bank: Any,
-    *,
-    max_log_gap: float,
-    soft_scale: float,
-) -> Iterator[None]:
-    """Temporarily override bank log-relative tolerance knobs; always restore."""
-    if bank is None or not hasattr(bank, "cfg"):
-        yield
-        return
-    cfg = bank.cfg
-    gap_restore = None
-    soft_restore = None
-    try:
-        if hasattr(cfg, "tolerance_max_log_gap"):
-            gap_restore = float(cfg.tolerance_max_log_gap)
-            cfg.tolerance_max_log_gap = float(max_log_gap)
-        if hasattr(cfg, "tolerance_log_soft_scale"):
-            soft_restore = float(cfg.tolerance_log_soft_scale)
-            cfg.tolerance_log_soft_scale = float(soft_scale)
-        yield
-    finally:
-        if gap_restore is not None:
-            cfg.tolerance_max_log_gap = float(gap_restore)
-        if soft_restore is not None:
-            cfg.tolerance_log_soft_scale = float(soft_restore)
-
-
 def _alpha_wm_from_bridge(bridge: EIRBridge) -> float:
     st = getattr(bridge, "wm_calibration_state", None)
     if isinstance(st, dict):
         return float(st.get("alpha_wm", 0.0))
     return float(getattr(st, "alpha_wm", 0.0))
-
-
-def _compute_snippet_distill_loss_progress(
-    bridge: EIRBridge,
-    *,
-    eir_cfg: EIRConfig,
-    cache: Any,
-    feat: torch.Tensor,
-    risky: torch.Tensor,
-    frames: int,
-    start: int,
-    end: int,
-) -> torch.Tensor:
-    """Progress-conditioned snippet distillation (cser_dexpbt_progress_refine).
-
-    Row weight is ``w_t = g_t * c_teacher_t * I_retrieval_t`` where ``g_t`` is the
-    scale-invariant progress gate, ``c_teacher_t`` the continuous teacher
-    confidence, and ``I_retrieval_t`` the per-row retrieval-valid indicator.
-    Retrieval uses the batched log-relative tolerance API and is only run for
-    rows whose gate clears the retrieval budget (compute-budget control); the
-    gate statistics are computed over all risky rows.
-    """
-    from .snippet_distill import compute_snippet_distill_loss
-    from .snippet_wm_reranker import (
-        effective_alpha_wm,
-        mean_squared_action_delta,
-        normalize_priority_scores,
-        score_snippet_candidates,
-        wm_head_probs_for_candidates,
-    )
-    from .progress_conditioned_refinement import (
-        compute_refinement_gate,
-        select_retrieval_rows,
-        teacher_confidence,
-    )
-    from dataclasses import replace as _dc_replace
-
-    pcfg = bridge.progress_refine_cfg
-    sd_cfg = bridge.snippet_distill_cfg
-    bank = bridge.snippet_bank
-    dev, dtype = feat.device, feat.dtype
-    zero = feat.new_zeros(())
-
-    # Profile-23 readiness adaptive (optional; default OFF keeps Profile-22 path).
-    ra_cfg = getattr(bridge, "readiness_adaptive_cfg", None)
-    ra_enabled = bool(
-        ra_cfg is not None and getattr(ra_cfg, "readiness_adaptive_enable", False)
-    )
-    ra_state = getattr(bridge, "readiness_adaptive_state", None)
-    time_ramp_override = None
-    active_budget_override = None
-    readiness_weight_override = None  # when set, replaces sd_cfg.weight entirely
-    force_alpha_wm_zero = False
-    graduated_alpha = None
-
-    def _slice(name: str) -> Optional[torch.Tensor]:
-        t = getattr(cache, name, None)
-        if t is None:
-            return None
-        return t[start:end].to(device=dev)[risky]
-
-    norm_err = _slice("normalized_error_flat")
-    recent = _slice("recent_progress_flat")
-    osc = _slice("oscillation_flat")
-    hist = _slice("progress_history_valid_flat")
-    if norm_err is None or hist is None:
-        bridge.last_actor_distill_fallback_reason = "progress_context_missing"
-        bridge.last_snippet_distill_loss = 0.0
-        bridge.last_progress_refine = {"progress_refine/fallback_frac": 1.0}
-        return zero
-    if recent is None:
-        recent = torch.zeros_like(norm_err)
-    if osc is None:
-        osc = torch.zeros_like(norm_err)
-    lifted = None
-    if getattr(cache, "lifted_flat", None) is not None:
-        lifted = cache.lifted_flat[start:end].to(device=dev)[risky]
-    tol_r = cache.success_tol_flat[start:end].to(device=dev)[risky].float()
-    feat_r = feat.detach()[risky]
-    R = int(feat_r.shape[0])
-
-    if ra_enabled:
-        from .readiness_adaptive import (
-            PHASE_CALIBRATED_REFINEMENT,
-            PHASE_PRIORITY_BOOTSTRAP,
-            PHASE_WARMUP,
-            ReadinessAdaptiveState,
-            accumulate_ready_frames,
-            bank_readiness,
-            bank_size_readiness,
-            coverage_readiness,
-            dynamic_active_budget,
-            dynamic_max_log_gap,
-            dynamic_soft_scale,
-            ess_and_scale,
-            evaluate_bank_ready_windows,
-            phase_lambda,
-            refinement_ramp,
-            select_shadow_indices,
-            sync_phase,
-            telemetry as readiness_telemetry,
-            update_coverage_ema,
-        )
-
-        if ra_state is None:
-            ra_state = ReadinessAdaptiveState()
-            bridge.readiness_adaptive_state = ra_state
-        elif isinstance(ra_state, dict):
-            ra_state = ReadinessAdaptiveState.from_dict(ra_state)
-            bridge.readiness_adaptive_state = ra_state
-
-        bank_size = float(getattr(bank, "size", 0) or 0) if bank is not None else 0.0
-        r_size = bank_size_readiness(
-            bank_size,
-            float(ra_cfg.readiness_bank_size_low),
-            float(ra_cfg.readiness_bank_size_full),
-        )
-        r_cov = coverage_readiness(
-            float(ra_state.coverage_ema), float(ra_cfg.readiness_coverage_target)
-        )
-        r_bank = bank_readiness(r_size, r_cov)
-        ra_state.last_bank_size_readiness = float(r_size)
-        ra_state.last_coverage_readiness = float(r_cov)
-        ra_state.last_bank_readiness = float(r_bank)
-        ra_state = accumulate_ready_frames(ra_state, frames=int(frames), cfg=ra_cfg)
-
-        # Periodic readiness windows (all phases). Shadow coverage only in WARMUP.
-        readiness_eval_due = (
-            int(frames) - int(ra_state.last_readiness_eval_frame)
-            >= int(ra_cfg.readiness_eval_interval_frames)
-        )
-        if readiness_eval_due:
-            if int(ra_state.phase) == PHASE_WARMUP:
-                hist_m = hist.float() > 0.5
-                if lifted is not None:
-                    eligible = hist_m & (lifted.float() > 0.5)
-                else:
-                    eligible = hist_m
-                shadow_idx = select_shadow_indices(
-                    eligible,
-                    float(ra_cfg.readiness_shadow_retrieval_fraction),
-                )
-                coverage_obs = 0.0
-                if (
-                    bank is not None
-                    and int(getattr(bank, "size", 0) or 0) > 0
-                    and int(shadow_idx.numel()) > 0
-                ):
-                    # Shadow uses current bank cfg; no readiness tol override needed.
-                    res = bank.retrieve_candidates_batched(
-                        feat_r[shadow_idx],
-                        query_tolerance=tol_r[shadow_idx],
-                        normalized_error=norm_err[shadow_idx],
-                        recent_progress=recent[shadow_idx],
-                        k=int(getattr(sd_cfg, "topk", 8)),
-                    )
-                    coverage_obs = float(res.valid_mask.float().mean().item())
-                ra_state.coverage_ema = update_coverage_ema(
-                    float(ra_state.coverage_ema),
-                    float(coverage_obs),
-                    float(ra_cfg.readiness_coverage_ema_beta),
-                )
-                r_cov = coverage_readiness(
-                    float(ra_state.coverage_ema),
-                    float(ra_cfg.readiness_coverage_target),
-                )
-                r_bank = bank_readiness(r_size, r_cov)
-                ra_state.last_coverage_readiness = float(r_cov)
-                ra_state.last_bank_readiness = float(r_bank)
-            ra_state = evaluate_bank_ready_windows(
-                ra_state, frames=int(frames), r_bank=float(r_bank), cfg=ra_cfg
-            )
-        ra_state = sync_phase(ra_state)
-        bridge.readiness_adaptive_state = ra_state
-
-        if int(ra_state.phase) == PHASE_WARMUP:
-            # Shadow / coverage only; no WM, no distill loss.
-            bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
-            bridge.last_snippet_distill_loss = 0.0
-            bridge.last_progress_refine = {
-                "progress_refine/fallback_frac": 0.0,
-                "progress_refine/gate_mean": 0.0,
-                "progress_refine/active_frac": 0.0,
-            }
-            return zero
-
-        # Phase 1 / 2: readiness-driven ramp + dynamic budget.
-        r_refine = refinement_ramp(
-            int(ra_state.ready_accumulated_frames),
-            int(ra_cfg.readiness_ramp_frames),
-            float(r_bank),
-        )
-        ra_state.last_refinement_ramp = float(r_refine)
-        time_ramp_override = float(r_refine)
-        active_budget_override = float(dynamic_active_budget(r_refine))
-        ra_state.last_active_budget = float(active_budget_override)
-        ra_state.last_max_log_gap = float(dynamic_max_log_gap(r_bank))
-        ra_state.last_soft_scale = float(dynamic_soft_scale(r_bank))
-        if int(ra_state.phase) == PHASE_PRIORITY_BOOTSTRAP:
-            force_alpha_wm_zero = True
-        elif int(ra_state.phase) == PHASE_CALIBRATED_REFINEMENT:
-            graduated_alpha = float(ra_state.last_alpha_effective)
-        readiness_weight_override = True  # signal ESS path below
-        bridge.readiness_adaptive_state = ra_state
-
-    gate_res = compute_refinement_gate(
-        normalized_error=norm_err,
-        recent_progress=recent,
-        oscillation=osc,
-        history_valid=hist,
-        frames=int(frames),
-        cfg=pcfg,
-        lifted=lifted,
-        time_ramp_override=time_ramp_override,
-    )
-    gate = gate_res.gate.to(dtype)
-    retr_mask, budget_frac = select_retrieval_rows(
-        gate, pcfg, max_active_fraction=active_budget_override
-    )
-
-    # Bank log-gap/soft-scale overrides apply only for the retrieve call and are
-    # always restored via context manager (including on exceptions).
-    _bank_tol_cm = (
-        _temporary_bank_tolerance_cfg(
-            bank,
-            max_log_gap=float(ra_state.last_max_log_gap),
-            soft_scale=float(ra_state.last_soft_scale),
-        )
-        if ra_enabled and bank is not None
-        else nullcontext()
-    )
-
-    a2c = _get_a2c_network(bridge.agent_ref)
-
-    def _mu_fn(f):
-        mu = a2c.mu(f)
-        mu_act = getattr(a2c, "mu_act", None)
-        return mu_act(mu) if mu_act is not None else mu
-
-    mu_r = _mu_fn(feat_r).detach()
-    action_dim = int(mu_r.shape[-1])
-    teacher_first = mu_r.clone()  # zero-weight rows stay no-ops (teacher == actor)
-    retrieval_valid = torch.zeros(R, device=dev, dtype=dtype)
-    conf = torch.zeros(R, device=dev, dtype=dtype)
-    fallback_rows = 0
-
-    sel_idx = retr_mask.nonzero(as_tuple=False).reshape(-1)
-    rerank_changed_frac = 0.0
-    wm_term_mean = 0.0
-    retr_diag: dict[str, float] = {}
-    rerank_diag: dict[str, float] = {}
-    score_selected: Optional[torch.Tensor] = None
-    score_actor_proxy: Optional[torch.Tensor] = None
-    c_diag: dict[str, float] = {}
-    nonfinite_candidate_row_frac = 0.0
-    nonfinite_candidate_row_count = 0
-    if int(sel_idx.numel()) > 0:
-        with _bank_tol_cm:
-            res = bank.retrieve_candidates_batched(
-                feat_r[sel_idx],
-                query_tolerance=tol_r[sel_idx],
-                normalized_error=norm_err[sel_idx],
-                recent_progress=recent[sel_idx],
-                k=int(getattr(sd_cfg, "topk", 8)),
-            )
-        retr_diag = dict(res.diagnostics)
-        cand_first = res.actions[:, :, 0, :]  # [n, k, A]
-        pri = res.priority  # [n, k]
-        mu_sel = mu_r[sel_idx]  # [n, A]
-        action_delta = mean_squared_action_delta(cand_first, mu_sel)  # [n, k]
-        retrieval_data_row_valid = (
-            torch.isfinite(pri).all(dim=1)
-            & torch.isfinite(cand_first).all(dim=(1, 2))
-            & torch.isfinite(action_delta).all(dim=1)
-        )
-        nonfinite_candidate_row_frac = float((~retrieval_data_row_valid).float().mean().item())
-        nonfinite_candidate_row_count = int((~retrieval_data_row_valid).sum().item())
-
-        # Default before (and when) WM reranker is unavailable: normalized
-        # priority for both selection and teacher confidence. Ranking matches
-        # raw priority on ordinary finite inputs; scale matches WM-active rows.
-        # Must run before the rerank_cfg check so rerank_cfg=None / enabled=False
-        # never fall back to raw priority scores. reason=11 until WM activates.
-        candidate_score = normalize_priority_scores(pri)
-        best_idx = candidate_score.argmax(dim=1)
-        unc = None
-        wm_valid_mask = None
-        wm_row_active = None
-        alpha_wm = effective_alpha_wm(
-            wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
-            alpha_wm=_alpha_wm_from_bridge(bridge),
-        )
-        if force_alpha_wm_zero:
-            alpha_wm = 0.0
-        elif graduated_alpha is not None:
-            alpha_wm = float(graduated_alpha)
-        rerank_cfg = bridge.snippet_wm_rerank_cfg
-        rerank_diag: dict[str, float] = {
-            "snippet_wm_rerank/changed_frac": 0.0,
-            "snippet_wm_rerank/changed_frac_overall": 0.0,
-            "snippet_wm_rerank/changed_frac_given_active": 0.0,
-            "snippet_wm_rerank/wm_term_mean": 0.0,
-            "snippet_wm_rerank/action_delta_mean": 0.0,
-            "snippet_wm_rerank/action_penalty_mean": 0.0,
-            "snippet_wm_rerank/candidate_valid_frac": 0.0,
-            "snippet_wm_rerank/row_prediction_valid_frac": 0.0,
-            "snippet_wm_rerank/row_active_frac": 0.0,
-            "snippet_wm_rerank/row_fallback_frac": 1.0,
-            "snippet_wm_rerank/valid_frac": 0.0,
-            "snippet_wm_rerank/fallback_frac": 1.0,
-            "snippet_wm_rerank/predict_error_count": 0.0,
-            "snippet_wm_rerank/fallback_reason_id": 11.0,
-        }
-        if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
-            if float(alpha_wm) > 0.0:
-                belief_r = _belief_for_risky_rows(
-                    bridge, start=start, end=end, risky=risky, device=dev, dtype=dtype
-                )
-                belief_sel = belief_r[sel_idx] if belief_r is not None else None
-                p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
-                    belief_flat=belief_sel,
-                    cand_first_actions=cand_first,
-                    predict_fn=bridge.rssm_predict_fn,
-                    horizon_steps=tuple(
-                        getattr(
-                            bridge,
-                            "wm_horizon_steps",
-                            getattr(rerank_cfg, "horizon_steps", (4, 8)),
-                        )
-                    ),
-                )
-                predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
-                rerank_diag.update(wm_diag)
-                best_idx, candidate_score, score_diag, row_wm_active_scored = score_snippet_candidates(
-                    priority=pri,
-                    p_recovery=p_rec,
-                    p_success=p_succ,
-                    p_drop=p_drop,
-                    uncertainty=unc,
-                    action_delta=action_delta,
-                    alpha_wm=alpha_wm,
-                    cfg=rerank_cfg,
-                    wm_valid_mask=wm_valid_mask,
-                )
-                rerank_diag.update(score_diag)
-                # Keep predict-path reason when scoring only reports generic invalid.
-                score_reason = float(score_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
-                if score_reason in (6.0, 12.0) and predict_reason in (
-                    1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 9.0,
-                ):
-                    rerank_diag["snippet_wm_rerank/fallback_reason_id"] = predict_reason
-                # Align confidence WM-active with scorer + retrieval data validity.
-                wm_row_active = row_wm_active_scored & retrieval_data_row_valid
-                if int(sel_idx.numel()) > 0:
-                    rerank_diag["snippet_wm_rerank/row_active_frac"] = float(
-                        wm_row_active.float().mean().item()
-                    )
-                    rerank_diag["snippet_wm_rerank/row_fallback_frac"] = float(
-                        (~wm_row_active).float().mean().item()
-                    )
-                    rerank_diag["snippet_wm_rerank/valid_frac"] = float(
-                        wm_row_active.float().mean().item()
-                    )
-                    rerank_diag["snippet_wm_rerank/fallback_frac"] = float(
-                        (~wm_row_active).float().mean().item()
-                    )
-            else:
-                # Uncalibrated / alpha=0: do not call WM predict; still score via
-                # normalized priority so confidence scale matches WM-active rows.
-                best_idx, candidate_score, score_diag, _row_active = score_snippet_candidates(
-                    priority=pri,
-                    p_recovery=torch.zeros_like(pri),
-                    p_success=torch.zeros_like(pri),
-                    p_drop=torch.zeros_like(pri),
-                    uncertainty=torch.ones_like(pri),
-                    action_delta=action_delta,
-                    alpha_wm=0.0,
-                    cfg=rerank_cfg,
-                    wm_valid_mask=None,
-                )
-                rerank_diag.update(score_diag)
-                rerank_diag["snippet_wm_rerank/fallback_reason_id"] = 11.0
-            rerank_changed_frac = float(
-                rerank_diag.get(
-                    "snippet_wm_rerank/changed_frac_overall",
-                    rerank_diag.get("snippet_wm_rerank/changed_frac", 0.0),
-                )
-            )
-            wm_term_mean = float(rerank_diag.get("snippet_wm_rerank/wm_term_mean", 0.0))
-
-        n = int(sel_idx.numel())
-        ar = torch.arange(n, device=dev)
-        teacher_dtype = teacher_first.dtype
-        teacher_sel = cand_first[ar, best_idx].to(device=dev, dtype=teacher_dtype)
-        score_selected = candidate_score[ar, best_idx]
-        # Safe actor-proxy under nonfinite deltas: fall back to index 0.
-        action_delta_safe = torch.where(
-            torch.isfinite(action_delta),
-            action_delta,
-            torch.full_like(action_delta, float("inf")),
-        )
-        actor_like_idx = action_delta_safe.argmin(dim=1)
-        score_actor_proxy = candidate_score[ar, actor_like_idx]
-        wm_unc_best = None
-        if unc is not None and wm_row_active is not None and bool(wm_row_active.any()):
-            wm_unc_best = unc[ar, best_idx].clamp(0.0, 1.0)
-        rv = res.valid_mask.bool() & retrieval_data_row_valid
-        rv_f = rv.to(dtype=dtype)
-        c_sel, c_diag = teacher_confidence(
-            score_best=score_selected,
-            score_actor=score_actor_proxy,
-            cfg=pcfg,
-            wm_uncertainty=wm_unc_best,
-            alpha_wm=float(alpha_wm),
-            retrieval_valid=rv_f,
-            wm_valid=wm_row_active,
-        )
-        # Rows that failed retrieval (or had nonfinite candidate data) keep actor.
-        fallback_rows = int((~rv).sum().item())
-        teacher_first[sel_idx] = torch.where(
-            rv[:, None],
-            teacher_sel,
-            teacher_first[sel_idx],
-        ).to(dtype=teacher_dtype)
-        retrieval_valid[sel_idx] = rv_f
-        conf[sel_idx] = c_sel.to(dtype)
-
-    # Continuous row weight w = gate * teacher_confidence * retrieval_valid.
-    row_weight = gate * conf * retrieval_valid
-    loss_sd_cfg = sd_cfg
-    if ra_enabled and readiness_weight_override:
-        from .readiness_adaptive import (
-            ess_and_scale,
-            phase_lambda,
-            telemetry as readiness_telemetry,
-        )
-
-        ess, ess_scale, ess_skip = ess_and_scale(
-            row_weight,
-            float(ra_cfg.readiness_ess_target),
-            float(ra_cfg.readiness_ess_min_for_update),
-        )
-        lam = float(phase_lambda(int(ra_state.phase), ra_cfg))
-        ra_state.last_ess = float(ess)
-        ra_state.last_ess_scale = float(ess_scale)
-        ra_state.last_ess_update_skipped = bool(ess_skip)
-        ra_state.last_lambda_effective = float(lam) * float(ess_scale)
-        if ess_skip or lam <= 0.0:
-            ra_state.last_unscaled_distill_loss = 0.0
-            ra_state.last_scaled_distill_loss = 0.0
-            bridge.readiness_adaptive_state = ra_state
-            bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
-            bridge.last_snippet_distill_loss = 0.0
-            bridge.last_progress_refine = {
-                "progress_refine/gate_mean": float(gate.float().mean().item()) if R else 0.0,
-                "progress_refine/active_frac": 0.0,
-                "progress_refine/retrieval_budget_frac": float(budget_frac),
-                "progress_refine/fallback_frac": 0.0,
-                "progress_refine/loss": 0.0,
-            }
-            return zero
-        # weight override = lambda * ess_scale ONLY (do not also multiply cfg.weight)
-        loss_sd_cfg = _dc_replace(sd_cfg, weight=float(lam) * float(ess_scale))
-
-    loss, stats = compute_snippet_distill_loss(
-        mu_fn=_mu_fn,
-        feat_start=feat_r,
-        teacher_first_action=teacher_first,
-        cfg=loss_sd_cfg,
-        row_weight=row_weight,
-        min_gate=float(pcfg.min_gate_for_retrieval),
-    )
-
-    if ra_enabled:
-        from .readiness_adaptive import telemetry as readiness_telemetry
-
-        scaled = float(stats.get("snippet_distill/loss", 0.0))
-        w_eff = float(getattr(loss_sd_cfg, "weight", 0.0) or 0.0)
-        unscaled = (scaled / w_eff) if w_eff > 1e-12 else 0.0
-        ra_state.last_scaled_distill_loss = scaled
-        ra_state.last_unscaled_distill_loss = float(unscaled)
-        bridge.readiness_adaptive_state = ra_state
-        bridge.last_readiness_adaptive = readiness_telemetry(ra_state)
-
-    valid_r = float(retrieval_valid.mean().item()) if R else 0.0
-    fallback_frac = float(fallback_rows) / float(max(int(sel_idx.numel()), 1))
-    bridge.last_snippet_distill_loss = float(stats.get("snippet_distill/loss", 0.0))
-    bridge.last_snippet_distill_active_frac = float(stats.get("snippet_distill/active_frac", 0.0))
-    bridge.last_snippet_wm_rerank_changed_frac = float(rerank_changed_frac)
-    bridge.last_snippet_wm_rerank_wm_term_mean = float(wm_term_mean)
-    bridge.last_snippet_retrieval_valid = valid_r
-    bridge.last_snippet_nonfinite_candidate_row_frac = float(nonfinite_candidate_row_frac)
-    bridge.last_snippet_no_tolerance_compatible = float(
-        retr_diag.get("snippet_retrieval/no_compatible_frac", 0.0)
-    )
-    if valid_r <= 0.0:
-        bridge.last_actor_distill_fallback_reason = "no_compatible_or_low_gate"
-    selected_score_mean = 0.0
-    actor_proxy_score_mean = 0.0
-    teacher_margin_mean = 0.0
-    teacher_score_margin_mean = 0.0
-    wm_valid_frac = float(
-        rerank_diag.get(
-            "snippet_wm_rerank/row_active_frac",
-            rerank_diag.get("snippet_wm_rerank/valid_frac", 0.0),
-        )
-    )
-    wm_fallback_frac = float(
-        rerank_diag.get(
-            "snippet_wm_rerank/row_fallback_frac",
-            rerank_diag.get(
-                "snippet_wm_rerank/fallback_frac",
-                1.0 if int(sel_idx.numel()) == 0 else 0.0,
-            ),
-        )
-    )
-    wm_predict_errors = float(rerank_diag.get("snippet_wm_rerank/predict_error_count", 0.0))
-    if score_selected is not None and score_actor_proxy is not None:
-        selected_score_mean = float(score_selected.float().mean().item())
-        actor_proxy_score_mean = float(score_actor_proxy.float().mean().item())
-        teacher_margin_mean = float(c_diag.get("teacher_margin_mean", 0.0))
-        teacher_score_margin_mean = float(c_diag.get("teacher_score_margin_mean", 0.0))
-    bridge.last_snippet_wm_rerank_valid_frac = wm_valid_frac
-    bridge.last_snippet_wm_rerank_fallback_frac = wm_fallback_frac
-    bridge.last_snippet_wm_rerank_predict_error_count = wm_predict_errors
-    bridge.last_progress_refine = {
-        "progress_refine/gate_mean": float(gate.float().mean().item()) if R else 0.0,
-        "progress_refine/gate_p50": float(torch.quantile(gate.float(), 0.5).item()) if R else 0.0,
-        "progress_refine/gate_p90": float(torch.quantile(gate.float(), 0.9).item()) if R else 0.0,
-        "progress_refine/active_frac": float(stats.get("snippet_distill/weight_pos_frac", 0.0)),
-        "progress_refine/history_valid_frac": float(gate_res.history_valid.float().mean().item()) if R else 0.0,
-        "progress_refine/normalized_error_mean": float(norm_err.float().mean().item()) if R else 0.0,
-        "progress_refine/normalized_error_active_mean": float(
-            (norm_err.float() * (row_weight > 0).float()).sum().item()
-            / max(float((row_weight > 0).float().sum().item()), 1.0)
-        ),
-        "progress_refine/recent_progress_mean": float(recent.float().mean().item()) if R else 0.0,
-        "progress_refine/recent_progress_active_mean": float(
-            (recent.float() * (row_weight > 0).float()).sum().item()
-            / max(float((row_weight > 0).float().sum().item()), 1.0)
-        ),
-        "progress_refine/oscillation_mean": float(osc.float().mean().item()) if R else 0.0,
-        "progress_refine/teacher_confidence_mean": float(conf.float().mean().item()) if R else 0.0,
-        "progress_refine/teacher_margin_mean": float(teacher_margin_mean),
-        "progress_refine/teacher_score_margin_mean": float(teacher_score_margin_mean),
-        "progress_refine/retrieval_valid_frac": valid_r,
-        "progress_refine/retrieval_budget_frac": float(budget_frac),
-        "progress_refine/effective_sample_size": float(
-            stats.get("snippet_distill/effective_sample_size", 0.0)
-        ),
-        "progress_refine/loss": float(stats.get("snippet_distill/loss", 0.0)),
-        "progress_refine/fallback_frac": float(fallback_frac),
-        "progress_refine/nonfinite_count": float(
-            gate_res.nonfinite_count
-            + int(stats.get("snippet_distill/nonfinite_count", 0.0))
-            + nonfinite_candidate_row_count
-        ),
-        "snippet_retrieval/tolerance_weight_mean": float(
-            retr_diag.get("snippet_retrieval/tolerance_weight_mean", 0.0)
-        ),
-        "snippet_retrieval/log_tolerance_gap_mean": float(
-            retr_diag.get("snippet_retrieval/log_tolerance_gap_mean", 0.0)
-        ),
-        "snippet_retrieval/no_compatible_frac": float(
-            retr_diag.get("snippet_retrieval/no_compatible_frac", 0.0)
-        ),
-        "snippet_retrieval/nonfinite_candidate_row_frac": float(nonfinite_candidate_row_frac),
-        "snippet_wm_rerank/valid_frac": wm_valid_frac,
-        "snippet_wm_rerank/fallback_frac": wm_fallback_frac,
-        "snippet_wm_rerank/candidate_valid_frac": float(
-            rerank_diag.get("snippet_wm_rerank/candidate_valid_frac", 0.0)
-        ),
-        "snippet_wm_rerank/row_prediction_valid_frac": float(
-            rerank_diag.get("snippet_wm_rerank/row_prediction_valid_frac", 0.0)
-        ),
-        "snippet_wm_rerank/row_active_frac": float(
-            rerank_diag.get("snippet_wm_rerank/row_active_frac", wm_valid_frac)
-        ),
-        "snippet_wm_rerank/row_fallback_frac": wm_fallback_frac,
-        "snippet_wm_rerank/changed_frac_overall": float(rerank_changed_frac),
-        "snippet_wm_rerank/changed_frac_given_active": float(
-            rerank_diag.get("snippet_wm_rerank/changed_frac_given_active", 0.0)
-        ),
-        "snippet_wm_rerank/predict_error_count": wm_predict_errors,
-        "snippet_wm_rerank/selected_score_mean": selected_score_mean,
-        "snippet_wm_rerank/actor_proxy_score_mean": actor_proxy_score_mean,
-        "snippet_wm_rerank/changed_frac": float(rerank_changed_frac),
-        "snippet_wm_rerank/wm_term_mean": float(wm_term_mean),
-        "snippet_wm_rerank/action_delta_mean": float(
-            rerank_diag.get("snippet_wm_rerank/action_delta_mean", 0.0)
-        ),
-        "snippet_wm_rerank/action_penalty_mean": float(
-            rerank_diag.get("snippet_wm_rerank/action_penalty_mean", 0.0)
-        ),
-        "snippet_wm_rerank/fallback_reason_id": float(
-            rerank_diag.get("snippet_wm_rerank/fallback_reason_id", 11.0)
-        ),
-    }
-    return loss
 
 
 def _compute_snippet_distill_loss(
@@ -1880,8 +1239,6 @@ def _compute_snippet_distill_loss(
     from .snippet_distill import compute_snippet_distill_loss, compute_snippet_activation_weight
     from .snippet_wm_reranker import (
         effective_alpha_wm,
-        mean_squared_action_delta,
-        normalize_priority_scores,
         score_snippet_candidates,
         wm_head_probs_for_candidates,
     )
@@ -1895,41 +1252,13 @@ def _compute_snippet_distill_loss(
     if not bool(risky.any()):
         return feat.new_zeros(())
 
-    pcfg = getattr(bridge, "progress_refine_cfg", None)
-    if pcfg is not None and bool(getattr(pcfg, "enabled", False)):
-        return _compute_snippet_distill_loss_progress(
-            bridge,
-            eir_cfg=eir_cfg,
-            cache=cache,
-            feat=feat,
-            risky=risky,
-            frames=frames,
-            start=start,
-            end=end,
-        )
-
     feat_r = feat.detach()[risky]
     a2c = _get_a2c_network(bridge.agent_ref)
     stage = _stage_for_tol(eir_cfg, cache.tol_mean)
     acts, _sim, pri, valid = bank.retrieve_candidates(
-        feat_r,
-        k=int(getattr(sd_cfg, "topk", 8)),
-        stage=stage,
-        query_tolerance=float(cache.tol_mean),
-    )
-    diag = dict(getattr(bank, "last_update_diagnostics", {}) or {})
-    bridge.last_snippet_no_tolerance_compatible = float(
-        diag.get("no_tolerance_compatible_candidate", 0.0)
-    )
-    bridge.last_snippet_compatible_candidate_count = float(
-        diag.get("compatible_candidate_count", 0.0)
+        feat_r, k=int(getattr(sd_cfg, "topk", 8)), stage=stage
     )
     if not valid:
-        bridge.last_snippet_retrieval_valid = 0.0
-        bridge.last_snippet_nonfinite_candidate_row_frac = 0.0
-        bridge.last_snippet_distill_loss = 0.0
-        if float(diag.get("no_tolerance_compatible_candidate", 0.0)) > 0.5:
-            bridge.last_actor_distill_fallback_reason = "no_tolerance_compatible_candidate"
         return feat.new_zeros(())
 
     def _mu_fn(f):
@@ -1943,77 +1272,36 @@ def _compute_snippet_distill_loss(
         wm_calibration_enable=bool(getattr(bridge, "wm_calibration_enable", False)),
         alpha_wm=_alpha_wm_from_bridge(bridge),
     )
-    cand_first = acts[:, :, 0, :]
-    action_delta = mean_squared_action_delta(cand_first, mu_r)
-    retrieval_data_row_valid = (
-        torch.isfinite(pri).all(dim=1)
-        & torch.isfinite(cand_first).all(dim=(1, 2))
-        & torch.isfinite(action_delta).all(dim=1)
-    )
-    best_idx = normalize_priority_scores(pri).argmax(dim=1)
-    rerank_diag = {
-        "snippet_wm_rerank/changed_frac": 0.0,
-        "snippet_wm_rerank/wm_term_mean": 0.0,
-        "snippet_wm_rerank/valid_frac": 0.0,
-        "snippet_wm_rerank/fallback_frac": 1.0,
-        "snippet_wm_rerank/predict_error_count": 0.0,
-        "snippet_wm_rerank/fallback_reason_id": 11.0,
-    }
+    best_idx = pri.argmax(dim=1)
+    rerank_diag = {"snippet_wm_rerank/changed_frac": 0.0, "snippet_wm_rerank/wm_term_mean": 0.0}
     if rerank_cfg is not None and bool(getattr(rerank_cfg, "enabled", False)):
-        if float(alpha_wm) > 0.0:
-            belief_r = _belief_for_risky_rows(
-                bridge, start=start, end=end, risky=risky, device=feat_r.device, dtype=feat_r.dtype
-            )
-            p_rec, p_succ, p_drop, unc, wm_valid_mask, wm_diag = wm_head_probs_for_candidates(
-                belief_flat=belief_r,
-                cand_first_actions=cand_first,
-                predict_fn=bridge.rssm_predict_fn,
-                horizon_steps=tuple(
-                    getattr(
-                        bridge,
-                        "wm_horizon_steps",
-                        getattr(rerank_cfg, "horizon_steps", (4, 8)),
-                    )
-                ),
-            )
-            predict_reason = float(wm_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
-            best_idx, _candidate_score, score_diag, _row_active = score_snippet_candidates(
-                priority=pri,
-                p_recovery=p_rec,
-                p_success=p_succ,
-                p_drop=p_drop,
-                uncertainty=unc,
-                action_delta=action_delta,
-                alpha_wm=alpha_wm,
-                cfg=rerank_cfg,
-                wm_valid_mask=wm_valid_mask,
-            )
-            rerank_diag.update(wm_diag)
-            rerank_diag.update(score_diag)
-            score_reason = float(score_diag.get("snippet_wm_rerank/fallback_reason_id", 0.0))
-            if score_reason in (6.0, 12.0) and predict_reason in (
-                1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 9.0,
-            ):
-                rerank_diag["snippet_wm_rerank/fallback_reason_id"] = predict_reason
-        else:
-            rerank_diag["snippet_wm_rerank/fallback_reason_id"] = 11.0
-            rerank_diag["snippet_wm_rerank/fallback_frac"] = 1.0
+        belief_r = _belief_for_risky_rows(
+            bridge, start=start, end=end, risky=risky, device=feat_r.device, dtype=feat_r.dtype
+        )
+        cand_first = acts[:, :, 0, :]
+        p_rec, p_succ, p_drop, unc = wm_head_probs_for_candidates(
+            belief_flat=belief_r if belief_r is not None else feat_r,
+            cand_first_actions=cand_first,
+            predict_fn=bridge.rssm_predict_fn,
+        )
+        action_delta = ((cand_first - mu_r[:, None, :]) ** 2).sum(dim=-1)
+        best_idx, rerank_diag = score_snippet_candidates(
+            priority=pri,
+            p_recovery=p_rec,
+            p_success=p_succ,
+            p_drop=p_drop,
+            uncertainty=unc,
+            action_delta=action_delta,
+            alpha_wm=alpha_wm,
+            cfg=rerank_cfg,
+        )
     teacher_first = acts[torch.arange(acts.shape[0], device=acts.device), best_idx, 0, :]
-    teacher_first = torch.where(
-        retrieval_data_row_valid[:, None],
-        teacher_first,
-        mu_r.to(dtype=teacher_first.dtype),
-    )
 
     act_w = compute_snippet_activation_weight(
         cfg=sd_cfg, frames=int(frames), tol_mean=float(cache.tol_mean),
         nsucc_mean=float(getattr(bridge, "last_nsucc_mean", -1.0)),
     )
-    mask = retrieval_data_row_valid.to(device=feat.device, dtype=feat.dtype)
-    bridge.last_snippet_retrieval_valid = float(mask.mean().item()) if mask.numel() else 0.0
-    bridge.last_snippet_nonfinite_candidate_row_frac = float(
-        (~retrieval_data_row_valid).float().mean().item()
-    ) if retrieval_data_row_valid.numel() else 0.0
+    mask = torch.ones(feat_r.shape[0], device=feat.device, dtype=feat.dtype)
     loss, metrics = compute_snippet_distill_loss(
         mu_fn=_mu_fn,
         feat_start=feat_r,
@@ -2029,15 +1317,6 @@ def _compute_snippet_distill_loss(
     )
     bridge.last_snippet_wm_rerank_wm_term_mean = float(
         rerank_diag.get("snippet_wm_rerank/wm_term_mean", 0.0)
-    )
-    bridge.last_snippet_wm_rerank_valid_frac = float(
-        rerank_diag.get("snippet_wm_rerank/valid_frac", 0.0)
-    )
-    bridge.last_snippet_wm_rerank_fallback_frac = float(
-        rerank_diag.get("snippet_wm_rerank/fallback_frac", 0.0)
-    )
-    bridge.last_snippet_wm_rerank_predict_error_count = float(
-        rerank_diag.get("snippet_wm_rerank/predict_error_count", 0.0)
     )
     return loss
 
@@ -2068,21 +1347,6 @@ def should_use_actor_distill_fallback(
     if float(snippet_rerank_changed_frac) <= min_rerank:
         return True, "snippet_rerank_inactive"
     return False, "snippet_ok_no_fallback"
-
-
-def should_use_actor_distill_fallback_for_retrieval(
-    *,
-    eir_cfg: EIRConfig,
-    retrieval_valid: bool,
-    retrieval_diag: dict | None = None,
-) -> tuple[bool, str]:
-    """Force EliteBank actor-distill when snippet retrieval is fail-closed."""
-    if not bool(getattr(eir_cfg, "actor_distill_enable", False)):
-        return False, "actor_distill_disabled"
-    diag = retrieval_diag or {}
-    if (not retrieval_valid) or float(diag.get("no_tolerance_compatible_candidate", 0.0)) > 0.5:
-        return True, "no_tolerance_compatible_candidate"
-    return False, "retrieval_ok"
 
 
 def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tensor]:
@@ -2371,10 +1635,6 @@ def compute_eir_loss(bridge: EIRBridge, frames: int = 0) -> dict[str, torch.Tens
                 getattr(bridge, "last_snippet_wm_rerank_changed_frac", 0.0)
             ),
         )
-        if float(getattr(bridge, "last_snippet_no_tolerance_compatible", 0.0)) > 0.5:
-            if bool(getattr(eir_cfg, "actor_distill_enable", False)):
-                run_actor_distill = True
-                fallback_reason = "no_tolerance_compatible_candidate"
         bridge.last_actor_distill_fallback_reason = str(fallback_reason)
         bridge.last_actor_distill_fallback_with_snippet_used = (
             1.0 if (run_actor_distill and _use_snippet) else 0.0

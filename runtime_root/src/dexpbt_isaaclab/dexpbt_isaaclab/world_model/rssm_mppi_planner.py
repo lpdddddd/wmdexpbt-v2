@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -59,23 +59,28 @@ class RSSMRerankConfig:
     w_value: float = 0.2
 
 
-def _extract_head_probs(
-    preds: dict[str, Any],
-    device,
-    dtype,
-    *,
-    horizon_steps: Optional[Sequence[int]] = None,
-) -> dict[str, torch.Tensor]:
-    """Pull recovery + mean success/drop probs via shared extractor.
-
-    Averaging uses configured ``horizon_steps`` when provided; otherwise all
-    numeric horizon keys that expose both success and drop (sorted).
-    """
-    from .wm_head_probs import extract_head_probs_compat
-
-    return extract_head_probs_compat(
-        preds, device, dtype, horizon_steps=horizon_steps
-    )
+def _extract_head_probs(preds: dict[str, Any], device, dtype) -> dict[str, torch.Tensor]:
+    """Pull mean success/drop probs (over horizons) and recovery prob from a
+    ``predict_transition`` output dict. Returns probabilities in [0,1]."""
+    out: dict[str, torch.Tensor] = {}
+    succ_list: list[torch.Tensor] = []
+    drop_list: list[torch.Tensor] = []
+    horizon_logits = preds.get("horizon_logits")
+    if isinstance(horizon_logits, dict):
+        for _h, head_out in horizon_logits.items():
+            if "success" in head_out:
+                succ_list.append(torch.sigmoid(head_out["success"]).reshape(-1))
+            if "drop" in head_out:
+                drop_list.append(torch.sigmoid(head_out["drop"]).reshape(-1))
+    if succ_list:
+        out["success_stack"] = torch.stack(succ_list, dim=0)  # [H, N]
+        out["success"] = out["success_stack"].mean(dim=0)
+    if drop_list:
+        out["drop"] = torch.stack(drop_list, dim=0).mean(dim=0)
+    rec = preds.get("recovery_logits")
+    if rec is not None:
+        out["recovery"] = torch.sigmoid(rec).reshape(-1)
+    return out
 
 
 class RSSMReranker:

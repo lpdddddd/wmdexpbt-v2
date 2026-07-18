@@ -228,48 +228,6 @@ class SeqWMTrainer:
         )
         self.global_step = 0
         self.last_metrics: dict[str, float] = {}
-        # Held-out partition knobs (set by train wiring / tests). When
-        # calibration is off or heldout_fraction==0, WM sampling is unrestricted.
-        self._wm_calibration_evaluator: Any = None
-        self._wm_partition_worker_rank: int = 0
-        self._last_partition_diag: dict[str, float] = {}
-
-    def configure_wm_partition(
-        self,
-        *,
-        evaluator: Any = None,
-        worker_rank: int = 0,
-    ) -> None:
-        """Attach calibration evaluator + worker rank for env-slot partition."""
-        if evaluator is not None:
-            self._wm_calibration_evaluator = evaluator
-        self._wm_partition_worker_rank = int(worker_rank)
-
-    def _partition_knobs(self) -> tuple[bool, float, int, int]:
-        ev = getattr(self, "_wm_calibration_evaluator", None)
-        cfg = getattr(ev, "cfg", None) if ev is not None else None
-        enabled = bool(getattr(cfg, "enabled", False)) if cfg is not None else False
-        frac = float(getattr(cfg, "heldout_fraction", 0.0) or 0.0) if cfg is not None else 0.0
-        seed = int(getattr(cfg, "heldout_partition_seed", 0) or 0) if cfg is not None else 0
-        rank = int(getattr(self, "_wm_partition_worker_rank", 0) or 0)
-        return enabled, frac, seed, rank
-
-    def _resolve_env_partition(
-        self, num_envs: int, *, device: torch.device | str | None = None
-    ):
-        from .wm_heldout_partition import build_env_partition_masks
-
-        enabled, frac, seed, rank = self._partition_knobs()
-        use_frac = float(frac) if enabled else 0.0
-        part = build_env_partition_masks(
-            int(num_envs),
-            heldout_fraction=use_frac,
-            partition_seed=seed,
-            worker_rank=rank,
-            device=device or self.device,
-        )
-        self._last_partition_diag = dict(part.diagnostics)
-        return part
 
     # ----- public API -----
 
@@ -349,21 +307,6 @@ class SeqWMTrainer:
 
         cumulative_metrics: dict[str, float] = {}
 
-        # Held-out partition: WM gradient updates sample only from train envs.
-        part = self._resolve_env_partition(int(obs_full.shape[1]), device=obs_full.device)
-        enabled, frac, _seed, _rank = self._partition_knobs()
-        train_mask = None
-        if enabled and float(frac) > 0.0:
-            if not part.valid:
-                # Illegal partition — skip WM update and surface diagnostics.
-                metrics = dict(part.diagnostics)
-                metrics["wm_cal/failure_reason_id"] = float(part.failure_reason_id)
-                metrics["wm_cal/train_partition_sample_count"] = 0.0
-                self.last_metrics = metrics
-                return metrics
-            train_mask = part.train_mask.to(device=obs_full.device)
-        partition_diag = dict(part.diagnostics)
-
         for _update_i in range(self.cfg.updates_per_ppo_epoch):
             batch = self.sampler.sample(
                 obs_full=obs_full,
@@ -382,21 +325,8 @@ class SeqWMTrainer:
                 dropped_full=dropped_full,
                 closest_d_hat_full=closest_full,
                 success_tolerance_full=success_tol_full,
-                env_index_mask=train_mask,
-                return_source_ids=True,
-                partition_worker_rank=int(getattr(self, "_wm_partition_worker_rank", 0)),
             )
             batch = batch.to(self.device)
-            env_ids = batch.meta.get("env_indices")
-            if env_ids is not None and train_mask is not None:
-                partition_diag["wm_cal/train_partition_sample_count"] = float(
-                    int(torch.as_tensor(env_ids).numel())
-                )
-                # Overlap probe: any sampled env outside train mask.
-                held = part.heldout_mask.to(device=torch.device("cpu"))
-                e_cpu = torch.as_tensor(env_ids).long().cpu()
-                overlap = int(held[e_cpu].sum().item()) if e_cpu.numel() else 0
-                partition_diag["wm_cal/partition_overlap_count"] = float(overlap)
             beta = _beta_kl_at(frames, self.cfg)
 
             # Sub-models that use beta_kl accept it; others ignore.
@@ -502,7 +432,6 @@ class SeqWMTrainer:
             # Accumulate (for last-update visibility, just keep the latest).
             cumulative_metrics = metrics
 
-        cumulative_metrics.update(partition_diag)
         self.last_metrics = cumulative_metrics
         return cumulative_metrics
 
@@ -693,7 +622,7 @@ class SeqWMTrainer:
         last_d_hat: Optional[torch.Tensor] = None,
         last_success_count: Optional[torch.Tensor] = None,
     ) -> Any:
-        """Sample one held-out replay batch and update calibration state."""
+        """Sample one replay batch and update calibration state."""
         if evaluator is None or state is None:
             return state
         cfg = getattr(evaluator, "cfg", None)
@@ -703,144 +632,43 @@ class SeqWMTrainer:
             getattr(cfg, "eval_interval_frames", 0)
         ):
             return state
-
+        td = experience_buffer.tensor_dict
+        batch = self.sampler.sample(
+            obs_full=td["obses"],
+            action_full=td["actions"],
+            reward_full=td["rewards"],
+            done_full=td["dones"].to(td["obses"].dtype),
+            returns_full=returns_full,
+            last_obs=last_obs.to(td["obses"].dtype),
+            d_hat_full=read_aux_full(experience_buffer, "aux_d_hat"),
+            last_d_hat=last_d_hat,
+            failure_full=read_aux_full(experience_buffer, "aux_failure"),
+            success_count_full=read_aux_full(experience_buffer, "aux_success_cnt"),
+            last_success_count=last_success_count,
+            lifted_full=read_aux_full(experience_buffer, "aux_lifted"),
+            picked_full=read_aux_full(experience_buffer, "aux_picked"),
+            dropped_full=read_aux_full(experience_buffer, "aux_dropped"),
+            closest_d_hat_full=read_aux_full(experience_buffer, "aux_closest_d_hat"),
+            success_tolerance_full=read_aux_full(experience_buffer, "aux_success_tolerance"),
+        ).to(self.device)
+        heads = getattr(self.model, "heads", None)
         from .wm_calibration_metrics import (
             build_wm_calibration_targets,
             extract_wm_calibration_predictions,
+            resolve_calibration_horizon,
         )
-        from .wm_head_probs import (
-            FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
-            FAILURE_INSUFFICIENT_SAMPLES,
-            FAILURE_INVALID_PARTITION,
-            FAILURE_MISSING_HEAD,
-            FAILURE_MISSING_TARGET_SOURCE,
-            FAILURE_NONFINITE,
-            FAILURE_PREDICT_EXCEPTION,
-            FAILURE_SHAPE_MISMATCH,
-            apply_calibration_failure,
-            normalize_horizon_steps,
+
+        horizon = resolve_calibration_horizon(
+            getattr(self.cfg, "horizon_steps", (4, 8)), default=4
         )
-        from .wm_heldout_partition import build_env_partition_masks
-
-        td = experience_buffer.tensor_dict
-        obs_full = td["obses"]
-        N = int(obs_full.shape[1])
-        enabled, frac, seed, rank = self._partition_knobs()
-        # Prefer evaluator cfg for partition (authoritative).
-        frac = float(getattr(cfg, "heldout_fraction", frac) or 0.0)
-        seed = int(getattr(cfg, "heldout_partition_seed", seed) or 0)
-        use_frac = float(frac) if enabled else 0.0
-        part = build_env_partition_masks(
-            N,
-            heldout_fraction=use_frac,
-            partition_seed=seed,
-            worker_rank=rank,
-            device=obs_full.device,
-        )
-        part_diag = dict(part.diagnostics)
-        part_diag["wm_cal/partition_seed"] = float(seed)
-        state.heldout_fraction = float(frac)
-        state.heldout_partition_seed = int(seed)
-        state.partition_worker_rank = int(rank)
-
-        if use_frac > 0.0 and not part.valid:
-            metrics = dict(part_diag)
-            metrics["wm_cal/n_samples"] = 0.0
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_INVALID_PARTITION,
-            )
-
-        heldout_mask = None
-        if use_frac > 0.0:
-            heldout_mask = part.heldout_mask.to(device=obs_full.device)
-
-        try:
-            batch = self.sampler.sample(
-                obs_full=obs_full,
-                action_full=td["actions"],
-                reward_full=td["rewards"],
-                done_full=td["dones"].to(obs_full.dtype),
-                returns_full=returns_full,
-                last_obs=last_obs.to(obs_full.dtype),
-                d_hat_full=read_aux_full(experience_buffer, "aux_d_hat"),
-                last_d_hat=last_d_hat,
-                failure_full=read_aux_full(experience_buffer, "aux_failure"),
-                success_count_full=read_aux_full(experience_buffer, "aux_success_cnt"),
-                last_success_count=last_success_count,
-                lifted_full=read_aux_full(experience_buffer, "aux_lifted"),
-                picked_full=read_aux_full(experience_buffer, "aux_picked"),
-                dropped_full=read_aux_full(experience_buffer, "aux_dropped"),
-                closest_d_hat_full=read_aux_full(experience_buffer, "aux_closest_d_hat"),
-                success_tolerance_full=read_aux_full(
-                    experience_buffer, "aux_success_tolerance"
-                ),
-                env_index_mask=heldout_mask,
-                return_source_ids=True,
-                partition_worker_rank=rank,
-            ).to(self.device)
-        except ValueError as exc:
-            # Mask shape / empty held-out selection — invalid partition.
-            metrics = dict(part_diag)
-            metrics["wm_cal/sample_error"] = 1.0
-            metrics["wm_cal/n_samples"] = 0.0
-            _ = exc
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_INVALID_PARTITION,
-            )
-
-        env_ids = batch.meta.get("env_indices")
-        if env_ids is not None and heldout_mask is not None:
-            e_cpu = torch.as_tensor(env_ids).long().cpu()
-            train_cpu = part.train_mask.cpu()
-            # Any train-env leak into held-out calibration batch.
-            leak = int(train_cpu[e_cpu].sum().item()) if e_cpu.numel() else 0
-            part_diag["wm_cal/partition_overlap_count"] = float(leak)
-            part_diag["wm_cal/heldout_candidate_count"] = float(e_cpu.numel())
-            if leak > 0:
-                metrics = dict(part_diag)
-                return apply_calibration_failure(
-                    state,
-                    cfg=cfg,
-                    frames=int(frames),
-                    metrics=metrics,
-                    failure_reason_id=FAILURE_INVALID_PARTITION,
-                )
-        elif env_ids is not None:
-            part_diag["wm_cal/heldout_candidate_count"] = float(
-                int(torch.as_tensor(env_ids).numel())
-            )
-
-        heads = getattr(self.model, "heads", None)
-        import inspect
-
-        horizon_steps = normalize_horizon_steps(
-            getattr(self.cfg, "horizon_steps", (4, 8))
-        )
-        recovery_horizon = int(getattr(self.cfg, "recovery_horizon", 16))
         improve_margin = float(getattr(self.cfg, "recovery_d_hat_margin", 0.005))
         floor_tol = float(getattr(self.cfg, "floor_tol_threshold", 0.02))
-        shadow_tol = float(
-            getattr(self.cfg, "recovery_shadow_tol_threshold", floor_tol)
-        )
-        d_hat_tol_min_steps = int(getattr(self.cfg, "recovery_d_hat_tol_min_steps", 0))
-        min_samples = int(getattr(cfg, "min_samples", 32))
 
         targets, tol_diag = build_wm_calibration_targets(
             batch,
-            horizon_steps=horizon_steps,
-            recovery_horizon=recovery_horizon,
+            horizon=horizon,
             improve_margin=improve_margin,
-            recovery_d_hat_tol_min_steps=d_hat_tol_min_steps,
             floor_tol_threshold=floor_tol,
-            recovery_shadow_tol_threshold=shadow_tol,
             eval_tol_mode=str(getattr(cfg, "eval_tol_mode", "hybrid")),
             eval_tol_threshold=float(getattr(cfg, "eval_tol_threshold", 0.05)),
             eval_tol_quantile=float(getattr(cfg, "eval_tol_quantile", 0.5)),
@@ -850,146 +678,34 @@ class SeqWMTrainer:
                 getattr(cfg, "eval_tol_min_samples_for_stats", 32)
             ),
         )
-        tol_diag.update(part_diag)
-        if float(tol_diag.get("wm_cal/missing_target_source", 0.0)) > 0.5:
-            metrics = dict(tol_diag)
-            metrics["wm_cal/n_samples"] = 0.0
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_MISSING_TARGET_SOURCE,
-            )
-
-        target_eval_mask = targets["eval_mask"]
-        target_eval_count = int(target_eval_mask.sum().item())
-        tol_diag["wm_cal/heldout_eval_count"] = float(target_eval_count)
-
-        # Held-out enabled but too few evaluable rows → insufficient heldout decay.
-        if use_frac > 0.0 and target_eval_count < min_samples:
-            metrics = dict(tol_diag)
-            metrics["wm_cal/n_samples"] = float(target_eval_count)
-            metrics["wm_cal/insufficient_heldout_samples"] = 1.0
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
-            )
-
-        encode_fn = getattr(self.model, "encode_sequence", None)
-        if encode_fn is None:
+        eval_mask = targets["eval_mask"]
+        idx = eval_mask.nonzero(as_tuple=False).reshape(-1)
+        min_samples = int(getattr(cfg, "min_samples", 32))
+        if int(idx.numel()) < min_samples:
             metrics = {
-                "wm_cal/missing_head": 1.0,
-                "wm_cal/target_eval_count": float(target_eval_count),
+                "wm_cal/insufficient_samples": 1.0,
+                "wm_cal/missing_head": 0.0,
+                "wm_cal/n_samples": float(int(idx.numel())),
             }
             metrics.update(tol_diag)
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_MISSING_HEAD,
-            )
+            state.last_metrics = metrics
+            return state
 
-        was_training = bool(self.model.training)
-        self.model.eval()
-        try:
-            with torch.no_grad():
-                sig = inspect.signature(encode_fn)
-                if "deterministic" in sig.parameters:
-                    belief = encode_fn(batch, deterministic=True)
-                else:
-                    # Non-RSSM backbones: explicit compatible call (no latent noise param).
-                    belief = encode_fn(batch)
-                flat = belief.reshape(-1, belief.shape[-1])
-                action_flat = batch.action.reshape(-1, batch.action_dim)
-                preds, pred_diag = extract_wm_calibration_predictions(
-                    heads,
-                    belief_flat=flat,
-                    action_flat=action_flat,
-                    horizon_steps=horizon_steps,
-                )
-        finally:
-            self.model.train(was_training)
-
+        belief = self.model.encode_sequence(batch)
+        flat = belief.reshape(-1, belief.shape[-1])
+        action_flat = batch.action.reshape(-1, batch.action_dim)
+        preds, pred_diag = extract_wm_calibration_predictions(
+            heads,
+            belief_flat=flat,
+            action_flat=action_flat,
+            horizon=horizon,
+        )
         if preds is None:
-            metrics = dict(tol_diag)
-            metrics.update(pred_diag)
-            metrics["wm_cal/target_eval_count"] = float(target_eval_count)
-            metrics["wm_cal/valid_prediction_count"] = 0.0
-            metrics["wm_cal/invalid_prediction_count"] = float(target_eval_count)
-            metrics["wm_cal/valid_prediction_frac"] = 0.0
-            metrics["wm_cal/n_samples"] = 0.0
-            # Authoritative reason last (do not let pred_diag zeros overwrite).
-            reason = float(
-                pred_diag.get(
-                    "wm_cal/failure_reason_id",
-                    FAILURE_PREDICT_EXCEPTION
-                    if float(pred_diag.get("wm_cal/predict_exception", 0.0)) > 0.5
-                    else FAILURE_MISSING_HEAD,
-                )
-            )
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=reason,
-            )
-
-        pred_valid = preds["valid_mask"].bool().reshape(-1)
-        if int(pred_valid.numel()) != int(target_eval_mask.numel()):
-            metrics = dict(tol_diag)
-            metrics.update(pred_diag)
-            metrics["wm_cal/shape_mismatch"] = 1.0
-            metrics["wm_cal/target_eval_count"] = float(target_eval_count)
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_SHAPE_MISMATCH,
-            )
-
-        final_eval_mask = target_eval_mask & pred_valid
-        idx = final_eval_mask.nonzero(as_tuple=False).reshape(-1)
-        valid_pred_count = int((target_eval_mask & pred_valid).sum().item())
-        invalid_pred_count = int((target_eval_mask & (~pred_valid)).sum().item())
-        n_eval = int(idx.numel())
-        base_telem = {
-            "wm_cal/target_eval_count": float(target_eval_count),
-            "wm_cal/heldout_eval_count": float(n_eval),
-            "wm_cal/valid_prediction_count": float(valid_pred_count),
-            "wm_cal/invalid_prediction_count": float(invalid_pred_count),
-            "wm_cal/valid_prediction_frac": float(valid_pred_count)
-            / float(max(target_eval_count, 1)),
-            "wm_cal/batch_valid_prediction_count": float(pred_valid.sum().item()),
-            "wm_cal/n_samples": float(n_eval),
-        }
-        if n_eval < min_samples:
-            metrics = dict(tol_diag)
-            metrics.update(pred_diag)
-            metrics.update(base_telem)
-            if use_frac > 0.0:
-                metrics["wm_cal/insufficient_heldout_samples"] = 1.0
-                return apply_calibration_failure(
-                    state,
-                    cfg=cfg,
-                    frames=int(frames),
-                    metrics=metrics,
-                    failure_reason_id=FAILURE_INSUFFICIENT_HELDOUT_SAMPLES,
-                )
-            metrics["wm_cal/insufficient_samples"] = 1.0
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=FAILURE_INSUFFICIENT_SAMPLES,
-            )
+            metrics = dict(pred_diag)
+            metrics["wm_cal/n_samples"] = float(int(idx.numel()))
+            metrics.update(tol_diag)
+            state.last_metrics = metrics
+            return state
 
         idx_list = idx.tolist()
         y_rec = [float(targets["y_recovery"][i].item()) for i in idx_list]
@@ -1000,6 +716,7 @@ class SeqWMTrainer:
         p_succ = [float(preds["p_success"][i].item()) for i in idx_list]
         p_drop = [float(preds["p_drop"][i].item()) for i in idx_list]
         unc = [float(preds["uncertainty"][i].item()) for i in idx_list]
+        err = [abs(p_rec[j] - y_rec[j]) for j in range(len(idx_list))]
         metrics = evaluator.evaluate_batch(
             {
                 "p_recovery": p_rec,
@@ -1009,32 +726,15 @@ class SeqWMTrainer:
                 "p_success": p_succ,
                 "y_success": y_succ,
                 "uncertainty": unc,
+                "error": err,
+                "wm_recovery_score": p_rec,
                 "y_improve": y_improve,
                 "missing_head": pred_diag.get("wm_cal/missing_head", 0.0),
             }
         )
-        if float(metrics.get("wm_cal/batch_invalid", 0.0)) > 0.5:
-            reason = float(metrics.get("wm_cal/failure_reason_id", FAILURE_NONFINITE))
-            metrics.update(tol_diag)
-            metrics.update(pred_diag)
-            metrics.update(base_telem)
-            return apply_calibration_failure(
-                state,
-                cfg=cfg,
-                frames=int(frames),
-                metrics=metrics,
-                failure_reason_id=reason,
-            )
         metrics.update(tol_diag)
-        metrics.update(pred_diag)
-        metrics.update(base_telem)
         state = evaluator.compute_alpha(metrics, state)
         state.last_eval_frame = int(frames)
-        # Keep success path reason authoritative.
-        metrics["wm_cal/failure_reason_id"] = float(
-            metrics.get("wm_cal/failure_reason_id", 0.0)
-        )
-        state.last_metrics = dict(metrics)
         return state
 
     # ----- save / load -----

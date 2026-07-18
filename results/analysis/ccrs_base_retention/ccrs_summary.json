@@ -1,0 +1,9 @@
+{
+  "results_jsonl": "/root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention/ccrs_results.jsonl",
+  "n_cells": 0,
+  "grid_tolerances_m": [],
+  "sections": {},
+  "missing": [
+    "no evaluation results yet (ccrs_results.jsonl empty)"
+  ]
+}

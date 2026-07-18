@@ -710,17 +710,6 @@ def main() -> None:
         default=3,
         help="Policy index that receives --recover-checkpoint on first launch.",
     )
-    parser.add_argument(
-        "--resume-manifest",
-        type=str,
-        default=None,
-        help=(
-            "Optional JSON manifest with per-policy continuation overrides "
-            "(checkpoint, seed, target_population_frames, tolerance resume). "
-            "When set, shared --extra values for those keys are stripped and "
-            "replaced by the matching policy entry."
-        ),
-    )
     args = parser.parse_args()
 
     train_root = Path(args.train_root).resolve()
@@ -742,29 +731,6 @@ def main() -> None:
                 f"--profile-per-policy length {len(profile_per_policy)} "
                 f"!= --num-policies {args.num_policies}"
             )
-
-    resume_by_idx: dict[int, dict] = {}
-    if args.resume_manifest:
-        manifest_path = Path(args.resume_manifest).resolve()
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"--resume-manifest not found: {manifest_path}")
-        payload = json.loads(manifest_path.read_text())
-        entries = payload.get("policies", payload if isinstance(payload, list) else [])
-        if not isinstance(entries, list) or not entries:
-            raise ValueError(f"--resume-manifest has no policies: {manifest_path}")
-        for entry in entries:
-            idx = int(entry["policy_idx"])
-            resume_by_idx[idx] = dict(entry)
-        missing = [i for i in range(args.num_policies) if i not in resume_by_idx]
-        if missing:
-            raise ValueError(
-                f"--resume-manifest missing policy entries for indices {missing}"
-            )
-        print(
-            f"[launch_pbt] resume_manifest={manifest_path} "
-            f"policies={sorted(resume_by_idx)}",
-            flush=True,
-        )
 
     markers = tuple(args.first_epoch_marker) if args.first_epoch_marker else DEFAULT_FIRST_EPOCH_MARKERS
 
@@ -841,71 +807,13 @@ def main() -> None:
             f"--max_iterations={args.max_iterations}",
         ]
         extra = list(args.extra)
-        normalized_extra = normalize_extra_args(extra)
-        resume_entry = resume_by_idx.get(policy_idx)
-        if resume_entry is not None:
-            # Drop shared overrides that must be per-policy for continuation.
-            strip_prefixes = (
-                "--checkpoint=",
-                "--seed=",
-                "--target_population_frames=",
-                "--success_tolerance_resume=",
-                "--initial_tolerance_resume=",
-                "--target_tolerance_resume=",
-                "--last_curriculum_update_resume=",
-                "--frame_since_restart_resume=",
-            )
-            normalized_extra = [
-                tok
-                for tok in normalized_extra
-                if not any(str(tok).startswith(p) for p in strip_prefixes)
-            ]
-        cmd.extend(normalized_extra)
+        cmd.extend(normalize_extra_args(extra))
         if profile_per_policy:
             prof = profile_per_policy[policy_idx]
             profile_args_path = train_root / f"profile_policy_{policy_idx:02d}.args"
             profile_args_path.write_text(f"--wm_strategy_profile {prof}\n")
             cmd.append(f"--wm_strategy_profile={prof}")
-        if resume_entry is not None:
-            ckpt = resume_entry.get("checkpoint")
-            if not ckpt:
-                raise ValueError(
-                    f"resume manifest policy {policy_idx} missing checkpoint"
-                )
-            cmd.append(f"--checkpoint={ckpt}")
-            if "seed" in resume_entry and resume_entry["seed"] is not None:
-                cmd.append(f"--seed={int(resume_entry['seed'])}")
-            if resume_entry.get("target_population_frames") is not None:
-                cmd.append(
-                    f"--target_population_frames="
-                    f"{int(resume_entry['target_population_frames'])}"
-                )
-            if resume_entry.get("success_tolerance_resume") is not None:
-                cmd.append(
-                    f"--success_tolerance_resume="
-                    f"{float(resume_entry['success_tolerance_resume'])}"
-                )
-            if resume_entry.get("initial_tolerance_resume") is not None:
-                cmd.append(
-                    f"--initial_tolerance_resume="
-                    f"{float(resume_entry['initial_tolerance_resume'])}"
-                )
-            if resume_entry.get("target_tolerance_resume") is not None:
-                cmd.append(
-                    f"--target_tolerance_resume="
-                    f"{float(resume_entry['target_tolerance_resume'])}"
-                )
-            if resume_entry.get("last_curriculum_update_resume") is not None:
-                cmd.append(
-                    f"--last_curriculum_update_resume="
-                    f"{int(resume_entry['last_curriculum_update_resume'])}"
-                )
-            if resume_entry.get("frame_since_restart_resume") is not None:
-                cmd.append(
-                    f"--frame_since_restart_resume="
-                    f"{int(resume_entry['frame_since_restart_resume'])}"
-                )
-        elif (
+        if (
             args.recover_checkpoint
             and policy_idx == args.recover_policy_idx
             and not _run_is_complete(run_dir)
