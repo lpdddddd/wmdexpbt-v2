@@ -1,0 +1,15 @@
+[2026-07-15T23:00:45+08:00] relaunch one-policy-per-process (avoid Isaac hang after env.close)
+[2026-07-15T23:00:45+08:00] START policy 0
+[2026-07-15T23:01:37+08:00] END policy 0 rc=0
+[2026-07-15T23:01:37+08:00] START policy 1
+[2026-07-15T23:03:13+08:00] END policy 1 rc=0
+[2026-07-15T23:03:13+08:00] START policy 2
+[2026-07-15T23:05:03+08:00] END policy 2 rc=0
+[2026-07-15T23:05:03+08:00] START policy 3
+[2026-07-15T23:06:56+08:00] END policy 3 rc=0
+[2026-07-15T23:06:56+08:00] START policy 4
+[2026-07-15T23:08:01+08:00] END policy 4 rc=0
+[2026-07-15T23:08:01+08:00] START policy 5
+[2026-07-15T23:09:17+08:00] END policy 5 rc=0
+[fair_eval] wrote 6 rows -> /root/autodl-tmp/wmdexpbt/results/analysis/profile24_abc_2b_joint_audit/eval_fair_tol0p022_last.csv
+[2026-07-15T23:09:17+08:00] ALL_DONE
