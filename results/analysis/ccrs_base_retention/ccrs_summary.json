@@ -5,11 +5,1013 @@
     "nsucc_mean",
     "success_any_rate"
   ],
-  "n_cells": 0,
+  "n_cells": 184,
   "n_rejected_rows": 0,
-  "grid_tolerances_m": [],
-  "sections": {},
+  "grid_tolerances_m": [
+    0.028,
+    0.025,
+    0.023,
+    0.022,
+    0.021,
+    0.02,
+    0.019,
+    0.018
+  ],
+  "sections": {
+    "p4_minus_p1": [
+      {
+        "tolerance": 0.028,
+        "diff": -0.07994140625000012,
+        "ci_lo": -0.10075195312500185,
+        "ci_hi": -0.058769531250000284,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.025,
+        "diff": -0.083154296875,
+        "ci_lo": -0.11025390625000042,
+        "ci_hi": -0.04942382812500046,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.023,
+        "diff": -0.06572265625000002,
+        "ci_lo": -0.09686523437499905,
+        "ci_hi": -0.03551757812499845,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.022,
+        "diff": -0.08032226562500018,
+        "ci_lo": -0.10224609374999905,
+        "ci_hi": -0.059960937500000866,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.021,
+        "diff": -0.09107421874999998,
+        "ci_lo": -0.11925781250000034,
+        "ci_hi": -0.05910156250000076,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.02,
+        "diff": -0.087578125,
+        "ci_lo": -0.12093750000000214,
+        "ci_hi": -0.051943359374999165,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.019,
+        "diff": -0.11252929687500013,
+        "ci_lo": -0.1377734375000006,
+        "ci_hi": -0.08877929687500208,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.018,
+        "diff": -0.12725585937499995,
+        "ci_lo": -0.15112304687500078,
+        "ci_hi": -0.1049023437500004,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      }
+    ],
+    "p5_peak_minus_tip": [
+      {
+        "tolerance": 0.028,
+        "diff": 0.11779296874999984,
+        "ci_lo": 0.09649414062499906,
+        "ci_hi": 0.13912109375000126,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.025,
+        "diff": 0.12206054687499987,
+        "ci_lo": 0.1032617187499999,
+        "ci_hi": 0.14041992187499952,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.023,
+        "diff": 0.14016601562499986,
+        "ci_lo": 0.11785156250000217,
+        "ci_hi": 0.16277343750000173,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.022,
+        "diff": 0.14720703124999995,
+        "ci_lo": 0.12559570312500068,
+        "ci_hi": 0.16935546874999996,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.021,
+        "diff": 0.14505859375000005,
+        "ci_lo": 0.12314453125000069,
+        "ci_hi": 0.16922851562499996,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.02,
+        "diff": 0.1351660156249999,
+        "ci_lo": 0.11020507812499958,
+        "ci_hi": 0.16180664062500105,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.019,
+        "diff": 0.10103515624999983,
+        "ci_lo": 0.08107421874999965,
+        "ci_hi": 0.12154296875000015,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      },
+      {
+        "tolerance": 0.018,
+        "diff": 0.08303710937500003,
+        "ci_lo": 0.05903320312499938,
+        "ci_hi": 0.10700195312500016,
+        "n_samples": 2048,
+        "significant": true,
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "pairing_reason": ""
+      }
+    ],
+    "dfc_exact": [
+      {
+        "worker_id": 1,
+        "pre_iteration": 106,
+        "post_iteration": 108,
+        "tol_pre": 0.029046297037257196,
+        "tol_post": 0.027593982185394335,
+        "Q_pa": 0.8668749999999998,
+        "Q_pb": 0.8668749999999995,
+        "Q_qa": 0.8523046875000007,
+        "Q_qb": 0.8447656249999997,
+        "D": 0.022109375000000098,
+        "F": 0.018339843749999474,
+        "C": 0.003769531250000624,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.006425781250002038,
+            0.046474609375000475
+          ],
+          "F": [
+            0.0010937499999995048,
+            0.0340429687500004
+          ],
+          "C": [
+            -0.012856445312500686,
+            0.019824218750000455
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 133,
+        "post_iteration": 134,
+        "tol_pre": 0.027593982185394335,
+        "tol_post": 0.02621428307612462,
+        "Q_pa": 0.8603906249999996,
+        "Q_pb": 0.8462304687499994,
+        "Q_qa": 0.7889746093749984,
+        "Q_qb": 0.7313671874999993,
+        "D": 0.12902343750000034,
+        "F": 0.09313964843750067,
+        "C": 0.03588378906249967,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.10947265625000058,
+            0.1493066406250002
+          ],
+          "F": [
+            0.07620117187500036,
+            0.10967285156250067
+          ],
+          "C": [
+            0.01917480468749949,
+            0.05400390625000068
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 139,
+        "post_iteration": 140,
+        "tol_pre": 0.02621428307612462,
+        "tol_post": 0.024903568922318386,
+        "Q_pa": 0.8460839843750004,
+        "Q_pb": 0.8366406249999995,
+        "Q_qa": 0.7556347656249989,
+        "Q_qb": 0.7520410156249993,
+        "D": 0.09404296875000118,
+        "F": 0.08752441406250089,
+        "C": 0.006518554687500289,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.06676757812500067,
+            0.12354492187500088
+          ],
+          "F": [
+            0.06984375000000087,
+            0.10832519531250157
+          ],
+          "C": [
+            -0.009711914062499882,
+            0.022670898437501308
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 146,
+        "post_iteration": 147,
+        "tol_pre": 0.024903568922318386,
+        "tol_post": 0.023658390476202464,
+        "Q_pa": 0.8169824218749995,
+        "Q_pb": 0.817939453125,
+        "Q_qa": 0.8782519531249999,
+        "Q_qb": 0.8667968750000002,
+        "D": -0.04981445312500077,
+        "F": -0.055063476562500324,
+        "C": 0.005249023437499556,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.07368164062500027,
+            -0.026044921874998628
+          ],
+          "F": [
+            -0.07656249999999898,
+            -0.03210449218750022
+          ],
+          "C": [
+            -0.007187500000000235,
+            0.017939453125000004
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 149,
+        "post_iteration": 150,
+        "tol_pre": 0.023658390476202464,
+        "tol_post": 0.02247547095239234,
+        "Q_pa": 0.849794921875,
+        "Q_pb": 0.8395312499999992,
+        "Q_qa": 0.7612597656249995,
+        "Q_qb": 0.7650781249999989,
+        "D": 0.08471679687500111,
+        "F": 0.08149414062500038,
+        "C": 0.0032226562500007327,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.06313476562499976,
+            0.10701171875000093
+          ],
+          "F": [
+            0.0637792968749995,
+            0.10025878906249985
+          ],
+          "C": [
+            -0.010029296874999705,
+            0.017094726562498608
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 153,
+        "post_iteration": 154,
+        "tol_pre": 0.02247547095239234,
+        "tol_post": 0.02135169740477272,
+        "Q_pa": 0.8690136718749997,
+        "Q_pb": 0.8732031249999999,
+        "Q_qa": 0.8148437500000005,
+        "Q_qb": 0.8016796874999994,
+        "D": 0.06733398437500027,
+        "F": 0.0628466796874998,
+        "C": 0.004487304687500471,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.04480468750000011,
+            0.09071289062500021
+          ],
+          "F": [
+            0.0461816406250008,
+            0.0787744140624998
+          ],
+          "C": [
+            -0.008403320312500573,
+            0.017519531250001052
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "pre_iteration": 157,
+        "post_iteration": 158,
+        "tol_pre": 0.02135169740477272,
+        "tol_post": 0.020284112534534084,
+        "Q_pa": 0.8700292968749994,
+        "Q_pb": 0.8573339843749996,
+        "Q_qa": 0.6561230468749983,
+        "Q_qb": 0.6350488281249993,
+        "D": 0.23498046875000012,
+        "F": 0.2180957031250007,
+        "C": 0.01688476562499941,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.2125781249999994,
+            0.2573339843750001
+          ],
+          "F": [
+            0.1974462890624996,
+            0.23673339843749924
+          ],
+          "C": [
+            0.0013281249999994582,
+            0.03162597656250005
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 109,
+        "post_iteration": 110,
+        "tol_pre": 0.029046297037257196,
+        "tol_post": 0.027593982185394335,
+        "Q_pa": 0.6093164062499997,
+        "Q_pb": 0.5428808593749997,
+        "Q_qa": 0.6642089843749984,
+        "Q_qb": 0.6335351562500007,
+        "D": -0.024218750000000955,
+        "F": -0.07277343749999982,
+        "C": 0.04855468749999886,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.052861328124997886,
+            0.0029101562499994627
+          ],
+          "F": [
+            -0.09269042968749924,
+            -0.05363281249999946
+          ],
+          "C": [
+            0.030864257812500573,
+            0.06554199218750029
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 113,
+        "post_iteration": 114,
+        "tol_pre": 0.027593982185394335,
+        "tol_post": 0.02621428307612462,
+        "Q_pa": 0.5976855468749991,
+        "Q_pb": 0.6184570312499994,
+        "Q_qa": 0.6559765625,
+        "Q_qb": 0.6285351562499989,
+        "D": -0.03084960937499981,
+        "F": -0.03418457031250022,
+        "C": 0.0033349609375004086,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.05405273437499969,
+            -0.007421874999998246
+          ],
+          "F": [
+            -0.05139648437499983,
+            -0.016562499999999036
+          ],
+          "C": [
+            -0.012133789062499123,
+            0.019086914062500238
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 120,
+        "post_iteration": 121,
+        "tol_pre": 0.02621428307612462,
+        "tol_post": 0.024903568922318386,
+        "Q_pa": 0.7396875000000005,
+        "Q_pb": 0.740117187499999,
+        "Q_qa": 0.7561035156249997,
+        "Q_qb": 0.7418261718749998,
+        "D": -0.002138671874999276,
+        "F": -0.009062499999999973,
+        "C": 0.006923828125000697,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.026005859375000218,
+            0.022324218750001013
+          ],
+          "F": [
+            -0.025053710937500973,
+            0.006289062499999998
+          ],
+          "C": [
+            -0.010122070312501175,
+            0.024692382812500413
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 124,
+        "post_iteration": 125,
+        "tol_pre": 0.024903568922318386,
+        "tol_post": 0.023658390476202464,
+        "Q_pa": 0.7304394531249994,
+        "Q_pb": 0.6972656249999992,
+        "Q_qa": 0.8264160156249993,
+        "Q_qb": 0.8241601562499987,
+        "D": -0.09372070312499936,
+        "F": -0.11143554687499974,
+        "C": 0.017714843750000375,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.12517578125000062,
+            -0.0641406250000004
+          ],
+          "F": [
+            -0.13249511718749885,
+            -0.09228027343749934
+          ],
+          "C": [
+            0.00012207031250033307,
+            0.03614746093750054
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 128,
+        "post_iteration": 129,
+        "tol_pre": 0.023658390476202464,
+        "tol_post": 0.02247547095239234,
+        "Q_pa": 0.6788183593749996,
+        "Q_pb": 0.6585742187499998,
+        "Q_qa": 0.7778906249999993,
+        "Q_qb": 0.7712499999999993,
+        "D": -0.09243164062499976,
+        "F": -0.10587402343749963,
+        "C": 0.013442382812499876,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.13216796874999748,
+            -0.05505859374999578
+          ],
+          "F": [
+            -0.12784179687500064,
+            -0.08250488281250007
+          ],
+          "C": [
+            -0.010449218750000044,
+            0.0351220703125007
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 139,
+        "post_iteration": 140,
+        "tol_pre": 0.02247547095239234,
+        "tol_post": 0.02135169740477272,
+        "Q_pa": 0.7404003906249996,
+        "Q_pb": 0.7370214843749995,
+        "Q_qa": 0.7737011718750006,
+        "Q_qb": 0.7717675781249995,
+        "D": -0.03136718749999989,
+        "F": -0.03402343750000053,
+        "C": 0.0026562500000006373,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.055673828124998215,
+            -0.0054003906250008615
+          ],
+          "F": [
+            -0.04945800781249926,
+            -0.01948730468750265
+          ],
+          "C": [
+            -0.017128906249999742,
+            0.024321289062500806
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 143,
+        "post_iteration": 144,
+        "tol_pre": 0.02135169740477272,
+        "tol_post": 0.020284112534534084,
+        "Q_pa": 0.7119433593749993,
+        "Q_pb": 0.6665332031249996,
+        "Q_qa": 0.7822753906250004,
+        "Q_qb": 0.7617382812500008,
+        "D": -0.04979492187500145,
+        "F": -0.0827685546875011,
+        "C": 0.032973632812499654,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.08491210937500249,
+            -0.013974609375001723
+          ],
+          "F": [
+            -0.10651855468750115,
+            -0.058925781250001474
+          ],
+          "C": [
+            0.01261230468749902,
+            0.05621093749999995
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 149,
+        "post_iteration": 150,
+        "tol_pre": 0.020284112534534084,
+        "tol_post": 0.019269906907807378,
+        "Q_pa": 0.7602734374999995,
+        "Q_pb": 0.7433789062499987,
+        "Q_qa": 0.7386132812500001,
+        "Q_qb": 0.7344531249999995,
+        "D": 0.025820312500000053,
+        "F": 0.015292968749999303,
+        "C": 0.01052734375000075,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.002490234375000955,
+            0.048310546875002136
+          ],
+          "F": [
+            -0.003964843750000002,
+            0.03225585937499981
+          ],
+          "C": [
+            -0.006127929687499367,
+            0.02649902343749877
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "pre_iteration": 154,
+        "post_iteration": 155,
+        "tol_pre": 0.019269906907807378,
+        "tol_post": 0.018306411562417007,
+        "Q_pa": 0.6531054687499986,
+        "Q_pb": 0.6328124999999997,
+        "Q_qa": 0.5066992187499982,
+        "Q_qb": 0.4950683593749978,
+        "D": 0.15803710937500082,
+        "F": 0.14207519531250112,
+        "C": 0.015961914062499694,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.12471679687500214,
+            0.19290039062499964
+          ],
+          "F": [
+            0.12297851562499923,
+            0.16121093749999985
+          ],
+          "C": [
+            -0.013203124999999732,
+            0.04533691406249879
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 100,
+        "post_iteration": 102,
+        "tol_pre": 0.028987010237647704,
+        "tol_post": 0.02753765972576532,
+        "Q_pa": 0.8838867187499997,
+        "Q_pb": 0.876142578125,
+        "Q_qa": 0.8659960937500004,
+        "Q_qb": 0.8561425781249999,
+        "D": 0.027744140624999747,
+        "F": 0.018945312499999645,
+        "C": 0.008798828125000102,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            0.01112304687499932,
+            0.04461914062499828
+          ],
+          "F": [
+            0.005234375000000291,
+            0.03290039062499961
+          ],
+          "C": [
+            -0.004819335937499114,
+            0.02236816406250014
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 108,
+        "post_iteration": 109,
+        "tol_pre": 0.02753765972576532,
+        "tol_post": 0.026160776739477053,
+        "Q_pa": 0.8603124999999994,
+        "Q_pb": 0.8490234374999999,
+        "Q_qa": 0.9071289062499995,
+        "Q_qb": 0.9025390624999995,
+        "D": -0.04222656250000012,
+        "F": -0.05016601562499989,
+        "C": 0.007939453124999774,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.06553710937500057,
+            -0.01680664062499926
+          ],
+          "F": [
+            -0.06678222656250005,
+            -0.033344726562500315
+          ],
+          "C": [
+            -0.005922851562500719,
+            0.02258300781249939
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 112,
+        "post_iteration": 113,
+        "tol_pre": 0.026160776739477053,
+        "tol_post": 0.0248527379025032,
+        "Q_pa": 0.898583984375,
+        "Q_pb": 0.8821191406249994,
+        "Q_qa": 0.9003906249999999,
+        "Q_qb": 0.8974414062499996,
+        "D": 0.0011425781250004041,
+        "F": -0.008564453125000038,
+        "C": 0.009707031250000442,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.01620117187500103,
+            0.018378906250001714
+          ],
+          "F": [
+            -0.021469726562500235,
+            0.004462890624999716
+          ],
+          "C": [
+            -0.0018847656250005063,
+            0.021958007812500735
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 116,
+        "post_iteration": 117,
+        "tol_pre": 0.0248527379025032,
+        "tol_post": 0.02361010100737804,
+        "Q_pa": 0.8915624999999991,
+        "Q_pb": 0.8897753906249997,
+        "Q_qa": 0.8946484374999992,
+        "Q_qb": 0.9045410156249996,
+        "D": -0.012978515625000409,
+        "F": -0.008925781249999987,
+        "C": -0.004052734375000422,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.028066406249999565,
+            0.0029492187500003153
+          ],
+          "F": [
+            -0.023344726562499973,
+            0.005473632812499685
+          ],
+          "C": [
+            -0.021733398437500495,
+            0.014624023437500133
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 120,
+        "post_iteration": 121,
+        "tol_pre": 0.02361010100737804,
+        "tol_post": 0.02242959595700914,
+        "Q_pa": 0.8898535156249996,
+        "Q_pb": 0.8751269531250008,
+        "Q_qa": 0.9177246093749996,
+        "Q_qb": 0.9096777343750004,
+        "D": -0.019824218750000844,
+        "F": -0.031210937499999813,
+        "C": 0.01138671874999897,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.03924804687499883,
+            8.789062500091926e-05
+          ],
+          "F": [
+            -0.04533203124999907,
+            -0.01759277343749882
+          ],
+          "C": [
+            0.0005664062499997624,
+            0.022246093750000306
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "pre_iteration": 129,
+        "post_iteration": 130,
+        "tol_pre": 0.02242959595700914,
+        "tol_post": 0.02130811615915868,
+        "Q_pa": 0.8174511718750014,
+        "Q_pb": 0.7929394531250017,
+        "Q_qa": 0.8510742187500004,
+        "Q_qb": 0.8316992187500015,
+        "D": -0.014248046875000142,
+        "F": -0.03619140624999945,
+        "C": 0.021943359374999305,
+        "identity_residual": 0.0,
+        "n_samples": 2048,
+        "mode": "exact",
+        "metric": "normalized_nsucc",
+        "reset_pairing_valid": true,
+        "lineage_changed": false,
+        "transition_kind": "within_lineage",
+        "ci": {
+          "D": [
+            -0.03389648437499837,
+            0.004892578125001212
+          ],
+          "F": [
+            -0.05108886718750055,
+            -0.021372070312499214
+          ],
+          "C": [
+            0.004765625000000162,
+            0.03989746093750085
+          ]
+        }
+      }
+    ]
+  },
   "missing": [
-    "no evaluation results yet (ccrs_results.jsonl empty)"
-  ]
+    "missing exact transition cells for 15 transitions"
+  ],
+  "missing_exact_transitions": [
+    "p0 it112->113 tol 0.02986954884717398->0.028376071404815278",
+    "p0 it117->118 tol 0.028376071404815278->0.026957267834574514",
+    "p0 it121->122 tol 0.026957267834574514->0.025609404442845787",
+    "p0 it138->139 tol 0.026957267834574514->0.025609404442845787",
+    "p0 it146->147 tol 0.026957267834574514->0.025609404442845787",
+    "p0 it151->152 tol 0.026957267834574514->0.025609404442845787",
+    "p0 it154->155 tol 0.025609404442845787->0.024328934220703497",
+    "p0 it158->159 tol 0.024328934220703497->0.023112487509668322",
+    "p2 it112->113 tol 0.0297302669104079->0.028243753564887505",
+    "p2 it119->120 tol 0.028243753564887505->0.02683156588664313",
+    "p2 it137->138 tol 0.02683156588664313->0.02548998759231097",
+    "p3 it104->106 tol 0.029046297037257196->0.027593982185394335",
+    "p3 it110->111 tol 0.027593982185394335->0.02621428307612462",
+    "p3 it114->115 tol 0.02621428307612462->0.024903568922318386",
+    "p3 it157->158 tol 0.024903568922318386->0.023658390476202464"
+  ],
+  "verdicts": {
+    "metric": "normalized_nsucc",
+    "prereg_min_effect": 0.05,
+    "prereg_min_effect_nsucc_at_M50": 2.5,
+    "high_precision_tols_m": [
+      0.02,
+      0.019,
+      0.018
+    ],
+    "mid_precision_tols_m": [
+      0.023,
+      0.022,
+      0.021
+    ],
+    "reset_pairing_valid_p1_p4": true,
+    "reset_pairing_valid_p5": true,
+    "p4_wins_high_precision": false,
+    "p1_wins_mid_precision": true,
+    "verdict_p1_p4": "C_p1_still_better_at_high_precision",
+    "verdict_p5": "real_policy_forgetting",
+    "n_significant_p4_minus_p1": 8,
+    "n_significant_p5_drop": 8
+  }
 }

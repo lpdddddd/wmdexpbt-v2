@@ -165,18 +165,48 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
+import yaml  # noqa: E402
 from rl_games.common import env_configurations, vecenv  # noqa: E402
 from rl_games.torch_runner import Runner  # noqa: E402
 
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper  # noqa: E402
 import dexpbt_isaaclab  # noqa: F401, E402  (register envs)
 
-# Reuse the proven loaders from eval_fair instead of duplicating them.
-from dexpbt_isaaclab.scripts.eval_fair import (  # noqa: E402
-    _filtered_restore,
-    _load_agent_cfg,
-    _load_env_cfg,
-)
+
+# NOTE: these three helpers mirror eval_fair.py. We cannot import eval_fair:
+# its module top level builds its own argparse parser with different required
+# args and boots its own AppLauncher, so importing it inside another script
+# aborts on argument parsing.
+
+def _load_agent_cfg() -> dict:
+    import importlib.resources as resources
+    cfg_file = resources.files("dexpbt_isaaclab.agents").joinpath("rl_games_ppo_cfg.yaml")
+    with open(str(cfg_file)) as f:
+        return yaml.safe_load(f)
+
+
+def _load_env_cfg(task_name: str):
+    spec = gym.spec(task_name)
+    entry = spec.kwargs["env_cfg_entry_point"]
+    module_path, cls_name = entry.rsplit(":", 1)
+    import importlib
+    mod = importlib.import_module(module_path)
+    return getattr(mod, cls_name)()
+
+
+def _filtered_restore(agent, checkpoint_path: Path, device: str) -> None:
+    """Restore an rl_games agent, tolerating aux_value_head keys from WM runs."""
+    try:
+        agent.restore(str(checkpoint_path))
+        return
+    except RuntimeError as e:
+        if "aux_value_head" not in str(e):
+            raise
+    print("[ccrs_eval] aux_value_head detected; loading with strict=False filter")
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model_sd = ckpt.get("model", ckpt)
+    filtered = {k: v for k, v in model_sd.items() if not k.startswith("aux_value_head")}
+    agent.model.load_state_dict(filtered, strict=False)
 
 
 def run_unit(unit: EvalUnit) -> dict:
