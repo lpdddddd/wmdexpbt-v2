@@ -100,7 +100,11 @@ def _torch_load_ok(path: Path) -> bool:
 @dataclass
 class ManifestRow:
     run_id: str
+    # Commit of the CODE at manifest-generation time (evaluation toolkit),
+    # NOT the commit the checkpoints were trained with — see training_commit.
     git_commit: str
+    # Commit the training run was launched from (provenance of checkpoints).
+    training_commit: str
     worker_id: int
     iteration: int
     frame: int
@@ -122,7 +126,13 @@ class ManifestRow:
 
 @dataclass
 class TransitionPair:
-    """A curriculum shrink transition: checkpoint before (p) and after (q)."""
+    """A curriculum shrink transition: checkpoint before (p) and after (q).
+
+    lineage_changed=True marks a lineage_replacement_transition: the post
+    checkpoint carries a different lineage_id (PBT copy/replacement between
+    the two ticks). Its F component mixes replacement effects and must not
+    be interpreted as ordinary within-lineage policy update / forgetting.
+    """
     worker_id: int
     pre_iteration: int
     post_iteration: int
@@ -132,6 +142,9 @@ class TransitionPair:
     post_tolerance: float
     pre_nsucc: Optional[float] = None
     post_nsucc: Optional[float] = None
+    pre_lineage_id: Optional[str] = None
+    post_lineage_id: Optional[str] = None
+    lineage_changed: Optional[bool] = None
 
 
 def parse_targets(spec: Optional[str]) -> dict[int, list[float]]:
@@ -186,6 +199,8 @@ def find_transitions(
         if prev is not None:
             ptol = _meta_tol(prev)
             if ptol is not None and tol < ptol - 1e-9 and band_lo <= tol <= band_hi:
+                pre_lin = prev.get("lineage_id")
+                post_lin = m.get("lineage_id")
                 out.append(TransitionPair(
                     worker_id=int(m.get("policy_idx", -1)),
                     pre_iteration=int(prev.get("iteration", -1)),
@@ -196,6 +211,10 @@ def find_transitions(
                     post_tolerance=float(tol),
                     pre_nsucc=float(prev["nsucc_mean"]) if prev.get("nsucc_mean") is not None else None,
                     post_nsucc=float(m["nsucc_mean"]) if m.get("nsucc_mean") is not None else None,
+                    pre_lineage_id=pre_lin,
+                    post_lineage_id=post_lin,
+                    lineage_changed=(None if (pre_lin is None or post_lin is None)
+                                     else bool(pre_lin != post_lin)),
                 ))
         prev = m
     return out
@@ -216,8 +235,14 @@ def build_manifest(
     torch_check: str = "none",
     workers: Optional[list[int]] = None,
     policy_arch: str = "rl_games a2c_continuous LSTM (DexPBTKukaAllegroLSTMPPO)",
+    training_commit: str = "unknown",
 ) -> tuple[list[ManifestRow], list[TransitionPair]]:
-    """Build manifest rows + transition list. Read-only."""
+    """Build manifest rows + transition list. Read-only.
+
+    git_commit records the CURRENT code commit (evaluation toolkit);
+    training_commit must be supplied by the caller and records the commit
+    the run's checkpoints were actually trained with.
+    """
     workspace = run_dir / "dexpbt_8gpu_ws"
     if not workspace.is_dir():
         raise FileNotFoundError(f"workspace not found: {workspace}")
@@ -257,6 +282,7 @@ def build_manifest(
         row = ManifestRow(
             run_id=run_id,
             git_commit=commit,
+            training_commit=training_commit,
             worker_id=worker_id,
             iteration=it,
             frame=int(meta["frame"]),
@@ -359,6 +385,9 @@ def write_outputs(
         "# CCRS Checkpoint Audit",
         "",
         f"- run: `{run_dir}`",
+        (f"- eval code commit (this audit): `{rows[0].git_commit}`  |  "
+         f"training commit (checkpoints): `{rows[0].training_commit}`"
+         if rows else ""),
         f"- rows: {len(rows)}  |  transitions in band: {len(transitions)}",
         f"- missing checkpoints: {len(missing)}",
         f"- zip-invalid checkpoints: {len(bad_zip)}",
@@ -382,15 +411,20 @@ def write_outputs(
         "",
         "## Tolerance shrink transitions (post-tol in band)",
         "",
-        "| worker | pre_iter -> post_iter | frames | tol(m) | nsucc |",
-        "|---|---|---|---|---|",
+        "lineage=changed marks a lineage_replacement_transition (PBT copy "
+        "between ticks); excluded from within-lineage forgetting analysis.",
+        "",
+        "| worker | pre_iter -> post_iter | frames | tol(m) | nsucc | lineage |",
+        "|---|---|---|---|---|---|",
     ]
     for t in transitions:
+        lin = ("changed" if t.lineage_changed
+               else ("same" if t.lineage_changed is not None else "unknown"))
         lines.append(
             f"| p{t.worker_id} | {t.pre_iteration} -> {t.post_iteration} "
             f"| {t.pre_frame/1e9:.2f}->{t.post_frame/1e9:.2f}B "
             f"| {t.pre_tolerance:.4f}->{t.post_tolerance:.4f} "
-            f"| {t.pre_nsucc:.1f}->{t.post_nsucc:.1f} |"
+            f"| {t.pre_nsucc:.1f}->{t.post_nsucc:.1f} | {lin} |"
         )
     if extra_notes:
         lines += ["", "## Notes", ""] + [f"- {n}" for n in extra_notes]
@@ -410,6 +444,9 @@ def main() -> None:
     ap.add_argument("--torch-check", choices=["none", "selected", "all"], default="selected")
     ap.add_argument("--note", action="append", default=[],
                     help="Extra note lines for the audit MD (repeatable)")
+    ap.add_argument("--training-commit", default="unknown",
+                    help="Git commit the run's checkpoints were trained with "
+                         "(provenance; distinct from the current code commit)")
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -422,6 +459,7 @@ def main() -> None:
         band_lo=lo,
         band_hi=hi,
         torch_check=args.torch_check,
+        training_commit=args.training_commit,
     )
     csv_path, md_path = write_outputs(
         rows, transitions, Path(args.out_dir).resolve(), run_dir,

@@ -7,30 +7,31 @@ No optimizer step, no PBT, no curriculum update, no mutation can occur:
 this process never constructs a trainer/optimizer — only a player — and the
 env-side curriculum trigger is disabled exactly as in eval_fair.py.
 
-policy_only mode (default, main CCRS results):
-  - pure rl_games player action = actor forward pass only
-  - no snippet retrieval, no WM rerank, no MPPI, no residual action,
-    no actor distillation (those subsystems live in the training observer
-    stack and are simply never instantiated here; asserted at runtime).
+v2 paired-reset protocol:
+- requires num_episodes <= num_envs;
+- collects ONLY the first completed episode of each env_id < num_episodes
+  (FirstEpisodeCollector), so the sample_id set (seed_XXXX_env_YYY) is
+  identical across all checkpoints/tolerances sharing a reset seed;
+- after the initial env.reset() and BEFORE the first action, records a
+  per-env reset fingerprint (object/goal pose + robot joint positions,
+  fixed-precision quantized) as pairing evidence;
+- terminal error is taken from an eval-only pre-reset snapshot hook wrapped
+  around env._reset_idx (the buffers read after step() are post-reset for
+  done envs and must NOT be used). If the hook cannot attach,
+  terminal_error_valid=false and terminal metrics are NaN;
+- status=ok ONLY when all requested episodes were collected; otherwise
+  status=incomplete with missing_env_ids and stop_reason.
 
-system_on mode: reserved, currently rejected at startup (do not mix with
-policy-only results).
+policy_only mode (default, main CCRS results): pure rl_games player forward
+pass; no snippet retrieval, no WM rerank, no MPPI, no residual action, no
+actor distillation (those subsystems live in the training observer stack and
+are never instantiated here; asserted at runtime).
+
+system_on mode: reserved, rejected at startup.
 
 One unit per process by design: Isaac Sim is not reliable across env.close()
-re-creation in one process (empirically hangs; see 2026-07-15 eval notes).
-Resume/skip: if the per-unit raw JSON already exists and is valid, the
-process exits 0 immediately (checked BEFORE Isaac boot).
-
-Usage:
-  python -m dexpbt_isaaclab.scripts.ccrs_eval \
-    --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
-    --run-id regrasping_..._5b_20260716_130631 \
-    --worker-id 1 --checkpoint-iteration 149 --checkpoint-frame 4120000000 \
-    --checkpoint-path /path/to/dexpbt_8gpu_ws/001/000149.pth \
-    --fixed-tolerance 0.020 --reset-seed 10001 \
-    --num-envs 512 --num-episodes 512 \
-    --raw-dir results/analysis/ccrs_base_retention/raw \
-    --headless
+re-creation in one process. Resume/skip: if the per-unit raw JSON exists and
+passes the strict is_done() validation, the process exits 0 before Isaac boot.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# --- protocol import must not require Isaac ---
+# --- protocol imports must not require Isaac ---
 from dexpbt_isaaclab.ccrs.eval_protocol import (
     EVALUATION_MODE_POLICY_ONLY,
     EVALUATION_MODE_SYSTEM_ON,
@@ -50,6 +51,12 @@ from dexpbt_isaaclab.ccrs.eval_protocol import (
     is_done,
     make_result_row,
     result_path,
+    write_result_atomic,
+)
+from dexpbt_isaaclab.ccrs.rollout_collect import (
+    FirstEpisodeCollector,
+    TerminalSnapshotHook,
+    extract_reset_fingerprints,
 )
 
 parser = argparse.ArgumentParser(description="CCRS single-unit fixed-tolerance eval.")
@@ -63,7 +70,8 @@ parser.add_argument("--fixed-tolerance", type=float, required=True,
                     help="Fixed success tolerance in METERS (e.g. 0.020 = 2 cm)")
 parser.add_argument("--reset-seed", type=int, required=True)
 parser.add_argument("--num-envs", type=int, default=512)
-parser.add_argument("--num-episodes", type=int, default=512)
+parser.add_argument("--num-episodes", type=int, default=512,
+                    help="Must be <= num-envs (paired-reset protocol)")
 parser.add_argument("--deterministic", type=str, default="true", choices=["true", "false"])
 parser.add_argument("--max-steps", type=int, default=200_000)
 parser.add_argument("--max-consecutive-successes", type=int, default=50)
@@ -125,6 +133,11 @@ if not (0.001 <= _pre_args.fixed_tolerance <= 0.2):
           "range [0.001, 0.2]; pass meters (0.020 = 2 cm)", file=sys.stderr)
     sys.exit(3)
 
+if _pre_args.num_episodes > _pre_args.num_envs:
+    print(f"[ccrs_eval] paired-reset protocol requires num_episodes <= num_envs "
+          f"(got {_pre_args.num_episodes} > {_pre_args.num_envs})", file=sys.stderr)
+    sys.exit(3)
+
 _unit = _build_unit(_pre_args)
 _raw_dir = Path(_pre_args.raw_dir).resolve()
 _raw_dir.mkdir(parents=True, exist_ok=True)
@@ -151,9 +164,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import gymnasium as gym  # noqa: E402
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import yaml  # noqa: E402
 from rl_games.common import env_configurations, vecenv  # noqa: E402
 from rl_games.torch_runner import Runner  # noqa: E402
 
@@ -227,14 +238,35 @@ def run_unit(unit: EvalUnit) -> dict:
     obs = env.reset()
     if isinstance(obs, dict):
         obs = obs["obs"]
+
+    # --- reset fingerprints: AFTER initial reset, BEFORE the first action ---
+    eligible = list(range(unit.num_episodes))
+    per_env_fingerprint = extract_reset_fingerprints(raw_env, eligible)
+
+    # --- eval-only pre-reset terminal snapshot hook (default off; installed
+    # here explicitly, never in training code paths) ---
+    hook = TerminalSnapshotHook(raw_env)
+    hook_ok = hook.install()
+    if not hook_ok:
+        print("[ccrs_eval] WARN: terminal snapshot hook unavailable; "
+              "terminal_error will be marked invalid")
+
     _ = agent.get_batch_size(obs, 1)
     if agent.is_rnn:
         agent.init_rnn()
 
-    episode_nsucc: list[float] = []
-    episode_final_error: list[float] = []
+    collector = FirstEpisodeCollector(
+        reset_seed=unit.reset_seed,
+        num_episodes=unit.num_episodes,
+        max_consecutive_successes=unit.max_consecutive_successes,
+    )
+
     step = 0
-    while simulation_app.is_running() and step < unit.max_steps:
+    max_steps_reached = False
+    while simulation_app.is_running() and not collector.complete:
+        if step >= unit.max_steps:
+            max_steps_reached = True
+            break
         with torch.no_grad():
             obs_t = agent.obs_to_torch(obs)
             actions = agent.get_action(obs_t, is_deterministic=unit.deterministic)
@@ -244,45 +276,53 @@ def run_unit(unit: EvalUnit) -> dict:
         if dm.any():
             idx = dm.nonzero(as_tuple=False).squeeze(-1)
             ns_vals = raw_env.prev_episode_successes[idx].detach().cpu().numpy()
-            episode_nsucc.extend(ns_vals.tolist())
-            if hasattr(raw_env, "object_pos") and hasattr(raw_env, "goal_pos"):
-                err = (raw_env.object_pos[idx] - raw_env.goal_pos[idx]).norm(dim=-1)
-                episode_final_error.extend(err.detach().cpu().numpy().tolist())
-            else:
-                episode_final_error.extend([float("nan")] * len(idx))
+            for env_id, ns in zip(idx.detach().cpu().numpy().tolist(),
+                                  ns_vals.tolist()):
+                terr, tvalid, dropped = hook.take(int(env_id))
+                collector.offer(
+                    env_id=int(env_id),
+                    nsucc=float(ns),
+                    terminal_error=terr,
+                    terminal_error_valid=tvalid,
+                    dropped=dropped,
+                )
         if agent.is_rnn and agent.states is not None and len(dones) > 0:
             for s in agent.states:
                 s[:, dones.bool(), :] = 0.0
-        if len(episode_nsucc) >= unit.num_episodes:
-            break
 
     tol_at_end = float(raw_env.success_tolerance)
+    hook.uninstall()
     env.close()
 
     return make_result_row(
         unit=unit,
-        episode_nsucc=episode_nsucc[: unit.num_episodes],
-        episode_final_error=episode_final_error[: unit.num_episodes],
+        samples=collector.samples,
+        per_env_fingerprint=per_env_fingerprint,
         git_sha=_git_sha(),
         checkpoint_hash=_ckpt_hash(Path(unit.checkpoint_path)),
-        keep_per_episode=True,
+        max_steps_reached=max_steps_reached,
         applied_tolerance_start=tol_at_start,
         applied_tolerance_end=tol_at_end,
-        extra={"steps_used": step},
+        extra={"steps_used": step,
+               "terminal_snapshot_hook_installed": bool(hook_ok)},
     )
 
 
 def main() -> None:
     row = run_unit(_unit)
-    tmp = _out_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(row))
-    tmp.replace(_out_path)
+    out = write_result_atomic(_raw_dir, _unit, row)
     brief = {k: row[k] for k in (
-        "worker_id", "checkpoint_iteration", "fixed_tolerance", "reset_seed",
-        "num_episodes", "success_rate", "nsucc_mean",
+        "status", "worker_id", "checkpoint_iteration", "fixed_tolerance",
+        "reset_seed", "actual_num_episodes", "normalized_nsucc", "nsucc_mean",
+        "success_any_rate", "terminal_error_valid",
     )}
-    print(f"[ccrs_eval] done: {json.dumps(brief)}")
-    print(f"[ccrs_eval] wrote {_out_path}")
+    print(f"[ccrs_eval] finished: {json.dumps(brief)}")
+    print(f"[ccrs_eval] wrote {out}")
+    if row["status"] != "ok":
+        print(f"[ccrs_eval] unit INCOMPLETE: missing={row['missing_env_ids'][:10]}"
+              f"{'...' if len(row['missing_env_ids']) > 10 else ''} "
+              f"stop_reason={row['stop_reason']}", file=sys.stderr)
+        sys.exit(4)
 
 
 if __name__ == "__main__":

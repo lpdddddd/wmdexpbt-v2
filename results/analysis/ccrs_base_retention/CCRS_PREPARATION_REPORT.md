@@ -1,190 +1,257 @@
-# CCRS 准备报告（base-retention 5B）
+# CCRS Preparation Report — base-retention 5B (v2 protocol)
 
-日期：2026-07-18　　分支：`base-retention`　　HEAD：`5cb2c7cdafb12e50b9b7db88fdc47e7ef1056f86`
-目标 run：`results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631`
+Date: 2026-07-18 (fix round after v1 review)
+Repo: `lpdddddd/wmdexpbt-v2`, branch `base-retention`
+HEAD before this fix round: `80446995018f46443d420dab422e69402aaa16e5`
+Training commit for all checkpoints: `5cb2c7cdafb12e50b9b7db88fdc47e7ef1056f86`
+(the CCRS toolkit commits are evaluation-only and postdate training)
 
-状态：**准备完成，未执行任何 CCRS 评测，未占用 GPU**。等待确认后启动。
+Run under audit: `regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631`
+Training status: **complete** — all six workers reached a 5.00B tick
+(p2: 5.08B); no training processes remain; all GPUs idle.
+No GPU task was launched during this preparation round.
 
 ---
 
-## 1. 找到了哪些 checkpoint
+## 1. What changed in this fix round (v1 -> v2 protocol)
 
-Workspace `dexpbt_8gpu_ws/{000..005}/` 保存完整：每个 worker 约 100–103 个 PBT tick
-checkpoint（前期每 40M、后期每 20M 一存），每个 .pth 约 180MB，配套 meta json 含
-frame / nsucc_mean / curriculum.success_tolerance / lineage_id。总计约 216GB。
+### 1.1 Primary metric: normalized_nsucc (fixes saturation)
 
-12 个关键 checkpoint 全部命中（frame 偏差为 0），并通过 zip 结构 + torch.load(CPU) 校验：
+v1 used `P(nsucc > 0)` as the main metric. base-retention nsucc is typically
+30–45, so that metric saturates at ~1.0 and cannot separate p1/p4/p5.
 
-| worker | iter | frame | live tol (m) | live nsucc | 角色 |
+v2 primary capability surface:
+
+    Q(k, τ) = E[min(nsucc, M) | checkpoint k, fixed tolerance τ] / M
+    M = max_consecutive_successes = 50
+
+- `normalized_nsucc` — PRIMARY CCRS capability metric (all curves, heatmap,
+  crossing test, p5 peak-tip, frontier, default D/F/C).
+- `nsucc_mean`, `nsucc_std` — raw capability metrics, kept for continuity.
+- `success_any_rate = P(nsucc > 0)` — AUXILIARY only, never used for primary
+  verdicts, and no longer described as `P(error <= τ)`.
+- Pre-registered practical effect: `PREREG_MIN_EFFECT = 0.05` in
+  normalized_nsucc (≈ 2.5 raw nsucc at M=50).
+
+### 1.2 True paired resets (fingerprints, not seed integers)
+
+- Protocol requires `num_episodes <= num_envs` (default 512/512, enforced in
+  `EvalUnit.__post_init__`, `ccrs_eval` and `ccrs_sweep`).
+- Only the FIRST completed episode of each env_id < num_episodes is recorded
+  (`FirstEpisodeCollector` with `seen_env_ids`); completion order cannot
+  change the sample set.
+- Every sample is stored with `sample_id = seed_<seed>_env_<id>`, reset_seed,
+  env_id, nsucc, normalized_nsucc, terminal_error(+valid), dropped.
+- After the initial `env.reset()` and BEFORE the first action, a per-env
+  **reset fingerprint** is computed over `object_pos`, `object_rot`,
+  `goal_pos`, `goal_rot`, `dof_pos` (robot joints), with fixed-precision
+  quantization (1e-5) before hashing. Raw results store both the per-env map
+  and an aggregate fingerprint.
+- Paired analysis (p1/p4, pre/post) first verifies fingerprint equality for
+  every shared (seed, env_id). On any mismatch: paired bootstrap is refused,
+  the report marks `reset_pairing_invalid`, and no significance conclusion is
+  produced.
+- Bootstrap is a **hierarchical paired bootstrap**: outer resample over
+  seeds, inner resample over env_ids within each drawn seed, with the same
+  resampled sample multiset applied to every cell. Statistical unit:
+  seed × env_id paired samples.
+
+### 1.3 Terminal error (fixes post-reset read)
+
+Verified in `dexpbt_kuka_allegro_env.py`: `_reset_idx()` ends with
+`_compute_intermediate_values()`, so after `env.step()` returns, `object_pos`
+/ `goal_pos` for done envs already hold POST-reset state. The v1 read was
+therefore invalid. Gymnasium `final_observation` is not provided by this
+Direct-workflow env.
+
+v2: an **eval-only `TerminalSnapshotHook`** wraps `env._reset_idx` inside the
+evaluator process only; at call time the buffers still hold the pre-reset
+terminal state, so it snapshots `||object_pos - goal_pos||` and
+`dropped = object_pos.z < 0.1` for exactly the env_ids being reset.
+- Training code is untouched (test asserts the env source has no CCRS
+  references); hook default off, must be explicitly installed, uninstall
+  restores the original method.
+- If the hook cannot attach: `terminal_error = NaN`,
+  `terminal_error_valid = false`, no terminal-based conclusions.
+
+### 1.4 Incomplete & resume validation
+
+- `status = ok` ONLY when `actual_num_episodes == requested_num_episodes`;
+  otherwise `status = incomplete` with `requested/actual_num_episodes`,
+  `max_steps_reached`, `missing_env_ids`, `stop_reason`.
+- `is_done()` validates: status, `schema_version`, `config_hash` vs the
+  current EvalUnit, actual==requested episodes, evaluation_mode,
+  fixed_tolerance, checkpoint identity (path + frame + iteration), and reset
+  protocol version. Incomplete results are never skipped.
+- `EvalUnit.unit_key()/config_hash()` now include checkpoint_frame,
+  checkpoint_path, max_steps, max_consecutive_successes,
+  reset_protocol_version, metric_protocol_version.
+- `SCHEMA_VERSION` bumped 1 -> 2; v1 dry/smoke results can never be mistaken
+  for v2 results (excluded from resume, aggregation, and analysis tables).
+- Raw JSON writes remain atomic (temp file + rename).
+
+### 1.5 Exact vs grid-projected D/F/C, lineage
+
+- **capability grid mode** (curves / crossing / heatmap / frontier): fixed
+  grid [0.028, 0.025, 0.023, 0.022, 0.021, 0.020, 0.019, 0.018] m.
+- **exact transition mode** (D/F/C): uses the REAL `pre_tolerance = a`,
+  `post_tolerance = b` from `tolerance_transitions.csv`; needs the four cells
+  Q(p,a), Q(p,b), Q(q,a), Q(q,b) evaluated at exactly a and b.
+  `ccrs_sweep --transitions` schedules those cells automatically. Missing
+  exact cells → the transition is reported under "missing exact transition
+  cells" and NO D/F/C is generated for it.
+- Nearest-grid analysis still exists but only as `grid_projected_dfc`,
+  explicitly labelled, opt-in (`report --grid-projected`), never presented as
+  exact and never used for primary conclusions.
+- `TransitionPair` / `tolerance_transitions.csv` now carry `pre_lineage_id`,
+  `post_lineage_id`, `lineage_changed`. Transitions with lineage change are
+  labelled `lineage_replacement_transition` and reported separately: their F
+  includes PBT copy/replacement effects and is excluded from within-lineage
+  forgetting analysis. In the final manifest all 37 in-band transitions are
+  within-lineage (lineage_changed=False).
+
+D/F/C on Q (identity D = F + C preserved, tested):
+
+    D = Q(p,a) − Q(q,b)
+    F = ½[(Q(p,a)−Q(q,a)) + (Q(p,b)−Q(q,b))]
+    C = ½[(Q(p,a)−Q(p,b)) + (Q(q,a)−Q(q,b))]
+
+---
+
+## 2. Final manifest (regenerated after training completion)
+
+`checkpoint_manifest.csv`: 84 rows; 0 missing checkpoints, 0 zip-invalid;
+12 key checkpoints torch_load-verified on CPU (all ok).
+`tolerance_transitions.csv`: 37 in-band (0.018–0.0285 m) shrink transitions,
+all within-lineage.
+
+Key checkpoints (roles tip/peak/target — the 12-checkpoint main sweep set):
+
+| worker | iter | frame | live tol (m) | live nsucc | roles |
 |---|---|---|---|---|---|
-| p1 | 149 | 4.12B | 0.0237 | 43.4 | peak（目标 4.12B，精确命中） |
-| p1 | 158 | 4.84B | 0.0203 | 39.0 | tip（见第 2 节偏差说明） |
-| p4 | 141 | 3.48B | 0.0214 | 40.2 | peak（精确命中） |
-| p4 | 160 | 5.00B | 0.0193 | 31.8 | tip |
-| p5 | 117 | 2.52B | 0.0236 | 45.0 | peak（精确命中） |
-| p5 | 160 | 5.00B | 0.0213 | 35.7 | tip |
-| p3 | 159 | 4.92B | 0.0237 | 41.2 | peak/target（精确命中） |
-| p3 | 160 | 5.00B | 0.0237 | 39.7 | tip |
-| p2 | 96 | 1.92B | 0.0365 | 44.8 | peak（精确命中） |
+| p0 | 160 | 5.00B | 0.0231 | 33.2 | tip;peak |
+| p1 | 149 | 4.12B | 0.0237 | 43.4 | peak;target;transition_pre |
+| p1 | 160 | 5.00B | 0.0203 | 40.0 | tip |
+| p2 |  96 | 1.92B | 0.0365 | 44.8 | peak;target |
 | p2 | 109 | 2.20B | 0.0297 | 44.7 | target |
 | p2 | 161 | 5.08B | 0.0255 | 30.6 | tip |
-| p0 | 160 | 5.00B | 0.0231 | 33.2 | tip/peak |
+| p3 | 159 | 4.92B | 0.0237 | 41.2 | peak;target |
+| p3 | 160 | 5.00B | 0.0237 | 39.7 | tip |
+| p4 | 141 | 3.48B | 0.0214 | 40.2 | peak;target |
+| p4 | 160 | 5.00B | 0.0193 | 31.8 | tip |
+| p5 | 117 | 2.52B | 0.0236 | 45.0 | peak;target;transition_post |
+| p5 | 160 | 5.00B | 0.0213 | 35.7 | tip |
 
-tolerance 收紧成对 checkpoint（post-tol ∈ [0.018, 0.0285]）共检出 **37 次 transition**
-（p0:8、p1:7、p2:3、p3:4、p4:9、p5:6），全部前/后 checkpoint 都存在，已写入
-`tolerance_transitions.csv`；对应 checkpoint 共 83 行进入 manifest（0 缺失，0 损坏）。
+p1 now has an exact 5.00B tip (iteration 160); the earlier 4.84B provisional
+tip is superseded. Nothing was fabricated: frames are read directly from the
+workspace metadata.
 
-产物：
-- `checkpoint_manifest.csv`（83 行，含 run_id / git_commit / worker_id / frame /
-  checkpoint_path / live_tolerance / live_nsucc / historical_peak_nsucc / lineage_id /
-  policy_arch / roles / frame_deviation / zip_ok / partial_sha256 / torch_load_ok）
-- `CHECKPOINT_AUDIT.md`、`tolerance_transitions.csv`
+## 3. Files changed in this round
 
-## 2. 缺少哪些关键 checkpoint
+- `dexpbt_isaaclab/ccrs/eval_protocol.py` — rewritten (schema v2, metrics,
+  samples, fingerprints, strict is_done, incomplete status).
+- `dexpbt_isaaclab/ccrs/rollout_collect.py` — NEW (FirstEpisodeCollector,
+  extract_reset_fingerprints, TerminalSnapshotHook).
+- `dexpbt_isaaclab/ccrs/analysis.py` — rewritten (Q tables, pairing checks,
+  hierarchical bootstrap, exact vs grid_projected D/F/C, verdicts).
+- `dexpbt_isaaclab/ccrs/manifest.py` — lineage fields on transitions,
+  training_commit vs eval code commit separation.
+- `dexpbt_isaaclab/ccrs/report.py` — rewritten (normalized_nsucc everywhere,
+  exact D/F/C with missing-cell reporting, lineage sections, pairing flags).
+- `dexpbt_isaaclab/scripts/ccrs_eval.py` — rewritten (paired resets,
+  fingerprints, terminal hook, incomplete exit code, strict pre-boot checks).
+- `dexpbt_isaaclab/scripts/ccrs_sweep.py` — exact-transition unit scheduling
+  (`--transitions/--transition-workers`), num_episodes<=num_envs guard.
+- `tests/test_ccrs_toolkit.py` — rewritten: 67 tests including all 18
+  required behavioral tests (see §4).
+- Regenerated artifacts: `checkpoint_manifest.csv`,
+  `tolerance_transitions.csv`, `CHECKPOINT_AUDIT.md`, dry `CCRS_REPORT.md`,
+  `ccrs_summary.json`, this report.
 
-- **p1 没有 5.00B tick**：p1 训练进度落后，审计时最新 tick 是 iter 158（4.84B，
-  tol 0.0203）。p1 和 p2 的训练进程仍在收尾（其余 4 个 worker 已到 5B+）。两个选项：
-  等 p1 到 5.00B 后重跑一次 manifest（一条命令），或直接接受 4.84B 作为 p1 tip
-  （偏差 160M frames，已在 manifest 中记录）。
-- 其余目标 checkpoint 无缺失，无需用邻近 tick 替代。
+## 4. Test results
 
-## 3. 复用了哪些现有 evaluation 代码
+`python -m pytest tests/test_ccrs_toolkit.py -q` → **67 passed** (isaaclab311
+env, no GPU, ~3 s). Also ran alongside existing suites
+(`test_recover_best_nsucc_picker.py`, `test_curriculum_freeze.py`,
+`test_curriculum_adaptive_fast.py`): **102 passed** total — eval_fair and
+checkpoint-loading behavior untouched (`eval_fair.py` not modified;
+`ccrs_eval` only imports its loaders).
 
-- `scripts/eval_fair.py`：直接 import 其 `_load_env_cfg` / `_load_agent_cfg` /
-  `_filtered_restore`（含 aux_value_head 过滤），rollout 循环与 tolerance 冻结方式
-  （`success_tolerance` / `initial_tolerance` / `target_tolerance` 同置 +
-  `last_curriculum_update = 1e9`）与 eval_fair 逐行一致，不存在第二套环境逻辑。
-- 沿用既有经验：**一个进程只跑一个评测单元**（Isaac 在 env.close() 后重建会挂死，
-  2026-07-15 eval 已验证），由调度器起子进程。
-- 部署口径确认：训练 launcher 中 `--no-eir_residual_apply_to_rollout
-  --no-eir_use_rssm_mppi --eir_mppi_mode=off`，即 rollout 本来就不使用 residual/MPPI；
-  snippet retrieval / WM rerank / actor distillation 只影响训练更新，不影响 rl_games
-  player 的纯 actor 前向。因此 policy-only 主评测（纯 player）与正式部署路径一致。
+All 18 required behavioral tests present and passing: normalized_nsucc
+formula; success_any auxiliary-only; curve/DFC default metric; fingerprint
+pairing accept + reject (incl. same-seed-different-fingerprint rejection);
+first-episode-per-env; completion-order invariance of sample_ids;
+incomplete status; incomplete-not-resumed; config-hash change invalidation;
+checkpoint-identity change invalidation; terminal_error invalid without
+reliable source (plus pre-reset hook behavior on a fake env reproducing the
+v1 bug); exact transition uses real a/b; missing exact cells refused;
+lineage change detection/exclusion; old-schema exclusion from aggregation,
+resume and tables; empty-data report without fabrication.
 
-## 4. 新增/修改了哪些文件
+Source-string checks (no optimizer/PBT/WM/snippet/MPPI in the evaluator) are
+retained as secondary evidence only.
 
-新增（无既有文件被修改）：
+## 5. Sweep sizing (plan-only verified, nothing executed)
 
-| 文件 | 作用 |
-|---|---|
-| `dexpbt_isaaclab/ccrs/__init__.py` | 包说明（单位约定：一律米） |
-| `dexpbt_isaaclab/ccrs/manifest.py` | 只读 manifest 构建器 + transition 检测 + 完整性校验（CLI） |
-| `dexpbt_isaaclab/ccrs/eval_protocol.py` | 评测单元定义、config hash、resume/skip、指标聚合（Wilson CI、分位数）、单位防呆（cm 当米传会报错） |
-| `dexpbt_isaaclab/ccrs/analysis.py` | R(k,τ) 表、D/F/C 分解（恒等式 D=F+C 按构造成立）、配对 seed bootstrap（非配对数据直接拒绝）、预注册判定 A/B/C/D |
-| `dexpbt_isaaclab/ccrs/report.py` | capability 曲线 / CCRS heatmap / p4−p1 差值 / p5 peak−tip / D/F/C 图 / precision-retention frontier / CCRS_REPORT.md / ccrs_summary.json；空数据时降级为 dry 模式，不伪造结果 |
-| `scripts/ccrs_eval.py` | GPU 单元评测（1 checkpoint × 1 tolerance × 1 seed / 进程）；启动 Isaac 前完成 resume 检查；冻结 policy（player-only、requires_grad=False、断言无 optimizer）；tolerance 漂移则整单报错 |
-| `scripts/ccrs_sweep.py` | 无 Isaac 的调度器：读 manifest 生成单元、按 shard 切分、跳过已完成、子进程串行执行、超时保护、聚合出 `ccrs_results.jsonl/.csv`；默认 plan-only，必须显式 `--execute` |
-| `tests/test_ccrs_toolkit.py` | 29 个单元测试 |
+- Main grid: 12 checkpoints × 8 tolerances × 4 seeds = **384 units**.
+- Exact transition cells (p1/p4/p5, 22 transitions): +44 checkpoint entries
+  with per-checkpoint exact tolerance pairs → **736 units total** with grid.
+- Defaults per unit: num_envs=512, num_episodes=512, deterministic, one
+  Isaac process per unit, strict resume/skip.
 
-输出目录（已建）：`results/analysis/ccrs_base_retention/{raw/, figures/}` +
-manifest / audit / transitions + dry 模式的 `CCRS_REPORT.md`、`ccrs_summary.json`。
+## 6. Outstanding GPU validation (NOT done in this round)
 
-每个原始结果 JSON 记录：git SHA、config hash、checkpoint hash（size+前 4MB sha256）与
-路径、reset seed、fixed tolerance（米 + 换算 cm）、evaluation_mode，以及
-num_episodes / num_success / success_rate（+Wilson 95% CI）/ nsucc_mean（+95% CI）/
-nsucc_std / final_error mean·median·q10·q25·q50·q75·q90，并**保留 per-episode 的
-nsucc 与 final_error 数组**（jsonl 中保留，csv 只存聚合），可任意重新聚合。
+- No GPU smoke test has been run under the v2 protocol; determinism of
+  fingerprints across processes (same seed → identical per-env fingerprints
+  for different checkpoints) is verified by construction and unit tests but
+  not yet on the real env.
+- Terminal snapshot hook has been validated against a fake env replicating
+  the real reset flow, not yet against Isaac.
+- Per-unit wall-time under 512 envs is unmeasured (v1 estimate: ~3–6 min).
 
-## 5. 单元测试结果
+## 7. Recommended two-stage commands (DO NOT run yet)
 
-`python3 -m pytest tests/test_ccrs_toolkit.py -q` → **29 passed**（0.84s，无 GPU）。
-覆盖用户要求的 9 项：① tolerance 漂移报错；② evaluator 源码级断言无
-optimizer/PBT/backward 路径；③ 同 seed 跨 checkpoint/tolerance 的 reset 恒等（seed 完全
-决定 env_cfg.seed）；④ manifest 正确识别 worker/frame/tolerance/transition，缺失
-checkpoint 显式标记不伪造；⑤ resume/skip（含损坏结果文件不算完成）；⑥ 合成数据
-D=F+C（残差 <1e-12）；⑦ 缺 cell / 非配对 seed / 单 seed 明确报错；⑧ policy-only：
-system_on 拒绝启动，eval 源码不引用 snippet/WM/MPPI/residual/distill；⑨ 单位一律米
-（传 2.0 判定为 cm 误用直接报错），报告同时显示 cm。
+Stage 1 — 12-unit pre-check (p1 peak it149 + p4 peak it141, τ ∈ {0.022,
+0.020, 0.019} m, seeds {10001, 10002}), single GPU:
 
-## 6. 完整 sweep 的组合数量
+    cd /root/autodl-tmp/wmdexpbt/runtime_root/src/dexpbt_isaaclab
+    OUT=/root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention
+    for it in "1 149 4120000000" "4 141 3480000000"; do
+      set -- $it
+      W=$1; IT=$2; FR=$3
+      CKPT=$(python3 -c "import csv;print(next(r['checkpoint_path'] for r in csv.DictReader(open('$OUT/checkpoint_manifest.csv')) if r['worker_id']=='$W' and r['iteration']=='$IT'))")
+      for TOL in 0.022 0.020 0.019; do
+        for SEED in 10001 10002; do
+          CUDA_VISIBLE_DEVICES=0 python3 -m dexpbt_isaaclab.scripts.ccrs_eval \
+            --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
+            --run-id regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631 \
+            --worker-id $W --checkpoint-iteration $IT --checkpoint-frame $FR \
+            --checkpoint-path "$CKPT" --fixed-tolerance $TOL --reset-seed $SEED \
+            --num-envs 512 --num-episodes 512 --raw-dir $OUT/raw --headless
+        done
+      done
+    done
+    # then verify: distinguishable normalized_nsucc, identical fingerprints
+    # across the two checkpoints per seed, paired analysis runs, terminal
+    # metrics valid:
+    python3 -m dexpbt_isaaclab.scripts.ccrs_sweep --aggregate-only \
+      --manifest $OUT/checkpoint_manifest.csv --out-dir $OUT \
+      --task DexPBT-Regrasping-KukaAllegro-Direct-v0
+    python3 -m dexpbt_isaaclab.ccrs.report --results $OUT/ccrs_results.jsonl \
+      --manifest $OUT/checkpoint_manifest.csv \
+      --transitions $OUT/tolerance_transitions.csv --out-dir $OUT
 
-- tolerance 网格：`[0.028, 0.025, 0.023, 0.022, 0.021, 0.020, 0.019, 0.018]`（8 档）
-- 默认 seeds：4（10001–10004），可配置
-- **主 sweep（推荐先跑）**：12 个关键 checkpoint × 8 tol × 4 seed = **384 单元**。
-  足以回答问题 1（p4 vs p1 高精度）、2（crossing）、3（p5 peak vs tip）。
-- **可选补充（D/F/C 全量分解）**：p1/p4/p5 的 transition 成对 checkpoint 44 个，
-  每个只需评 (a,b) 两档 tol × 4 seed ≈ **352 单元**；全 6 worker 全 transition 全网格
-  则是 71×8×4 ≈ 2272 单元（不建议一次性跑）。
+Stage 2 — full sweep (ONLY after stage 1 passes), 6 GPU shards:
 
-## 7. GPU / 耗时 / 成本估计
+    for G in 0 1 2 3 4 5; do
+      CUDA_VISIBLE_DEVICES=$G nohup python3 -m dexpbt_isaaclab.scripts.ccrs_sweep \
+        --manifest $OUT/checkpoint_manifest.csv --roles tip,peak,target \
+        --transitions $OUT/tolerance_transitions.csv --transition-workers 1,4,5 \
+        --out-dir $OUT --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
+        --num-envs 512 --num-episodes 512 \
+        --execute --shard-index $G --num-shards 6 \
+        > $OUT/sweep_shard$G.log 2>&1 &
+    done
 
-依据 2026-07-15 同规格评测实测（512 envs × 512 episodes，一进程一评测，含 Isaac
-启动）：**每单元约 1–2 分钟，按 2 分钟保守估计**。
-
-| 方案 | 单元数 | 1×GPU | 6×GPU（分 shard） |
-|---|---|---|---|
-| 主 sweep | 384 | ≈ 12.8 h | ≈ 2.2 h |
-| + p1/p4/p5 transition D/F/C | +352 | +11.7 h | +2 h |
-
-显存：单元评测约 10–12GB（V100 32GB 足够）。当前 GPU 全部空闲（p1/p2 训练进程尚在
-收尾，只占 GPU1 约 11.7GB 显存、0% 利用率）；若等训练完全结束再跑更干净。
-断点续跑：任意中断后重新执行同一命令自动跳过已完成单元。
-
-## 8. 推荐的正式启动命令
-
-主 sweep，6 卡各一个 shard（**未经你确认我不会执行**）：
-
-```bash
-cd /root/autodl-tmp/wmdexpbt/runtime_root/src/dexpbt_isaaclab
-for i in 0 1 2 3 4 5; do
-  CUDA_VISIBLE_DEVICES=$i nohup python3 -m dexpbt_isaaclab.scripts.ccrs_sweep \
-    --manifest /root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention/checkpoint_manifest.csv \
-    --roles tip,peak,target \
-    --out-dir /root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention \
-    --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
-    --num-envs 512 --num-episodes 512 --seeds 10001,10002,10003,10004 \
-    --execute --shard-index $i --num-shards 6 \
-    > /root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention/sweep_shard$i.log 2>&1 &
-done
-```
-
-跑完后聚合 + 出报告：
-
-```bash
-python3 -m dexpbt_isaaclab.scripts.ccrs_sweep --aggregate-only \
-  --manifest .../checkpoint_manifest.csv --out-dir .../ccrs_base_retention \
-  --task DexPBT-Regrasping-KukaAllegro-Direct-v0
-python3 -m dexpbt_isaaclab.ccrs.report \
-  --results .../ccrs_results.jsonl --manifest .../checkpoint_manifest.csv \
-  --transitions .../tolerance_transitions.csv --out-dir .../ccrs_base_retention
-```
-
-预演（不占 GPU，随时可跑）：把 `--execute` 换成 `--plan`。
-
-## 9. 当前仍存在的风险
-
-1. **p1/p2 训练未完全收尾**：建议等训练进程退出后再启动 sweep（避免 GPU/IO 干扰，
-   也可顺带拿到 p1 的真 5.00B tip，重跑一次 manifest 即可）。
-2. **evaluator 未做过 GPU smoke test**（按你的要求未占卡）。协议层已全部单测，但
-   Isaac 启动路径只与 eval_fair 逐行同构、未实测。建议正式 sweep 前先跑 1 个单元
-   验证（约 2 分钟、1 张卡），命令见下第 10 节。
-3. **seed 与 reset 的对应关系**：seed 通过 `env_cfg.seed` 在建 env 时注入，与
-   eval_fair 相同；同 seed 同 num_envs 下初始 reset 一致，但这依赖 Isaac 的确定性
-   实现，smoke test 时会顺带核对（同 seed 两次跑同 checkpoint 应产出几乎相同指标）。
-4. **每 seed episodes=512 × 4 seeds** 的方差对 |Δ|≥0.05 的判定检验力足够，但如果
-   结果落在边界附近，可能需要追加 seeds（工具支持增量追加，不会重算旧单元）。
-5. p2 peak（1.92B，tol 0.0365）处于宽松 tolerance 区，其在 0.018–0.028 网格上的
-   成功率可能整体偏低，属预期现象，不影响 p1/p4/p5 的核心问题。
-
-## 10. 是否满足正式启动条件
-
-**代码与数据侧：满足。** checkpoint 全部命中且可加载、评测/分析/报告工具齐备、
-29 项单测全绿、resume/分片/单位防呆就位。
-
-**唯一未完成项**：1 个单元的 GPU smoke test（你要求先确认）。建议的 smoke 命令
-（单卡、约 2 分钟，跑 p4 peak @ 0.020m @ seed 10001）：
-
-```bash
-cd /root/autodl-tmp/wmdexpbt/runtime_root/src/dexpbt_isaaclab
-CUDA_VISIBLE_DEVICES=2 python3 -m dexpbt_isaaclab.scripts.ccrs_eval \
-  --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
-  --run-id regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631 \
-  --worker-id 4 --checkpoint-iteration 141 --checkpoint-frame 3480000000 \
-  --checkpoint-path /root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000141.pth \
-  --fixed-tolerance 0.020 --reset-seed 10001 \
-  --num-envs 512 --num-episodes 512 \
-  --raw-dir /root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention/raw \
-  --headless
-```
-
-到此为止，等待你的确认。
+This preparation round ends here: code fixed, tested, manifest regenerated,
+nothing executed on GPU.

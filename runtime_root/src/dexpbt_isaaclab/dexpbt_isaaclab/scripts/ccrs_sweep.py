@@ -3,9 +3,15 @@
 
 No Isaac import here — each unit runs in its own subprocess (Isaac cannot
 survive env.close() + re-create in one process). Completed units are skipped
-via the per-unit raw JSON marker, so the sweep is resumable and can be
-sharded across GPUs by --shard-index/--num-shards (units are interleaved
-deterministically).
+via the strict per-unit raw JSON validation (is_done), so the sweep is
+resumable and can be sharded across GPUs by --shard-index/--num-shards
+(units are interleaved deterministically).
+
+Unit sources:
+1. capability grid: manifest checkpoints (role filter) x --tolerances grid;
+2. exact transitions (--transitions CSV): for every transition, the pre and
+   post checkpoints are evaluated at EXACTLY the real pre/post tolerances
+   (a, b) — required for exact D/F/C, never snapped to the grid.
 
 Plan-only mode (--plan) prints the unit table and exits without touching
 any GPU. This is the default safety behaviour unless --execute is passed.
@@ -13,7 +19,8 @@ any GPU. This is the default safety behaviour unless --execute is passed.
 Usage (plan only, safe):
   python -m dexpbt_isaaclab.scripts.ccrs_sweep \
     --manifest results/analysis/ccrs_base_retention/checkpoint_manifest.csv \
-    --roles tip,peak,target,transition \
+    --roles tip,peak,target \
+    --transitions results/analysis/ccrs_base_retention/tolerance_transitions.csv \
     --out-dir results/analysis/ccrs_base_retention \
     --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
     --plan
@@ -27,7 +34,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import subprocess
 import sys
 import time
@@ -36,10 +42,8 @@ from pathlib import Path
 from dexpbt_isaaclab.ccrs.eval_protocol import (
     DEFAULT_SEEDS,
     DEFAULT_TOLERANCES_M,
-    EvalUnit,
     build_units,
     is_done,
-    result_path,
     aggregate_raw_dir,
 )
 
@@ -72,18 +76,78 @@ def load_manifest_checkpoints(manifest_csv: Path, roles_filter: list[str]) -> li
     return rows
 
 
+def load_exact_transition_checkpoints(
+    manifest_csv: Path,
+    transitions_csv: Path,
+    workers_filter: list[int] | None = None,
+) -> list[dict]:
+    """Checkpoint rows for exact D/F/C cells.
+
+    For every transition (pre_iter, post_iter, a, b): both checkpoints get a
+    per-checkpoint "tolerances" list containing exactly {a, b}. Tolerances
+    are accumulated when a checkpoint participates in several transitions.
+    """
+    if not transitions_csv.is_file():
+        return []
+    # (worker, iter) -> manifest row (for checkpoint_path / frame / run_id)
+    all_rows: dict[tuple[int, int], dict] = {}
+    with manifest_csv.open() as f:
+        for r in csv.DictReader(f):
+            if r.get("notes") and "CHECKPOINT_MISSING" in r["notes"]:
+                continue
+            all_rows[(int(r["worker_id"]), int(r["iteration"]))] = r
+
+    acc: dict[tuple[int, int], dict] = {}
+    with transitions_csv.open() as f:
+        for t in csv.DictReader(f):
+            w = int(t["worker_id"])
+            if workers_filter and w not in workers_filter:
+                continue
+            a = float(t["pre_tolerance"])
+            b = float(t["post_tolerance"])
+            for it in (int(t["pre_iteration"]), int(t["post_iteration"])):
+                mrow = all_rows.get((w, it))
+                if mrow is None:
+                    print(f"[ccrs_sweep] WARN: transition checkpoint p{w} it{it} "
+                          "not in manifest; exact cells will be missing",
+                          file=sys.stderr)
+                    continue
+                key = (w, it)
+                if key not in acc:
+                    acc[key] = {
+                        "worker_id": w,
+                        "iteration": it,
+                        "frame": int(mrow["frame"]),
+                        "checkpoint_path": mrow["checkpoint_path"],
+                        "run_id": mrow["run_id"],
+                        "tolerances": [],
+                    }
+                for tol in (a, b):
+                    if not any(abs(tol - x) < 1e-9 for x in acc[key]["tolerances"]):
+                        acc[key]["tolerances"].append(tol)
+    return list(acc.values())
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="CCRS sweep scheduler (subprocess driver).")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--task", required=True)
-    ap.add_argument("--roles", default="tip,peak,target,transition",
-                    help="Comma list of role prefixes to include from manifest")
+    ap.add_argument("--roles", default="tip,peak,target",
+                    help="Comma list of role prefixes to include from manifest "
+                         "for the capability grid")
+    ap.add_argument("--transitions", default=None,
+                    help="tolerance_transitions.csv for exact D/F/C cells "
+                         "(pre/post checkpoints at real a/b tolerances)")
+    ap.add_argument("--transition-workers", default=None,
+                    help="Comma list of worker ids to restrict exact "
+                         "transition units (e.g. 1,4,5)")
     ap.add_argument("--tolerances", default=",".join(str(t) for t in DEFAULT_TOLERANCES_M),
-                    help="Comma list of fixed tolerances in METERS")
+                    help="Comma list of grid tolerances in METERS")
     ap.add_argument("--seeds", default=",".join(str(s) for s in DEFAULT_SEEDS))
     ap.add_argument("--num-envs", type=int, default=512)
-    ap.add_argument("--num-episodes", type=int, default=512)
+    ap.add_argument("--num-episodes", type=int, default=512,
+                    help="Must be <= num-envs (paired-reset protocol)")
     ap.add_argument("--deterministic", default="true", choices=["true", "false"])
     ap.add_argument("--max-steps", type=int, default=200_000)
     ap.add_argument("--shard-index", type=int, default=0)
@@ -105,19 +169,32 @@ def main() -> None:
         print(f"[ccrs_sweep] aggregated {n} rows")
         return
 
-    ckpts = load_manifest_checkpoints(
+    if args.num_episodes > args.num_envs:
+        print(f"[ccrs_sweep] paired-reset protocol requires num_episodes <= "
+              f"num_envs (got {args.num_episodes} > {args.num_envs})",
+              file=sys.stderr)
+        sys.exit(2)
+
+    grid_ckpts = load_manifest_checkpoints(
         Path(args.manifest), [r.strip() for r in args.roles.split(",") if r.strip()]
     )
-    if not ckpts:
-        print("[ccrs_sweep] no checkpoints selected from manifest", file=sys.stderr)
+    trans_ckpts: list[dict] = []
+    if args.transitions:
+        wf = ([int(x) for x in args.transition_workers.split(",") if x.strip()]
+              if args.transition_workers else None)
+        trans_ckpts = load_exact_transition_checkpoints(
+            Path(args.manifest), Path(args.transitions), wf)
+
+    if not grid_ckpts and not trans_ckpts:
+        print("[ccrs_sweep] no checkpoints selected", file=sys.stderr)
         sys.exit(2)
-    run_id = ckpts[0]["run_id"]
+    run_id = (grid_ckpts or trans_ckpts)[0]["run_id"]
     tols = [float(t) for t in args.tolerances.split(",") if t.strip()]
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
 
     units = build_units(
         run_id=run_id,
-        checkpoints=ckpts,
+        checkpoints=grid_ckpts + trans_ckpts,  # trans rows carry own tolerances
         tolerances_m=tols,
         seeds=seeds,
         num_envs=args.num_envs,
@@ -129,7 +206,8 @@ def main() -> None:
     done = [u for u in shard if is_done(raw_dir, u)]
     todo = [u for u in shard if not is_done(raw_dir, u)]
 
-    print(f"[ccrs_sweep] checkpoints={len(ckpts)} tolerances={len(tols)} seeds={len(seeds)}")
+    print(f"[ccrs_sweep] grid_ckpts={len(grid_ckpts)} exact_transition_ckpts="
+          f"{len(trans_ckpts)} grid_tolerances={len(tols)} seeds={len(seeds)}")
     print(f"[ccrs_sweep] total units={len(units)}  shard {args.shard_index}/{args.num_shards}: "
           f"{len(shard)} units ({len(done)} done, {len(todo)} todo)")
 
@@ -159,6 +237,7 @@ def main() -> None:
             "--num-episodes", str(u.num_episodes),
             "--deterministic", "true" if u.deterministic else "false",
             "--max-steps", str(u.max_steps),
+            "--max-consecutive-successes", str(u.max_consecutive_successes),
             "--raw-dir", str(raw_dir),
             "--headless",
         ]

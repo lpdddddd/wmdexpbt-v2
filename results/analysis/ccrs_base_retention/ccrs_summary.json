@@ -1,6 +1,12 @@
 {
   "results_jsonl": "/root/autodl-tmp/wmdexpbt/results/analysis/ccrs_base_retention/ccrs_results.jsonl",
+  "primary_metric": "normalized_nsucc",
+  "auxiliary_metrics": [
+    "nsucc_mean",
+    "success_any_rate"
+  ],
   "n_cells": 0,
+  "n_rejected_rows": 0,
   "grid_tolerances_m": [],
   "sections": {},
   "missing": [
