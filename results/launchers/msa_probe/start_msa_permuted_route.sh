@@ -224,7 +224,10 @@ echo $! > "$RUN_DIR/nohup.pid"
 # failure stops the whole arm (GUARD_FAILED) with no readiness marker;
 # (b) matched +100M cap — each worker is parked at its FIRST committed
 # frame >= baseline+100M; overshoot beyond one tick of slack fails the arm;
-# all six parked -> ARM_COMPLETE.json (normal completion) and full stop.
+# all six parked -> ARM_COMPLETE.json (normal completion) and full stop;
+# (c) while MSA_BUSY.json exists (in-flight probe cycle) park/cap actions
+# are deferred (cap_pending) and re-evaluated on fresh committed metas
+# once the sidecar clears the marker.
 nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
   --config "$RUN_DIR/ARM_CONFIG.json" \
   --run-dir "$RUN_DIR" \
@@ -237,8 +240,12 @@ echo $! > "$RUN_DIR/continuation_guard.pid"
 # stopped-state verification + MSA_HOLDS.json persistence, heterogeneous
 # per-worker tau_plus pins via msa_forced_success_tolerance, policy-only
 # evals in subprocesses with bounded per-device concurrency).
-# - the sidecar WAITS for the guard's FIRST_TICK_VALIDATED.json (6/6
-#   readiness barrier) before starting or resuming any cycle;
+# - the sidecar WAITS for BOTH the guard's FIRST_TICK_VALIDATED.json (6/6
+#   readiness barrier) AND HOLD_SMOKE_PASSED.json (written only by a fully
+#   successful run_hold_smoke.sh) before starting or resuming any cycle —
+#   it may be launched early but idles at the gate without touching
+#   MSA_HOLDS.json (execution order: launch arm -> 6/6 readiness ->
+#   run_hold_smoke.sh -> PASSED marker -> first N=4 cycle);
 # - MSA_EVAL_DEVICES defaults to cuda:6,cuda:7: trainers occupy DEXPBT_GPUS
 #   (0-5); eval devices are REQUIRED and never default onto cuda:0;
 # - MSA_NUM_SEEDS defaults to 4 = EXECUTION SMOKE (validates the machinery
@@ -251,6 +258,7 @@ nohup python -u -m dexpbt_isaaclab.msa.sidecar \
   --num-seeds "${MSA_NUM_SEEDS:-4}" \
   --eval-devices "${MSA_EVAL_DEVICES:-cuda:6,cuda:7}" \
   --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \
+  --hold-smoke-marker "$RUN_DIR/HOLD_SMOKE_PASSED.json" \
   --commit-max-wait-s "${MSA_COMMIT_MAX_WAIT_S:-3600}" \
   --permuted-route >>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"

@@ -268,12 +268,49 @@ that could only bite in production:
    N=4/2 GPUs ≈ 5.4 h; N=16/2 GPUs ≈ 21.6 h; N=256/2 GPUs ≈ 345.6 h
    (unacceptable without further optimization).
 
+## 5b. Orchestration blocker patch ("Close MSA smoke, commit, and cap races")
+
+Three last pre-pilot orchestration blockers, no algorithm changes:
+
+1. **Enforced hold smoke gate.** The formal sidecar's cycle gate
+   (`cycle_gate_ok`) now requires BOTH `FIRST_TICK_VALIDATED.json` and
+   `HOLD_SMOKE_PASSED.json` (new required `--hold-smoke-marker`); it can
+   be launched early but idles without touching `MSA_HOLDS.json`.
+   `hold_smoke` writes the PASSED marker atomically ONLY when the frame
+   stayed frozen, the next committed tick appeared after release and
+   residual holds are empty; any failure writes `HOLD_SMOKE_FAILED.json`
+   (also a permanent sidecar stop marker), SIGCONTs everything and
+   fail-closed stops the whole arm.
+2. **Durable COMMITTING phase (DONE-before-commit fixed).** After DECIDE
+   the controller persists `status=COMMITTING` + `decision` +
+   `final_tol_by_worker` + all-false `commit_acks_by_worker` BEFORE any
+   durable commit; workers are then released and committed IN PARALLEL
+   (one bounded wait per worker — serial waits would let later workers
+   train extra ticks), each ack persisted immediately. Only with 6/6 acks
+   does the cycle become DONE and the machine return to NORMAL. A sidecar
+   restart into COMMITTING runs `_resume_committing`: no re-eval, no
+   re-training, idempotent commits for un-acked workers only. A commit
+   timeout attaches the ack table to `CommitTimeout`; the sidecar writes
+   it into `COMMIT_TIMEOUT.json`, never claims promotion, and stops the
+   arm without a second full wait.
+3. **Guard/watchdog coordination via `MSA_BUSY.json`.** The controller
+   maintains the atomic busy marker (intervention_id, phase, status,
+   due_workers, timestamp) from BEFORE the first PRE_EVAL hold until DONE
+   or failure-cleanup completion (a hard kill leaves it in place). While
+   it exists the guard defers +100M park/cap actions as `cap_pending`
+   (no stop_worker, no SIGCONT of held workers) and re-evaluates on fresh
+   committed metas after it clears. `stop_worker` now SIGCONTs ONLY the
+   target worker's held PIDs; `stop_arm` remains the only all-holds
+   release. The watchdog stops the arm on a dead sidecar whenever holds
+   OR the busy marker exist (busy-with-empty-holds = death mid-COMMITTING).
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
   with SIGSTOP is expected to be safe for single-GPU rl_games workers (no
   NCCL peers). Run the prepared `run_hold_smoke.sh` (single worker, 60 s)
-  and inspect `HOLD_SMOKE_RESULT.json` BEFORE any probe cycle.
+  BEFORE any probe cycle — this is now ENFORCED: the formal sidecar's
+  cycle gate stays closed until `HOLD_SMOKE_PASSED.json` exists.
 - The durable tolerance commit waits for a live committed tick (~20M
   frames) per transition; a full cycle therefore spans several ticks of
   wall time. The bounded wait (`--commit-max-wait-s`, default 1 h) stops
@@ -292,7 +329,7 @@ that could only bite in production:
 ## 7. Artifacts
 
 - code: `dexpbt_isaaclab/msa/` (9 modules incl. `hold_watchdog.py`),
-  `tests/test_msa_probe.py` (95 tests)
+  `tests/test_msa_probe.py` (110 tests)
 - launchers: `results/launchers/msa_probe/` (4 arm scripts + 4 configs +
   `run_hold_smoke.sh` + `EVAL_COST_ESTIMATE.json`)
 - audit: `blocker_audit_3b_5b.json` (this directory)

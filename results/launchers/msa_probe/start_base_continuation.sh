@@ -224,7 +224,10 @@ echo $! > "$RUN_DIR/nohup.pid"
 # failure stops the whole arm (GUARD_FAILED) with no readiness marker;
 # (b) matched +100M cap — each worker is parked at its FIRST committed
 # frame >= baseline+100M; overshoot beyond one tick of slack fails the arm;
-# all six parked -> ARM_COMPLETE.json (normal completion) and full stop.
+# all six parked -> ARM_COMPLETE.json (normal completion) and full stop;
+# (c) while MSA_BUSY.json exists (in-flight probe cycle) park/cap actions
+# are deferred (cap_pending) and re-evaluated on fresh committed metas
+# once the sidecar clears the marker.
 nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
   --config "$RUN_DIR/ARM_CONFIG.json" \
   --run-dir "$RUN_DIR" \

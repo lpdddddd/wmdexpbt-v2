@@ -5,6 +5,11 @@
 # its committed frame is frozen for the hold window, releases, verifies the
 # next committed tick appears. No tolerance writes, no MSA cycle, no eval.
 # Result: <run_dir>/HOLD_SMOKE_RESULT.json (release guaranteed either way).
+# GATE: HOLD_SMOKE_PASSED.json is written atomically ONLY when the frame
+# stayed frozen, the next committed tick appeared after release AND no
+# residual holds remain — the formal sidecar refuses to start any cycle
+# until it exists. Any failure writes HOLD_SMOKE_FAILED.json and
+# fail-closed stops the whole arm.
 set -euo pipefail
 
 RUN_DIR="${1:?usage: run_hold_smoke.sh <run_dir> [worker] [seconds]}"

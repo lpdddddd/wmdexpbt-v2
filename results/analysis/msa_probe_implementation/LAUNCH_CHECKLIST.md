@@ -33,9 +33,26 @@ tolerances, lineage ids, seed manifest identity, bootstrap parameters, the
      frame ≥ baseline+100M; overshoot beyond one 20M tick of slack fails
      the arm; 6/6 parked → `ARM_COMPLETE.json` (normal completion) and a
      full stop of guard, sidecar, watchdog and every worker tree;
-4. (MSA arms) starts the sidecar — which WAITS for the readiness marker —
-   and the external `hold_watchdog` (releases SIGSTOPped workers and stops
-   the arm if the sidecar dies mid-hold).
+4. (MSA arms) starts the sidecar — which WAITS for BOTH the readiness
+   marker AND `HOLD_SMOKE_PASSED.json` (it may be launched early but idles
+   at the gate without touching `MSA_HOLDS.json`) — and the external
+   `hold_watchdog` (releases SIGSTOPped workers and stops the arm if the
+   sidecar dies mid-hold; also stops the arm if the sidecar dies while
+   `MSA_BUSY.json` exists, even with no holds recorded, e.g. during the
+   durable COMMITTING phase).
+
+## Mandatory execution order (MSA arms)
+
+```
+launch arm → 6/6 readiness (FIRST_TICK_VALIDATED.json)
+           → run_hold_smoke.sh → HOLD_SMOKE_PASSED.json
+           → first N=4 execution-smoke cycle
+```
+
+The formal sidecar enforces this order itself: it starts no cycle until
+both markers exist. A failed smoke writes `HOLD_SMOKE_FAILED.json` (a
+permanent stop marker), SIGCONTs everything and fail-closed stops the
+whole arm; the PASSED marker is never written on any failure path.
 
 ## Pre-launch checks
 
@@ -50,7 +67,7 @@ tolerances, lineage ids, seed manifest identity, bootstrap parameters, the
 3. [ ] Disk headroom: each arm writes a new run dir (checkpoints ~180MB x
        6 workers x ~10 ticks for 100M frames ≈ 11GB per arm; MSA arms add
        read-only snapshots + eval raw ≈ +3GB).
-4. [ ] `python -m pytest tests/test_msa_probe.py -q` green (95 tests).
+4. [ ] `python -m pytest tests/test_msa_probe.py -q` green (110 tests).
 5. [ ] Dry-run regenerates cleanly (heterogeneous taus, 20M packets,
        post-hold packet starts):
        `python -m dexpbt_isaaclab.msa.dry_run --out /tmp/trace.md`.
@@ -62,15 +79,18 @@ tolerances, lineage ids, seed manifest identity, bootstrap parameters, the
        conclusion (27 eval cells ≈ 5.4 h on 2 GPUs). Pilot N=16
        (≈ 21.6 h) must be set explicitly; N=256 is formal-only and NOT
        affordable on 2 GPUs (≈ 345.6 h) — see `EVAL_COST_ESTIMATE.json`.
-8. [ ] **MANDATORY GPU gate — hold smoke BEFORE any probe cycle.**
-       SIGSTOP/SIGCONT against a live Isaac trainer is validated in
-       simulation and against real (non-Isaac) processes only. After the
-       arm launches and `FIRST_TICK_VALIDATED.json` appears, run
-       `bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60`
-       and check `HOLD_SMOKE_RESULT.json` (`ok: true`, frame frozen during
-       the hold, next committed tick after release). Abort the arm if the
-       trainer misbehaves on resume. Only then allow the sidecar's first
-       cycle (watch `msa_sidecar.log` + `nvidia-smi` through PRE_EVAL).
+8. [ ] **MANDATORY GPU gate — hold smoke BEFORE any probe cycle (now
+       ENFORCED by the sidecar, not just procedure).** SIGSTOP/SIGCONT
+       against a live Isaac trainer is validated in simulation and against
+       real (non-Isaac) processes only. After the arm launches and
+       `FIRST_TICK_VALIDATED.json` appears, run
+       `bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60`.
+       Success (frame frozen during the hold + next committed tick after
+       release + no residual holds) atomically writes
+       `HOLD_SMOKE_PASSED.json`, which is the ONLY thing that opens the
+       sidecar's cycle gate. Failure writes `HOLD_SMOKE_FAILED.json` and
+       stops the arm. Watch the first cycle via `msa_sidecar.log` +
+       `nvidia-smi` through PRE_EVAL.
 9. [ ] Confirm `curriculum_control/` of the new run dir is empty at start
        (fresh arm; provenance intentionally absent → probe immediately
        due, per spec — but gated behind the 6/6 readiness marker).
@@ -84,6 +104,7 @@ bash results/launchers/msa_probe/start_msa.sh               --i-know-what-i-am-d
 bash results/launchers/msa_probe/start_msa_permuted_route.sh --i-know-what-i-am-doing
 # then, for MSA arms, after FIRST_TICK_VALIDATED.json appears:
 bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60
+# the sidecar starts its first cycle only after HOLD_SMOKE_PASSED.json
 ```
 
 ## Monitoring once launched
@@ -93,13 +114,20 @@ bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60
   - `FIRST_TICK_VALIDATED.json` — 6/6 readiness (sidecar may start);
   - `GUARD_FAILED` — fail-closed stop with the reason;
   - `ARM_COMPLETE.json` — NORMAL completion (all six parked at +100M);
+- hold smoke: `HOLD_SMOKE_RESULT.json` (detail),
+  `HOLD_SMOKE_PASSED.json` (gate open) / `HOLD_SMOKE_FAILED.json`
+  (permanent stop marker — arm was stopped);
 - MSA sidecar log: `<run_dir>/msa_sidecar.log`; hold state:
   `<run_dir>/MSA_HOLDS.json` (present only while workers are held);
+  cycle state: `<run_dir>/MSA_BUSY.json` (present from before the first
+  hold of a cycle until DONE / failure cleanup — while it exists the
+  guard defers +100M park/cap actions as `cap_pending`);
 - hold watchdog: `<run_dir>/hold_watchdog.log`; `MSA_SIDECAR_DIED.json`
-  means the sidecar died mid-hold — workers were SIGCONTed and the arm
-  was stopped;
+  means the sidecar died mid-hold OR mid-cycle (busy marker present,
+  even with no holds) — workers were SIGCONTed and the arm was stopped;
 - `COMMIT_TIMEOUT.json` — a durable tolerance commit did not confirm
-  within `--commit-max-wait-s`; the arm was stopped, promotion NOT
+  within `--commit-max-wait-s`; includes the per-worker
+  `commit_acks_by_worker` table; the arm was stopped, promotion NOT
   claimed;
 - probe cycle outcomes: `<run_dir>/dexpbt_8gpu_ws/msa_cycles/*.json`
   (intervention id, per-worker tau/tau_plus, L_mid table, routing, panel
@@ -121,8 +149,9 @@ bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60
   was alive and committing ticks;
 - any worker's ledger frame regresses (must be monotonic) → kill arm,
   investigate before resuming;
-- hold smoke `ok: false` → do NOT run any probe cycle; the SIGSTOP
-  approach needs rework (supervisor-level checkpoint-and-park fallback);
+- `HOLD_SMOKE_FAILED.json` → the arm was already fail-closed stopped and
+  the sidecar gate can never open; the SIGSTOP approach needs rework
+  (supervisor-level checkpoint-and-park fallback) before any relaunch;
 - nsucc collapse below the original run's collapse thresholds → the
   original gates (unchanged in every arm) handle it; do not intervene
   manually.

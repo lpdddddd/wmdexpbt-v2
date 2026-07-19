@@ -27,6 +27,14 @@ re-run ~5B frames):
      parked, ARM_COMPLETE.json is written (NORMAL completion, not a
      failure) and the guard stops the sidecar, the watchdog and every
      remaining worker process tree.
+   - MSA COORDINATION: while <run_dir>/MSA_BUSY.json exists (an MSA cycle
+     is in flight: eval holds, probe packets, DECIDE, durable COMMITTING)
+     park/cap actions are deferred as cap_pending — the guard neither
+     stops the capped worker nor SIGCONTs anyone. Once the sidecar clears
+     the busy marker, the committed meta is re-read and the park/cap
+     verdict re-evaluated on fresh frames. stop_worker SIGCONTs ONLY the
+     target worker's held PIDs; only stop_arm (true global failure)
+     releases all holds.
    Regardless of the resume runner's max_iterations semantics (rl_games
    max_epochs on a warm start), this worker-local cap is the FINAL
    authority on the continuation budget.
@@ -53,6 +61,7 @@ from pathlib import Path
 from typing import Optional
 
 from dexpbt_isaaclab.msa.sidecar import (
+    BUSY_FILE,
     HOLDS_FILE,
     _descendants,
     latest_committed_meta,
@@ -64,6 +73,7 @@ TICK_SLACK_FRAMES = 20_000_000
 TOLERANCE_ATOL = 1e-6
 POLL_S = 60.0
 READINESS_MARKER = "FIRST_TICK_VALIDATED.json"
+BUSY_MARKER = BUSY_FILE
 NUM_WORKERS = 6
 
 
@@ -212,13 +222,23 @@ def cap_action(entry: dict, meta: dict,
 
 def _sigcont_held_pids(run_dir: Path) -> None:
     """SIGCONT every PID recorded in MSA_HOLDS.json (a stopped process
-    queues SIGTERM without acting on it)."""
+    queues SIGTERM without acting on it). ONLY for whole-arm stops."""
     for pids in read_holds_file(run_dir).values():
         for pid in reversed(pids):              # children first, root last
             try:
                 os.kill(int(pid), signal.SIGCONT)
             except (ProcessLookupError, OSError):
                 pass
+
+
+def _sigcont_worker_pids(run_dir: Path, worker_id: int) -> None:
+    """SIGCONT ONLY the pids MSA_HOLDS.json records for one worker —
+    a single-worker park must never wake the other held workers."""
+    for pid in reversed(read_holds_file(run_dir).get(int(worker_id), [])):
+        try:
+            os.kill(int(pid), signal.SIGCONT)
+        except (ProcessLookupError, OSError):
+            pass
 
 
 def _terminate_tree(root_pid: int) -> None:
@@ -240,9 +260,9 @@ def _worker_root_pid(run_dir: Path, worker_id: int) -> Optional[int]:
 
 
 def stop_worker(run_dir: Path, worker_id: int) -> None:
-    """Safely park ONE worker: SIGCONT its held PIDs, then terminate its
-    full process tree."""
-    _sigcont_held_pids(run_dir)
+    """Safely park ONE worker: SIGCONT ONLY that worker's held PIDs
+    (never the whole panel's), then terminate its full process tree."""
+    _sigcont_worker_pids(run_dir, worker_id)
     pid = _worker_root_pid(run_dir, worker_id)
     if pid is not None:
         _terminate_tree(pid)
@@ -283,9 +303,17 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
     validated: dict[int, dict] = {}
     marker_written = (run_dir / READINESS_MARKER).is_file()
     parked: dict[int, dict] = {}
+    cap_pending: set[int] = set()
     it = 0
     while True:
         it += 1
+        # an in-flight MSA cycle (eval holds, probe packets, DECIDE,
+        # durable COMMITTING) — park/cap actions are DEFERRED while it
+        # exists: stopping or SIGCONTing workers mid-cycle would corrupt
+        # the phase barrier. The committed meta is re-read on every
+        # iteration, so the park/cap verdict after the busy marker clears
+        # is always based on fresh frames.
+        busy = (run_dir / BUSY_MARKER).is_file()
         for key, entry in sorted(resume.items()):
             wid = int(key.lstrip("p"))
             meta = latest_committed_meta(workspace / f"{wid:03d}")
@@ -304,6 +332,15 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
             if wid in parked:
                 continue
             action = cap_action(entry, meta, cap_frames=cap_frames)
+            if action != "run" and busy:
+                if wid not in cap_pending:
+                    cap_pending.add(wid)
+                    print(f"[guard] worker {wid} reached its cap "
+                          f"(frame {meta.get('frame')}) during an MSA "
+                          "cycle; cap_pending until the busy marker "
+                          "clears")
+                continue
+            cap_pending.discard(wid)
             if action == "fail":
                 stop_arm(
                     run_dir,

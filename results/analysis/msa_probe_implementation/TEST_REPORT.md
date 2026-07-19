@@ -1,8 +1,9 @@
 # base_retention_msa_probe — Test Report
 
 Date: 2026-07-19, updated the same date for the pilot-integration fix pass
-("Fix MSA pilot integration and phase safety") and again for the pre-pilot
-safety patch ("Harden MSA readiness holds and pilot budget"). Environment:
+("Fix MSA pilot integration and phase safety"), the pre-pilot safety patch
+("Harden MSA readiness holds and pilot budget") and the final orchestration
+blocker patch ("Close MSA smoke, commit, and cap races"). Environment:
 isaaclab311 python (CPU only; no Isaac import anywhere in the MSA package
 or its tests; no GPU used).
 
@@ -16,9 +17,10 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 95/95 passed
+## MSA suite: `tests/test_msa_probe.py` — 110/110 passed
 
-(72 retained from the previous pass + 23 new safety-patch tests.)
+(72 retained from the pilot-integration pass + 23 safety-patch tests +
+15 new orchestration-blocker tests.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -80,7 +82,7 @@ budget"; 23 new tests):
 | sidecar death watchdog releases held workers + stops arm | `TestHoldWatchdog.test_dead_sidecar_with_holds_releases_and_stops` (real stopped process resumed), `test_sidecar_alive_is_ok`, `test_dead_sidecar_no_holds_idle_exit` |
 | normal +100M cap → ARM_COMPLETE.json (6/6 parked, no failure marker) | `TestMatchedCap.test_all_six_parked_writes_arm_complete` |
 | cap never lets a worker run to ~140M | `test_overshoot_to_140m_fails_the_arm`, `TestContinuationGuard.test_hard_cap_100m` (run/park/fail) |
-| commit timeout: ONE bounded wait, no re-wait in cleanup, tau pin restored | `TestCommitTimeoutBounded.test_commit_timeout_single_bounded_wait` |
+| commit timeout: ONE bounded wait per worker (parallel), no re-wait in cleanup, tau pin restored, ack table attached | `TestCommitTimeoutBounded.test_commit_timeout_single_bounded_wait` |
 | 2-device eval scheduler: max concurrency 1 per device, round-robin | `TestEvalScheduler.test_round_robin_and_max_one_per_device` |
 | eval job failure cancels remaining jobs (fail closed) | `test_failure_cancels_remaining_and_raises`, `test_device_validation` |
 | 27 eval cells cost math (5.4 h / 21.6 h / 345.6 h on 2 GPUs) | `TestEvalCostEstimate.test_27_cells_and_wall_times`, `test_cost_estimate_file_generated` |
@@ -88,11 +90,41 @@ budget"; 23 new tests):
 | hold smoke end-to-end (frozen frame, release, next tick, result JSON) | `TestHoldSmoke.test_hold_smoke_end_to_end` (real SIGSTOP on a live process) |
 | base-retention msa_enabled=False behavior unchanged | retained `TestEnvPinBehavior.*`, `TestOriginalProfileUnchanged.*` |
 
+Orchestration-blocker coverage ("Close MSA smoke, commit, and cap races";
+15 new tests):
+
+| requirement | test(s) |
+|---|---|
+| smoke success alone writes HOLD_SMOKE_PASSED.json (atomic; also asserts no FAILED marker, no tmp files) | `TestHoldSmoke.test_hold_smoke_end_to_end` (extended) |
+| smoke failure: FAILED marker, PIDs SIGCONTed, whole arm fail-closed stopped (waiting sidecar SIGTERMed), PASSED never written | `TestHoldSmoke.test_hold_smoke_failure_stops_arm_never_writes_passed` |
+| no HOLD_SMOKE_PASSED → formal sidecar gate stays closed even with 6/6 readiness | `TestHoldSmokeGate.test_no_smoke_marker_gate_closed` |
+| smoke marker alone (no readiness) still not sufficient | `test_smoke_marker_alone_not_sufficient` |
+| HOLD_SMOKE_FAILED.json is a permanent sidecar stop marker | `test_smoke_failed_is_a_sidecar_stop_marker` |
+| crash after DECIDE, before FIRST commit: persisted COMMITTING + all-false acks; restart commits ONLY (no re-eval, no re-train), then DONE | `TestCommittingPhase.test_committing_persisted_before_any_commit` |
+| crash after PARTIAL acks: restart commits only un-acked workers (exactly 2 new attempts) | `test_partial_acks_resume_commits_only_unacked` |
+| every persisted DONE carries a full-true ack table (no DONE-before-durable-commit) | `test_done_never_written_before_all_acks` |
+| MSA_BUSY set before the FIRST hold, phase/status carried (incl. COMMITTING), cleared only at DONE | `TestBusyMarkerLifecycle.test_busy_set_before_first_hold_and_cleared_at_done` |
+| soft failure cleanup clears busy; hard kill leaves it for the watchdog | `test_soft_failure_cleanup_clears_busy`, `test_hard_kill_leaves_busy_for_watchdog` |
+| cap during PRE/MID/POST holds (busy present): no park, no fail, held worker untouched (real SIGSTOPped process stays 'T') | `TestGuardMSACoordination.test_cap_during_hold_defers_and_touches_nobody` |
+| cap during COMMITTING: waits for busy clear, then re-reads metas and parks (ARM_COMPLETE) | `test_cap_waits_for_busy_clear_then_parks` |
+| stop_worker SIGCONTs ONLY the target worker's held PIDs | `test_stop_worker_sigconts_only_target` (worker 1's process stays stopped) |
+| sidecar dead + busy=true + holds EMPTY → watchdog writes MSA_SIDECAR_DIED.json and stops arm | `TestWatchdogBusyNoHolds.test_dead_sidecar_busy_no_holds_stops_arm` |
+| sidecar dead + no busy + no holds → still a quiet idle_exit | `test_dead_sidecar_no_busy_no_holds_still_idle` |
+
+## Real execution order (enforced, not just procedural)
+
+```
+launch arm → 6/6 readiness (FIRST_TICK_VALIDATED.json)
+           → hold smoke (run_hold_smoke.sh)
+           → HOLD_SMOKE_PASSED.json
+           → first N=4 execution-smoke cycle
+```
+
 ## Regression suites (per-file, one process per test module)
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 95 passed |
+| `tests/test_msa_probe.py` | 110 passed |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
 | `tests/test_wm_strategy_profiles.py` | 31 passed |
 | `tests/test_late_floor_retention_gate.py`, `test_env_mastery_curriculum.py`, `test_curriculum_adaptive_fast.py`, `test_hybrid_curriculum_safety.py`, `test_pbt_curriculum_inherit.py`, `test_curriculum_freeze_unit_conversion.py` | 76 passed |

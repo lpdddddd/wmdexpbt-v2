@@ -14,8 +14,13 @@ Loop:
     2. write MSA_SIDECAR_DIED.json (the holds it found + timestamp);
     3. stop the WHOLE arm (uncontrolled continuation training after a
        mid-cycle sidecar death would corrupt the probe's dose accounting);
-- if the sidecar is dead and no holds are recorded, exit quietly (a clean
-  --once exit or a normal shutdown).
+- if the sidecar is DEAD and <run_dir>/MSA_BUSY.json exists — EVEN with no
+  recorded holds (e.g. death during the durable COMMITTING phase, when
+  every worker is running but un-acked commits are pending) — the arm is
+  equally unrecoverable without operator review: write
+  MSA_SIDECAR_DIED.json and stop the whole arm;
+- only if the sidecar is dead with NO holds and NO busy marker does the
+  watchdog exit quietly (a clean --once exit or a normal shutdown).
 
 All decision logic lives in check_once() with an injectable stop action so
 it is unit-testable with real (dummy) processes and without killing
@@ -32,7 +37,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from dexpbt_isaaclab.msa.sidecar import read_holds_file
+from dexpbt_isaaclab.msa.sidecar import BUSY_FILE, read_holds_file
 
 POLL_S = 20.0
 DIED_MARKER = "MSA_SIDECAR_DIED.json"
@@ -64,17 +69,27 @@ def check_once(run_dir: Path,
     """One watchdog decision. Returns:
 
     'ok'          — sidecar alive (or no pid file yet), keep watching;
-    'idle_exit'   — sidecar dead, no holds recorded: exit quietly;
-    'released'    — sidecar dead WITH recorded holds: SIGCONTed all live
-                    held PIDs, wrote MSA_SIDECAR_DIED.json and stopped
-                    the arm.
+    'idle_exit'   — sidecar dead, NO holds recorded and NO busy marker:
+                    exit quietly;
+    'released'    — sidecar dead with recorded holds OR with the
+                    MSA_BUSY.json cycle marker (even if holds are empty,
+                    e.g. mid-COMMITTING): SIGCONTed all live held PIDs
+                    (children before root), wrote MSA_SIDECAR_DIED.json
+                    and stopped the arm.
     """
     run_dir = Path(run_dir)
     pid = sidecar_pid(run_dir)
     if pid is None or _pid_alive(pid):
         return "ok"
     holds = read_holds_file(run_dir)
-    if not holds:
+    busy_path = run_dir / BUSY_FILE
+    busy: Optional[dict] = None
+    if busy_path.is_file():
+        try:
+            busy = json.loads(busy_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            busy = {"unreadable": True}
+    if not holds and busy is None:
         return "idle_exit"
     released: dict[int, list[int]] = {}
     for w, pids in sorted(holds.items()):
@@ -90,6 +105,7 @@ def check_once(run_dir: Path,
         "sidecar_pid": pid,
         "holds_found": {str(w): pids for w, pids in sorted(holds.items())},
         "sigcont_delivered": {str(w): p for w, p in sorted(released.items())},
+        "busy_marker": busy,
         "time": time.time(),
         "action": "released held workers, stopping the whole arm "
                   "(no uncontrolled continuation training)",
@@ -99,7 +115,8 @@ def check_once(run_dir: Path,
 
         def stop_arm_fn(rd, reason):
             stop_arm(rd, reason, marker_name=None)
-    stop_arm_fn(run_dir, f"sidecar {pid} died with active holds")
+    stop_arm_fn(run_dir, f"sidecar {pid} died mid-cycle "
+                         f"(holds={sorted(holds)}, busy={busy is not None})")
     return "released"
 
 

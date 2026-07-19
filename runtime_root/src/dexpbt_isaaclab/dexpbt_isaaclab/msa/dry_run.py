@@ -93,7 +93,18 @@ class FakeWorld:
     # controller cleanup is bypassed (kill -9 simulation).
     crash_on: Optional[str] = None     # "pre"/"mid"/"post"/"eval"/"common_train"/"commit"/"commit_timeout"
     crash_hard: bool = False
+    # per-worker commit crash: every commit for these workers raises (with
+    # crash_hard=True this simulates a kill mid-COMMITTING, leaving their
+    # acks false while other workers' acks persist).
+    crash_commit_workers: set[int] = field(default_factory=set)
     commit_calls: int = 0
+    # MSA_BUSY.json coordination marker (in-memory mirror)
+    busy: Optional[dict] = None
+    busy_log: list = field(default_factory=list)
+
+    def set_busy(self, info: Optional[dict]) -> None:
+        self.busy = None if info is None else dict(info)
+        self.busy_log.append(None if info is None else dict(info))
 
     def _boom(self, msg: str) -> None:
         if self.crash_hard:
@@ -171,6 +182,8 @@ class FakeWorld:
         if self.crash_on == "commit":
             self.crash_on = None    # crash once; cleanup commits then succeed
             self._boom("injected commit crash")
+        if worker_id in self.crash_commit_workers:
+            self._boom(f"injected commit crash for worker {worker_id}")
         if worker_id in self.held:
             # production commit waits for a live committed tick; a held
             # worker would deadlock — the controller must commit only
@@ -284,6 +297,7 @@ def make_world(*, permuted: bool = False,
         save_state=world.save_state,
         load_state=world.load_state,
         refresh_view=world.refresh_view,
+        set_busy=world.set_busy,
         packet_frames=PROBE_PACKET_FRAMES)
     return world, ctl, views
 

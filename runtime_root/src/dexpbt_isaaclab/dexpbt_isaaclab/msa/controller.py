@@ -37,6 +37,7 @@ Integration contract (no trainer surgery):
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -114,6 +115,12 @@ SnapshotFn = Callable[[int, str], tuple[str, int]]
 # Called after a hold so packet start frames / snapshot frames can never be
 # one tick stale (the due-detection -> hold race).
 RefreshFn = Callable[[int], "WorkerView"]
+# set_busy(info|None): maintain the MSA_BUSY.json coordination marker (the
+# continuation guard defers park/cap actions and the watchdog treats a dead
+# sidecar as fatal while it exists). Called with a dict BEFORE the first
+# hold, refreshed at every phase persist, and with None only after the
+# cycle is fully DONE or the failure cleanup completed.
+SetBusyFn = Callable[[Optional[dict]], None]
 # pin_tolerance(worker_id, tol): set msa_forced_success_tolerance (locked).
 PinFn = Callable[[int, float], None]
 # commit_tolerance(worker_id, tol): durably make tol the live tolerance
@@ -171,6 +178,7 @@ class MSAController:
         save_state: SaveStateFn,
         load_state: LoadStateFn,
         refresh_view: RefreshFn,
+        set_busy: Optional[SetBusyFn] = None,
         top_k: int = FORMAL_TOP_K,
         packet_frames: int = PROBE_PACKET_FRAMES,
         permuted_route: bool = False,
@@ -190,6 +198,7 @@ class MSAController:
         self._save_state = save_state
         self._load_state = load_state
         self._refresh_view = refresh_view
+        self._set_busy = set_busy or (lambda info: None)
         self.machine = MSAProbeStateMachine()
 
     # -- persisted state helpers ---------------------------------------------
@@ -203,6 +212,15 @@ class MSAController:
         machine_dict = self.machine.to_dict()
         for w in worker_ids:
             self._save_state(w, provs[w].to_dict(), machine_dict, dict(cycle))
+        # keep the coordination marker in step with the persisted phase; it
+        # exists from BEFORE the first hold until DONE / cleanup complete.
+        self._set_busy({
+            "intervention_id": str(cycle.get("intervention_id", "")),
+            "phase": self.machine.phase.value,
+            "status": str(cycle.get("status", "")),
+            "due_workers": list(cycle.get("due_workers", [])),
+            "timestamp": time.time(),
+        })
 
     def pending_cycle(self, worker_ids: list[int]) -> Optional[dict]:
         """The persisted in-flight cycle context (for resume), if any.
@@ -234,10 +252,127 @@ class MSAController:
                 due.append(w.worker_id)
         return sorted(due)
 
+    # -- durable commits (parallel, per-worker acks) ---------------------------
+    def _commit_all(self, todo: list[int], final_tol: dict[int, float],
+                    cycle: dict,
+                    provs: dict[int, MSAProvenance]) -> None:
+        """Durably commit every listed worker IN PARALLEL; persist each
+        worker's ack the moment its commit confirms. Raises the first
+        failure (CommitTimeout preferred) with the ack table attached —
+        never a second bounded wait for an already-failed worker."""
+        if not todo:
+            return
+        acks = cycle["commit_acks_by_worker"]
+        lock = threading.Lock()
+        failures: list[BaseException] = []
+
+        def _one(w: int) -> None:
+            try:
+                self._commit(w, final_tol[w])
+            except BaseException as exc:            # noqa: BLE001
+                with lock:
+                    failures.append(exc)
+                return
+            with lock:
+                acks[str(w)] = True
+                # ack persisted IMMEDIATELY (to every due worker's control,
+                # so any surviving copy carries the same ack table)
+                self._persist([int(k) for k in acks], provs, cycle)
+
+        threads = [threading.Thread(target=_one, args=(w,), daemon=True)
+                   for w in todo]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if failures:
+            err = next((f for f in failures if isinstance(f, TimeoutError)),
+                       failures[0])
+            try:
+                err.commit_acks = dict(acks)         # for COMMIT_TIMEOUT.json
+            except Exception:
+                pass
+            raise err
+
+    def _resume_committing(self, resume_cycle: dict) -> ProbeCycleResult:
+        """Finish an interrupted COMMITTING cycle: NO re-eval, NO re-train —
+        only idempotent durable commits for workers not yet acked."""
+        cycle = dict(resume_cycle)
+        intervention_id = str(cycle["intervention_id"])
+        due = [int(w) for w in cycle["due_workers"]]
+        tau = {int(k): float(v)
+               for k, v in cycle["tau_by_worker"].items()}
+        tau_plus = {int(k): float(v)
+                    for k, v in cycle["tau_plus_by_worker"].items()}
+        final_tol = {int(k): float(v)
+                     for k, v in cycle["final_tol_by_worker"].items()}
+        acks = {str(w): bool(cycle.get("commit_acks_by_worker", {})
+                             .get(str(w), False)) for w in due}
+        cycle["commit_acks_by_worker"] = acks
+        # restore the persisted machine (PROMOTE for promote, DECIDE for
+        # stay) so the final transition to NORMAL stays legal and audited.
+        _, machine_d, _ = self._load_state(due[0])
+        if machine_d:
+            self.machine = MSAProbeStateMachine.from_dict(machine_d)
+        m = self.machine
+        provs = {w: self.load_provenance(w) or MSAProvenance(worker_id=w)
+                 for w in due}
+        promoted = cycle.get("decision") == "promote"
+        try:
+            self._persist(due, provs, cycle)        # re-arms the busy marker
+            # workers are RUNNING here (holds died with the old process /
+            # were released by the watchdog); commit only the un-acked.
+            todo = [w for w in due if not acks[str(w)]]
+            self._commit_all(todo, final_tol, cycle, provs)
+            cycle["status"] = "DONE"
+            m.transition(MSAPhase.NORMAL, "committing resumed")
+            self._persist(due, provs, cycle)
+            self._set_busy(None)
+            return ProbeCycleResult(
+                intervention_id=intervention_id, due_workers=due,
+                routing=None,
+                l_mid_by_worker={int(k): float(v) for k, v in
+                                 cycle.get("l_mid_by_worker", {}).items()},
+                panel_stat=None,
+                retention_by_worker={int(k): v for k, v in
+                                     cycle.get("retention_by_worker",
+                                               {}).items()},
+                promoted=promoted,
+                first_blocking_gate=str(cycle.get("first_blocking_gate",
+                                                  "")),
+                tau_by_worker=dict(tau), tau_plus_by_worker=dict(tau_plus),
+                resumed=True)
+        except Exception as err:
+            # promotion is NOT claimed; un-acked workers revert to their
+            # own tau via a synchronous pin (never a second bounded wait
+            # after a commit timeout).
+            for w in due:
+                if not acks[str(w)]:
+                    try:
+                        self._pin(w, tau[w])
+                    except Exception:
+                        pass
+            cycle["status"] = "FAILED"
+            cycle["failed_phase"] = m.phase.value
+            cycle["error"] = f"{type(err).__name__}: {err}"
+            m.abort(f"COMMITTING: {type(err).__name__}")
+            try:
+                self._persist(due, provs, cycle)
+            except Exception:
+                pass
+            self._set_busy(None)
+            raise CycleFailure(
+                f"MSA cycle {intervention_id} failed while COMMITTING: "
+                f"{err}") from err
+
     # -- one full probe cycle -------------------------------------------------
     def run_cycle(self, workers: list[WorkerView],
                   resume_cycle: Optional[dict] = None) -> ProbeCycleResult:
         by_id = {w.worker_id: w for w in workers}
+
+        if (resume_cycle is not None
+                and str(resume_cycle.get("status")) == "COMMITTING"):
+            return self._resume_committing(resume_cycle)
 
         if resume_cycle is not None:
             intervention_id = str(resume_cycle["intervention_id"])
@@ -539,20 +674,33 @@ class MSAController:
                 final_tol = dict(tau_plus)
                 for w in due:
                     self._pin(w, tau_plus[w])
-                m.transition(MSAPhase.NORMAL, "promotion applied")
-            else:
-                m.transition(MSAPhase.NORMAL, decision.first_blocking_gate)
 
-            cycle["status"] = "DONE"
+            # -- COMMITTING: persisted BEFORE any durable commit ---------------
+            # The machine stays in PROMOTE (promote) / DECIDE (stay) and the
+            # cycle is NOT DONE until every worker's durable commit is
+            # acknowledged; a crash between DECIDE and the last ack resumes
+            # into _resume_committing (commits only, no re-eval/re-train).
+            cycle["status"] = "COMMITTING"
             cycle["decision"] = ("promote" if decision.promote else "stay")
             cycle["first_blocking_gate"] = decision.first_blocking_gate
+            cycle["final_tol_by_worker"] = {str(w): final_tol[w] for w in due}
+            cycle["commit_acks_by_worker"] = {str(w): False for w in due}
+            cycle["retention_by_worker"] = {
+                str(w): vars(r) for w, r in retention_by_worker.items()}
             self._persist(due, provs, cycle)
             # durable commits need the workers RUNNING (a committed tick must
             # confirm the live tolerance before the pin is cleared and the
-            # resume snapshot is synced), so release first, then commit.
+            # resume snapshot is synced), so release first, then commit ALL
+            # workers IN PARALLEL (serial waits would let later workers train
+            # extra ticks while earlier ones wait for their ack).
             _release(due)
-            for w in due:
-                self._commit(w, final_tol[w])
+            self._commit_all(due, final_tol, cycle, provs)
+            cycle["status"] = "DONE"
+            m.transition(MSAPhase.NORMAL,
+                         "promotion applied" if decision.promote
+                         else decision.first_blocking_gate)
+            self._persist(due, provs, cycle)
+            self._set_busy(None)
             promoted_committed = decision.promote
 
             return ProbeCycleResult(
@@ -607,6 +755,10 @@ class MSAController:
                 self._persist(due, provs, cycle)
             except Exception:
                 pass
+            # cleanup is complete: only now may the busy marker go away
+            # (a hard kill skips this whole handler and leaves it in place
+            # for the watchdog / guard to act on).
+            self._set_busy(None)
             raise CycleFailure(
                 f"MSA cycle {intervention_id} failed in {failed_phase}: "
                 f"{err}") from err

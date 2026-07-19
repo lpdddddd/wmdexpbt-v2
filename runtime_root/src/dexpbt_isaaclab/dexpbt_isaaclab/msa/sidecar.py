@@ -7,10 +7,20 @@ optimizer, replay, PBT lineage or any observer-owned curriculum field.
 
 Readiness barrier: the sidecar REQUIRES --readiness-marker (the
 FIRST_TICK_VALIDATED.json written by continuation_guard once ALL SIX
-workers produced a validated first continuation tick). Until the marker
-exists — and worker views are exactly {0..5} — the sidecar neither starts
-nor resumes any probe cycle. If the guard fails the arm (GUARD_FAILED),
-the sidecar releases all holds and exits.
+workers produced a validated first continuation tick) AND
+--hold-smoke-marker (the HOLD_SMOKE_PASSED.json written only by a fully
+successful run_hold_smoke.sh). Until BOTH markers exist — and worker
+views are exactly {0..5} — the sidecar neither starts nor resumes any
+probe cycle and performs no holds (it cannot race the hold smoke over
+MSA_HOLDS.json). If the guard fails the arm (GUARD_FAILED) or the smoke
+fails (HOLD_SMOKE_FAILED.json), the sidecar releases all holds and exits.
+
+Cycle coordination: while a cycle is in flight (from before the first
+PRE_EVAL hold, through eval/probe/DECIDE and the durable COMMITTING
+phase, until DONE or failure cleanup completes) the controller keeps
+<run_dir>/MSA_BUSY.json in place via set_busy; the continuation guard
+defers +100M park/cap actions while it exists and the hold watchdog
+treats a dead sidecar with a busy marker as fatal even with no holds.
 
 Wiring:
 - worker views        <- newest COMMITTED tick (LATEST.commit marker in
@@ -92,7 +102,16 @@ POLL_S = 30.0
 COMMIT_TOLERANCE_ATOL = 1e-6
 DEFAULT_COMMIT_MAX_WAIT_S = 3600.0
 HOLDS_FILE = "MSA_HOLDS.json"
+BUSY_FILE = "MSA_BUSY.json"
+SMOKE_PASSED_FILE = "HOLD_SMOKE_PASSED.json"
+SMOKE_FAILED_FILE = "HOLD_SMOKE_FAILED.json"
 NUM_WORKERS = 6
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2, default=str))
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +196,22 @@ def readiness_ok(marker_path: Path, views: list[WorkerView],
     if ids != list(range(num_policies)):
         return False, (f"committed worker views {ids} != expected "
                        f"{list(range(num_policies))} (partial launch?)")
+    return True, ""
+
+
+def cycle_gate_ok(readiness_marker: Path, smoke_marker: Path,
+                  views: list[WorkerView],
+                  num_policies: int = NUM_WORKERS) -> tuple[bool, str]:
+    """The FULL gate for starting/resuming any probe cycle: the guard's
+    6/6 readiness marker AND the manually-run hold smoke's PASSED marker.
+    Until both exist the sidecar idles (it never touches MSA_HOLDS.json in
+    that state, so it cannot race the hold smoke)."""
+    ready, why = readiness_ok(readiness_marker, views, num_policies)
+    if not ready:
+        return False, why
+    if not smoke_marker.is_file():
+        return False, (f"hold smoke gate not passed: {smoke_marker} "
+                       "missing (run run_hold_smoke.sh first)")
     return True, ""
 
 
@@ -498,6 +533,20 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         return (control.msa_provenance, control.msa_state_machine,
                 control.msa_cycle)
 
+    def set_busy(info: Optional[dict]) -> None:
+        """Maintain <run_dir>/MSA_BUSY.json: exists from before the first
+        hold of a cycle until the cycle is DONE or its failure cleanup
+        finished. The guard defers park/cap actions and the watchdog treats
+        a dead sidecar as fatal while it exists."""
+        busy_path = run_dir / BUSY_FILE
+        if info is None:
+            try:
+                busy_path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        _atomic_write_json(busy_path, dict(info))
+
     ctl = MSAController(
         evaluate=evaluate, snapshot=snapshot,
         retention_threshold=rho_threshold,
@@ -510,6 +559,7 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         save_state=save_state,
         load_state=load_state,
         refresh_view=refresh_view,
+        set_busy=set_busy,
         packet_frames=packet_frames,
         permuted_route=permuted_route)
     return ctl, holds
@@ -529,7 +579,14 @@ def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
     wait readiness -> record committed frame -> hold -> wait hold_seconds
     -> confirm the committed frame did NOT advance -> release -> confirm
     the NEXT committed tick appears within resume_timeout_s. Writes
-    HOLD_SMOKE_RESULT.json; release is guaranteed (finally)."""
+    HOLD_SMOKE_RESULT.json; release is guaranteed (finally).
+
+    Gate semantics: HOLD_SMOKE_PASSED.json is written ATOMICALLY, and ONLY
+    when (a) the frame was completely frozen during the hold, (b) the next
+    committed tick appeared after release AND (c) residual_holds is empty.
+    Any other outcome writes HOLD_SMOKE_FAILED.json, guarantees every PID
+    was SIGCONTed (release_all in the finally) and fail-closed stops the
+    whole arm. The PASSED marker can never be written on a failure path."""
     result: dict = {"worker_id": int(worker_id),
                     "hold_seconds": float(hold_seconds),
                     "ok": False, "timestamp": time.time()}
@@ -578,8 +635,34 @@ def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
         return 0
     finally:
         holds.release_all()          # guaranteed release, success or not
-        result["residual_holds"] = read_holds_file(run_dir)
+        result["residual_holds"] = {
+            str(w): pids for w, pids in read_holds_file(run_dir).items()}
+        if result["ok"] and result["residual_holds"]:
+            result["ok"] = False
+            result["error"] = (f"residual holds after release: "
+                               f"{result['residual_holds']}")
         out_path.write_text(json.dumps(result, indent=2))
+        if result["ok"]:
+            _atomic_write_json(run_dir / SMOKE_PASSED_FILE, {
+                "worker_id": int(worker_id),
+                "frame_before_hold": result.get("frame_before_hold"),
+                "next_committed_frame": result.get("next_committed_frame"),
+                "hold_seconds": float(hold_seconds),
+                "timestamp": time.time(),
+            })
+            try:      # a pass supersedes an older (relaunched-arm) failure
+                (run_dir / SMOKE_FAILED_FILE).unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            # NEVER write the PASSED marker on any failure path; record
+            # the failure and fail-closed stop the whole arm (all PIDs
+            # were already SIGCONTed by release_all above).
+            _atomic_write_json(run_dir / SMOKE_FAILED_FILE, dict(result))
+            from dexpbt_isaaclab.msa.continuation_guard import stop_arm
+            stop_arm(run_dir,
+                     f"hold smoke failed: {result.get('error', 'unknown')}",
+                     marker_name=None)
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +671,8 @@ def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
 
 def _stop_markers_present(run_dir: Path) -> Optional[str]:
     for name in ("GUARD_FAILED", "MSA_SIDECAR_DIED.json",
-                 "COMMIT_TIMEOUT.json", "ARM_COMPLETE.json"):
+                 "COMMIT_TIMEOUT.json", SMOKE_FAILED_FILE,
+                 "ARM_COMPLETE.json"):
         if (run_dir / name).is_file():
             return name
     return None
@@ -618,6 +702,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="FIRST_TICK_VALIDATED.json written by "
                          "continuation_guard; no cycle starts/resumes "
                          "before it exists")
+    ap.add_argument("--hold-smoke-marker", default="",
+                    help="HOLD_SMOKE_PASSED.json written by the hold "
+                         "smoke; no cycle starts/resumes before it exists "
+                         "(REQUIRED unless --hold-smoke-only)")
     ap.add_argument("--commit-max-wait-s", type=float,
                     default=DEFAULT_COMMIT_MAX_WAIT_S,
                     help="single bounded wait for a durable tolerance "
@@ -644,6 +732,9 @@ def main(argv: list[str] | None = None) -> int:
     eval_devices = [d for d in str(args.eval_devices).split(",") if d.strip()]
     if not eval_devices:
         ap.error("--eval-devices is required (unless --hold-smoke-only)")
+    if not str(args.hold_smoke_marker).strip():
+        ap.error("--hold-smoke-marker is required (unless --hold-smoke-only)")
+    smoke_marker = Path(args.hold_smoke_marker)
 
     permuted = args.permuted_route or args.arm == "MSA_PERMUTED_ROUTE"
     ctl, holds = build_controller(
@@ -671,14 +762,17 @@ def main(argv: list[str] | None = None) -> int:
             }, indent=2, default=str))
 
     def _stop_arm_commit_timeout(err: CommitTimeout) -> None:
-        (run_dir / "COMMIT_TIMEOUT.json").write_text(json.dumps({
+        # promotion is NEVER claimed here; the marker records every
+        # worker's durable-commit ack state at the moment of the timeout.
+        _atomic_write_json(run_dir / "COMMIT_TIMEOUT.json", {
             "worker_id": err.worker_id,
             "target_tau": err.target_tau,
             "last_observed_frame": err.last_frame,
             "last_observed_tau": err.last_tau,
             "max_wait_s": err.max_wait_s,
+            "commit_acks_by_worker": getattr(err, "commit_acks", {}),
             "time": time.time(),
-        }, indent=2))
+        })
         holds.release_all()
         from dexpbt_isaaclab.msa.continuation_guard import stop_arm
         stop_arm(run_dir, f"commit timeout: {err}", marker_name=None)
@@ -691,10 +785,13 @@ def main(argv: list[str] | None = None) -> int:
                       "releasing holds and exiting")
                 return 0 if marker == "ARM_COMPLETE.json" else 2
             views = _worker_views(workspace, args.num_policies)
-            ready, why = readiness_ok(readiness_marker, views,
-                                      args.num_policies)
+            # DOUBLE gate: 6/6 readiness marker AND hold-smoke PASSED
+            # marker. While waiting the sidecar performs no holds at all,
+            # so it can start early without racing the manual hold smoke.
+            ready, why = cycle_gate_ok(readiness_marker, smoke_marker,
+                                       views, args.num_policies)
             if not ready:
-                print(f"[msa-sidecar] waiting for readiness: {why}")
+                print(f"[msa-sidecar] waiting for gate: {why}")
                 time.sleep(POLL_S)
                 continue
             all_ids = [v.worker_id for v in views]

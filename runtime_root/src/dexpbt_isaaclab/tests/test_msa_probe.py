@@ -1018,6 +1018,9 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
             # 6/6 readiness barrier gate for the sidecar
             self.assertIn("--readiness-marker", text)
             self.assertIn("FIRST_TICK_VALIDATED.json", text)
+            # hold smoke gate: the sidecar also waits for the PASSED marker
+            self.assertIn("--hold-smoke-marker", text)
+            self.assertIn("HOLD_SMOKE_PASSED.json", text)
             # bounded durable-commit wait
             self.assertIn("--commit-max-wait-s", text)
             # external hold watchdog independent of the sidecar
@@ -1025,6 +1028,7 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
         # prepared (never executed) single-worker hold smoke launcher
         smoke = (LAUNCHER_DIR / "run_hold_smoke.sh").read_text()
         self.assertIn("--hold-smoke-only", smoke)
+        self.assertIn("HOLD_SMOKE_PASSED.json", smoke)
         self.assertIn("--hold-smoke-worker", smoke)
         self.assertIn("HOLD_SMOKE_RESULT.json", smoke)
 
@@ -1483,8 +1487,13 @@ class TestCommitTimeoutBounded(unittest.TestCase):
         cause = cm.exception.__cause__
         self.assertIsInstance(cause, CommitTimeout)
         self.assertEqual(cause.max_wait_s, 1800.0)
-        # ONE bounded commit attempt only: cleanup never re-waits
-        self.assertEqual(world.commit_calls, 1)
+        # ONE bounded commit attempt PER WORKER (the six waits run in
+        # parallel), and the cleanup never re-waits: exactly 6 calls.
+        self.assertEqual(world.commit_calls, 6)
+        # the ack table (all false — nothing durably committed) rides on
+        # the timeout for COMMIT_TIMEOUT.json
+        self.assertEqual(getattr(cause, "commit_acks", None),
+                         {str(w): False for w in world.taus})
         # holds cleared; every worker back on an original-tau PIN (the
         # durable revert is intentionally skipped after a timeout)
         self.assertEqual(world.held, set())
@@ -1645,6 +1654,377 @@ class TestHoldSmoke(unittest.TestCase):
             self.assertNotIn(_proc_state(proc.pid), ("T", "t"))
             self.assertEqual(read_holds_file(run_dir), {})
             self.assertEqual(result["residual_holds"], {})
+            # gate marker: PASSED written atomically, FAILED absent
+            passed = json.loads(
+                (run_dir / "HOLD_SMOKE_PASSED.json").read_text())
+            self.assertEqual(passed["worker_id"], 0)
+            self.assertEqual(passed["next_committed_frame"], 5_040_000_000)
+            self.assertFalse((run_dir / "HOLD_SMOKE_FAILED.json").exists())
+            self.assertEqual(list(run_dir.glob("*.tmp.*")), [])
+
+    def test_hold_smoke_failure_stops_arm_never_writes_passed(self):
+        import subprocess
+        import time
+
+        from dexpbt_isaaclab.msa.sidecar import _proc_state, hold_smoke
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            # workspace has NO committed tick for worker 0 -> smoke fails
+            ws = run_dir / "dexpbt_8gpu_ws"
+            (ws / "000").mkdir(parents=True)
+            marker = run_dir / "FIRST_TICK_VALIDATED.json"
+            marker.write_text(json.dumps({
+                "workers": [{"worker_id": w} for w in range(6)]}))
+            # a live "formal sidecar" waiting at the gate: the fail-closed
+            # stop must terminate it
+            sidecar_proc = subprocess.Popen(["sleep", "60"])
+            self.addCleanup(sidecar_proc.kill)
+            (run_dir / "msa_sidecar.pid").write_text(str(sidecar_proc.pid))
+            rc = hold_smoke(run_dir, ws, 0, hold_seconds=0.1,
+                            readiness_marker=marker,
+                            resume_timeout_s=1.0, poll_s=0.05)
+            self.assertEqual(rc, 2)
+            # PASSED is NEVER written on a failure path
+            self.assertFalse((run_dir / "HOLD_SMOKE_PASSED.json").exists())
+            failed = json.loads(
+                (run_dir / "HOLD_SMOKE_FAILED.json").read_text())
+            self.assertFalse(failed["ok"])
+            self.assertIn("no committed tick", failed["error"])
+            self.assertEqual(failed["residual_holds"], {})
+            # the arm was fail-closed stopped (waiting sidecar SIGTERMed)
+            deadline = time.monotonic() + 5
+            while (_proc_state(sidecar_proc.pid) not in (None, "Z")
+                   and time.monotonic() < deadline):
+                time.sleep(0.05)
+            self.assertIn(_proc_state(sidecar_proc.pid), (None, "Z"))
+
+
+class TestHoldSmokeGate(unittest.TestCase):
+    """The formal sidecar's cycle gate requires BOTH the 6/6 readiness
+    marker AND HOLD_SMOKE_PASSED.json before any cycle starts/resumes."""
+
+    def _views(self, n=6):
+        from dexpbt_isaaclab.msa.sidecar import WorkerView
+        return [WorkerView(worker_id=w, lineage_id=f"l{w}",
+                           active_tau=0.023, frame=5_020_000_000,
+                           source_checkpoint_id="c") for w in range(n)]
+
+    def test_no_smoke_marker_gate_closed(self):
+        from dexpbt_isaaclab.msa.continuation_guard import (
+            readiness_entry,
+            write_readiness_marker,
+        )
+        from dexpbt_isaaclab.msa.sidecar import cycle_gate_ok
+        with tempfile.TemporaryDirectory() as td:
+            readiness = Path(td) / "FIRST_TICK_VALIDATED.json"
+            smoke = Path(td) / "HOLD_SMOKE_PASSED.json"
+            entry = {"path": "p", "sha256_head": "h"}
+            meta = {"frame": 5_020_000_000, "lineage_id": "l",
+                    "curriculum": {"success_tolerance": 0.023}}
+            write_readiness_marker(
+                Path(td), {w: readiness_entry(w, entry, meta)
+                           for w in range(6)})
+            # readiness satisfied, hold smoke NOT run -> gate stays closed
+            ok, why = cycle_gate_ok(readiness, smoke, self._views(6))
+            self.assertFalse(ok)
+            self.assertIn("hold smoke gate", why)
+            # smoke PASSED -> gate opens
+            smoke.write_text(json.dumps({"worker_id": 0}))
+            ok, why = cycle_gate_ok(readiness, smoke, self._views(6))
+            self.assertTrue(ok, why)
+
+    def test_smoke_marker_alone_not_sufficient(self):
+        from dexpbt_isaaclab.msa.sidecar import cycle_gate_ok
+        with tempfile.TemporaryDirectory() as td:
+            readiness = Path(td) / "FIRST_TICK_VALIDATED.json"
+            smoke = Path(td) / "HOLD_SMOKE_PASSED.json"
+            smoke.write_text(json.dumps({"worker_id": 0}))
+            ok, why = cycle_gate_ok(readiness, smoke, self._views(6))
+            self.assertFalse(ok)
+            self.assertIn("readiness marker missing", why)
+
+    def test_smoke_failed_is_a_sidecar_stop_marker(self):
+        from dexpbt_isaaclab.msa.sidecar import _stop_markers_present
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(_stop_markers_present(Path(td)))
+            (Path(td) / "HOLD_SMOKE_FAILED.json").write_text("{}")
+            self.assertEqual(_stop_markers_present(Path(td)),
+                             "HOLD_SMOKE_FAILED.json")
+
+
+class TestCommittingPhase(unittest.TestCase):
+    """Durable commits happen in an explicit persisted COMMITTING state:
+    DONE/NORMAL only after ALL SIX workers acked; a crash mid-COMMITTING
+    resumes with commits ONLY (no re-eval, no re-training)."""
+
+    def test_committing_persisted_before_any_commit(self):
+        """Crash after DECIDE, before the FIRST durable commit: restart
+        completes only the commits."""
+        world, ctl, views = dr.make_world()
+        world.crash_hard = True
+        world.crash_commit_workers = set(range(6))   # every commit dies
+        with self.assertRaises(dr.HardKill):
+            ctl.run_cycle(views)
+        # persisted state: COMMITTING with the full decision context and
+        # an all-false ack table; NOT DONE, machine NOT back to NORMAL
+        cycle = world.state_store[0]["msa_cycle"]
+        self.assertEqual(cycle["status"], "COMMITTING")
+        self.assertIn(cycle["decision"], ("promote", "stay"))
+        self.assertEqual(len(cycle["final_tol_by_worker"]), 6)
+        self.assertEqual(cycle["commit_acks_by_worker"],
+                         {str(w): False for w in range(6)})
+        self.assertNotEqual(
+            world.state_store[0]["msa_state_machine"]["phase"], "NORMAL")
+        self.assertEqual(world.commit_log, [])
+        # busy marker survives the hard kill (watchdog/guard signal)
+        self.assertIsNotNone(world.busy)
+        evals_before = len(world.eval_calls)
+        trained_before = dict(world.trained_frames)
+
+        # restart: un-crash the world, resume via pending_cycle
+        world.crash_hard = False
+        world.crash_commit_workers = set()
+        world2, ctl2, views2 = dr.make_world(world=world)
+        pending = ctl2.pending_cycle(list(range(6)))
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["status"], "COMMITTING")
+        result = ctl2.run_cycle(views2, resume_cycle=pending)
+        self.assertTrue(result.resumed)
+        # commits ONLY: no re-eval, no re-training
+        self.assertEqual(len(world.eval_calls), evals_before)
+        self.assertEqual(world.trained_frames, trained_before)
+        self.assertEqual(sorted(w for w, _ in world.commit_log),
+                         list(range(6)))
+        cycle = world.state_store[0]["msa_cycle"]
+        self.assertEqual(cycle["status"], "DONE")
+        self.assertEqual(cycle["commit_acks_by_worker"],
+                         {str(w): True for w in range(6)})
+        self.assertEqual(ctl2.machine.phase, MSAPhase.NORMAL)
+        self.assertIsNone(world.busy)
+        # committed tolerances match the persisted final_tol_by_worker
+        for w in range(6):
+            self.assertEqual(world.live_tolerance[w],
+                             float(cycle["final_tol_by_worker"][str(w)]))
+            self.assertEqual(world.pinned_tolerance[w], 0.0)
+
+    def test_partial_acks_resume_commits_only_unacked(self):
+        """Crash after SOME workers acked: restart commits ONLY the
+        un-acked workers (idempotent for the rest)."""
+        world, ctl, views = dr.make_world()
+        world.crash_hard = True
+        world.crash_commit_workers = {4, 5}
+        with self.assertRaises(dr.HardKill):
+            ctl.run_cycle(views)
+        cycle = world.state_store[0]["msa_cycle"]
+        self.assertEqual(cycle["status"], "COMMITTING")
+        acks = cycle["commit_acks_by_worker"]
+        self.assertEqual({w for w in range(6) if acks[str(w)]},
+                         {0, 1, 2, 3})
+        self.assertEqual(sorted(w for w, _ in world.commit_log),
+                         [0, 1, 2, 3])
+        calls_before = world.commit_calls
+
+        world.crash_hard = False
+        world.crash_commit_workers = set()
+        world2, ctl2, views2 = dr.make_world(world=world)
+        pending = ctl2.pending_cycle(list(range(6)))
+        self.assertEqual(pending["status"], "COMMITTING")
+        result = ctl2.run_cycle(views2, resume_cycle=pending)
+        self.assertTrue(result.resumed)
+        # exactly TWO new commit attempts: workers 4 and 5 only
+        self.assertEqual(world.commit_calls - calls_before, 2)
+        self.assertEqual(sorted(w for w, _ in world.commit_log),
+                         list(range(6)))
+        cycle = world.state_store[0]["msa_cycle"]
+        self.assertEqual(cycle["status"], "DONE")
+        self.assertEqual(cycle["commit_acks_by_worker"],
+                         {str(w): True for w in range(6)})
+        self.assertIsNone(world.busy)
+        for w in range(6):
+            self.assertEqual(world.pinned_tolerance[w], 0.0)
+
+    def test_done_never_written_before_all_acks(self):
+        """The success path itself: every persisted DONE snapshot must
+        carry a full-true ack table (no DONE-before-durable-commit)."""
+        world, ctl, views = dr.make_world()
+        result = ctl.run_cycle(views)
+        self.assertTrue(result.promoted or result.first_blocking_gate)
+        for w in range(6):
+            cycle = world.state_store[w]["msa_cycle"]
+            self.assertEqual(cycle["status"], "DONE")
+            self.assertEqual(cycle["commit_acks_by_worker"],
+                             {str(x): True for x in range(6)})
+
+
+class TestBusyMarkerLifecycle(unittest.TestCase):
+    """MSA_BUSY.json (in-memory mirror in FakeWorld): set BEFORE the first
+    hold, kept through eval/probe/DECIDE/COMMITTING, cleared only at DONE
+    or after failure cleanup; a hard kill leaves it in place."""
+
+    def test_busy_set_before_first_hold_and_cleared_at_done(self):
+        world, ctl, views = dr.make_world()
+        orig_hold = world.hold_workers
+        busy_at_hold = []
+
+        def _hold(ids):
+            busy_at_hold.append(world.busy is not None)
+            orig_hold(ids)
+
+        ctl._hold = _hold
+        ctl.run_cycle(views)
+        # every hold (PRE/MID/POST barriers) happened under a busy marker
+        self.assertTrue(busy_at_hold)
+        self.assertTrue(all(busy_at_hold))
+        # cleared only after full DONE
+        self.assertIsNone(world.busy)
+        # the marker carried the phase progression, incl. COMMITTING
+        phases = [b["phase"] for b in world.busy_log if b]
+        self.assertIn("PRE_EVAL", phases)
+        statuses = [b["status"] for b in world.busy_log if b]
+        self.assertIn("COMMITTING", statuses)
+        self.assertEqual(world.busy_log[-1], None)
+
+    def test_soft_failure_cleanup_clears_busy(self):
+        world, ctl, views = dr.make_world(crash_on="mid")
+        with self.assertRaises(CycleFailure):
+            ctl.run_cycle(views)
+        self.assertIsNone(world.busy)     # cleanup completed -> cleared
+
+    def test_hard_kill_leaves_busy_for_watchdog(self):
+        world, ctl, views = dr.make_world(crash_on="mid")
+        world.crash_hard = True
+        with self.assertRaises(dr.HardKill):
+            ctl.run_cycle(views)
+        self.assertIsNotNone(world.busy)  # watchdog/guard must see it
+
+
+class TestGuardMSACoordination(unittest.TestCase):
+    """While MSA_BUSY.json exists the guard defers park/cap (cap_pending):
+    it must not stop workers or SIGCONT holds mid-cycle; after the busy
+    marker clears it re-reads committed metas and parks normally."""
+
+    def _stopped_sleeper(self, run_dir: Path, worker_id: int):
+        import os as _os
+        import signal as sg
+        import subprocess
+        import time as _time
+
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        proc = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(proc.kill)
+        _os.kill(proc.pid, sg.SIGSTOP)
+        deadline = _time.monotonic() + 5
+        while (_proc_state(proc.pid) not in ("T", "t")
+               and _time.monotonic() < deadline):
+            _time.sleep(0.05)
+        d = run_dir / f"policy_{worker_id:02d}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pid.txt").write_text(str(proc.pid))
+        return proc
+
+    def test_cap_during_hold_defers_and_touches_nobody(self):
+        from dexpbt_isaaclab.msa.continuation_guard import guard_loop
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            # all six at their +100M target, one even past the slack —
+            # but an MSA cycle is in flight (busy marker + held worker)
+            frames = {w: 5_000_000_000 + 100_000_000 for w in range(6)}
+            frames[3] = 5_000_000_000 + 140_000_000
+            ws = _mk_workspace(run_dir, frames)
+            (run_dir / "MSA_BUSY.json").write_text(json.dumps(
+                {"intervention_id": "msa_x", "phase": "MID_EVAL",
+                 "due_workers": list(range(6))}))
+            held = self._stopped_sleeper(run_dir, 0)
+            (run_dir / "MSA_HOLDS.json").write_text(
+                json.dumps({"0": [held.pid]}))
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            self.assertEqual(rc, 0)
+            # cap deferred: no completion, no failure, worker STILL held
+            self.assertFalse((run_dir / "ARM_COMPLETE.json").exists())
+            self.assertFalse((run_dir / "GUARD_FAILED").exists())
+            self.assertIn(_proc_state(held.pid), ("T", "t"))
+
+    def test_cap_waits_for_busy_clear_then_parks(self):
+        from dexpbt_isaaclab.msa.continuation_guard import guard_loop
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            frames = {w: 5_000_000_000 + 100_000_000 for w in range(6)}
+            ws = _mk_workspace(run_dir, frames)
+            busy = run_dir / "MSA_BUSY.json"
+            busy.write_text(json.dumps({"phase": "PROMOTE",
+                                        "status": "COMMITTING"}))
+            # COMMITTING in flight: nothing parks
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            self.assertEqual(rc, 0)
+            self.assertFalse((run_dir / "ARM_COMPLETE.json").exists())
+            # sidecar finished the cycle and cleared the marker: the guard
+            # re-reads committed metas and applies the normal park/cap
+            busy.unlink()
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            self.assertEqual(rc, 0)
+            payload = json.loads(
+                (run_dir / "ARM_COMPLETE.json").read_text())
+            self.assertEqual(len(payload["workers"]), 6)
+
+    def test_stop_worker_sigconts_only_target(self):
+        from dexpbt_isaaclab.msa.continuation_guard import stop_worker
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            w0 = self._stopped_sleeper(run_dir, 0)
+            w1 = self._stopped_sleeper(run_dir, 1)
+            (run_dir / "MSA_HOLDS.json").write_text(json.dumps(
+                {"0": [w0.pid], "1": [w1.pid]}))
+            stop_worker(run_dir, 0)
+            import time as _time
+
+            deadline = _time.monotonic() + 5
+            while (_proc_state(w0.pid) not in (None, "Z")
+                   and _time.monotonic() < deadline):
+                _time.sleep(0.05)
+            # target worker was SIGCONTed then terminated ...
+            self.assertIn(_proc_state(w0.pid), (None, "Z"))
+            # ... while worker 1's held process was NEVER SIGCONTed
+            self.assertIn(_proc_state(w1.pid), ("T", "t"))
+
+
+class TestWatchdogBusyNoHolds(unittest.TestCase):
+    """Sidecar death with busy=true but EMPTY holds (e.g. mid-COMMITTING,
+    all workers running) must still write MSA_SIDECAR_DIED.json and stop
+    the arm — never a quiet idle_exit."""
+
+    def test_dead_sidecar_busy_no_holds_stops_arm(self):
+        import subprocess
+
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            (run_dir / "msa_sidecar.pid").write_text(str(dead.pid))
+            (run_dir / "MSA_BUSY.json").write_text(json.dumps(
+                {"intervention_id": "msa_x", "phase": "PROMOTE",
+                 "status": "COMMITTING", "due_workers": list(range(6))}))
+            stops = []
+            state = check_once(run_dir,
+                               stop_arm_fn=lambda rd, r: stops.append(r))
+            self.assertEqual(state, "released")
+            marker = json.loads(
+                (run_dir / "MSA_SIDECAR_DIED.json").read_text())
+            self.assertEqual(marker["holds_found"], {})
+            self.assertEqual(marker["busy_marker"]["status"], "COMMITTING")
+            self.assertEqual(len(stops), 1)
+
+    def test_dead_sidecar_no_busy_no_holds_still_idle(self):
+        import subprocess
+
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        with tempfile.TemporaryDirectory() as td:
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            (Path(td) / "msa_sidecar.pid").write_text(str(dead.pid))
+            self.assertEqual(check_once(Path(td)), "idle_exit")
 
 
 if __name__ == "__main__":
