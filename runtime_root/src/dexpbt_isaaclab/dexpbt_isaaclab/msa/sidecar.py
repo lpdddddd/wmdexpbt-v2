@@ -672,6 +672,7 @@ def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
 def _stop_markers_present(run_dir: Path) -> Optional[str]:
     for name in ("GUARD_FAILED", "MSA_SIDECAR_DIED.json",
                  "COMMIT_TIMEOUT.json", SMOKE_FAILED_FILE,
+                 "STATE_FIDELITY_FAILED.json",
                  "ARM_COMPLETE.json"):
         if (run_dir / name).is_file():
             return name
@@ -682,7 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--arm", required=True,
-                    choices=["MSA", "MSA_PERMUTED_ROUTE"])
+                    choices=["MSA", "MSA_PERMUTED_ROUTE",
+                             "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL"])
     ap.add_argument("--task", default="DexPBT-Regrasping-KukaAllegro-Direct-v0")
     ap.add_argument("--rho-threshold", type=float, default=None)
     ap.add_argument("--permuted-route", action="store_true")

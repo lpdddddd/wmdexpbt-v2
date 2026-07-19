@@ -1,7 +1,7 @@
 # MSA Probe Dry-Run Trace (production-style)
 
-- scenario: 6 workers with HETEROGENEOUS live tolerances (real 5B-tip values), tick-quantized parallel trainer (20,000,000 frames per committed tick), phase-barrier holds, N=16 pilot seeds (formal N=256 explicit only)
-- intervention_id: `msa_1784447278_6058fb05`
+- scenario: 6 workers with HETEROGENEOUS live tolerances (real 5B-tip values), tick-quantized parallel trainer (80,000,000 frames per committed tick), phase-barrier holds, N=16 pilot seeds (formal N=256 explicit only)
+- intervention_id: `msa_1784465377_032f8891`
 - arm: MSA
 
 ## Worker-local tolerances
@@ -17,7 +17,7 @@
 
 ## State machine transitions
 
-1. `NORMAL->PRE_EVAL [msa_1784447278_6058fb05]`
+1. `NORMAL->PRE_EVAL [msa_1784465377_032f8891]`
 1. `PRE_EVAL->COMMON_PROBE`
 1. `COMMON_PROBE->MID_EVAL`
 1. `MID_EVAL->ROUTE_SECOND_HALF`
@@ -31,12 +31,12 @@
 
 | worker | L_mid (criterion-local) | tau_plus frames |
 |---|---|---|
-| p0 | +0.0600 | 40,000,000 |
-| p1 | +0.1000 | 40,000,000 |
-| p2 | +0.0200 | 20,000,000 |
-| p3 | +0.0800 | 40,000,000 |
-| p4 | +0.0400 | 20,000,000 |
-| p5 | +0.0600 | 20,000,000 |
+| p0 | +0.0600 | 160,000,000 |
+| p1 | +0.1000 | 160,000,000 |
+| p2 | +0.0200 | 80,000,000 |
+| p3 | +0.0800 | 160,000,000 |
+| p4 | +0.0400 | 80,000,000 |
+| p5 | +0.0600 | 80,000,000 |
 
 ## Second-half routing
 
@@ -64,6 +64,6 @@
 - reset calls (policy/optimizer/replay/lineage/curriculum): 0 (must be 0)
 - durable tolerance commits (pin cleared): [(0, 0.0219568631342), (1, 0.0213516974048), (2, 0.0254899875923), (3, 0.0236583904762), (4, 0.0249035689223), (5, 0.0262142830761)]
 - residual pins after cycle: {} (must be empty)
-- total tau_plus dose: 180,000,000 frames (= 6 x 20,000,000 common + 3 x 20,000,000 second half)
+- total tau_plus dose: 720,000,000 frames (= 6 x 80,000,000 common + 3 x 80,000,000 second half)
 - frames never advanced while a worker was held (asserted in FakeWorld.snapshot/evaluate/train_until).
 - q_post evaluated for recipients only; never entered L_mid.

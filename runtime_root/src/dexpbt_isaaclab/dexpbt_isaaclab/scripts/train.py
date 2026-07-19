@@ -6127,6 +6127,40 @@ def main():
                 )
             )
 
+    # Structured resume audit (2026-07-19): continuation guards must be able
+    # to verify that the tolerance/clock resume was APPLIED to the env
+    # without parsing free-text log lines and without requiring the live
+    # tolerance to still equal the resume value at the first committed tick
+    # (a live curriculum may legally move within its own gates).
+    if (
+        str(getattr(args_cli, "observer_mode", "") or "") == "pbt"
+        and args_cli.train_root
+        and (resume_log or args_cli.checkpoint)
+    ):
+        try:
+            _resume_path = (
+                Path(args_cli.train_root).resolve().parent
+                / "RESUME_APPLIED.json"
+            )
+            _resume_tmp = _resume_path.with_suffix(f".tmp.{os.getpid()}")
+            _resume_tmp.write_text(json.dumps({
+                "schema_version": 1,
+                "policy_idx": int(args_cli.policy_idx),
+                "checkpoint": str(args_cli.checkpoint or ""),
+                "restart_source_policy": args_cli.restart_source_policy,
+                "applied": dict(resume_log),
+                "success_tolerance_resume_flag":
+                    args_cli.success_tolerance_resume,
+                "last_curriculum_update_resume_flag":
+                    args_cli.last_curriculum_update_resume,
+                "frame_since_restart_resume_flag":
+                    args_cli.frame_since_restart_resume,
+                "timestamp": time.time(),
+            }, indent=2))
+            os.replace(_resume_tmp, _resume_path)
+        except Exception as _exc:  # never block training on audit I/O
+            print(f"[RESUME] WARNING: RESUME_APPLIED.json not written: {_exc}")
+
     # Patch P1 (2026-06-01): env reads mastery control JSON from workspace.
     if hasattr(raw_env, "curriculum_mode"):
         raw_env.curriculum_mode = args_cli.curriculum_mode

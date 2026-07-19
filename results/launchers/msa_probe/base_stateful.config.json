@@ -1,7 +1,9 @@
 {
-  "arm": "GATE_RELAX",
+  "arm": "BASE_STATEFUL",
   "profile": "base_retention_msa_probe",
-  "wm_strategy_profile": "cser_dexpbt_conservative_gate_relax",
+  "wm_strategy_profile": "cser_dexpbt_conservative",
+  "state_faithful": true,
+  "source_run": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631",
   "resume_checkpoints": {
     "p0": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",
@@ -53,20 +55,22 @@
     }
   },
   "base_seed": 42,
-  "continuation_frames_per_worker": 100000000,
-  "max_iterations": 45390,
+  "committed_tick_frames": 80000000,
+  "continuation_ticks_per_worker": 6,
+  "continuation_frames_per_worker": 480000000,
+  "cap_slack_frames": 80000000,
+  "budget_breakdown_ticks": {
+    "readiness_and_stall_reproduction": 1,
+    "msa_probe_cycle_common_plus_second": 2,
+    "post_cycle_same_tau_observation": 2,
+    "phase_quantization_slack": 1
+  },
+  "max_iterations": 48780,
   "frame_ledger": {
     "monotonic": true,
     "probe_frames_charged": true,
-    "note": "probe packets train through the normal supervisor loop under forced tolerance; they consume the same 100M budget as ordinary continuation frames"
+    "note": "probe packets train through the normal supervisor loop under forced tolerance; they consume the same 480M budget as ordinary continuation frames"
   },
   "original_launcher": "results/launchers/start_regrasping_cser_dexpbt_conservative_retention_strict_5b.sh",
-  "flag_diff_vs_base": [
-    {
-      "flag": "--late_floor_retention_min_retention",
-      "old": "0.88",
-      "new": "0.75",
-      "note": "already the configured hard minimum (late_floor_retention_hard_min_retention); applied via the dedicated cser_dexpbt_conservative_gate_relax profile table because profile expansion is authoritative over CLI"
-    }
-  ]
+  "flag_diff_vs_base": []
 }

@@ -237,6 +237,35 @@ def normalize_extra_args(
     return normalized
 
 
+def parse_clock_resume_per_policy(
+    spec: str, num_policies: int
+) -> list[tuple[int, int]]:
+    """Parse --curriculum-clock-resume-per-policy: 'lcu:fsr,lcu:fsr,...'.
+
+    Returns one (last_curriculum_update, frame_since_restart) pair per
+    policy (both in sim steps, straight from the source run's
+    curriculum_resume_snapshot.json). Raises on any malformed entry —
+    a half-restored clock silently changes gate semantics.
+    """
+    pairs: list[tuple[int, int]] = []
+    entries = [e.strip() for e in str(spec).split(",")]
+    if len(entries) != num_policies:
+        raise ValueError(
+            f"--curriculum-clock-resume-per-policy needs {num_policies} "
+            f"entries, got {len(entries)}")
+    for i, ent in enumerate(entries):
+        parts = ent.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"clock resume entry {i} must be 'lcu:fsr', got {ent!r}")
+        lcu, fsr = int(parts[0]), int(parts[1])
+        if lcu < 0 or fsr < 0 or lcu > fsr:
+            raise ValueError(
+                f"clock resume entry {i}: need 0 <= lcu <= fsr, got {ent!r}")
+        pairs.append((lcu, fsr))
+    return pairs
+
+
 def _read_status(run_dir: Path) -> dict[str, str]:
     status_path = run_dir / "status.txt"
     if not status_path.is_file():
@@ -731,6 +760,17 @@ def main() -> None:
         "curriculum_resume_snapshot.json in a fresh run dir). Requires "
         "--recover-checkpoint-per-policy.",
     )
+    parser.add_argument(
+        "--curriculum-clock-resume-per-policy",
+        type=str,
+        default="",
+        help="Comma-separated 'lcu:fsr' pairs (sim steps), one per policy, "
+        "from the source run's curriculum_resume_snapshot.json. Passed as "
+        "--last_curriculum_update_resume / --frame_since_restart_resume so "
+        "restart-step-relative gates (post_shrink_consolidation_until_"
+        "restart_step) keep their source meaning on a state-faithful "
+        "continuation. Requires --tolerance-resume-per-policy.",
+    )
     args = parser.parse_args()
 
     recover_per_policy: list[str] = []
@@ -773,6 +813,17 @@ def main() -> None:
                     f"per-policy resume tolerance {v} outside sane meter "
                     "range [0.001, 0.2]"
                 )
+
+    clock_resume_per_policy: list[tuple[int, int]] = []
+    if str(args.curriculum_clock_resume_per_policy or "").strip():
+        if not tolerance_resume_per_policy:
+            raise ValueError(
+                "--curriculum-clock-resume-per-policy requires "
+                "--tolerance-resume-per-policy"
+            )
+        clock_resume_per_policy = parse_clock_resume_per_policy(
+            args.curriculum_clock_resume_per_policy, args.num_policies
+        )
 
     train_root = Path(args.train_root).resolve()
     train_root.mkdir(parents=True, exist_ok=True)
@@ -893,6 +944,10 @@ def main() -> None:
                     "--success_tolerance_resume="
                     f"{tolerance_resume_per_policy[policy_idx]}"
                 )
+            if clock_resume_per_policy:
+                lcu, fsr = clock_resume_per_policy[policy_idx]
+                cmd.append(f"--last_curriculum_update_resume={lcu}")
+                cmd.append(f"--frame_since_restart_resume={fsr}")
         print(f"Launch policy {policy_idx}: {' '.join(cmd)}", flush=True)
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = gpu

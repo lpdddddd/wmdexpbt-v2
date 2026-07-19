@@ -1205,6 +1205,14 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._recent_peak_nsucc_mean: dict[int, float] = {}
         self._collapse_freeze_until: dict[int, int] = {}
         self._last_mastered_tolerance: dict[int, float] = {}
+        # State-faithful continuation (2026-07-19): a bootstrap step may
+        # pre-seed <workspace>/observer_state_seed/<w>.json with the SOURCE
+        # run's in-memory curriculum state (rolling windows, peaks,
+        # freeze-until maps, last-mastered records, rollback counters) so a
+        # continuation does not silently reset every gate. Checked once,
+        # lazily, at the first curriculum tick; a missing dir is the normal
+        # non-continuation case and costs one stat().
+        self._observer_seed_checked = False
         self._collapse_detected_this_tick = False
         self._shrink_issued_this_window: dict[int, bool] = {}
         self._last_curriculum_pbt_iteration: int = -1
@@ -1507,12 +1515,98 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             lineage_id=lineage_id,
         )
 
+    def _maybe_apply_observer_state_seed(self, env_frames: int) -> None:
+        """State-faithful continuation: restore the source run's observer
+        in-memory curriculum state from <workspace>/observer_state_seed/.
+
+        Applied ONCE per process, only while the run is still inside the
+        seed validity window (tip + 2 committed ticks) and only for
+        policies whose rolling window is still empty — a late observer
+        restart deep into the continuation must NOT regress live state to
+        the bootstrap snapshot. Without the seed dir this is a no-op and
+        ordinary runs are bit-for-bit unchanged.
+        """
+        if self._observer_seed_checked:
+            return
+        self._observer_seed_checked = True
+        seed_dir = self.workspace / "observer_state_seed"
+        if not seed_dir.is_dir():
+            return
+        for policy_idx in range(self.num_policies):
+            seed_path = seed_dir / f"{policy_idx:03d}.json"
+            if not seed_path.is_file():
+                continue
+            try:
+                seed = json.loads(seed_path.read_text())
+            except Exception as exc:
+                print(f"[observer-seed] policy {policy_idx}: unreadable "
+                      f"seed ({exc}); skipping", flush=True)
+                continue
+            if int(env_frames) > int(seed.get("seed_valid_until_frame", -1)):
+                print(f"[observer-seed] policy {policy_idx}: stale seed "
+                      f"(env_frames {env_frames} beyond validity); skipping",
+                      flush=True)
+                continue
+            window = self._policy_window(policy_idx)
+            if window.samples:
+                continue          # live state already exists; never regress
+            for s in seed.get("window_samples", []):
+                window.append(WindowSample(
+                    env_frames=int(s["env_frames"]),
+                    nsucc_mean=float(s["nsucc_mean"]),
+                    nsucc_max=float(s["nsucc_max"]),
+                    success_tolerance=float(s["success_tolerance"]),
+                    pbt_iteration=int(s.get("pbt_iteration", 0)),
+                    lineage_id=s.get("lineage_id"),
+                ))
+            self._recent_peak_nsucc_mean[policy_idx] = float(
+                seed["recent_peak_nsucc_mean"])
+            self._collapse_freeze_until[policy_idx] = int(
+                seed["collapse_freeze_until"])
+            self._curriculum_safety_freeze_until[policy_idx] = int(
+                seed["curriculum_safety_freeze_until"])
+            self._wm_curriculum_freeze_until[policy_idx] = int(
+                seed["wm_curriculum_freeze_until"])
+            self._last_mastered_tolerance[policy_idx] = float(
+                seed["last_mastered_tolerance"])
+            self._last_mastered_safe_tolerance[policy_idx] = float(
+                seed["last_mastered_safe_tolerance"])
+            self._last_mastered_safe_frame[policy_idx] = int(
+                seed["last_mastered_safe_frame"])
+            self._last_mastered_safe_nsucc_mean[policy_idx] = float(
+                seed["last_mastered_safe_nsucc_mean"])
+            self._last_mastered_safe_global_retention[policy_idx] = float(
+                seed["last_mastered_safe_global_retention"])
+            self._repeated_collapse_count[policy_idx] = int(
+                seed["repeated_collapse_count"])
+            self._rollback_count[policy_idx] = int(seed["rollback_count"])
+            self._last_rollback_frame[policy_idx] = int(
+                seed["last_rollback_frame"])
+            self._rollback_reason[policy_idx] = str(
+                seed.get("rollback_reason", ""))
+            self._shrinks_since_rollback[policy_idx] = int(
+                seed["shrinks_since_rollback"])
+            self._floor_recovery_protect_until[policy_idx] = int(
+                seed["floor_recovery_protect_until"])
+            if int(seed["first_floor_frame"]) >= 0:
+                self._first_floor_frame[policy_idx] = int(
+                    seed["first_floor_frame"])
+            if int(seed["first_hard_floor_frame"]) >= 0:
+                self._first_hard_floor_frame[policy_idx] = int(
+                    seed["first_hard_floor_frame"])
+            print(f"[observer-seed] policy {policy_idx}: restored source "
+                  f"curriculum state (window={len(window.samples)} samples, "
+                  f"peak={seed['recent_peak_nsucc_mean']:.2f}, "
+                  f"last_mastered={seed['last_mastered_tolerance']:.6f})",
+                  flush=True)
+
     def _update_curriculum_windows_and_control(
         self,
         population: dict[int, dict[str, Any] | None],
         env_frames: int,
     ) -> None:
         """Append rolling nsucc samples and write per-policy control JSON."""
+        self._maybe_apply_observer_state_seed(env_frames)
         self._collapse_detected_this_tick = False
         if self.pbt_iteration != self._last_curriculum_pbt_iteration:
             self._last_curriculum_pbt_iteration = int(self.pbt_iteration)

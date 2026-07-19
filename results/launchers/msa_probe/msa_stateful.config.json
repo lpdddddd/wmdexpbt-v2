@@ -1,7 +1,9 @@
 {
-  "arm": "MSA",
+  "arm": "MSA_STATEFUL",
   "profile": "base_retention_msa_probe",
   "wm_strategy_profile": "cser_dexpbt_conservative",
+  "state_faithful": true,
+  "source_run": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631",
   "resume_checkpoints": {
     "p0": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",
@@ -53,20 +55,29 @@
     }
   },
   "base_seed": 42,
-  "continuation_frames_per_worker": 100000000,
-  "max_iterations": 45390,
+  "committed_tick_frames": 80000000,
+  "continuation_ticks_per_worker": 6,
+  "continuation_frames_per_worker": 480000000,
+  "cap_slack_frames": 80000000,
+  "budget_breakdown_ticks": {
+    "readiness_and_stall_reproduction": 1,
+    "msa_probe_cycle_common_plus_second": 2,
+    "post_cycle_same_tau_observation": 2,
+    "phase_quantization_slack": 1
+  },
+  "max_iterations": 48780,
   "frame_ledger": {
     "monotonic": true,
     "probe_frames_charged": true,
-    "note": "probe packets train through the normal supervisor loop under forced tolerance; they consume the same 100M budget as ordinary continuation frames"
+    "note": "probe packets train through the normal supervisor loop under forced tolerance; they consume the same 480M budget as ordinary continuation frames"
   },
   "original_launcher": "results/launchers/start_regrasping_cser_dexpbt_conservative_retention_strict_5b.sh",
   "flag_diff_vs_base": [],
   "msa": {
     "tau_plus_rule": "max(0.010, 0.95 * tau[w]) per worker (heterogeneous, criterion-local)",
     "exposure_window_frames": 100000000,
-    "packet_frames": 20000000,
-    "packet_note": "one committed PBT tick (20M env frames); provenance stores OBSERVED committed frames",
+    "packet_frames": 80000000,
+    "packet_note": "one committed PBT tick at the REAL stage-3 cadence (80M env frames; the base 20M pbt_interval is NOT the committed quantum); provenance stores OBSERVED committed frames",
     "top_k_recipients": 3,
     "permuted_route": false,
     "permuted_route_seed": 777001,

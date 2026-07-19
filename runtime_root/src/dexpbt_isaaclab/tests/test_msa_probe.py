@@ -455,7 +455,9 @@ class TestHeterogeneousDryRunCycle(unittest.TestCase):
             self.assertEqual(
                 segs[0]["segment_end_frame"] - segs[0]["segment_start_frame"],
                 PROBE_PACKET_FRAMES)
-        self.assertEqual(PROBE_PACKET_FRAMES, 20_000_000)
+        # REAL stage-3 committed cadence (never assume the base 20M
+        # pbt_interval is the committed quantum)
+        self.assertEqual(PROBE_PACKET_FRAMES, 80_000_000)
 
     # top-3 second half is parallel too; non-recipients trained at their tau
     def test_second_half_parallel_and_non_recipients_reverted(self):
@@ -797,61 +799,108 @@ class TestEnvPinBehavior(unittest.TestCase):
 
 
 class TestContinuationGuard(unittest.TestCase):
-    """First-tick tolerance/lineage/frame validation + hard +100M cap."""
+    """First-tick validation (structured RESUME_APPLIED + one-shrink band
+    + lineage/frame) and the worker-local committed-tick cap."""
 
-    ENTRY = {"frame": 5_000_000_000, "live_tolerance": 0.023112487509668322,
+    TIP_TOL = 0.023112487509668322
+    ENTRY = {"frame": 5_000_000_000, "live_tolerance": TIP_TOL,
              "lineage_id": "lin-1", "iteration": 160}
+    RESUME_OK = {"applied": {"success_tolerance": TIP_TOL}}
 
     def test_first_tick_pass(self):
         from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
-        meta = {"frame": 5_020_000_000, "lineage_id": "lin-1",
-                "curriculum": {"success_tolerance": 0.023112487509668322}}
-        self.assertTrue(check_first_tick(self.ENTRY, meta).ok)
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": self.TIP_TOL}}
+        v = check_first_tick(self.ENTRY, meta, self.RESUME_OK)
+        self.assertTrue(v.ok)
+        # held EXACTLY the source tolerance -> stall reproduced
+        self.assertTrue(v.reproduced)
 
-    def test_first_tick_tolerance_mismatch_fails_closed(self):
+    def test_first_tick_missing_resume_applied_fails_closed(self):
         from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
-        meta = {"frame": 5_020_000_000, "lineage_id": "lin-1",
-                "curriculum": {"success_tolerance": 0.075}}  # reset to initial
-        v = check_first_tick(self.ENTRY, meta)
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": self.TIP_TOL}}
+        v = check_first_tick(self.ENTRY, meta, None)
         self.assertFalse(v.ok)
-        self.assertIn("tolerance", v.reason)
+        self.assertIn("RESUME_APPLIED", v.reason)
+
+    def test_first_tick_resume_applied_wrong_tolerance_fails(self):
+        from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": self.TIP_TOL}}
+        v = check_first_tick(self.ENTRY, meta,
+                             {"applied": {"success_tolerance": 0.075}})
+        self.assertFalse(v.ok)
+        self.assertIn("tolerance resume failed", v.reason)
+
+    def test_first_tick_one_legal_shrink_passes_not_reproduced(self):
+        # a live curriculum may legally shrink ONCE inside the interval;
+        # the worker passes first-tick validation but does NOT count as
+        # having reproduced the stall.
+        from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": 0.95 * self.TIP_TOL}}
+        v = check_first_tick(self.ENTRY, meta, self.RESUME_OK)
+        self.assertTrue(v.ok)
+        self.assertFalse(v.reproduced)
+
+    def test_first_tick_legacy_cascade_fails_closed(self):
+        # two+ shrinks in one committed interval — the exact 2026-07-19
+        # legacy-fallback signature (0.0231 -> 0.0168) — must fail.
+        from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": 0.016849}}
+        v = check_first_tick(self.ENTRY, meta, self.RESUME_OK)
+        self.assertFalse(v.ok)
+        self.assertIn("legacy", v.reason)
+
+    def test_first_tick_tolerance_reset_fails_closed(self):
+        from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
+        meta = {"frame": 5_080_000_000, "lineage_id": "lin-1",
+                "curriculum": {"success_tolerance": 0.075}}  # reset to initial
+        v = check_first_tick(self.ENTRY, meta, self.RESUME_OK)
+        self.assertFalse(v.ok)
 
     def test_first_tick_frame_reset_fails_closed(self):
         from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
         meta = {"frame": 20_000_000, "lineage_id": "lin-1",
-                "curriculum": {"success_tolerance": 0.023112487509668322}}
-        v = check_first_tick(self.ENTRY, meta)
+                "curriculum": {"success_tolerance": self.TIP_TOL}}
+        v = check_first_tick(self.ENTRY, meta, self.RESUME_OK)
         self.assertFalse(v.ok)
         self.assertIn("baseline", v.reason)
 
     def test_first_tick_lineage_mismatch_fails_closed(self):
         from dexpbt_isaaclab.msa.continuation_guard import check_first_tick
-        meta = {"frame": 5_020_000_000, "lineage_id": "OTHER",
-                "curriculum": {"success_tolerance": 0.023112487509668322}}
-        self.assertFalse(check_first_tick(self.ENTRY, meta).ok)
+        meta = {"frame": 5_080_000_000, "lineage_id": "OTHER",
+                "curriculum": {"success_tolerance": self.TIP_TOL}}
+        self.assertFalse(
+            check_first_tick(self.ENTRY, meta, self.RESUME_OK).ok)
 
-    def test_hard_cap_100m(self):
+    def test_worker_local_cap_at_real_cadence(self):
         from dexpbt_isaaclab.msa.continuation_guard import (
+            COMMITTED_TICK_FRAMES,
             CONTINUATION_CAP_FRAMES,
+            TICK_SLACK_FRAMES,
             cap_action,
         )
-        self.assertEqual(CONTINUATION_CAP_FRAMES, 100_000_000)
-        target = 5_000_000_000 + 100_000_000
+        # budget = 6 committed ticks at the REAL 80M stage-3 cadence; the
+        # base 20M pbt_interval is NOT the committed quantum.
+        self.assertEqual(COMMITTED_TICK_FRAMES, 80_000_000)
+        self.assertEqual(CONTINUATION_CAP_FRAMES, 480_000_000)
+        self.assertEqual(TICK_SLACK_FRAMES, 80_000_000)
+        target = 5_000_000_000 + CONTINUATION_CAP_FRAMES
         # below target: keep running
         self.assertEqual(cap_action(self.ENTRY, {"frame": target - 1}),
                          "run")
         # first frame >= target: park THIS worker (normal completion path)
         self.assertEqual(cap_action(self.ENTRY, {"frame": target}), "park")
         self.assertEqual(cap_action(self.ENTRY,
-                                    {"frame": target + 20_000_000}),
+                                    {"frame": target + 80_000_000}),
                          "park")   # within one tick of slack
-        # beyond target + slack: fail — a worker must never be discovered
-        # only after silently running to ~140M+
+        # beyond target + slack: fail — a worker must never silently
+        # overshoot a full committed tick past its budget
         self.assertEqual(cap_action(self.ENTRY,
-                                    {"frame": target + 20_000_001}),
-                         "fail")
-        self.assertEqual(cap_action(self.ENTRY,
-                                    {"frame": 5_000_000_000 + 140_000_000}),
+                                    {"frame": target + 80_000_001}),
                          "fail")
 
     def test_bootstrap_verify_hash_and_mapping(self):
@@ -941,16 +990,16 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
     def test_base_continuation_launcher_keeps_original_gates(self):
         if not LAUNCHER_DIR.exists():
             self.skipTest("arm launchers not generated in this checkout")
-        base = (LAUNCHER_DIR / "start_base_continuation.sh").read_text()
-        relax = (LAUNCHER_DIR / "start_gate_relax.sh").read_text()
+        base = (LAUNCHER_DIR / "start_base_stateful.sh").read_text()
+        relax = (LAUNCHER_DIR / "start_gate_relax_stateful.sh").read_text()
         self.assertIn("--late_floor_retention_min_retention 0.88", base)
         self.assertIn("--late_floor_retention_min_retention 0.75", relax)
         # single-flag diff: everything else identical
         diff = [
             (a, b) for a, b in zip(base.splitlines(), relax.splitlines())
             if a != b and "GATE_RELAX" not in a + b
-            and "gate_relax" not in a + b and "BASE_CONTINUATION" not in a + b
-            and "base_continuation" not in a + b
+            and "gate_relax" not in a + b and "BASE_STATEFUL" not in a + b
+            and "base_stateful" not in a + b
         ]
         self.assertEqual(len(diff), 1, diff)
         self.assertIn("late_floor_retention_min_retention", diff[0][0])
@@ -982,12 +1031,12 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
 
         if not LAUNCHER_DIR.exists():
             self.skipTest("arm launchers not generated in this checkout")
-        relax = (LAUNCHER_DIR / "start_gate_relax.sh").read_text()
+        relax = (LAUNCHER_DIR / "start_gate_relax_stateful.sh").read_text()
         self.assertIn('--profile-per-policy "'
                       + ",".join(["cser_dexpbt_conservative_gate_relax"] * 6)
                       + '"', relax)
-        for other in ("start_base_continuation.sh", "start_msa.sh",
-                      "start_msa_permuted_route.sh"):
+        for other in ("start_base_stateful.sh", "start_msa_stateful.sh",
+                      "start_msa_permuted_stateful.sh"):
             text = (LAUNCHER_DIR / other).read_text()
             self.assertIn('--profile-per-policy "'
                           + ",".join(["cser_dexpbt_conservative"] * 6)
@@ -998,17 +1047,29 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
         if not LAUNCHER_DIR.exists():
             self.skipTest("arm launchers not generated in this checkout")
         for sh in LAUNCHER_DIR.glob("start_*.sh"):
+            if sh.name == "run_hold_smoke.sh":
+                continue
             text = sh.read_text()
+            # STATE-FAITHFUL bootstrap before anything launches (fail
+            # closed) + fingerprint validation
+            self.assertIn("state_bootstrap", text)
+            self.assertIn("REFUSING TO LAUNCH: state bootstrap failed", text)
+            self.assertIn("--verify", text)
+            self.assertIn("state fingerprint validation failed", text)
             # fail-closed bootstrap verification before any launch
             self.assertIn("continuation_guard", text)
             self.assertIn("--verify-only", text)
             self.assertIn("REFUSING TO LAUNCH: bootstrap verification",
                           text)
-            # explicit tolerance resume (a bare --checkpoint resets tol)
+            # explicit tolerance + env-clock resume (a bare --checkpoint
+            # resets tolerance AND restart-step-relative gates)
             self.assertIn("--tolerance-resume-per-policy", text)
-            # hard cap guard loop
+            self.assertIn("--curriculum-clock-resume-per-policy", text)
+            # hard cap guard loop at the real cadence budget
             self.assertIn("continuation_guard.log", text)
-        for arm in ("start_msa.sh", "start_msa_permuted_route.sh"):
+            self.assertIn("--cap-frames 480000000", text)
+        for arm in ("start_msa_stateful.sh",
+                    "start_msa_permuted_stateful.sh"):
             text = (LAUNCHER_DIR / arm).read_text()
             # bounded multi-device eval, never the trainers' cuda:0
             self.assertIn("--eval-devices", text)
@@ -1087,18 +1148,28 @@ class TestArmConfigs(unittest.TestCase):
             for entry in c["resume_checkpoints"].values():
                 self.assertTrue(entry.get("sha256_head"),
                                 "bootstrap hash missing")
-        self.assertTrue(cfgs["msa_permuted_route"]["msa"]["permuted_route"])
-        self.assertFalse(cfgs["msa"]["msa"]["permuted_route"])
-        # 20M committed-tick packet everywhere
-        for name in ("msa", "msa_permuted_route"):
-            self.assertEqual(cfgs[name]["msa"]["packet_frames"], 20_000_000)
+        self.assertTrue(
+            cfgs["msa_permuted_stateful"]["msa"]["permuted_route"])
+        self.assertFalse(cfgs["msa_stateful"]["msa"]["permuted_route"])
+        # one committed tick at the REAL 80M stage-3 cadence everywhere
+        for name in ("msa_stateful", "msa_permuted_stateful"):
+            self.assertEqual(cfgs[name]["msa"]["packet_frames"], 80_000_000)
             self.assertEqual(cfgs[name]["msa"]["eval_num_seeds_pilot"],
                              PILOT_NUM_SEEDS)
         # same probe dose/eval budget between MSA and its negative control
         for k in ("packet_frames", "top_k_recipients",
                   "eval_num_seeds_pilot", "eval_seed_manifest_id_pilot"):
-            self.assertEqual(cfgs["msa"]["msa"][k],
-                             cfgs["msa_permuted_route"]["msa"][k])
+            self.assertEqual(cfgs["msa_stateful"]["msa"][k],
+                             cfgs["msa_permuted_stateful"]["msa"][k])
+        # state-faithful metadata on every arm
+        for c in cfgs.values():
+            self.assertTrue(c["state_faithful"])
+            self.assertIn("source_run", c)
+            self.assertEqual(c["committed_tick_frames"], 80_000_000)
+            self.assertEqual(c["continuation_frames_per_worker"],
+                             480_000_000)
+            self.assertEqual(sum(c["budget_breakdown_ticks"].values()),
+                             c["continuation_ticks_per_worker"])
 
 
 def _mk_workspace(root: Path, frames: dict[int, int], tol: float = 0.023,
@@ -1435,15 +1506,18 @@ class TestHoldWatchdog(unittest.TestCase):
 
 
 class TestMatchedCap(unittest.TestCase):
-    """target[w] = baseline + 100M; per-worker park; ARM_COMPLETE.json on
-    6/6; overshoot beyond one tick of slack fails the arm."""
+    """target[w] = baseline + 6 committed ticks (480M at the real 80M
+    cadence); per-worker park; ARM_COMPLETE.json on 6/6; overshoot beyond
+    one tick of slack fails the arm."""
+
+    CAP = 480_000_000
 
     def test_all_six_parked_writes_arm_complete(self):
         from dexpbt_isaaclab.msa.continuation_guard import guard_loop
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             ws = _mk_workspace(
-                run_dir, {w: 5_000_000_000 + 100_000_000 for w in range(6)})
+                run_dir, {w: 5_000_000_000 + self.CAP for w in range(6)})
             rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
             self.assertEqual(rc, 0)
             payload = json.loads(
@@ -1451,19 +1525,20 @@ class TestMatchedCap(unittest.TestCase):
             self.assertEqual(len(payload["workers"]), 6)
             for rec in payload["workers"]:
                 self.assertEqual(rec["target_frame"],
-                                 5_000_000_000 + 100_000_000)
+                                 5_000_000_000 + self.CAP)
                 self.assertEqual(rec["observed_frame"],
                                  rec["target_frame"])
             # normal completion: NEVER failure semantics
             self.assertFalse((run_dir / "GUARD_FAILED").exists())
             self.assertFalse((run_dir / "CAP_REACHED").exists())
 
-    def test_overshoot_to_140m_fails_the_arm(self):
+    def test_overshoot_beyond_one_tick_fails_the_arm(self):
         from dexpbt_isaaclab.msa.continuation_guard import guard_loop
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
-            frames = {w: 5_000_000_000 + 100_000_000 for w in range(6)}
-            frames[3] = 5_000_000_000 + 140_000_000     # silent overrun
+            frames = {w: 5_000_000_000 + self.CAP for w in range(6)}
+            # more than one full committed tick past target: silent overrun
+            frames[3] = 5_000_000_000 + self.CAP + 80_000_001
             ws = _mk_workspace(run_dir, frames)
             rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
             self.assertEqual(rc, 2)
@@ -1927,10 +2002,10 @@ class TestGuardMSACoordination(unittest.TestCase):
         from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
-            # all six at their +100M target, one even past the slack —
+            # all six at their cap target, one even past the slack —
             # but an MSA cycle is in flight (busy marker + held worker)
-            frames = {w: 5_000_000_000 + 100_000_000 for w in range(6)}
-            frames[3] = 5_000_000_000 + 140_000_000
+            frames = {w: 5_000_000_000 + 480_000_000 for w in range(6)}
+            frames[3] = 5_000_000_000 + 480_000_000 + 80_000_001
             ws = _mk_workspace(run_dir, frames)
             (run_dir / "MSA_BUSY.json").write_text(json.dumps(
                 {"intervention_id": "msa_x", "phase": "MID_EVAL",
@@ -1949,7 +2024,7 @@ class TestGuardMSACoordination(unittest.TestCase):
         from dexpbt_isaaclab.msa.continuation_guard import guard_loop
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
-            frames = {w: 5_000_000_000 + 100_000_000 for w in range(6)}
+            frames = {w: 5_000_000_000 + 480_000_000 for w in range(6)}
             ws = _mk_workspace(run_dir, frames)
             busy = run_dir / "MSA_BUSY.json"
             busy.write_text(json.dumps({"phase": "PROMOTE",

@@ -22,7 +22,7 @@ cd "${RUNTIME_ROOT}/src/dexpbt_isaaclab"
 
 python -u -m dexpbt_isaaclab.msa.sidecar \
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \
-  --arm MSA \
+  --arm MSA_STATEFUL \
   --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \
   --hold-smoke-only \
   --hold-smoke-worker "$WORKER" \

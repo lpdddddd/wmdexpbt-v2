@@ -41,7 +41,10 @@ DRY_RUN_TAUS = {
     4: 0.026214283076124620,
     5: 0.027593982185394335,
 }
-TICK_FRAMES = 20_000_000            # committed PBT tick quantum
+# Committed PBT tick quantum at the REAL stage-3 cadence (80M env frames:
+# base 20M pbt_interval x 4.0 SELECTION-stage multiplier — measured in the
+# strict-5B source run; the probe packet is exactly one such tick).
+TICK_FRAMES = 80_000_000
 DRY_RUN_NUM_SEEDS = PILOT_NUM_SEEDS  # pilot N=16 (formal N=256, explicit)
 DRY_RUN_RHO_THRESHOLD = 0.88
 
@@ -235,9 +238,10 @@ class FakeWorld:
         self.trained_frames_at_tol[key] = (
             self.trained_frames_at_tol.get(key, 0) + TICK_FRAMES)
         if kind == "tau_plus":
+            # learn_rate is calibrated as skill gain PER COMMITTED TICK so
+            # the simulated dynamics are invariant to the cadence constant.
             self.skill_plus[w] = min(
-                1.0, self.skill_plus[w]
-                + self.learn_rate[w] * (TICK_FRAMES / 20_000_000))
+                1.0, self.skill_plus[w] + self.learn_rate[w])
 
     # -- persistent state store (== CurriculumControlState.msa_*) --------------
     def save_state(self, worker_id: int, prov, machine, cycle) -> None:

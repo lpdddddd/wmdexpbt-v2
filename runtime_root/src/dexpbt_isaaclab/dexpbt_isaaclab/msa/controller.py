@@ -64,11 +64,15 @@ from dexpbt_isaaclab.msa.provenance import (
 from dexpbt_isaaclab.msa.state_machine import MSAPhase, MSAProbeStateMachine
 
 # One committed PBT tick is the smallest reliably observable training
-# quantum (20M env frames at --pbt-interval-steps 20000000). The probe
-# packet is therefore exactly one committed tick; provenance stores the
-# frames actually observed on the ledger, which may exceed the packet by
-# tick quantization but never fabricates start + n.
-PROBE_PACKET_FRAMES = 20_000_000
+# quantum. The base --pbt-interval-steps is 20M env frames, but every 5B
+# continuation runs in consolidation stage 3 (SELECTION, frame >= 3.5B)
+# whose interval multiplier is 4.0 -> the REAL committed cadence is 80M
+# env frames per tick (measured in the strict-5B source run and confirmed
+# by the 2026-07-19 execution smoke: first commit at baseline+80M). The
+# probe packet is exactly one committed tick at that real cadence;
+# provenance stores the frames actually observed on the ledger, which may
+# exceed the packet by tick quantization but never fabricates start + n.
+PROBE_PACKET_FRAMES = 80_000_000
 FORMAL_TOP_K = 3
 
 

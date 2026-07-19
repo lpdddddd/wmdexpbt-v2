@@ -304,6 +304,62 @@ Three last pre-pilot orchestration blockers, no algorithm changes:
    release. The watchdog stops the arm on a dead sidecar whenever holds
    OR the busy marker exist (busy-with-empty-holds = death mid-COMMITTING).
 
+## 5c. State-faithful stall bootstrap ("Add state-faithful stall bootstrap for MSA arms", 2026-07-19)
+
+The GPU execution smoke invalidated the bare warm-start bootstrap: with an
+empty `curriculum_control/` at worker start the env fell back to the ungated
+LEGACY curriculum and worker 0 shrank 0.0231 → 0.0168 within the first
+committed interval — the stall was NOT reproduced, so no arm built on that
+bootstrap can support the causal MSA question. This pass replaces it:
+
+1. **`msa/state_bootstrap.py` (new)** — before any worker starts it (a)
+   copies each worker's source control JSON into the new workspace with
+   every base-retention gate field intact and ONLY `msa_*` cleared; (b)
+   rebuilds the observer's unpersisted in-memory state (rolling window from
+   the last 12 committed metas, recent peak, collapse/safety/WM freeze
+   horizons, last-mastered records, rollback counters,
+   `shrinks_since_rollback` from meta history) into
+   `observer_state_seed/<w>.json`; (c) copies the resume snapshots into the
+   new policy dirs; (d) writes `STATE_FIDELITY.json` (per worker, per field:
+   source vs restored vs category) and `STATE_FINGERPRINT.json` (sha256 of
+   the restored state + every consumed source file); (e) FAILS CLOSED on any
+   missing critical state. Full source-of-truth analysis:
+   `STATE_SOURCE_AUDIT.md`.
+2. **Observer seed loading** — `pbt_observer._maybe_apply_observer_state_seed`
+   restores the seeded state once per process at the first curriculum tick,
+   only inside the validity window (tip + 2 ticks) and never regressing live
+   state; ordinary runs without the seed dir are bit-for-bit unchanged.
+3. **Structured resume audit** — train.py writes
+   `policy_XX/RESUME_APPLIED.json` (what tolerance/clock resume was actually
+   applied to the env); the guard validates THIS instead of requiring the
+   live first-tick tolerance to still equal the manifest tip.
+4. **Stall reproduction gate** (in `continuation_guard`) — the first
+   committed interval doubles as the reproduction interval: per worker at
+   most ONE legal mastery shrink (two shrinks in one interval is the
+   legacy-cascade signature → `GUARD_FAILED`), restored control state must
+   not be default-clobbered (`verify_control_fidelity`: last-mastered ≠
+   0.075-clobber, peak preserved, freeze horizons kept), and arm-level
+   ≥ 4/6 workers must hold EXACTLY their source tolerance —
+   otherwise `STATE_FIDELITY_FAILED.json` + full arm stop, MSA never starts.
+5. **Env clock resume** — `launch_pbt --curriculum-clock-resume-per-policy`
+   ("lcu:fsr" per policy, from the source resume snapshots) →
+   `--last_curriculum_update_resume` / `--frame_since_restart_resume`, so
+   `post_shrink_consolidation_until_restart_step` keeps its source meaning.
+6. **Real committed cadence** — measured 80M frames/tick (stage-3 SELECTION:
+   20M base × 4.0 mult; 40M in stage 2), so: `PROBE_PACKET_FRAMES` = 80M,
+   cap slack = 80M, continuation budget = 6 ticks = 480M/worker
+   (1 reproduction + 2 probe cycle + 2 observation + 1 slack),
+   `max_iterations` = 44,500 + 4,280. Never assume the 20M pbt_interval is
+   the committed quantum.
+7. **Escalating stops** — every guard stop path now runs
+   SIGCONT → SIGTERM → 20 s grace → re-enumerate the tree → SIGKILL
+   survivors → verify exit (zombies excluded); the smoke had shown Isaac
+   trainers surviving bare SIGTERM.
+8. **Four stateful arms** — `BASE_STATEFUL` (matched "still stuck" control),
+   `GATE_RELAX_STATEFUL`, `MSA_STATEFUL`, `MSA_PERMUTED_STATEFUL`; same six
+   tip checkpoints, same full control state, same seed; launchers run the
+   bootstrap + fingerprint verification fail-closed before anything starts.
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
@@ -328,11 +384,13 @@ Three last pre-pilot orchestration blockers, no algorithm changes:
 
 ## 7. Artifacts
 
-- code: `dexpbt_isaaclab/msa/` (9 modules incl. `hold_watchdog.py`),
-  `tests/test_msa_probe.py` (110 tests)
-- launchers: `results/launchers/msa_probe/` (4 arm scripts + 4 configs +
-  `run_hold_smoke.sh` + `EVAL_COST_ESTIMATE.json`)
-- audit: `blocker_audit_3b_5b.json` (this directory)
+- code: `dexpbt_isaaclab/msa/` (10 modules incl. `hold_watchdog.py` and
+  `state_bootstrap.py`), `tests/test_msa_probe.py` (114 tests),
+  `tests/test_state_bootstrap.py` (32 tests)
+- launchers: `results/launchers/msa_probe/` (4 STATEFUL arm scripts +
+  4 configs + `run_hold_smoke.sh` + `EVAL_COST_ESTIMATE.json`)
+- audit: `blocker_audit_3b_5b.json`, `STATE_SOURCE_AUDIT.md`
+  (this directory)
 - docs: `STATE_MACHINE.md`, `CONFIG_DIFF.md`, `DRY_RUN_TRACE.md`,
   `TEST_REPORT.md`, `LAUNCH_CHECKLIST.md`, `EVAL_COST_ESTIMATE.json`
   (this directory)

@@ -2,10 +2,11 @@
 
 Date: 2026-07-19, updated the same date for the pilot-integration fix pass
 ("Fix MSA pilot integration and phase safety"), the pre-pilot safety patch
-("Harden MSA readiness holds and pilot budget") and the final orchestration
-blocker patch ("Close MSA smoke, commit, and cap races"). Environment:
-isaaclab311 python (CPU only; no Isaac import anywhere in the MSA package
-or its tests; no GPU used).
+("Harden MSA readiness holds and pilot budget"), the final orchestration
+blocker patch ("Close MSA smoke, commit, and cap races") and the
+state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
+arms"). Environment: isaaclab311 python (CPU only; no Isaac import anywhere
+in the MSA package or its tests; no GPU used).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -17,10 +18,13 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 110/110 passed
+## MSA suite: `tests/test_msa_probe.py` — 114/114 passed
+## Bootstrap suite: `tests/test_state_bootstrap.py` — 32/32 passed
 
 (72 retained from the pilot-integration pass + 23 safety-patch tests +
-15 new orchestration-blocker tests.)
+15 orchestration-blocker tests, updated in place for the real 80M cadence,
+the 480M cap and the stateful arm names + 4 new first-tick semantics tests;
+plus the 32-test state-bootstrap suite.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -111,10 +115,35 @@ Orchestration-blocker coverage ("Close MSA smoke, commit, and cap races";
 | sidecar dead + busy=true + holds EMPTY → watchdog writes MSA_SIDECAR_DIED.json and stops arm | `TestWatchdogBusyNoHolds.test_dead_sidecar_busy_no_holds_stops_arm` |
 | sidecar dead + no busy + no holds → still a quiet idle_exit | `test_dead_sidecar_no_busy_no_holds_still_idle` |
 
+State-faithful bootstrap coverage ("Add state-faithful stall bootstrap for
+MSA arms"; 32 new tests in `tests/test_state_bootstrap.py` + 4 updated
+first-tick tests in the MSA suite):
+
+| requirement | test(s) |
+|---|---|
+| control JSON copied with every gate field intact, ONLY msa_* cleared | `TestStateBootstrap.test_control_copied_gate_state_intact_msa_cleared` |
+| observer seed rebuilt from control + last-12 metas (window, peak, freezes, last-mastered, rollback state, safety=max(rollback, late-floor)) | `test_observer_seed_rebuilt_from_metas_and_control` |
+| shrinks_since_rollback rebuilt counting only post-rollback shrinks | `test_shrinks_since_rollback_counts_only_post_rollback` |
+| STATE_FIDELITY.json: all critical fields match; losses explicit (default_lost) | `test_fidelity_report_faithful_with_explicit_losses` |
+| resume snapshots copied into new policy dirs; env clock exported | `test_resume_snapshot_copied_into_new_policy_dirs` |
+| fail-closed on missing control / short meta history (nothing claims faithful) | `test_fail_closed_on_missing_control`, `test_fail_closed_on_short_meta_history` |
+| fingerprint verify passes clean; detects restored-state tamper AND source change | `test_fingerprint_verify_and_tamper_detection`, `test_fingerprint_detects_source_change` |
+| cadence audit measures the REAL 80M committed quantum | `test_cadence_audit_measures_real_80m` |
+| observer restores windows + gate memory from the seed | `TestObserverSeedLoading.test_seed_restores_windows_and_gate_memory` |
+| stale seed (past validity window) skipped; live state never regressed; one-shot; no-op without seed dir | `test_stale_seed_skipped_after_validity_window`, `test_live_state_never_regressed`, `test_applied_once_per_process`, `test_noop_without_seed_dir` |
+| control fidelity check catches the 0.075 clobber / peak reset / freeze-horizon loss | `TestGuardControlFidelity.*` |
+| stall reproduction gate: ≥4/6 exact-hold passes, 3/6 fails | `TestStallReproductionGate.*` |
+| guard loop end-to-end: pass + marker with reproduction record; one legal shrink ok; majority breakout → STATE_FIDELITY_FAILED; missing RESUME_APPLIED → GUARD_FAILED; legacy cascade (0.016849) → GUARD_FAILED; clobbered control → STATE_FIDELITY_FAILED | `TestGuardLoopStateFaithful.*` (6 tests) |
+| escalating stop: SIGTERM-ignoring process SIGKILLed and verified dead; cooperative process exits on SIGTERM; SIGSTOPped process SIGCONTed first | `TestEscalatingStop.*` (real processes, incl. `trap '' TERM`) |
+| env-clock resume parsing (lcu:fsr) validated; arms clock list from source snapshots | `TestClockResume.*` |
+| first-tick semantics: RESUME_APPLIED structural check, one-shrink band, legacy-cascade rejection, reproduced flag | `TestContinuationGuard.test_first_tick_*` (updated) |
+| worker-local cap at real cadence: 480M target, 80M slack | `TestContinuationGuard.test_worker_local_cap_at_real_cadence`, `TestMatchedCap.*` (updated) |
+
 ## Real execution order (enforced, not just procedural)
 
 ```
-launch arm → 6/6 readiness (FIRST_TICK_VALIDATED.json)
+launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
+           → 6/6 readiness + stall reproduction (FIRST_TICK_VALIDATED.json)
            → hold smoke (run_hold_smoke.sh)
            → HOLD_SMOKE_PASSED.json
            → first N=4 execution-smoke cycle
@@ -124,7 +153,9 @@ launch arm → 6/6 readiness (FIRST_TICK_VALIDATED.json)
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 110 passed |
+| `tests/test_msa_probe.py` | 114 passed |
+| `tests/test_state_bootstrap.py` | 32 passed |
+| `tests/test_pbt_curriculum_p1.py` + `test_curriculum_freeze.py` + `test_env_mastery_curriculum.py` | 22 passed, 1 pre-existing failure (below) |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
 | `tests/test_wm_strategy_profiles.py` | 31 passed |
 | `tests/test_late_floor_retention_gate.py`, `test_env_mastery_curriculum.py`, `test_curriculum_adaptive_fast.py`, `test_hybrid_curriculum_safety.py`, `test_pbt_curriculum_inherit.py`, `test_curriculum_freeze_unit_conversion.py` | 76 passed |
@@ -140,11 +171,16 @@ Per-file runs are green.
 
 `python -m dexpbt_isaaclab.msa.dry_run` — 6 workers with the REAL
 heterogeneous 5B-tip tolerances (0.02247…0.02759, full precision, not
-6-decimal-friendly), 20M tick-quantized parallel trainer, phase-barrier
-holds with post-hold packet-start reads: promoted=True,
-recipients=[1, 3, 0] (tie 0 vs 5 broken by worker id), total tau_plus
-dose = 6×20M + 3×20M, zero residual pins/holds, all invariants held.
-Permuted arm: same total dose. Full trace: `DRY_RUN_TRACE.md`.
+6-decimal-friendly), 80M tick-quantized parallel trainer (the REAL stage-3
+committed cadence), phase-barrier holds with post-hold packet-start reads:
+promoted=True, recipients=[1, 3, 0] (tie 0 vs 5 broken by worker id), total
+tau_plus dose = 6×80M + 3×80M, zero residual pins/holds, all invariants
+held. Permuted arm: same total dose. Full trace: `DRY_RUN_TRACE.md`.
+
+State bootstrap against the REAL source run (read-only, no GPU):
+`state_bootstrap --source-run <strict_5b_run> --run-dir /tmp/sb_dryrun` →
+`STATE BOOTSTRAP OK: state_faithful=True (6 workers)`, fingerprint verify
+clean, cadence audit `committed_tick_frames=80000000` for all six workers.
 
 Plan-only continuation-guard verification against the real manifest:
 `continuation_guard --verify-only` on `msa.config.json` →
