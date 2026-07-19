@@ -8,42 +8,48 @@
       "iteration": 160,
       "frame": 5000000000,
       "live_tolerance": 0.023112487509668322,
-      "lineage_id": "c91ec3ca-f19a-4016-86fb-4bd28d9eb2b5"
+      "lineage_id": "c91ec3ca-f19a-4016-86fb-4bd28d9eb2b5",
+      "sha256_head": "2211668e5c50e3064d2534bf9d4fc08dc7e960b7efacc109919fadbf035f8018"
     },
     "p1": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/001/000160.pth",
       "iteration": 160,
       "frame": 5000000000,
       "live_tolerance": 0.020284112534534084,
-      "lineage_id": "5931b868-2ff2-4b87-b2a0-b20027f6701f"
+      "lineage_id": "5931b868-2ff2-4b87-b2a0-b20027f6701f",
+      "sha256_head": "36e40cd97b0cded6d30c50f4faad037b4135df312267da24991b2f52495fbc6b"
     },
     "p2": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/002/000161.pth",
       "iteration": 161,
       "frame": 5080000000,
       "live_tolerance": 0.02548998759231097,
-      "lineage_id": "cff1c0dd-4a23-4f1a-bf6a-70e69f131329"
+      "lineage_id": "cff1c0dd-4a23-4f1a-bf6a-70e69f131329",
+      "sha256_head": "2cfe93ea406f3d4cebcf1cd059fb3537ac8852a58a48236070e4488a33b7b4f6"
     },
     "p3": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/003/000160.pth",
       "iteration": 160,
       "frame": 5000000000,
       "live_tolerance": 0.023658390476202464,
-      "lineage_id": "c88240b9-db78-49ab-ac0b-a27fd9ece951"
+      "lineage_id": "c88240b9-db78-49ab-ac0b-a27fd9ece951",
+      "sha256_head": "aa6f2284ee5a373814d53c55e58a9e34ef0ca8b9e68245eeb92cefd748ef6fd0"
     },
     "p4": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth",
       "iteration": 160,
       "frame": 5000000000,
       "live_tolerance": 0.019269906907807378,
-      "lineage_id": "03ff385c-49de-43fd-80cc-8814bb7d06d7"
+      "lineage_id": "03ff385c-49de-43fd-80cc-8814bb7d06d7",
+      "sha256_head": "c75cdfe6c6dc5f4afd152102f3b5750b4aa5f967bdc58dea6d285623ac24d975"
     },
     "p5": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/005/000160.pth",
       "iteration": 160,
       "frame": 5000000000,
       "live_tolerance": 0.02130811615915868,
-      "lineage_id": "14838080-94c0-4f8d-b9e9-7565cf0993b1"
+      "lineage_id": "14838080-94c0-4f8d-b9e9-7565cf0993b1",
+      "sha256_head": "86a1826102dc4b580bb959a2b5efe37d44f20e828f47f042074779194777ecc2"
     }
   },
   "base_seed": 42,
@@ -57,24 +63,28 @@
   "original_launcher": "results/launchers/start_regrasping_cser_dexpbt_conservative_retention_strict_5b.sh",
   "flag_diff_vs_base": [],
   "msa": {
-    "tau_plus_rule": "max(0.010, 0.95 * tau)",
+    "tau_plus_rule": "max(0.010, 0.95 * tau[w]) per worker (heterogeneous, criterion-local)",
     "exposure_window_frames": 100000000,
-    "packet_frames": 8000000,
+    "packet_frames": 20000000,
+    "packet_note": "one committed PBT tick (20M env frames); provenance stores OBSERVED committed frames",
     "top_k_recipients": 3,
     "permuted_route": false,
     "permuted_route_seed": 777001,
-    "eval_num_seeds": 256,
-    "eval_seed_manifest_id": "msa_seeds_310000_256_e846d02fcc0ce804",
+    "eval_num_seeds_pilot": 16,
+    "eval_num_seeds_formal": 256,
+    "eval_num_seeds_note": "pilot N=16 is the launcher default; formal N=256 must be requested explicitly (never run by default)",
+    "eval_seed_manifest_id_pilot": "msa_seeds_310000_16_75e53d173fbafadc",
     "eval_seed_first": 310001,
-    "eval_seed_last": 310256,
+    "eval_seed_last": 310016,
+    "eval_device_note": "sidecar --eval-device is REQUIRED; the launcher pins cuda:${MSA_EVAL_GPU} (a GPU outside DEXPBT_GPUS), never the trainers' cuda:0",
     "bootstrap": {
       "seed": 20260719,
       "repeats": 10000,
       "quantile": 0.05,
-      "statistic": "panel median of per-worker L_mid"
+      "statistic": "criterion-local conditional panel median of per-worker L_mid"
     },
     "rho_threshold": 0.88,
-    "rho_rule": "p_post/p_pre at the SAME tau; p_pre>=0.01 required; cross-tolerance historical peaks forbidden",
+    "rho_rule": "p_post/p_pre at the worker's OWN tau; p_pre>=0.01 required; cross-tolerance historical peaks forbidden",
     "numeric_gates": "unchanged from base-retention; only the cross-tolerance retention read is replaced by same-tau rho"
   }
 }

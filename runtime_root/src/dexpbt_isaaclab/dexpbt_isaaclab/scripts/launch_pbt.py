@@ -719,6 +719,18 @@ def main() -> None:
         "checkpoint on first launch (continuation arms). Empty = unchanged "
         "legacy behavior. Mutually exclusive with --recover-checkpoint.",
     )
+    parser.add_argument(
+        "--tolerance-resume-per-policy",
+        type=str,
+        default="",
+        help="Comma-separated success tolerances (meters), one per policy. "
+        "Passed as --success_tolerance_resume=<v> to each warm-started "
+        "policy so the curriculum tolerance is restored explicitly instead "
+        "of silently resetting to the initial tolerance (a bare "
+        "--checkpoint does NOT restore it on first launch: there is no "
+        "curriculum_resume_snapshot.json in a fresh run dir). Requires "
+        "--recover-checkpoint-per-policy.",
+    )
     args = parser.parse_args()
 
     recover_per_policy: list[str] = []
@@ -739,6 +751,28 @@ def main() -> None:
         for p in recover_per_policy:
             if not Path(p).is_file():
                 raise FileNotFoundError(f"per-policy recover checkpoint missing: {p}")
+
+    tolerance_resume_per_policy: list[float] = []
+    if str(args.tolerance_resume_per_policy or "").strip():
+        if not recover_per_policy:
+            raise ValueError(
+                "--tolerance-resume-per-policy requires "
+                "--recover-checkpoint-per-policy"
+            )
+        tolerance_resume_per_policy = [
+            float(v) for v in args.tolerance_resume_per_policy.split(",")
+        ]
+        if len(tolerance_resume_per_policy) != args.num_policies:
+            raise ValueError(
+                f"--tolerance-resume-per-policy needs {args.num_policies} "
+                f"values, got {len(tolerance_resume_per_policy)}"
+            )
+        for v in tolerance_resume_per_policy:
+            if not (0.001 <= v <= 0.2):
+                raise ValueError(
+                    f"per-policy resume tolerance {v} outside sane meter "
+                    "range [0.001, 0.2]"
+                )
 
     train_root = Path(args.train_root).resolve()
     train_root.mkdir(parents=True, exist_ok=True)
@@ -854,6 +888,11 @@ def main() -> None:
             and not _run_is_active(run_dir)
         ):
             cmd.append(f"--checkpoint={recover_per_policy[policy_idx]}")
+            if tolerance_resume_per_policy:
+                cmd.append(
+                    "--success_tolerance_resume="
+                    f"{tolerance_resume_per_policy[policy_idx]}"
+                )
         print(f"Launch policy {policy_idx}: {' '.join(cmd)}", flush=True)
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = gpu

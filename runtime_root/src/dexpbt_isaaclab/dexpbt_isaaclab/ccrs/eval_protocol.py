@@ -103,9 +103,13 @@ class EvalUnit:
         rollout limits and protocol versions so that any protocol change
         invalidates old results.
         """
+        # Canonical tolerance (.12g, matching msa.eval_bridge.canonical_tau):
+        # a 6-decimal rounding here could collide two distinct full-precision
+        # taus (e.g. heterogeneous MSA tau_plus values) into ONE unit key /
+        # result file, silently overwriting the first result.
         payload = (
             f"{self.run_id}|{self.checkpoint_identity()}"
-            f"|tol{self.fixed_tolerance:.6f}|seed{self.reset_seed}"
+            f"|tol{format(self.fixed_tolerance, '.12g')}|seed{self.reset_seed}"
             f"|mode{self.evaluation_mode}|det{int(self.deterministic)}"
             f"|envs{self.num_envs}|eps{self.num_episodes}"
             f"|steps{self.max_steps}|mcs{self.max_consecutive_successes}"

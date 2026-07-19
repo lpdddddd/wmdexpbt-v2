@@ -97,6 +97,17 @@ class MSAProbeStateMachine:
             self.cycle_index += 1
         self.phase = nxt
 
+    def abort(self, reason: str = "") -> None:
+        """Crash-cleanup escape hatch: from ANY phase back to NORMAL.
+
+        Not a normal transition (recorded as ABORT in the history); used
+        only by the controller's exception path after it restored every
+        worker's own tau and cleared holds/pins.
+        """
+        self.history.append(f"{self.phase.value}->NORMAL [ABORT"
+                            + (f": {reason}]" if reason else "]"))
+        self.phase = MSAPhase.NORMAL
+
     # -- what the trainer consults every step --------------------------------
     def training_allowed(self) -> bool:
         return _TRAINING_ALLOWED[self.phase]

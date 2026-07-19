@@ -120,6 +120,12 @@ class MSAProvenance:
         self.exposures.append(asdict(seg))
 
     def record_intervention(self, rec: InterventionRecord) -> None:
+        # Idempotent by intervention_id: a resumed / retried cycle REPLACES
+        # its earlier (possibly aborted) record instead of duplicating it.
+        self.interventions = [
+            r for r in self.interventions
+            if r.get("intervention_id") != rec.intervention_id
+        ]
         self.interventions.append(asdict(rec))
         self.last_probe_end_frame = max(
             (s["segment_end_frame"] for s in rec.segments),

@@ -3,6 +3,11 @@
 Statistical contract (pre-registered):
 - L_mid = q_mid - q_pre is computed ONLY from per-seed paired results at the
   SAME tau_plus and the SAME ordered seed manifest (fail-closed otherwise).
+  Tolerances are heterogeneous across workers: each worker's L_mid uses its
+  OWN tau_plus[w] = max(0.010, 0.95 * tau[w]), so L_mid is a
+  CRITERION-LOCAL improvement. Cross-worker routing and the panel
+  statistic therefore compare criterion-local improvements, not a shared
+  absolute criterion (documented on every consumer).
 - Second-half routing: workers sorted by L_mid descending, ties broken by
   ascending worker_id (stable/deterministic); top-k receive the second
   packet. The MSA_PERMUTED_ROUTE control arm shuffles the L_mid -> worker
@@ -94,8 +99,9 @@ def route_second_half(
     permuted: bool = False,
     permutation_seed: int = PERMUTED_ROUTE_SEED,
 ) -> RoutingResult:
-    """Sort by L_mid descending (stable tie-break: ascending worker_id) and
-    give the second 8M tau_plus packet to the top-k workers.
+    """Sort by (criterion-local) L_mid descending (stable tie-break:
+    ascending worker_id) and give the second tau_plus packet (one committed
+    20M tick at each recipient's OWN tau_plus) to the top-k workers.
 
     permuted=True (MSA_PERMUTED_ROUTE): shuffle the mapping between L_mid
     values and worker identities with the pre-registered seed BEFORE
@@ -204,9 +210,10 @@ def panel_bootstrap_lower_quantile(
         "n_boot": n_boot,
         "prng_seed": seed,
         "n_workers": len(workers),
-        "note": ("conditional decision statistic for the current "
-                 "six-checkpoint panel; NOT a population CI over "
-                 "independent seeds"),
+        "note": ("criterion-local conditional panel statistic: each "
+                 "worker's L_mid is measured at its OWN tau_plus; the "
+                 "panel median conditions on this checkpoint panel and "
+                 "is NOT a population CI over independent seeds"),
     }
 
 

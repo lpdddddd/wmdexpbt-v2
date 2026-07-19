@@ -34,7 +34,12 @@ from dexpbt_isaaclab.msa.decision import (
     PERMUTED_ROUTE_SEED,
     TOP_K_RECIPIENTS,
 )
-from dexpbt_isaaclab.msa.eval_bridge import FORMAL_NUM_SEEDS, build_seed_manifest
+from dexpbt_isaaclab.msa.controller import PROBE_PACKET_FRAMES
+from dexpbt_isaaclab.msa.eval_bridge import (
+    FORMAL_NUM_SEEDS,
+    PILOT_NUM_SEEDS,
+    build_seed_manifest,
+)
 from dexpbt_isaaclab.msa.provenance import EXPOSURE_WINDOW_FRAMES
 
 ARM_NAMES = ("BASE_CONTINUATION", "GATE_RELAX", "MSA", "MSA_PERMUTED_ROUTE")
@@ -78,6 +83,7 @@ class TipCheckpoint:
     checkpoint_path: str
     live_tolerance: float
     lineage_id: str
+    sha256_head: str = ""
 
 
 def resolve_tip_checkpoints(manifest_csv: Path,
@@ -85,8 +91,13 @@ def resolve_tip_checkpoints(manifest_csv: Path,
     """Resolve the six 5B tip checkpoints from the CCRS manifest.
 
     Fails closed: every worker 0..num_policies-1 must have exactly one row
-    whose roles include 'tip' and whose file exists on disk.
+    whose roles include 'tip' and whose file exists on disk. The bootstrap
+    hash (size + first-4MB sha256, same scheme as the CCRS manifest) is
+    computed here and re-verified fail-closed by continuation_guard
+    --verify-only before any arm may launch.
     """
+    from dexpbt_isaaclab.msa.continuation_guard import ckpt_head_hash
+
     by_worker: dict[int, list[dict]] = {}
     with open(manifest_csv, newline="") as f:
         for row in csv.DictReader(f):
@@ -107,7 +118,8 @@ def resolve_tip_checkpoints(manifest_csv: Path,
             worker_id=w, iteration=int(r["iteration"]), frame=int(r["frame"]),
             checkpoint_path=str(path),
             live_tolerance=float(r["live_tolerance"]),
-            lineage_id=r.get("lineage_id") or ""))
+            lineage_id=r.get("lineage_id") or "",
+            sha256_head=ckpt_head_hash(path)))
     return tips
 
 
@@ -115,7 +127,7 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
     """Machine-readable config for one arm (written next to its launcher)."""
     if arm not in ARM_NAMES:
         raise ValueError(f"unknown arm {arm}")
-    manifest_id, seeds = build_seed_manifest(FORMAL_NUM_SEEDS)
+    manifest_id, seeds = build_seed_manifest(PILOT_NUM_SEEDS)
     wm_profile = GATE_RELAX_PROFILE if arm == "GATE_RELAX" else BASE_PROFILE
     cfg: dict = {
         "arm": arm,
@@ -128,6 +140,7 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
                 "frame": t.frame,
                 "live_tolerance": t.live_tolerance,
                 "lineage_id": t.lineage_id,
+                "sha256_head": t.sha256_head,
             } for t in tips
         },
         "base_seed": base_seed,           # matched across all arms
@@ -153,22 +166,35 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
                      "because profile expansion is authoritative over CLI"}]
     if arm in ("MSA", "MSA_PERMUTED_ROUTE"):
         cfg["msa"] = {
-            "tau_plus_rule": "max(0.010, 0.95 * tau)",
+            "tau_plus_rule": "max(0.010, 0.95 * tau[w]) per worker "
+                             "(heterogeneous, criterion-local)",
             "exposure_window_frames": EXPOSURE_WINDOW_FRAMES,
-            "packet_frames": 8_000_000,
+            "packet_frames": PROBE_PACKET_FRAMES,
+            "packet_note": "one committed PBT tick (20M env frames); "
+                           "provenance stores OBSERVED committed frames",
             "top_k_recipients": TOP_K_RECIPIENTS,
             "permuted_route": arm == "MSA_PERMUTED_ROUTE",
             "permuted_route_seed": PERMUTED_ROUTE_SEED,
-            "eval_num_seeds": FORMAL_NUM_SEEDS,
-            "eval_seed_manifest_id": manifest_id,
+            "eval_num_seeds_pilot": PILOT_NUM_SEEDS,
+            "eval_num_seeds_formal": FORMAL_NUM_SEEDS,
+            "eval_num_seeds_note": "pilot N=16 is the launcher default; "
+                                   "formal N=256 must be requested "
+                                   "explicitly (never run by default)",
+            "eval_seed_manifest_id_pilot": manifest_id,
             "eval_seed_first": seeds[0],
             "eval_seed_last": seeds[-1],
+            "eval_device_note": "sidecar --eval-device is REQUIRED; the "
+                                "launcher pins cuda:${MSA_EVAL_GPU} (a GPU "
+                                "outside DEXPBT_GPUS), never the trainers' "
+                                "cuda:0",
             "bootstrap": {"seed": BOOTSTRAP_SEED, "repeats": BOOTSTRAP_REPEATS,
                           "quantile": 0.05,
-                          "statistic": "panel median of per-worker L_mid"},
+                          "statistic": "criterion-local conditional panel "
+                                       "median of per-worker L_mid"},
             "rho_threshold": MSA_RHO_THRESHOLD,
-            "rho_rule": "p_post/p_pre at the SAME tau; p_pre>=0.01 required; "
-                        "cross-tolerance historical peaks forbidden",
+            "rho_rule": "p_post/p_pre at the worker's OWN tau; p_pre>=0.01 "
+                        "required; cross-tolerance historical peaks "
+                        "forbidden",
             "numeric_gates": "unchanged from base-retention; only the "
                              "cross-tolerance retention read is replaced by "
                              "same-tau rho",
@@ -197,6 +223,7 @@ LOG="${{RUN_DIR}}/launch_master.log"
 BASE_SEED="${{BASE_SEED:-42}}"
 
 RECOVER_LIST="{recover_list}"
+TOLERANCE_LIST="{tolerance_list}"
 
 export DEXPBT_MAX_ACTIVE="${{DEXPBT_MAX_ACTIVE:-6}}"
 export DEXPBT_INTER_LAUNCH_DELAY_S="${{DEXPBT_INTER_LAUNCH_DELAY_S:-180}}"
@@ -215,6 +242,16 @@ export PYTHONUNBUFFERED=1
 
 cd "${{RUNTIME_ROOT}}/src/dexpbt_isaaclab"
 
+# Fail-closed bootstrap verification: checkpoint existence + hash + worker
+# mapping + manifest fields. Any failure aborts BEFORE anything launches.
+python -m dexpbt_isaaclab.msa.continuation_guard \\
+  --config "$RUN_DIR/ARM_CONFIG.json" --verify-only \\
+  | tee -a "$LOG"
+test "${{PIPESTATUS[0]}}" -eq 0 || {{
+  echo "REFUSING TO LAUNCH: bootstrap verification failed" | tee -a "$LOG"
+  exit 3
+}}
+
 nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
   "$RUN_DIR" \\
   --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \\
@@ -225,22 +262,39 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
   --pbt-initial-delay 50000000 \\
   --profile-per-policy "{profile_list}" \\
   --recover-checkpoint-per-policy "$RECOVER_LIST" \\
+  --tolerance-resume-per-policy "$TOLERANCE_LIST" \\
   --extra \\
   --seed "$BASE_SEED" \\
 {base_flags}  >>"$LOG" 2>&1 &
 
 echo $! > "$RUN_DIR/nohup.pid"
+
+# Continuation guard: first committed tick must match the manifest tip
+# tolerance (<=1e-6) / lineage / frame baseline, and every worker has a
+# HARD +100M frame cap. Any violation stops the whole arm (fail closed).
+nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \\
+  --config "$RUN_DIR/ARM_CONFIG.json" \\
+  --run-dir "$RUN_DIR" \\
+  --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
+  >>"$RUN_DIR/continuation_guard.log" 2>&1 &
+echo $! > "$RUN_DIR/continuation_guard.pid"
 {sidecar}echo "launched {arm}: run_dir=$RUN_DIR"
 """
 
 _SIDECAR_BLOCK = """
 # MSA probe sidecar: drives the probe state machine over the shared
-# curriculum_control chain (reads tick metas, forces tau_plus/tau via
-# forced_success_tolerance, runs policy-only evals in subprocesses).
+# curriculum_control chain (committed-tick views, phase-barrier holds,
+# heterogeneous per-worker tau_plus pins via msa_forced_success_tolerance,
+# policy-only evals in subprocesses pinned to a dedicated eval GPU).
+# MSA_EVAL_GPU defaults to 6: trainers occupy DEXPBT_GPUS (0-5); the eval
+# device is REQUIRED by the sidecar and never defaults onto cuda:0.
+# Pilot N=16 seeds; formal N=256 must be requested explicitly.
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \\
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
   --arm {arm} \\
   --rho-threshold {rho} \\
+  --num-seeds "${{MSA_NUM_SEEDS:-16}}" \\
+  --eval-device "cuda:${{MSA_EVAL_GPU:-6}}" \\
   {permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
 """
@@ -302,6 +356,7 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
     _validate_gate_relax_profile()
     tips = resolve_tip_checkpoints(manifest_csv)
     recover_list = ",".join(t.checkpoint_path for t in tips)
+    tolerance_list = ",".join(f"{t.live_tolerance!r}" for t in tips)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for arm in ARM_NAMES:
@@ -318,6 +373,7 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
         wm_profile = GATE_RELAX_PROFILE if arm == "GATE_RELAX" else BASE_PROFILE
         script = _LAUNCHER_TEMPLATE.format(
             arm=arm, arm_lower=arm.lower(), recover_list=recover_list,
+            tolerance_list=tolerance_list,
             max_iter=CONTINUATION_MAX_ITER,
             profile_list=",".join([wm_profile] * 6),
             base_flags=_base_flags_block(arm, original_launcher),

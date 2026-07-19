@@ -9,7 +9,7 @@ import time
 import uuid as _uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -269,14 +269,24 @@ class CurriculumControlState:
     # MSA probe (2026-07-19, base_retention_msa_probe profile only).
     # Defaults are inert: msa_enabled=False means no runtime code path
     # branches on any msa_* field, so existing base-retention runs are
-    # bit-for-bit unchanged. The two dict fields carry the serialized
-    # dexpbt_isaaclab.msa provenance + state machine INSIDE the existing
-    # control JSON / curriculum resume snapshot chain (no parallel
-    # checkpoint system). A pre-MSA checkpoint simply lacks these keys ->
-    # msa_provenance=None -> probe immediately due on resume.
+    # bit-for-bit unchanged. The dict fields carry the serialized
+    # dexpbt_isaaclab.msa provenance + state machine + in-flight cycle
+    # context INSIDE the existing control JSON / curriculum resume snapshot
+    # chain (no parallel checkpoint system, single source of truth). A
+    # pre-MSA checkpoint simply lacks these keys -> msa_provenance=None ->
+    # probe immediately due on resume.
+    #
+    # msa_forced_success_tolerance is written ONLY by the MSA sidecar via
+    # update_curriculum_control (locked read-modify-write); when
+    # msa_enabled and the value is > 0 the env PINS the tolerance to it
+    # (no curriculum shrink can fire during a probe packet). It has
+    # priority over the observer-owned forced_success_tolerance so the
+    # two writers never fight over one field.
     msa_enabled: bool = False
+    msa_forced_success_tolerance: float = 0.0
     msa_provenance: dict[str, Any] | None = None
     msa_state_machine: dict[str, Any] | None = None
+    msa_cycle: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -341,6 +351,93 @@ def read_curriculum_control(path: Path) -> CurriculumControlState | None:
         return None
 
 
+# --- MSA concurrency-safe control updates (2026-07-19) ----------------------
+#
+# Two writers touch the per-policy control JSON in an MSA continuation run:
+# the PBT observer (rebuilds the full state every tick from its own
+# bookkeeping) and the MSA sidecar (owns only the msa_* fields). An unlocked
+# read-modify-write from either side can lose the other's update. The
+# minimal fix:
+#   * both writers serialize through one advisory flock on <path>.lock;
+#   * the sidecar mutates ONLY msa_* fields via update_curriculum_control;
+#   * the observer writes through write_curriculum_control_preserving_msa,
+#     which re-reads the on-disk msa_* fields under the lock and carries
+#     them into its freshly built state (the observer never authors them).
+# Ordinary base-retention runs never call update_curriculum_control and the
+# preserving write degenerates to a plain write (all msa_* at defaults), so
+# behavior with msa_enabled=False is unchanged.
+
+MSA_CONTROL_FIELDS = (
+    "msa_enabled",
+    "msa_forced_success_tolerance",
+    "msa_provenance",
+    "msa_state_machine",
+    "msa_cycle",
+)
+
+
+class _control_lock:
+    """Advisory exclusive flock on <path>.lock (blocking, short critical
+    sections only)."""
+
+    def __init__(self, path: Path) -> None:
+        self._lock_path = path.parent / f"{path.name}.lock"
+        self._fd: int | None = None
+
+    def __enter__(self) -> "_control_lock":
+        import fcntl
+
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(self._fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        import fcntl
+
+        if self._fd is not None:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+            self._fd = None
+
+
+def update_curriculum_control(
+    path: Path,
+    mutator: "Callable[[CurriculumControlState], CurriculumControlState | None]",
+) -> CurriculumControlState:
+    """Locked read-modify-write of one control JSON.
+
+    ``mutator`` receives the freshest on-disk state (or a default state if
+    the file does not exist yet) and either mutates it in place (return
+    None) or returns a replacement. The write happens under the same flock
+    as write_curriculum_control_preserving_msa, so no concurrent
+    full-state writer can interleave between our read and our write.
+    """
+    with _control_lock(path):
+        state = read_curriculum_control(path) or CurriculumControlState()
+        out = mutator(state)
+        if out is not None:
+            state = out
+        write_curriculum_control(path, state)
+        return state
+
+
+def write_curriculum_control_preserving_msa(
+    path: Path,
+    state: CurriculumControlState,
+) -> None:
+    """Full-state write (observer path) that carries over on-disk msa_*
+    fields under the update lock so a concurrent sidecar update is never
+    lost. With no sidecar (plain base-retention) this is equivalent to
+    write_curriculum_control."""
+    with _control_lock(path):
+        existing = read_curriculum_control(path)
+        if existing is not None:
+            for f_name in MSA_CONTROL_FIELDS:
+                setattr(state, f_name, getattr(existing, f_name))
+        write_curriculum_control(path, state)
+
+
 def post_shrink_consolidation_active(
     frames_since_restart: int,
     control: CurriculumControlState,
@@ -377,23 +474,24 @@ def apply_source_safe_consolidation_on_copy(
     """
     from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
 
-    control = read_curriculum_control(path) or CurriculumControlState()
-    control.post_shrink_consolidation_until_restart_step = 0
-    control.blocked_by_consolidation = False
-    freeze_steps = env_frames_to_sim_steps(
-        int(consolidation_env_frames), int(num_envs)
-    )
-    control.post_shrink_consolidation_until_restart_step = int(freeze_steps)
-    control.post_shrink_freeze_env_frames = int(consolidation_env_frames)
-    control.recovery_consolidation_frames_selected = int(consolidation_env_frames)
-    control.recovery_consolidation_source = str(consolidation_source)
-    if float(inherited_tolerance) > 0.0:
-        control.last_mastered_tolerance = float(inherited_tolerance)
-    if inheritance_audit:
-        for k, v in inheritance_audit.items():
-            if hasattr(control, k):
-                setattr(control, k, v)
-    write_curriculum_control(path, control)
+    def _mutate(control: CurriculumControlState) -> None:
+        control.post_shrink_consolidation_until_restart_step = 0
+        control.blocked_by_consolidation = False
+        freeze_steps = env_frames_to_sim_steps(
+            int(consolidation_env_frames), int(num_envs)
+        )
+        control.post_shrink_consolidation_until_restart_step = int(freeze_steps)
+        control.post_shrink_freeze_env_frames = int(consolidation_env_frames)
+        control.recovery_consolidation_frames_selected = int(consolidation_env_frames)
+        control.recovery_consolidation_source = str(consolidation_source)
+        if float(inherited_tolerance) > 0.0:
+            control.last_mastered_tolerance = float(inherited_tolerance)
+        if inheritance_audit:
+            for k, v in inheritance_audit.items():
+                if hasattr(control, k):
+                    setattr(control, k, v)
+
+    update_curriculum_control(path, _mutate)
 
 
 def mark_shrink_consumed(
@@ -408,20 +506,21 @@ def mark_shrink_consumed(
     """Env-side: consume shrink_token and start post-shrink consolidation."""
     from dexpbt_isaaclab.dexpbt_utils import env_frames_to_sim_steps
 
-    control = read_curriculum_control(path) or CurriculumControlState()
-    control.shrink_token = False
-    control.allow_shrink = False
-    control.just_shrank = True
-    control.shrinks_in_window = max(1, int(control.shrinks_in_window))
-    freeze_steps = env_frames_to_sim_steps(int(consolidation_env_frames), int(num_envs))
-    control.post_shrink_consolidation_until_restart_step = int(frames_since_restart) + int(
-        freeze_steps
-    )
-    if pre_shrink_tolerance > 0.0:
-        control.pre_shrink_tolerance = float(pre_shrink_tolerance)
-    if post_shrink_tolerance > 0.0:
-        control.post_shrink_tolerance = float(post_shrink_tolerance)
-    write_curriculum_control(path, control)
+    def _mutate(control: CurriculumControlState) -> None:
+        control.shrink_token = False
+        control.allow_shrink = False
+        control.just_shrank = True
+        control.shrinks_in_window = max(1, int(control.shrinks_in_window))
+        freeze_steps = env_frames_to_sim_steps(int(consolidation_env_frames), int(num_envs))
+        control.post_shrink_consolidation_until_restart_step = int(frames_since_restart) + int(
+            freeze_steps
+        )
+        if pre_shrink_tolerance > 0.0:
+            control.pre_shrink_tolerance = float(pre_shrink_tolerance)
+        if post_shrink_tolerance > 0.0:
+            control.post_shrink_tolerance = float(post_shrink_tolerance)
+
+    update_curriculum_control(path, _mutate)
 
 
 def evaluate_mastery_gate(
@@ -506,6 +605,16 @@ def apply_env_tolerance_curriculum(
     control = read_curriculum_control(curriculum_control_path)
     if control is None:
         return dexpbt_tolerance_curriculum(**legacy_kwargs)
+
+    # MSA probe pin (sidecar-owned field; inert unless msa_enabled). While a
+    # probe packet is active the tolerance is PINNED: no shrink, no drift,
+    # priority over the observer-owned forced_success_tolerance so the two
+    # writers never fight over one field.
+    if control.msa_enabled and float(control.msa_forced_success_tolerance or 0.0) > 1e-9:
+        pinned = float(control.msa_forced_success_tolerance)
+        pinned = min(pinned, initial_tolerance)
+        pinned = max(pinned, target_tolerance)
+        return pinned, frames_since_restart
 
     if control.forced_success_tolerance > 1e-9:
         forced = float(control.forced_success_tolerance)

@@ -19,6 +19,7 @@ LOG="${RUN_DIR}/launch_master.log"
 BASE_SEED="${BASE_SEED:-42}"
 
 RECOVER_LIST="/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/001/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/002/000161.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/003/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/005/000160.pth"
+TOLERANCE_LIST="0.023112487509668322,0.020284112534534084,0.02548998759231097,0.023658390476202464,0.019269906907807378,0.02130811615915868"
 
 export DEXPBT_MAX_ACTIVE="${DEXPBT_MAX_ACTIVE:-6}"
 export DEXPBT_INTER_LAUNCH_DELAY_S="${DEXPBT_INTER_LAUNCH_DELAY_S:-180}"
@@ -37,6 +38,16 @@ export PYTHONUNBUFFERED=1
 
 cd "${RUNTIME_ROOT}/src/dexpbt_isaaclab"
 
+# Fail-closed bootstrap verification: checkpoint existence + hash + worker
+# mapping + manifest fields. Any failure aborts BEFORE anything launches.
+python -m dexpbt_isaaclab.msa.continuation_guard \
+  --config "$RUN_DIR/ARM_CONFIG.json" --verify-only \
+  | tee -a "$LOG"
+test "${PIPESTATUS[0]}" -eq 0 || {
+  echo "REFUSING TO LAUNCH: bootstrap verification failed" | tee -a "$LOG"
+  exit 3
+}
+
 nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   "$RUN_DIR" \
   --task DexPBT-Regrasping-KukaAllegro-Direct-v0 \
@@ -47,6 +58,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt-initial-delay 50000000 \
   --profile-per-policy "cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative" \
   --recover-checkpoint-per-policy "$RECOVER_LIST" \
+  --tolerance-resume-per-policy "$TOLERANCE_LIST" \
   --extra \
   --seed "$BASE_SEED" \
   --pbt_ranking_metric success_aware_r_meta \
@@ -206,13 +218,29 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
 
 echo $! > "$RUN_DIR/nohup.pid"
 
+# Continuation guard: first committed tick must match the manifest tip
+# tolerance (<=1e-6) / lineage / frame baseline, and every worker has a
+# HARD +100M frame cap. Any violation stops the whole arm (fail closed).
+nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
+  --config "$RUN_DIR/ARM_CONFIG.json" \
+  --run-dir "$RUN_DIR" \
+  --workspace "$RUN_DIR/dexpbt_8gpu_ws" \
+  >>"$RUN_DIR/continuation_guard.log" 2>&1 &
+echo $! > "$RUN_DIR/continuation_guard.pid"
+
 # MSA probe sidecar: drives the probe state machine over the shared
-# curriculum_control chain (reads tick metas, forces tau_plus/tau via
-# forced_success_tolerance, runs policy-only evals in subprocesses).
+# curriculum_control chain (committed-tick views, phase-barrier holds,
+# heterogeneous per-worker tau_plus pins via msa_forced_success_tolerance,
+# policy-only evals in subprocesses pinned to a dedicated eval GPU).
+# MSA_EVAL_GPU defaults to 6: trainers occupy DEXPBT_GPUS (0-5); the eval
+# device is REQUIRED by the sidecar and never defaults onto cuda:0.
+# Pilot N=16 seeds; formal N=256 must be requested explicitly.
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \
   --arm MSA_PERMUTED_ROUTE \
   --rho-threshold 0.88 \
+  --num-seeds "${MSA_NUM_SEEDS:-16}" \
+  --eval-device "cuda:${MSA_EVAL_GPU:-6}" \
   --permuted-route >>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
 echo "launched MSA_PERMUTED_ROUTE: run_dir=$RUN_DIR"

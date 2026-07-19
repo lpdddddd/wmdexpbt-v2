@@ -1,72 +1,94 @@
 # base_retention_msa_probe — Test Report
 
-Date: 2026-07-19. Environment: isaaclab311 conda python (CPU only; no Isaac
-import anywhere in the MSA package or its tests; no GPU used).
+Date: 2026-07-19, updated the same date for the pilot-integration fix pass
+("Fix MSA pilot integration and phase safety"). Environment: isaaclab311
+conda python (CPU only; no Isaac import anywhere in the MSA package or its
+tests; no GPU used).
 
-## New suite: `tests/test_msa_probe.py` — 41/41 passed
+Three evidence tiers, kept separate on purpose:
 
-(41st test added in the GATE_RELAX profile-delivery fix, see addendum below.)
+1. **Unit tests** — pure-python contracts (this file, sections below).
+2. **Production-style simulation** — heterogeneous-tau full-cycle dry run
+   against a tick-quantized parallel fake trainer with held-worker
+   assertions and crash injection (`DRY_RUN_TRACE.md`).
+3. **GPU validation** — NOT performed (no GPU tasks were run). SIGSTOP
+   holds and live commit-wait behavior remain GPU-unverified; see
+   `LAUNCH_CHECKLIST.md`.
 
-Coverage of the 15 required behaviors (spec section J):
+## MSA suite: `tests/test_msa_probe.py` — 72/72 passed
+
+Original 15 required behaviors (spec section J) — retained:
 
 | # | required behavior | test(s) |
 |---|---|---|
 | 1 | tau=0.010 never probed | `TestDueLogic.test_tau_at_floor_never_due`, `test_tau_plus_floor_clamp` |
 | 2 | missing-provenance resume immediately due | `TestDueLogic.test_missing_provenance_immediately_due`, `test_from_dict_none_stays_none` |
 | 3 | probe at most once per 100M worker-local frames | `TestDueLogic.test_probe_at_most_once_per_window` |
-| 4 | evaluator never modifies live state | `TestEvaluatorIsolation.*` (read-only snapshot enforcement + AST scan: no `load_state_dict`/`optimizer`/`replay_buffer`/`mutate`/`restart_policy` identifiers in sidecar/controller/eval_bridge; only `forced_success_tolerance` + `msa_enabled` written to control JSON) |
+| 4 | evaluator never modifies live state | `TestEvaluatorIsolation.*` (read-only snapshot enforcement + AST scan; control writes limited to the five `msa_*` fields — the observer-owned `forced_success_tolerance` is never written) |
 | 5 | pre/mid tolerance or seed-manifest mismatch fails closed | `TestPairedEvalContracts.test_manifest_mismatch_fails_closed`, `test_tolerance_mismatch_fails_closed`, `test_seed_order_mismatch_fails_closed` |
-| 6 | all workers' first half exactly 8M | `TestDryRunCycle.test_common_probe_is_8m_for_all` |
-| 7 | second-half top-3 deterministic tie-break | `TestRouting.test_top3_stable_tie_break`, `TestDryRunCycle.test_second_probe_deterministic_recipients` |
-| 8 | permuted route keeps total dose identical | `TestRouting.test_permuted_route_same_dose`, `TestDryRunCycle.test_permuted_arm_same_dose_different_mapping` |
-| 9 | q_post never enters common-dose L_mid | `TestDryRunCycle.test_q_post_not_in_common_dose` |
+| 6 | matched common dose for all workers (now one 20M committed tick) | `TestHeterogeneousDryRunCycle.test_common_exposure_parallel_exactly_one_packet` |
+| 7 | second-half top-3 deterministic tie-break | `TestRouting.test_top3_stable_tie_break` |
+| 8 | permuted route keeps total dose identical | `TestRouting.test_permuted_route_same_dose`, `TestHeterogeneousDryRunCycle.test_permuted_arm_same_dose_different_mapping` |
+| 9 | q_post never enters common-dose L_mid | `TestHeterogeneousDryRunCycle.test_q_post_not_in_common_dose` |
 | 10 | p_pre < 0.01 → retention unavailable, promotion blocked | `TestPairedEvalContracts.test_low_p_pre_retention_unavailable` |
 | 11 | rho compares same tau only | `TestPairedEvalContracts.test_rho_same_tau_only`, `TestBootstrap.test_cross_tolerance_gate_names_rejected` |
-| 12 | bootstrap deterministic (fixed PRNG) | `TestBootstrap.test_bootstrap_deterministic`, `test_bootstrap_is_labeled_conditional`, `test_negative_panel_blocks_promotion` |
-| 13 | no optimizer/PBT-lineage reset through probe | `TestDryRunCycle.test_no_resets` + isolation AST scan |
-| 14 | frame ledger includes all probe frames | `TestDryRunCycle.test_frame_ledger_includes_probe_frames`, `test_forced_tolerance_sequence` |
-| 15 | original base-retention behavior unchanged | `TestOriginalProfileUnchanged.*` (inert dataclass defaults; legacy control JSON round-trip; `apply_env_tolerance_curriculum` / `dexpbt_tolerance_curriculum_mastery` / `mark_shrink_consumed` contain no `msa` branch; GATE_RELAX vs BASE_CONTINUATION launcher diff is exactly one line) |
+| 12 | bootstrap deterministic (fixed PRNG) | `TestBootstrap.test_bootstrap_deterministic`, `test_bootstrap_is_labeled_criterion_local_conditional`, `test_negative_panel_blocks_promotion` |
+| 13 | no optimizer/PBT-lineage reset through probe | `TestHeterogeneousDryRunCycle.test_no_resets` + isolation AST scan |
+| 14 | frame ledger includes all probe frames (observed) | `TestHeterogeneousDryRunCycle.test_observed_frames_and_ledger` |
+| 15 | original base-retention behavior unchanged | `TestOriginalProfileUnchanged.*` (inert defaults incl. `msa_forced_success_tolerance`; legacy control JSON round-trip; msa_enabled=False curriculum shrink bit-identical; GATE_RELAX vs BASE launcher diff exactly one line) |
 
-Plus: explicit state machine tests (full legal cycle, illegal jumps raise,
-serialization round-trip, no implicit freeze flags), the read-only blocker
-audit on a synthetic run, and arm-config invariants (matched seeds, same six
-resume checkpoints, probe dose parity between MSA and MSA_PERMUTED_ROUTE).
+New pilot-integration coverage (this fix pass):
 
-## Regression suites (unchanged code paths) — all green
-
-| suite | result |
+| requirement | test(s) |
 |---|---|
-| `tests/test_msa_probe.py` | 41 passed |
-| `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
-| `tests/test_late_floor_retention_gate.py`, `test_env_mastery_curriculum.py`, `test_curriculum_adaptive_fast.py`, `test_hybrid_curriculum_safety.py`, `test_pbt_curriculum_inherit.py`, `test_curriculum_freeze_unit_conversion.py` | 76 passed |
-| `tests/test_pbt_curriculum_p1.py` | 11 passed, 1 pre-existing failure (`StableSourceTierTest::test_l2_usable_when_stable_fails`) — verified identical at the pre-change commit via `git stash`; unrelated to this task |
+| six DIFFERENT taus, full cycle, worker-local tau_plus | `TestHeterogeneousDryRunCycle.test_worker_local_tolerances` (FakeWorld raises on any foreign-tolerance eval) |
+| common exposure parallel (a serial loop would 6x the dose) | `test_common_exposure_parallel_exactly_one_packet` |
+| top-3 second segment parallel; non-recipients train at their own tau | `test_second_half_parallel_and_non_recipients_reverted` |
+| non-recipients re-pinned to own tau immediately after MID | `test_non_recipient_repinned_to_own_tau_after_mid` |
+| real 20M committed-tick packet accounting, observed frames | `test_common_exposure_parallel_exactly_one_packet`, `test_observed_frames_and_ledger` |
+| frames never advance during eval (phase barrier) | held-assertions in `FakeWorld.snapshot/evaluate/train_until` + `test_frames_do_not_advance_during_eval` |
+| crash recovery in every phase (pins cleared, own tau restored, FAILED + ABORT recorded) | `TestCrashRecovery.test_crash_in_pre_eval` / `_common_probe` / `_mid_eval` / `_post_eval`, `test_failed_cycle_not_auto_resumed` |
+| state machine + provenance real round-trip through the persisted store | `test_state_persisted_roundtrip`, `TestStateMachine.test_abort_from_any_phase`, `TestDueLogic.test_intervention_record_replaced_not_duplicated` |
+| restart resume: hard kill → resume → completed segments NOT re-trained, snapshots reused | `TestRestartResume.test_resume_after_hard_kill_in_mid_eval` |
+| concurrent control updates: no lost update between sidecar and observer | `TestConcurrentControlUpdates.test_no_lost_updates` (threaded flock stress), `test_mark_shrink_consumed_preserves_msa_fields` |
+| non-6-decimal tau evaluation match (canonical .12g) | `TestCanonicalTolerance.test_canonical_roundtrip`, `test_non_six_decimal_tau_matches_own_request`, `test_six_decimal_rounding_no_longer_matches_silently`, `test_ccrs_unit_key_distinguishes_close_taus` |
+| continuation first-tick validation (tolerance / frame / lineage fail-closed) | `TestContinuationGuard.test_first_tick_*` |
+| +100M hard frame cap | `TestContinuationGuard.test_hard_cap_100m` |
+| bootstrap manifest hash + worker-mapping verification | `TestContinuationGuard.test_bootstrap_verify_hash_and_mapping` |
+| promotion: worker-local tau_plus durably committed, resume snapshot synced, pin (forced override) == 0 | `TestHeterogeneousDryRunCycle.test_promotion_commits_worker_local_tau_plus_and_clears_pins` |
+| stay decision restores worker-local tau durably | `test_stay_decision_restores_worker_local_tau` |
+| base-retention msa_enabled=False behavior unchanged | `TestEnvPinBehavior.test_msa_disabled_pin_is_inert`, `TestOriginalProfileUnchanged.test_msa_disabled_curriculum_behavior_unchanged` |
+| MSA pin applies only when enabled and outranks observer forced | `TestEnvPinBehavior.test_msa_enabled_pin_applies_and_blocks_shrink`, `test_msa_pin_has_priority_over_observer_forced` |
+| GATE_RELAX still exactly one 0.88→0.75 profile difference | `TestOriginalProfileUnchanged.test_gate_relax_goes_through_dedicated_profile`, `test_base_continuation_launcher_keeps_original_gates` |
+| launchers: guard preflight, tolerance resume, eval device, pilot N | `test_launchers_have_guard_tolerance_resume_and_eval_device`, `TestEvaluatorIsolation.test_eval_device_required`, `TestArmConfigs.test_arm_configs_matched_and_charged` |
 
-## Dry-run
+## Full CPU suite (per-file, one process per test module)
 
-`python -m dexpbt_isaaclab.msa.dry_run` executes a full probe cycle against
-a deterministic fake world (6 workers at tau=0.0235): promoted=True,
-recipients=[1, 3, 0] (tie 0 vs 5 broken by worker id), all invariants held.
-Permuted arm: recipients=[3, 2, 1] under seed 777001 with identical total
-dose. Full trace: `DRY_RUN_TRACE.md`.
+89 test modules were each run in their own pytest process
+(`/tmp/per_file_results.txt`): **1240+ tests passed**, with exactly one
+failure:
+
+- `tests/test_pbt_curriculum_p1.py::StableSourceTierTest::test_l2_usable_when_stable_fails`
+  — **pre-existing**: fails identically at the parent commit (verified via
+  `git stash`); it exercises observer source-tier selection unrelated to
+  this change.
+
+Known pre-existing environment issue (unchanged): collecting many heavy
+profile suites in ONE pytest process segfaults during import/teardown
+(reproduced identically at the parent commit). Per-file runs are green.
+
+## Production-style dry run (simulation tier)
+
+`python -m dexpbt_isaaclab.msa.dry_run` — 6 workers with the REAL
+heterogeneous 5B-tip tolerances (0.02247…0.02759, full precision, not
+6-decimal-friendly), 20M tick-quantized parallel trainer, N=16 pilot
+seeds: promoted=True, recipients=[1, 3, 0] (tie 0 vs 5 broken by worker
+id), total tau_plus dose = 6×20M + 3×20M, zero residual pins/holds, all
+invariants held. Permuted arm: same total dose. Full trace:
+`DRY_RUN_TRACE.md`.
+
+Plan-only continuation-guard verification against the real manifest:
+`continuation_guard --verify-only` on `msa.config.json` →
+`BOOTSTRAP OK: 6/6 checkpoints verified (hash, mapping, fields)`.
 
 No GPU was used at any point; no training was started.
-
-## Addendum: GATE_RELAX profile-delivery fix (same date)
-
-Launcher/log exploration confirmed that `apply_wm_strategy_profile` is
-authoritative for non-legacy profiles: profile-table values override
-explicit CLI args, and `late_floor_retention_min_retention` (0.88) is in
-the `cser_dexpbt_conservative` table. The originally generated GATE_RELAX
-launcher relied on a CLI flag alone, which would have been silently
-reverted at startup. Fix: registered a dedicated
-`cser_dexpbt_conservative_gate_relax` profile (id 21; single-key table
-diff to 0.75), pointed the GATE_RELAX launcher's `--profile-per-policy`
-at it, and added fail-closed validation in `msa.arms` plus
-`TestArmConfigs.test_gate_relax_goes_through_dedicated_profile`.
-Re-verified: `tests/test_msa_probe.py` 41 passed;
-`tests/test_wm_strategy_profiles.py` 31 passed;
-`tests/test_profile_copy_health_gates.py` + `tests/test_v13_elite_profiles.py`
-19 passed; `tests/test_profile_copy_v12.py` 18 passed. (Running the four
-profile suites in one pytest process segfaults at teardown — reproduced
-identically at the pre-change commit via `git stash`; pre-existing,
-unrelated.)

@@ -41,6 +41,7 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     qualifies_best_stable_save,
     read_curriculum_control,
     write_curriculum_control,
+    write_curriculum_control_preserving_msa,
     write_curriculum_resume_snapshot,
 )
 
@@ -1541,7 +1542,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 env_frames,
                 population=population,
             )
-            write_curriculum_control(
+            # Locked write that carries over on-disk msa_* fields so a
+            # concurrent MSA sidecar update is never lost. Identical to
+            # write_curriculum_control when no sidecar exists.
+            write_curriculum_control_preserving_msa(
                 self._curriculum_control_dir / f"{policy_idx:03d}.json",
                 control,
             )

@@ -14,12 +14,16 @@ impossible), the same task / 8192 envs / PBT cadence / profile list
 | item | base 5B run | continuation arms | why |
 |---|---|---|---|
 | warm start | fresh start | `--recover-checkpoint-per-policy` with the six 5B tip checkpoints | resume the completed population |
-| `--max-iterations` | 44500 | 45390 | +100M worker-local frames (~890 RL epochs at ~112,360 frames/epoch) |
+| tolerance resume | n/a | `--tolerance-resume-per-policy` with the six manifest live tolerances | a bare `--checkpoint` does NOT restore the curriculum tolerance on a fresh run dir (it would reset to 0.075); per-policy `--success_tolerance_resume` restores it explicitly |
+| pre-launch verification | n/a | `continuation_guard --verify-only` (fail-closed) | checkpoint existence + size/head sha256 vs `sha256_head` in the config + worker mapping + manifest fields; any failure aborts before launch |
+| runtime guard | n/a | `continuation_guard` loop (per-run `continuation_guard.log`) | first committed tick must match the manifest tolerance (≤1e-6) / lineage / ≥5B frame baseline, else the whole arm is stopped; worker-local **+100M hard frame cap** (+1 tick slack) prevents a silent extra ~5B after an epoch/frame-ledger reset |
+| `--max-iterations` | 44500 | 45390 | +100M worker-local frames (~890 RL epochs at ~112,360 frames/epoch); the guard cap is the hard backstop |
 | run dir | `regrasping_cser_..._strict_5b_*` | `base_retention_msa_probe_<arm>_*` | isolation |
 
-`--recover-checkpoint-per-policy` is a new, inert `launch_pbt` option
-(default empty = bit-for-bit legacy behavior; mutually exclusive with the
-old single-policy `--recover-checkpoint`).
+`--recover-checkpoint-per-policy` and `--tolerance-resume-per-policy` are
+inert `launch_pbt` options (default empty = bit-for-bit legacy behavior;
+the former is mutually exclusive with the old single-policy
+`--recover-checkpoint`, the latter requires the former).
 
 Resume checkpoints (resolved from the CCRS manifest, never guessed):
 
@@ -78,28 +82,37 @@ re-applies 0.75.
 Zero numeric gate changes. Additions only:
 
 - the MSA probe sidecar (`python -m dexpbt_isaaclab.msa.sidecar`) runs next
-  to the supervisor and drives the probe state machine;
-- during probe segments the sidecar writes `forced_success_tolerance`
-  (tau_plus, then back to tau) into the existing curriculum control JSON —
-  the env already honors this field, so no env/trainer code changes;
+  to the supervisor and drives the probe state machine with phase-barrier
+  holds (SIGSTOP/SIGCONT of the worker's training tree during eval phases);
+- during probe segments the sidecar pins the tolerance through the
+  sidecar-owned `msa_forced_success_tolerance` (worker-local tau_plus,
+  then back to the worker's own tau) via the locked
+  `update_curriculum_control` API — honored by the env ONLY when
+  `msa_enabled`, with priority over (and never touching) the
+  observer-owned `forced_success_tolerance`;
+- eval subprocesses are pinned to `--eval-device cuda:${MSA_EVAL_GPU:-6}`
+  (trainers occupy `DEXPBT_GPUS=0-5`); the flag is required, there is no
+  cuda:0 default;
 - the promotion decision replaces the **cross-tolerance retention read**
-  with the **same-tau rho** (`p_post/p_pre` at tau, threshold 0.88 = the
-  current applicable base-retention value). All other gate numerics stay.
-- `CurriculumControlState` gains three inert fields (`msa_enabled=False`,
-  `msa_provenance=None`, `msa_state_machine=None`); no runtime code path in
-  the original profile branches on them.
+  with the **same-tau rho** (`p_post/p_pre` at the worker's OWN tau,
+  threshold 0.88 = the current applicable base-retention value). All other
+  gate numerics stay.
+- `CurriculumControlState` gains five inert fields (`msa_enabled=False`,
+  `msa_forced_success_tolerance=0.0`, `msa_provenance=None`,
+  `msa_state_machine=None`, `msa_cycle=None`); with `msa_enabled=False`
+  no runtime behavior changes (unit-tested bit-identical shrink path).
 
 Probe parameters (pre-registered in `msa.config.json`):
 
 | parameter | value |
 |---|---|
-| tau_plus rule | max(0.010, 0.95 * tau) |
+| tau_plus rule | max(0.010, 0.95 * tau[w]) per worker (heterogeneous, criterion-local) |
 | exposure window | 100,000,000 worker-local frames |
-| packet size | 8,000,000 frames (x2: common + routed second half) |
-| second-half recipients | top-3 by L_mid (tie: ascending worker id) |
-| eval N | 256 ordered seeds (`msa_seeds_310000_256_*`), per-seed results kept |
-| bootstrap | seed 20260719, 10000 repeats, panel-median 5th percentile |
-| rho threshold | 0.88 (same-tau only; p_pre >= 0.01 required) |
+| packet size | 20,000,000 frames = one committed PBT tick (x2: common + routed second half); provenance records OBSERVED committed frames |
+| second-half recipients | top-3 by criterion-local L_mid (tie: ascending worker id) |
+| eval N | pilot 16 ordered seeds (`msa_seeds_310000_16_*`), per-seed results kept; formal 256 must be requested explicitly (never a default) |
+| bootstrap | seed 20260719, 10000 repeats, panel-median 5th percentile (criterion-local conditional panel) |
+| rho threshold | 0.88 (worker-local same-tau only; p_pre >= 0.01 required) |
 
 ## Arm 4 — MSA_PERMUTED_ROUTE (negative control)
 
