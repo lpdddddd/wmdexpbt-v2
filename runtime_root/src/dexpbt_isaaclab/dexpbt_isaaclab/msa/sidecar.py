@@ -346,15 +346,116 @@ def _gpu_memory_used(index: str) -> Optional[int]:
         return None
 
 
+def _gpu_uuid_map() -> dict[str, str]:
+    """GPU index -> UUID from nvidia-smi (audit trail only)."""
+    smi = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+        capture_output=True, text=True)
+    uuid_by_idx: dict[str, str] = {}
+    for line in smi.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2:
+            uuid_by_idx[parts[0]] = parts[1]
+    return uuid_by_idx
+
+
+def _pid_running(pid: int) -> bool:
+    """Alive and not a zombie (zombies are reap-pending, never survivors)."""
+    return _proc_state(pid) not in (None, "Z", "X", "x")
+
+
+def _run_bounded_logged(cmd: list[str], env: dict, log_path: Path,
+                        gpu_index: Optional[str], timeout_s: float,
+                        term_grace_s: float = 20.0,
+                        poll_s: float = 2.0) -> dict:
+    """Run one child with NO PIPE deadlock and a HARD wall timeout.
+
+    - stdout+stderr append to log_path (a file, not an unconsumed PIPE:
+      an Isaac process writing more than the ~64KB pipe buffer would
+      otherwise block forever with nobody reading);
+    - start_new_session=True: the child gets its OWN process group, so a
+      timeout can terminate the ENTIRE evaluator tree with killpg;
+    - on timeout: SIGTERM the process group -> bounded grace ->
+      SIGKILL the process group -> verify no survivor (every pid ever
+      enumerated under the child); survivors are reported, never ignored;
+    - samples the GPU's used VRAM (peak) while the child runs if
+      gpu_index is given.
+
+    Returns {exit_code, timed_out, duration_s, log_path, error_tail,
+    survivor_pids, gpu_memory_peak}.
+    """
+    result: dict = {"exit_code": None, "timed_out": False,
+                    "duration_s": 0.0, "log_path": str(log_path),
+                    "error_tail": "", "survivor_pids": [],
+                    "gpu_memory_peak": None}
+    start = time.monotonic()
+    known: set[int] = set()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as logf:
+        proc = subprocess.Popen(cmd, env=env, stdout=logf,
+                                stderr=subprocess.STDOUT,
+                                start_new_session=True)
+        known.add(proc.pid)
+        deadline = start + float(timeout_s)
+        while proc.poll() is None:
+            known.update(_descendants(proc.pid))
+            if gpu_index is not None:
+                m = _gpu_memory_used(gpu_index)
+                if m is not None:
+                    result["gpu_memory_peak"] = max(
+                        result["gpu_memory_peak"] or 0, m)
+            if time.monotonic() > deadline:
+                result["timed_out"] = True
+                break
+            time.sleep(max(0.05, float(poll_s)))
+    if result["timed_out"]:
+        known.update(_descendants(proc.pid))
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        grace_end = time.monotonic() + max(0.5, float(term_grace_s))
+        while time.monotonic() < grace_end:
+            if proc.poll() is not None and \
+                    not any(_pid_running(p) for p in known):
+                break
+            time.sleep(0.2)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        verify_end = time.monotonic() + 10.0
+        survivors = [p for p in sorted(known) if _pid_running(p)]
+        while survivors and time.monotonic() < verify_end:
+            time.sleep(0.2)
+            survivors = [p for p in sorted(known) if _pid_running(p)]
+        result["survivor_pids"] = survivors
+    else:
+        proc.wait()
+    result["exit_code"] = proc.poll()
+    result["duration_s"] = round(time.monotonic() - start, 2)
+    try:
+        tail = Path(log_path).read_bytes()[-4000:]
+        result["error_tail"] = tail.decode("utf-8", "replace")[-2000:]
+    except OSError:
+        pass
+    return result
+
+
 def _run_coexistence_eval(policy_ws: Path, meta: dict, worker_id: int,
                           gpu_index: str, task: str, run_dir: Path,
                           eval_num_envs: int, python_exe: str,
-                          ) -> tuple[int, str, Optional[int]]:
+                          timeout_s: float = 1800.0) -> dict:
     """Launch ONE real policy-only eval cell (N=1) on the SAME GPU as the
-    frozen trainer, through the production eval_bridge. Returns
-    (returncode, stderr tail, peak VRAM seen during the eval). Proves the
-    eval process can start and run beside a SIGSTOPped trainer that is
-    still holding its VRAM — no CUDA OOM, no Isaac startup failure."""
+    frozen trainer, through the production eval_bridge, with bounded
+    wall time and full process-group cleanup (_run_bounded_logged).
+    Proves the eval process can start and run beside a SIGSTOPped trainer
+    that is still holding its VRAM — no CUDA OOM, no Isaac startup
+    failure, no hung evaluator left behind."""
     from dexpbt_isaaclab.msa.eval_bridge import (
         EvalRequest,
         SnapshotSpec,
@@ -376,16 +477,8 @@ def _run_coexistence_eval(policy_ws: Path, meta: dict, worker_id: int,
                       num_episodes=int(eval_num_envs))
     cmd = req.build_commands(python_exe)[0]
     env = req.build_env()
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
-    mem_peak: Optional[int] = None
-    while proc.poll() is None:
-        m = _gpu_memory_used(gpu_index)
-        if m is not None:
-            mem_peak = m if mem_peak is None else max(mem_peak, m)
-        time.sleep(2.0)
-    _out, err = proc.communicate()
-    return proc.returncode, (err or "")[-2000:], mem_peak
+    return _run_bounded_logged(cmd, env, run_dir / "cert_eval.log",
+                               str(gpu_index), timeout_s)
 
 
 def _tree_shape(root_pid: int) -> list[dict]:
@@ -405,6 +498,7 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
                       hold_seconds: float, cert_path: Path, *,
                       task: str, profile: str, gpu_index: str,
                       repo_dir: Path, eval_num_envs: int = 512,
+                      eval_timeout_s: float = 1800.0,
                       python_exe: Optional[str] = None,
                       first_tick_timeout_s: float = 4 * 3600.0,
                       resume_timeout_s: float = 5400.0,
@@ -417,10 +511,14 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
     wait first committed tick -> record tree shape + VRAM -> hold ->
     verify the committed frame is frozen -> WHILE the trainer is frozen
     (still holding its VRAM) launch ONE real policy-only eval cell (N=1,
-    eval_num_envs) on the SAME GPU and require it to exit cleanly (no CUDA
-    OOM, no Isaac startup failure) -> release -> verify the next committed
-    tick appears. ok=true only when BOTH the hold behaviour AND the
-    shared-GPU eval succeeded; release guaranteed."""
+    eval_num_envs) on the SAME GPU with a HARD wall timeout
+    (eval_timeout_s; on timeout the WHOLE evaluator process group is
+    terminated and verified gone) and require it to exit cleanly (no CUDA
+    OOM, no Isaac startup failure, no survivor) -> release -> verify the
+    next committed tick appears. ok=true only when BOTH the hold
+    behaviour AND the shared-GPU eval succeeded; the trainer hold is
+    released in the finally block on EVERY path (success, failure,
+    exception, timeout)."""
     holds = WorkerHolds(run_dir)
     policy_ws = workspace / f"{worker_id:03d}"
     python_exe = python_exe or sys.executable
@@ -430,7 +528,11 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
                   "worker_id": int(worker_id),
                   "eval_device": f"cuda:{gpu_index}",
                   "eval_num_envs": int(eval_num_envs),
+                  "eval_timeout_s": float(eval_timeout_s),
                   "eval_exit_code": None, "eval_error": "",
+                  "eval_duration_s": None, "eval_timed_out": False,
+                  "eval_log_path": "", "eval_error_tail": "",
+                  "eval_survivor_pids": [],
                   "gpu_memory_before_hold": None,
                   "gpu_memory_while_trainer_frozen": None,
                   "gpu_memory_during_eval": None,
@@ -439,17 +541,9 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
     try:
         cert["git_commit"] = _current_git_commit(repo_dir)
         names, driver, cuda = _gpu_env([str(gpu_index)])
-        smi = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,uuid",
-             "--format=csv,noheader"], capture_output=True, text=True)
-        uuid_by_idx = {}
-        for line in smi.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2:
-                uuid_by_idx[parts[0]] = parts[1]
         cert["gpu"] = {"index": str(gpu_index),
                        "name": names[str(gpu_index)],
-                       "uuid": uuid_by_idx.get(str(gpu_index), ""),
+                       "uuid": _gpu_uuid_map().get(str(gpu_index), ""),
                        "driver_version": driver,
                        "cuda_version": cuda}
         deadline = time.monotonic() + first_tick_timeout_s
@@ -475,16 +569,35 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
                              f"-> {frame_during}")
             return 2
         # SHARED-GPU COEXISTENCE: while the trainer is still SIGSTOPped and
-        # holding its VRAM, run one real eval cell on the SAME GPU.
+        # holding its VRAM, run one real eval cell on the SAME GPU with a
+        # hard wall timeout and full process-group cleanup.
         cert["gpu_memory_while_trainer_frozen"] = _gpu_memory_used(gpu_index)
         try:
-            rc_eval, err_tail, mem_during = _run_coexistence_eval(
+            res = _run_coexistence_eval(
                 policy_ws, meta, worker_id, str(gpu_index), task, run_dir,
-                eval_num_envs, python_exe)
-            cert["eval_exit_code"] = rc_eval
-            cert["gpu_memory_during_eval"] = mem_during
-            if rc_eval != 0:
-                cert["eval_error"] = f"eval exited {rc_eval}: {err_tail}"
+                eval_num_envs, python_exe, timeout_s=float(eval_timeout_s))
+            cert["eval_exit_code"] = res["exit_code"]
+            cert["eval_duration_s"] = res["duration_s"]
+            cert["eval_timed_out"] = bool(res["timed_out"])
+            cert["eval_log_path"] = res["log_path"]
+            cert["eval_survivor_pids"] = list(res["survivor_pids"])
+            cert["gpu_memory_during_eval"] = res["gpu_memory_peak"]
+            if res["timed_out"]:
+                cert["eval_error"] = (f"eval timed out after "
+                                      f"{eval_timeout_s}s (process group "
+                                      "terminated)")
+                cert["eval_error_tail"] = res["error_tail"]
+                cert["error"] = "shared-GPU eval coexistence timed out"
+                return 2
+            if res["survivor_pids"]:
+                cert["eval_error"] = (f"evaluator survivors after "
+                                      f"termination: {res['survivor_pids']}")
+                cert["eval_error_tail"] = res["error_tail"]
+                cert["error"] = "shared-GPU eval left survivors"
+                return 2
+            if res["exit_code"] != 0:
+                cert["eval_error"] = f"eval exited {res['exit_code']}"
+                cert["eval_error_tail"] = res["error_tail"]
                 cert["error"] = "shared-GPU eval coexistence failed"
                 return 2
             cert["eval_coexistence_ok"] = True
@@ -1150,6 +1263,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="env count for the shared-GPU coexistence eval "
                          "cell run beside the frozen trainer "
                          "(--certificate-smoke)")
+    ap.add_argument("--cert-eval-timeout-s", type=float, default=1800.0,
+                    help="hard wall timeout for the coexistence eval cell; "
+                         "on expiry the whole evaluator process group is "
+                         "SIGTERM/SIGKILLed and the smoke fails closed "
+                         "(--certificate-smoke)")
     ap.add_argument("--commit-max-wait-s", type=float,
                     default=DEFAULT_COMMIT_MAX_WAIT_S,
                     help="single bounded wait for a durable tolerance "
@@ -1178,6 +1296,7 @@ def main(argv: list[str] | None = None) -> int:
             task=args.task, profile=args.wm_profile,
             gpu_index=str(args.cert_gpu_index),
             eval_num_envs=args.cert_eval_num_envs,
+            eval_timeout_s=args.cert_eval_timeout_s,
             repo_dir=Path(__file__).resolve().parent)
 
     if args.hold_smoke_only:

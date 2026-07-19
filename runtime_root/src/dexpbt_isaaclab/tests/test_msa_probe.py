@@ -10,6 +10,7 @@ durable promotion commits. Pure CPU; no Isaac, no GPU.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -1697,18 +1698,24 @@ class TestHoldWatchdog(unittest.TestCase):
 
         from dexpbt_isaaclab.msa.hold_watchdog import check_once
         with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "continuation_guard.pid").write_text(
+                str(_os.getpid()))
             (Path(td) / "msa_sidecar.pid").write_text(str(_os.getpid()))
             self.assertEqual(check_once(Path(td)), "ok")
 
-    def test_dead_sidecar_no_holds_idle_exit(self):
-        import subprocess
-
+    def test_dead_sidecar_no_holds_keeps_watching_until_arm_complete(self):
+        # guard lifetime supervision: a dead sidecar with nothing frozen is
+        # NOT idle any more — the guard is still supervised. Only
+        # ARM_COMPLETE.json (normal completion) allows a quiet exit.
         from dexpbt_isaaclab.msa.hold_watchdog import check_once
         with tempfile.TemporaryDirectory() as td:
-            dead = subprocess.Popen(["true"])
-            dead.wait()
-            (Path(td) / "msa_sidecar.pid").write_text(str(dead.pid))
-            self.assertEqual(check_once(Path(td)), "idle_exit")
+            run_dir = Path(td)
+            guard = _spawn_running(self)
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
+            (run_dir / "msa_sidecar.pid").write_text(str(_dead_pid()))
+            self.assertEqual(check_once(run_dir), "ok")
+            (run_dir / "ARM_COMPLETE.json").write_text("{}")
+            self.assertEqual(check_once(run_dir), "idle_exit")
 
     def test_dead_sidecar_with_holds_releases_and_stops(self):
         import os as _os
@@ -1720,6 +1727,8 @@ class TestHoldWatchdog(unittest.TestCase):
         from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
+            guard = _spawn_running(self)              # guard still alive
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             held = subprocess.Popen(["sleep", "60"])
             self.addCleanup(held.kill)
             _os.kill(held.pid, sg.SIGSTOP)
@@ -2565,6 +2574,8 @@ class TestWatchdogBusyNoHolds(unittest.TestCase):
         from dexpbt_isaaclab.msa.hold_watchdog import check_once
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
+            guard = _spawn_running(self)              # guard still alive
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             dead = subprocess.Popen(["true"])
             dead.wait()
             (run_dir / "msa_sidecar.pid").write_text(str(dead.pid))
@@ -2581,15 +2592,25 @@ class TestWatchdogBusyNoHolds(unittest.TestCase):
             self.assertEqual(marker["busy_marker"]["status"], "COMMITTING")
             self.assertEqual(len(stops), 1)
 
-    def test_dead_sidecar_no_busy_no_holds_still_idle(self):
-        import subprocess
-
+    def test_dead_sidecar_no_busy_no_holds_never_stops_arm(self):
+        # nothing frozen and no busy marker: never a stop — with a live
+        # guard the watchdog keeps watching; after ARM_COMPLETE it idles.
         from dexpbt_isaaclab.msa.hold_watchdog import check_once
         with tempfile.TemporaryDirectory() as td:
-            dead = subprocess.Popen(["true"])
-            dead.wait()
-            (Path(td) / "msa_sidecar.pid").write_text(str(dead.pid))
-            self.assertEqual(check_once(Path(td)), "idle_exit")
+            run_dir = Path(td)
+            guard = _spawn_running(self)
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
+            (run_dir / "msa_sidecar.pid").write_text(str(_dead_pid()))
+            calls = []
+            self.assertEqual(
+                check_once(run_dir, stop_arm_fn=lambda rd, r:
+                           calls.append(r)), "ok")
+            self.assertEqual(calls, [])
+            (run_dir / "ARM_COMPLETE.json").write_text("{}")
+            self.assertEqual(
+                check_once(run_dir, stop_arm_fn=lambda rd, r:
+                           calls.append(r)), "idle_exit")
+            self.assertEqual(calls, [])
 
 
 class TestStopArmCallerSafe(unittest.TestCase):
@@ -2603,57 +2624,82 @@ class TestStopArmCallerSafe(unittest.TestCase):
             self.assertIn(_proc_state(p.pid), (None, "Z"),
                           f"worker {w} not terminated")
 
-    def test_caller_is_sidecar_kills_workers_and_watchdog_sibling(self):
-        # TEST A: caller registers itself as msa_sidecar.pid; the sibling
-        # hold_watchdog is a separate process that MUST be stopped.
+    def _assert_gone(self, pid):
         from dexpbt_isaaclab.msa.sidecar import _proc_state
+        deadline = __import__("time").monotonic() + 5
+        while (_proc_state(pid) not in (None, "Z")
+               and __import__("time").monotonic() < deadline):
+            __import__("time").sleep(0.05)
+        self.assertIn(_proc_state(pid), (None, "Z"))
+
+    def test_caller_is_sidecar_kills_workers_and_all_siblings(self):
+        # TEST A: caller registers itself as msa_sidecar.pid; the sibling
+        # hold_watchdog AND continuation_guard MUST both be stopped.
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             procs = _spawn_worker_procs(self, run_dir)
-            sibling = _spawn_running(self)            # the watchdog sibling
-            (run_dir / "hold_watchdog.pid").write_text(str(sibling.pid))
+            watchdog = _spawn_running(self)           # the watchdog sibling
+            (run_dir / "hold_watchdog.pid").write_text(str(watchdog.pid))
+            guard = _spawn_running(self)              # the guard sibling
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             res = _run_caller(run_dir, "msa_sidecar.pid", "sidecar")
             self.assertEqual(res.returncode, 0, res.stderr)
             # the caller ran PAST stop_arm (it was never killed)
             self.assertTrue((run_dir / "CALLER_DONE.json").exists())
             self.assertTrue((run_dir / "GUARD_FAILED").exists())
             self._assert_workers_dead(procs)
-            # the sibling control process was terminated
-            deadline = __import__("time").monotonic() + 5
-            while (_proc_state(sibling.pid) not in (None, "Z")
-                   and __import__("time").monotonic() < deadline):
-                __import__("time").sleep(0.05)
-            self.assertIn(_proc_state(sibling.pid), (None, "Z"))
+            # every sibling control process was terminated
+            self._assert_gone(watchdog.pid)
+            self._assert_gone(guard.pid)
             # stale ownership cleared
             self.assertFalse((run_dir / "MSA_HOLDS.json").exists())
             self.assertFalse((run_dir / "READINESS_HOLDS.json").exists())
 
-    def test_caller_is_watchdog_kills_workers_and_sidecar_sibling(self):
+    def test_caller_is_watchdog_kills_workers_and_all_siblings(self):
         # TEST B: caller registers itself as hold_watchdog.pid; the
-        # sibling msa_sidecar MUST be stopped.
-        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        # sibling msa_sidecar AND continuation_guard MUST be stopped.
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             procs = _spawn_worker_procs(self, run_dir)
-            sibling = _spawn_running(self)            # the sidecar sibling
-            (run_dir / "msa_sidecar.pid").write_text(str(sibling.pid))
+            sidecar = _spawn_running(self)            # the sidecar sibling
+            (run_dir / "msa_sidecar.pid").write_text(str(sidecar.pid))
+            guard = _spawn_running(self)              # the guard sibling
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             res = _run_caller(run_dir, "hold_watchdog.pid", "guard")
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertTrue((run_dir / "CALLER_DONE.json").exists())
             self._assert_workers_dead(procs)
-            deadline = __import__("time").monotonic() + 5
-            while (_proc_state(sibling.pid) not in (None, "Z")
-                   and __import__("time").monotonic() < deadline):
-                __import__("time").sleep(0.05)
-            self.assertIn(_proc_state(sibling.pid), (None, "Z"))
+            self._assert_gone(sidecar.pid)
+            self._assert_gone(guard.pid)
 
-    def test_watchdog_check_once_stop_is_caller_safe(self):
-        # TEST C / P0-2 #6: the REAL watchdog path (check_once -> default
-        # stop_arm) invoked from a process registered as hold_watchdog.pid
-        # tears the arm down and still reaches its completion marker.
+    def test_caller_is_guard_kills_workers_and_all_siblings(self):
+        # TEST C (new sibling set): caller registers itself as
+        # continuation_guard.pid — stop_arm must skip the caller and stop
+        # the sidecar and watchdog siblings.
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             procs = _spawn_worker_procs(self, run_dir)
+            sidecar = _spawn_running(self)
+            (run_dir / "msa_sidecar.pid").write_text(str(sidecar.pid))
+            watchdog = _spawn_running(self)
+            (run_dir / "hold_watchdog.pid").write_text(str(watchdog.pid))
+            res = _run_caller(run_dir, "continuation_guard.pid", "guard")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue((run_dir / "CALLER_DONE.json").exists())
+            self._assert_workers_dead(procs)
+            self._assert_gone(sidecar.pid)
+            self._assert_gone(watchdog.pid)
+
+    def test_watchdog_check_once_stop_is_caller_safe(self):
+        # TEST D / P0-2 #6: the REAL watchdog path (check_once -> default
+        # stop_arm) invoked from a process registered as hold_watchdog.pid
+        # tears the arm down (including the guard sibling) and still
+        # reaches its completion marker.
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            procs = _spawn_worker_procs(self, run_dir)
+            guard = _spawn_running(self)              # guard alive
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             (run_dir / "msa_sidecar.pid").write_text(str(_dead_pid()))
             (run_dir / "MSA_HOLDS.json").write_text(
                 json.dumps({"0": [procs[0].pid]}))
@@ -2662,6 +2708,7 @@ class TestStopArmCallerSafe(unittest.TestCase):
             self.assertTrue((run_dir / "CALLER_DONE.json").exists())
             self.assertTrue((run_dir / "MSA_SIDECAR_DIED.json").exists())
             self._assert_workers_dead(procs)
+            self._assert_gone(guard.pid)
 
 
 class TestReadinessWatchdog(unittest.TestCase):
@@ -2675,7 +2722,8 @@ class TestReadinessWatchdog(unittest.TestCase):
 
     def test_guard_death_partial_readiness_releases_and_stops(self):
         # TEST 1: guard dies mid-barrier with a PARTIAL readiness set ->
-        # SIGCONT the frozen workers, GUARD_DIED_DURING_READINESS, stop.
+        # SIGCONT the frozen workers, CONTINUATION_GUARD_DIED (plus the
+        # readiness-specific GUARD_DIED_DURING_READINESS record), stop.
         from dexpbt_isaaclab.msa.hold_watchdog import check_once
         from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
@@ -2685,10 +2733,12 @@ class TestReadinessWatchdog(unittest.TestCase):
             (run_dir / "continuation_guard.pid").write_text(str(_dead_pid()))
             calls, stop = self._stop_capture()
             state = check_once(run_dir, stop_arm_fn=stop)
-            self.assertEqual(state, "released_readiness")
+            self.assertEqual(state, "guard_died")
             marker = json.loads(
                 (run_dir / "GUARD_DIED_DURING_READINESS.json").read_text())
             self.assertIn("guard died", marker["phase"])
+            self.assertTrue(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").exists())
             self.assertEqual(len(calls), 1)
             for p in frozen.values():
                 deadline = __import__("time").monotonic() + 5
@@ -2730,12 +2780,12 @@ class TestReadinessWatchdog(unittest.TestCase):
             (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             _, stop = self._stop_capture()
             self.assertEqual(check_once(run_dir, stop_arm_fn=stop), "ok")
-            # guard dies: still not idle
+            # guard dies: still not idle — fatal guard death
             guard.kill()
             guard.wait(timeout=5)
             state = check_once(run_dir, stop_arm_fn=stop)
             self.assertNotEqual(state, "idle_exit")
-            self.assertEqual(state, "released_readiness")
+            self.assertEqual(state, "guard_died")
 
     def test_corrupt_readiness_fails_closed(self):
         # TEST 4: an unreadable READINESS_HOLDS.json is NEVER treated as
@@ -2752,10 +2802,13 @@ class TestReadinessWatchdog(unittest.TestCase):
                 "ok")
             # grace elapsed, guard never came up -> fail closed
             state = check_once(run_dir, stop_arm_fn=stop, grace_expired=True)
-            self.assertEqual(state, "released_readiness")
+            self.assertEqual(state, "guard_died")
             marker = json.loads(
                 (run_dir / "GUARD_DIED_DURING_READINESS.json").read_text())
             self.assertTrue(marker["readiness_holds_corrupt"])
+            marker2 = json.loads(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").read_text())
+            self.assertTrue(marker2["readiness_holds_corrupt"])
 
     def test_normal_adoption_no_false_action(self):
         # TEST 5: after adoption (readiness gone, MSA_HOLDS present) with a
@@ -2768,6 +2821,8 @@ class TestReadinessWatchdog(unittest.TestCase):
                 json.dumps({"0": [held.pid]}))
             sidecar = _spawn_running(self)
             (run_dir / "msa_sidecar.pid").write_text(str(sidecar.pid))
+            guard = _spawn_running(self)
+            (run_dir / "continuation_guard.pid").write_text(str(guard.pid))
             _write_marker_stub(run_dir)
             calls, stop = self._stop_capture()
             self.assertEqual(check_once(run_dir, stop_arm_fn=stop), "ok")
@@ -2795,6 +2850,216 @@ class TestReadinessWatchdog(unittest.TestCase):
             self.assertEqual(calls, [])
             for p in frozen.values():
                 self.assertIn(_proc_state(p.pid), ("T", "t"))
+
+
+class TestCoexistenceEvalBounded(unittest.TestCase):
+    """Patch A: the coexistence eval never uses an unconsumed PIPE (log
+    file instead), has a HARD wall timeout that terminates the whole
+    evaluator process group, and the trainer hold is released on the
+    timeout path too."""
+
+    def test_large_output_does_not_deadlock(self):
+        # a child writing far more than the ~64KB pipe buffer must finish:
+        # with an unconsumed PIPE this would block forever.
+        from dexpbt_isaaclab.msa.sidecar import _run_bounded_logged
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "eval.log"
+            code = ("import sys\n"
+                    "sys.stdout.write('x' * 2_000_000)\n"
+                    "sys.stderr.write('e' * 2_000_000)\n"
+                    "print('done')\n")
+            res = _run_bounded_logged(
+                [sys.executable, "-c", code], dict(os.environ), log,
+                gpu_index=None, timeout_s=120.0, poll_s=0.05)
+            self.assertEqual(res["exit_code"], 0)
+            self.assertFalse(res["timed_out"])
+            self.assertEqual(res["survivor_pids"], [])
+            self.assertGreater(log.stat().st_size, 3_900_000)
+            self.assertEqual(res["log_path"], str(log))
+            self.assertIn("done", res["error_tail"])
+
+    def test_timeout_terminates_whole_process_group(self):
+        # a hung evaluator WITH a child must be SIGTERM/SIGKILLed as a
+        # process group and leave no survivor.
+        from dexpbt_isaaclab.msa.sidecar import (
+            _pid_running,
+            _run_bounded_logged,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "eval.log"
+            t0 = __import__("time").monotonic()
+            res = _run_bounded_logged(
+                ["bash", "-c", "sleep 300 & echo child_spawned; "
+                               "exec sleep 300"],
+                dict(os.environ), log, gpu_index=None, timeout_s=1.0,
+                term_grace_s=2.0, poll_s=0.1)
+            elapsed = __import__("time").monotonic() - t0
+            self.assertTrue(res["timed_out"])
+            self.assertEqual(res["survivor_pids"], [])
+            self.assertNotEqual(res["exit_code"], 0)
+            self.assertLess(elapsed, 30.0)     # bounded, never infinite
+            # log captured pre-kill output, proving the redirect worked
+            self.assertIn("child_spawned", res["error_tail"])
+            # nothing from the group survives (re-verify independently)
+            for p in res["survivor_pids"]:
+                self.assertFalse(_pid_running(p))
+
+    def test_timeout_releases_trainer_hold_and_fails_certificate(self):
+        # certificate_smoke: an eval timeout must (a) fail the certificate
+        # (ok=false, eval_coexistence_ok=false, eval_timed_out=true) and
+        # (b) STILL release the trainer hold in the finally block.
+        from dexpbt_isaaclab.msa import sidecar as sc
+        from dexpbt_isaaclab.msa.sidecar import _proc_state, read_holds_file
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            ws = _mk_workspace(run_dir, {0: 5_020_000_000})
+            procs = _spawn_worker_procs(self, run_dir, workers=[0])
+            fake_res = {"exit_code": None, "timed_out": True,
+                        "duration_s": 1800.0,
+                        "log_path": str(run_dir / "cert_eval.log"),
+                        "error_tail": "isaac hung", "survivor_pids": [],
+                        "gpu_memory_peak": 12345}
+            patches = {
+                "_current_git_commit": lambda repo: "testcommit",
+                "_gpu_env": lambda idxs: ({"4": "FakeGPU"}, "550", "12.4"),
+                "_gpu_uuid_map": lambda: {"4": "GPU-fake"},
+                "_gpu_memory_used": lambda idx: None,
+                "_run_coexistence_eval":
+                    lambda *a, **k: dict(fake_res),
+            }
+            saved = {k: getattr(sc, k) for k in patches}
+            for k, v in patches.items():
+                setattr(sc, k, v)
+            try:
+                cert_path = run_dir / "CERT.json"
+                rc = sc.certificate_smoke(
+                    run_dir, ws, 0, 0.3, cert_path,
+                    task="T-v0", profile="prof", gpu_index="4",
+                    repo_dir=run_dir, eval_num_envs=8,
+                    eval_timeout_s=1800.0)
+            finally:
+                for k, v in saved.items():
+                    setattr(sc, k, v)
+            self.assertEqual(rc, 2)
+            cert = json.loads(cert_path.read_text())
+            self.assertFalse(cert["ok"])
+            self.assertFalse(cert["eval_coexistence_ok"])
+            self.assertTrue(cert["eval_timed_out"])
+            self.assertEqual(cert["eval_duration_s"], 1800.0)
+            self.assertEqual(cert["eval_survivor_pids"], [])
+            self.assertIn("timed out", cert["error"])
+            self.assertIn("isaac hung", cert["eval_error_tail"])
+            # the trainer hold WAS released despite the timeout
+            deadline = __import__("time").monotonic() + 5
+            while (_proc_state(procs[0].pid) in ("T", "t")
+                   and __import__("time").monotonic() < deadline):
+                __import__("time").sleep(0.05)
+            self.assertNotIn(_proc_state(procs[0].pid), ("T", "t"))
+            self.assertEqual(read_holds_file(run_dir), {})
+
+
+class TestGuardLifetimeWatchdog(unittest.TestCase):
+    """Patch B: the watchdog supervises continuation_guard.pid for the
+    WHOLE arm lifetime — guard death before ARM_COMPLETE.json is fatal in
+    every phase; guard exit after ARM_COMPLETE is never reported."""
+
+    def _stop_capture(self):
+        calls = []
+        return calls, (lambda rd, r: calls.append(r))
+
+    def test_base_arm_guard_death_after_readiness_stops_arm(self):
+        # BASE/GATE arm shape: readiness done (marker present, holds
+        # released, NO sidecar) — the guard dying mid-continuation must
+        # stop the arm and record the full state.
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            _mk_workspace(run_dir, {w: 5_100_000_000 + w for w in range(6)})
+            _write_marker_stub(run_dir)
+            (run_dir / "continuation_guard.pid").write_text(str(_dead_pid()))
+            calls, stop = self._stop_capture()
+            state = check_once(run_dir, stop_arm_fn=stop)
+            self.assertEqual(state, "guard_died")
+            self.assertEqual(len(calls), 1)
+            marker = json.loads(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").read_text())
+            self.assertTrue(marker["readiness_marker_present"])
+            self.assertEqual(marker["msa_holds"], {})
+            self.assertIsNone(marker["msa_busy"])
+            self.assertIn("guard_pid", marker)
+            self.assertIn("time", marker)
+            for w in range(6):
+                self.assertEqual(marker["worker_frames"][str(w)],
+                                 5_100_000_000 + w)
+
+    def test_msa_adoption_guard_death_releases_and_stops(self):
+        # MSA arm mid-cycle: sidecar ALIVE and holding a worker — guard
+        # death is still fatal; the union of holds is SIGCONTed.
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            _write_marker_stub(run_dir)
+            held = _spawn_stopped(self)
+            (run_dir / "MSA_HOLDS.json").write_text(
+                json.dumps({"2": [held.pid]}))
+            sidecar = _spawn_running(self)
+            (run_dir / "msa_sidecar.pid").write_text(str(sidecar.pid))
+            (run_dir / "continuation_guard.pid").write_text(str(_dead_pid()))
+            calls, stop = self._stop_capture()
+            state = check_once(run_dir, stop_arm_fn=stop)
+            self.assertEqual(state, "guard_died")
+            self.assertEqual(len(calls), 1)
+            marker = json.loads(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").read_text())
+            self.assertEqual(marker["msa_holds"]["2"], [held.pid])
+            # the held worker was SIGCONTed back to life
+            deadline = __import__("time").monotonic() + 5
+            while (_proc_state(held.pid) in ("T", "t")
+                   and __import__("time").monotonic() < deadline):
+                __import__("time").sleep(0.05)
+            self.assertNotIn(_proc_state(held.pid), ("T", "t"))
+
+    def test_msa_busy_guard_death_fails_closed(self):
+        # guard death while MSA_BUSY.json exists (holds empty, e.g. the
+        # COMMITTING window) is equally fatal — never a quiet pass.
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            _write_marker_stub(run_dir)
+            sidecar = _spawn_running(self)
+            (run_dir / "msa_sidecar.pid").write_text(str(sidecar.pid))
+            (run_dir / "MSA_BUSY.json").write_text(json.dumps(
+                {"intervention_id": "msa_x", "status": "COMMITTING"}))
+            (run_dir / "continuation_guard.pid").write_text(str(_dead_pid()))
+            calls, stop = self._stop_capture()
+            state = check_once(run_dir, stop_arm_fn=stop)
+            self.assertEqual(state, "guard_died")
+            self.assertEqual(len(calls), 1)
+            marker = json.loads(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").read_text())
+            self.assertEqual(marker["msa_busy"]["status"], "COMMITTING")
+
+    def test_arm_complete_guard_exit_is_not_reported(self):
+        # NORMAL completion: after ARM_COMPLETE.json the guard's exit is
+        # expected — the watchdog idles out with no marker and no stop.
+        from dexpbt_isaaclab.msa.hold_watchdog import check_once
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            _write_marker_stub(run_dir)
+            (run_dir / "ARM_COMPLETE.json").write_text("{}")
+            (run_dir / "continuation_guard.pid").write_text(str(_dead_pid()))
+            calls, stop = self._stop_capture()
+            self.assertEqual(check_once(run_dir, stop_arm_fn=stop),
+                             "idle_exit")
+            self.assertEqual(calls, [])
+            self.assertFalse(
+                (run_dir / "CONTINUATION_GUARD_DIED.json").exists())
+            # a MISSING guard pid file after ARM_COMPLETE is fine too
+            (run_dir / "continuation_guard.pid").unlink()
+            self.assertEqual(check_once(run_dir, stop_arm_fn=stop),
+                             "idle_exit")
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

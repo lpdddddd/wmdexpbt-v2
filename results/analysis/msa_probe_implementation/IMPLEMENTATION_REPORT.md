@@ -469,6 +469,53 @@ refactor):
    certificates are invalid and the disposable smoke must be re-run. The
    eval output is an execution certificate only — never a method result.
 
+## 5f. Bounded coexistence eval + guard lifetime supervision ("Bound coexistence eval and supervise guard lifetime", 2026-07-19)
+
+Final orchestration patch before the disposable GPU certificate smoke
+(no MSA algorithm, tau_plus, rho threshold, routing, promotion gate,
+training-parameter or bootstrap-semantics change):
+
+1. **Coexistence eval: no PIPE deadlock, no infinite wait (A).** The old
+   `_run_coexistence_eval` used `stdout=PIPE, stderr=PIPE` with NOBODY
+   consuming them — an Isaac eval writing more than the ~64KB pipe buffer
+   would block forever, and there was no wall timeout at all. New
+   `_run_bounded_logged` core: stdout+stderr append to
+   `<disposable run_dir>/cert_eval.log` (a file, nothing to consume);
+   the evaluator starts with `start_new_session=True` (own process
+   group); a hard `--cert-eval-timeout-s` (default 1800 s) SIGTERMs the
+   WHOLE process group on expiry, waits a bounded grace, SIGKILLs the
+   group, and verifies no survivor among every pid ever enumerated under
+   the child. VRAM peak sampling is retained. New certificate fields:
+   `eval_duration_s`, `eval_timed_out`, `eval_log_path`,
+   `eval_error_tail` (log tail on failure), `eval_survivor_pids`,
+   `eval_timeout_s`. Timeout, non-zero exit or a residual evaluator all
+   yield `ok=false` + `eval_coexistence_ok=false`; `certificate_smoke`'s
+   `finally` releases the trainer hold on success, failure, exception
+   AND timeout (CPU-tested with a real SIGSTOPped trainer).
+2. **Watchdog supervises the guard's WHOLE lifetime (B).** Previously
+   guard death was only detected while readiness holds existed; a guard
+   dying after the barrier left the arm without cap/gate enforcement and
+   nobody noticed. Now, after the startup grace, `continuation_guard.pid`
+   is monitored continuously for ALL FOUR stateful arms: as long as
+   `ARM_COMPLETE.json` has not appeared, a missing or dead guard pid is
+   fatal — the watchdog SIGCONTs the UNION of readiness and MSA holds,
+   writes `CONTINUATION_GUARD_DIED.json` (guard pid, readiness-marker
+   presence, READINESS_HOLDS / MSA_HOLDS / MSA_BUSY contents, the six
+   workers' latest committed frames, timestamp) and caller-safely stops
+   the workers and the sidecar. Guard death mid-barrier additionally
+   keeps the readiness-specific `GUARD_DIED_DURING_READINESS.json`
+   record. `ARM_COMPLETE.json` marks normal completion: after it the
+   guard's exit is expected and never reported (quiet idle_exit). A dead
+   sidecar with nothing frozen no longer idle-exits the watchdog — the
+   guard is still supervised until ARM_COMPLETE.
+3. **`stop_arm` cleans the guard sibling (C).** The control-pid cleanup
+   set is now `continuation_guard.pid` + `msa_sidecar.pid` +
+   `hold_watchdog.pid`, with the unchanged caller-safe order: SIGCONT all
+   holds → write the failure marker → stop all six worker trees → stop
+   the OTHER control processes (skip `os.getpid()`; the caller returns
+   naturally) → clear stale readiness/MSA holds files. Verified with real
+   subprocess callers registered as sidecar, watchdog AND guard pids.
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
@@ -481,7 +528,10 @@ refactor):
   frozen workers stay stopped~~ — CLOSED in §5e: the hold watchdog now
   covers the readiness barrier and the MSA pre-adoption window for every
   stateful arm (SIGCONT + `GUARD_DIED_DURING_READINESS.json` + caller-safe
-  arm stop).
+  arm stop). §5f extends this to the guard's WHOLE lifetime: any guard
+  death before `ARM_COMPLETE.json` writes `CONTINUATION_GUARD_DIED.json`
+  and stops the arm; guard exit after ARM_COMPLETE is never a false
+  positive.
 - The disposable certificate binds to (git commit, task, profile, GPU
   model, driver) — any code change or driver update invalidates it and
   the disposable smoke must be re-run (~one committed interval of GPU
@@ -509,7 +559,7 @@ refactor):
 ## 7. Artifacts
 
 - code: `dexpbt_isaaclab/msa/` (10 modules incl. `hold_watchdog.py` and
-  `state_bootstrap.py`), `tests/test_msa_probe.py` (135 tests),
+  `state_bootstrap.py`), `tests/test_msa_probe.py` (143 tests),
   `tests/test_state_bootstrap.py` (32 tests)
 - launchers: `results/launchers/msa_probe/` (4 STATEFUL arm scripts +
   4 configs + `start_stateful_hold_smoke.sh` (disposable certificate

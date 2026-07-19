@@ -6,8 +6,10 @@ Date: 2026-07-19, updated the same date for the pilot-integration fix pass
 blocker patch ("Close MSA smoke, commit, and cap races"), the
 state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
 arms"), the synchronization pass ("Make readiness a hold barrier with
-sidecar adoption") and the watchdog/preflight pass ("Close readiness
-watchdog and shared-GPU preflight gaps"). Environment: isaaclab311 python
+sidecar adoption"), the watchdog/preflight pass ("Close readiness
+watchdog and shared-GPU preflight gaps") and the final orchestration
+patch ("Bound coexistence eval and supervise guard lifetime").
+Environment: isaaclab311 python
 (CPU only; no Isaac import anywhere in the MSA package or its tests; no
 GPU used).
 
@@ -21,7 +23,7 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 135/135 passed
+## MSA suite: `tests/test_msa_probe.py` — 143/143 passed
 ## Bootstrap suite: `tests/test_state_bootstrap.py` — 32/32 passed
 
 (72 retained from the pilot-integration pass + 23 safety-patch tests +
@@ -31,9 +33,12 @@ the 480M cap and the stateful arm names + 4 first-tick semantics tests +
 certificate gate, children-before-root termination, six-GPU metadata +
 10 watchdog/preflight tests — caller-safe stop_arm (real subprocess
 callers), readiness-phase watchdog coverage, fail-closed corrupt holds,
-eval-coexistence certificate gate; plus the 32-test state-bootstrap
-suite, whose guard-loop tests run against REAL per-worker processes
-frozen by the barrier.)
+eval-coexistence certificate gate + 8 final-patch tests — bounded/logged
+coexistence eval (no PIPE deadlock, process-group timeout kill, hold
+release on timeout), guard-lifetime watchdog for all four stateful arms,
+guard-as-caller stop_arm; plus the 32-test state-bootstrap suite, whose
+guard-loop tests run against REAL per-worker processes frozen by the
+barrier.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -92,7 +97,7 @@ budget"; 23 new tests):
 | snapshot frame == packet start / mid boundary frame | `test_snapshot_frame_equals_packet_start_frame` (+ controller `_snapshot_at` enforcement in every cycle test) |
 | hold verifies stopped state; MSA_HOLDS.json persisted/removed | `TestWorkerHoldsSafety.test_hold_verifies_stopped_and_persists` (real SIGSTOPped process), `test_hold_verification_failure_fails_closed` |
 | release order children before supervisor/root | `test_release_order_children_before_root` |
-| sidecar death watchdog releases held workers + stops arm | `TestHoldWatchdog.test_dead_sidecar_with_holds_releases_and_stops` (real stopped process resumed), `test_sidecar_alive_is_ok`, `test_dead_sidecar_no_holds_idle_exit` |
+| sidecar death watchdog releases held workers + stops arm | `TestHoldWatchdog.test_dead_sidecar_with_holds_releases_and_stops` (real stopped process resumed), `test_sidecar_alive_is_ok`, `test_dead_sidecar_no_holds_keeps_watching_until_arm_complete` |
 | normal +100M cap → ARM_COMPLETE.json (6/6 parked, no failure marker) | `TestMatchedCap.test_all_six_parked_writes_arm_complete` |
 | cap never lets a worker run to ~140M | `test_overshoot_to_140m_fails_the_arm`, `TestContinuationGuard.test_hard_cap_100m` (run/park/fail) |
 | commit timeout: ONE bounded wait per worker (parallel), no re-wait in cleanup, tau pin restored, ack table attached | `TestCommitTimeoutBounded.test_commit_timeout_single_bounded_wait` |
@@ -170,9 +175,9 @@ preflight gaps"; 10 new tests, real processes):
 
 | # | requirement | test(s) |
 |---|---|---|
-| P0-1 A | stop_arm called FROM the process registered as msa_sidecar.pid: all six workers exit AND the caller reaches its post-stop_arm completion marker (never killed mid-cleanup) | `TestStopArmCallerSafe.test_caller_is_sidecar_kills_workers_and_watchdog_sibling` (real python subprocess caller) |
-| P0-1 B | same from a process registered as hold_watchdog.pid | `test_caller_is_watchdog_kills_workers_and_sidecar_sibling` |
-| P0-1 C | the sibling control process (the one that is NOT the caller) IS terminated; holds files cleared (no stale ownership) | asserted inside tests A and B |
+| P0-1 A | stop_arm called FROM the process registered as msa_sidecar.pid: all six workers exit AND the caller reaches its post-stop_arm completion marker (never killed mid-cleanup) | `TestStopArmCallerSafe.test_caller_is_sidecar_kills_workers_and_all_siblings` (real python subprocess caller) |
+| P0-1 B | same from a process registered as hold_watchdog.pid | `test_caller_is_watchdog_kills_workers_and_all_siblings` |
+| P0-1 C | ALL sibling control processes (continuation_guard.pid + msa_sidecar.pid + hold_watchdog.pid minus the caller) ARE terminated; holds files cleared (no stale ownership) | asserted inside tests A/B + `test_caller_is_guard_kills_workers_and_all_siblings` |
 | P0-1 | the real watchdog path (check_once → default stop_arm) is caller-safe end to end | `test_watchdog_check_once_stop_is_caller_safe` |
 | P0-2 1 | guard dies mid-barrier with PARTIAL readiness holds → all frozen pids SIGCONTed, GUARD_DIED_DURING_READINESS.json, arm stopped | `TestReadinessWatchdog.test_guard_death_partial_readiness_releases_and_stops` |
 | P0-2 2 | 6/6 marker written, sidecar dies BEFORE adoption (readiness holds still present) → release all + stop | `test_sidecar_death_before_adoption_releases_and_stops` |
@@ -181,6 +186,20 @@ preflight gaps"; 10 new tests, real processes):
 | P0-2 5 | after normal adoption (readiness gone, MSA_HOLDS + live sidecar) no double release / no false kill | `test_normal_adoption_no_false_action`, `test_guard_alive_during_barrier_is_ok` |
 | P0-2 6 | watchdog calling stop_arm never kills itself first | `TestStopArmCallerSafe.test_watchdog_check_once_stop_is_caller_safe` |
 | P1 | certificate WITHOUT eval_coexistence_ok (old cert, or coexistence failed) rejected by the formal sidecar gate | `TestHoldSmokeCertificate.test_certificate_without_coexistence_proof_rejected`, `test_mismatches_fail_closed` (eval_coexistence_ok=false case) |
+
+Final orchestration patch ("Bound coexistence eval and supervise guard
+lifetime"; 8 new tests, real processes):
+
+| # | requirement | test(s) |
+|---|---|---|
+| A | evaluator writing MBs of stdout/stderr never deadlocks (log file, no unconsumed PIPE) | `TestCoexistenceEvalBounded.test_large_output_does_not_deadlock` (4MB output, exit 0, full log on disk) |
+| A | eval timeout → SIGTERM whole process group → bounded grace → SIGKILL → verified NO survivor | `test_timeout_terminates_whole_process_group` (hung bash + spawned child, both dead, bounded wall time) |
+| A | timeout fails the certificate (ok=false, eval_coexistence_ok=false, eval_timed_out=true, new fields recorded) AND the trainer hold is still released in the finally | `test_timeout_releases_trainer_hold_and_fails_certificate` (real SIGSTOPped trainer resumed after fake timeout) |
+| B | BASE-shape arm (readiness done, no sidecar): guard death → CONTINUATION_GUARD_DIED.json with guard pid, marker presence, holds/busy, six worker frames, timestamp; arm stopped | `TestGuardLifetimeWatchdog.test_base_arm_guard_death_after_readiness_stops_arm` |
+| B | MSA mid-cycle (sidecar ALIVE, MSA_HOLDS non-empty): guard death still fatal; union of holds SIGCONTed | `test_msa_adoption_guard_death_releases_and_stops` |
+| B | guard death with MSA_BUSY.json present (holds empty, COMMITTING window) fails closed | `test_msa_busy_guard_death_fails_closed` |
+| B | after ARM_COMPLETE.json the guard's exit is NEVER reported (dead or missing pid → quiet idle_exit, no marker, no stop) | `test_arm_complete_guard_exit_is_not_reported`, `TestHoldWatchdog.test_dead_sidecar_no_holds_keeps_watching_until_arm_complete` |
+| C | caller registered as continuation_guard.pid survives its own stop_arm; sidecar + watchdog siblings all exit | `TestStopArmCallerSafe.test_caller_is_guard_kills_workers_and_all_siblings` |
 
 CPU tests vs real GPU validation for P1: the eval-coexistence smoke itself
 (Isaac eval cell on GPU4 beside a SIGSTOPped VRAM-holding trainer) is GPU
@@ -207,12 +226,22 @@ launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
            → BASE/GATE: simultaneous SIGCONT of all six
            → MSA: sidecar adopts holds (→ MSA_HOLDS.json), first PRE_EVAL
              from the frozen validated boundary
-failure paths (all caller-safe, workers first, caller last):
-  guard dies in barrier      → watchdog SIGCONTs readiness holds, writes
-                               GUARD_DIED_DURING_READINESS.json, stops arm
+failure paths (all caller-safe, workers first, caller last; stop_arm also
+terminates the continuation_guard/msa_sidecar/hold_watchdog siblings):
+  guard dies ANYWHERE before ARM_COMPLETE.json
+                             → watchdog SIGCONTs the union of readiness/MSA
+                               holds, writes CONTINUATION_GUARD_DIED.json
+                               (plus GUARD_DIED_DURING_READINESS.json when
+                               mid-barrier), stops workers + sidecar
   sidecar dies pre-adoption  → watchdog releases readiness holds, stops arm
   sidecar dies mid-cycle     → watchdog releases MSA holds, writes
                                MSA_SIDECAR_DIED.json, stops arm
+  coexistence eval hangs     → hard --cert-eval-timeout-s (1800s default):
+                               SIGTERM process group → grace → SIGKILL →
+                               survivor check; certificate fails closed and
+                               the frozen trainer is still released
+ARM_COMPLETE.json = normal completion: guard exit after it is never
+reported (no false positive).
 ```
 
 The in-arm `run_hold_smoke.sh` is EXECUTION SMOKE ONLY (it advances the
@@ -223,7 +252,7 @@ four-arm comparison.
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 135 passed |
+| `tests/test_msa_probe.py` | 143 passed |
 | `tests/test_state_bootstrap.py` | 32 passed |
 | `tests/test_pbt_curriculum_p1.py` + `test_curriculum_freeze.py` + `test_env_mastery_curriculum.py` | 22 passed, 1 pre-existing failure (below) |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |

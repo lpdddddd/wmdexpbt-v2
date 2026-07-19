@@ -12,8 +12,8 @@ into READINESS_HOLDS.json; for MSA arms the holds stay after the marker
 until the sidecar adopts them. While READINESS_HOLDS.json is non-empty the
 watchdog NEVER idle-exits:
   - if the guard dies mid-barrier (marker not yet written): SIGCONT every
-    readiness-held pid, write GUARD_DIED_DURING_READINESS.json, stop the
-    arm;
+    readiness-held pid, write CONTINUATION_GUARD_DIED.json (plus the
+    readiness-specific GUARD_DIED_DURING_READINESS.json), stop the arm;
   - if the sidecar dies after the marker but before adoption completes
     (READINESS_HOLDS.json still present): same — release the frozen
     workers and stop the arm.
@@ -27,7 +27,26 @@ owns MSA_HOLDS.json / MSA_BUSY.json:
     un-acked): equally unrecoverable — write MSA_SIDECAR_DIED.json and
     stop the arm;
   - sidecar dead with NO readiness holds, NO MSA holds and NO busy marker:
-    exit quietly (idle_exit).
+    keep watching (the guard is still supervised until ARM_COMPLETE).
+
+CONTINUATION GUARD LIFETIME (all four stateful arms: BASE_STATEFUL,
+GATE_RELAX_STATEFUL, MSA_STATEFUL, MSA_PERMUTED_STATEFUL). After the
+startup grace, continuation_guard.pid is monitored CONTINUOUSLY. As long
+as ARM_COMPLETE.json has not appeared, a missing or dead guard pid is
+FATAL: without the guard nothing enforces the per-worker +cap or the
+stall-reproduction gates, so the arm would train uncontrolled. On guard
+death the watchdog:
+  - SIGCONTs the UNION of readiness and MSA holds (never leaves a worker
+    frozen);
+  - writes CONTINUATION_GUARD_DIED.json recording the guard pid, whether
+    FIRST_TICK_VALIDATED.json exists, the READINESS_HOLDS / MSA_HOLDS /
+    MSA_BUSY contents, the latest committed frame of each of the six
+    workers, and a timestamp;
+  - caller-safely stops the workers and the sidecar (stop_arm skips
+    os.getpid()).
+ARM_COMPLETE.json marks NORMAL completion: after it appears the guard's
+exit is expected and never reported — the watchdog exits quietly
+(idle_exit), releasing any leftover holds first as a last-resort safety.
 
 FAIL CLOSED. A holds file that exists but is unreadable/partially written
 is NEVER treated as the empty set: if its owner is already dead the arm is
@@ -62,7 +81,11 @@ from dexpbt_isaaclab.msa.sidecar import (
 POLL_S = 20.0
 DIED_MARKER = "MSA_SIDECAR_DIED.json"
 READINESS_DIED_MARKER = "GUARD_DIED_DURING_READINESS.json"
+GUARD_DIED_MARKER = "CONTINUATION_GUARD_DIED.json"
 READINESS_MARKER = "FIRST_TICK_VALIDATED.json"
+ARM_COMPLETE_MARKER = "ARM_COMPLETE.json"
+WORKSPACE_DIRNAME = "dexpbt_8gpu_ws"
+NUM_WORKERS = 6
 STARTUP_GRACE_S = 120.0
 
 
@@ -153,13 +176,82 @@ def _default_stop_arm(run_dir: Path, reason: str) -> None:
     stop_arm(run_dir, reason, marker_name=None)
 
 
+def _worker_frames(run_dir: Path,
+                   num_workers: int = NUM_WORKERS) -> dict[str, Optional[int]]:
+    """Latest committed frame per worker (best effort, audit trail)."""
+    from dexpbt_isaaclab.msa.sidecar import latest_committed_meta
+    ws = Path(run_dir) / WORKSPACE_DIRNAME
+    frames: dict[str, Optional[int]] = {}
+    for w in range(num_workers):
+        meta = None
+        try:
+            meta = latest_committed_meta(ws / f"{w:03d}")
+        except Exception:                                # noqa: BLE001
+            meta = None
+        frames[str(w)] = (int(meta["frame"])
+                          if meta and meta.get("frame") is not None else None)
+    return frames
+
+
+def _stop_guard_died(run_dir: Path, guard_pid: Optional[int],
+                     readiness: dict[int, dict], r_corrupt: bool,
+                     holds: dict[int, list[int]], h_corrupt: bool,
+                     busy: Optional[dict], marker_present: bool,
+                     stop_arm_fn: Callable[[Path, str], None]) -> str:
+    """The continuation guard died (or its pid file never appeared after
+    the startup grace) while ARM_COMPLETE.json is absent: release the
+    UNION of readiness and MSA holds, write CONTINUATION_GUARD_DIED.json,
+    caller-safely stop the workers and the sidecar."""
+    released: dict[str, list[int]] = {}
+    for w, rec in sorted(readiness.items()):
+        released.setdefault(str(w), []).extend(
+            _sigcont_pids([int(p) for p in rec.get("pids", [])]))
+    for w, pids in sorted(holds.items()):
+        released.setdefault(str(w), []).extend(_sigcont_pids(list(pids)))
+    (run_dir / GUARD_DIED_MARKER).write_text(json.dumps({
+        "guard_pid": guard_pid,
+        "readiness_marker_present": bool(marker_present),
+        "readiness_holds": {str(w): rec.get("pids", [])
+                            for w, rec in sorted(readiness.items())},
+        "readiness_holds_corrupt": bool(r_corrupt),
+        "msa_holds": {str(w): pids for w, pids in sorted(holds.items())},
+        "msa_holds_corrupt": bool(h_corrupt),
+        "msa_busy": busy,
+        "worker_frames": _worker_frames(run_dir),
+        "sigcont_delivered": released,
+        "time": time.time(),
+        "action": "guard died before ARM_COMPLETE: released the union of "
+                  "readiness/MSA holds, stopping workers and sidecar "
+                  "(no unguarded continuation training)",
+    }, indent=2))
+    if (readiness or r_corrupt) and not marker_present:
+        # keep the readiness-specific record for the barrier window
+        (run_dir / READINESS_DIED_MARKER).write_text(json.dumps({
+            "phase": "guard died during readiness barrier",
+            "dead_pid": guard_pid,
+            "marker_present": bool(marker_present),
+            "readiness_holds_corrupt": bool(r_corrupt),
+            "holds_found": {str(w): rec.get("pids", [])
+                            for w, rec in sorted(readiness.items())},
+            "sigcont_delivered": released,
+            "time": time.time(),
+            "action": "released readiness-frozen workers, stopping the "
+                      "whole arm (guard died before the matched boundary "
+                      "was handed off)",
+        }, indent=2))
+    stop_arm_fn(run_dir, f"continuation guard {guard_pid} died before "
+                         f"ARM_COMPLETE (readiness={sorted(readiness)}, "
+                         f"holds={sorted(holds)}, busy={busy is not None})")
+    return "guard_died"
+
+
 def _stop_readiness(run_dir: Path, readiness: dict[int, dict],
                     *, phase: str, dead_pid: Optional[int],
                     marker_present: bool, corrupt: bool,
                     stop_arm_fn: Callable[[Path, str], None]) -> str:
     """Release the readiness-frozen workers and stop the whole arm because
-    the freeze owner (guard before the marker, sidecar in the pre-adoption
-    window) died. Returns 'released_readiness'."""
+    the sidecar died in the pre-adoption window (guard death anywhere is
+    handled by _stop_guard_died). Returns 'released_readiness'."""
     released: dict[int, list[int]] = {}
     for w, rec in sorted(readiness.items()):
         released[w] = _sigcont_pids([int(p) for p in rec.get("pids", [])])
@@ -209,18 +301,24 @@ def check_once(run_dir: Path,
                *, grace_expired: bool = True) -> str:
     """One watchdog decision. Returns:
 
-    'ok'                 — the relevant owner is alive (or its pid file has
-                           not appeared yet and the startup grace has not
-                           elapsed): keep watching;
-    'idle_exit'          — no readiness holds, sidecar dead, NO MSA holds
-                           and NO busy marker: exit quietly;
+    'ok'                 — every supervised owner is alive (or its pid
+                           file has not appeared yet and the startup grace
+                           has not elapsed): keep watching;
+    'idle_exit'          — ARM_COMPLETE.json present (normal completion):
+                           exit quietly, guard/sidecar exits are expected
+                           and never reported; leftover holds (should not
+                           exist) are released first as a last resort;
+    'guard_died'         — ARM_COMPLETE absent and continuation_guard.pid
+                           missing (after the grace) or dead: SIGCONTed
+                           the union of readiness/MSA holds, wrote
+                           CONTINUATION_GUARD_DIED.json, stopped the arm;
     'released'           — sidecar dead in the cycle phase with MSA holds
                            OR a busy marker (or an unreadable holds/busy
                            file): SIGCONTed the held pids, wrote
                            MSA_SIDECAR_DIED.json, stopped the arm;
-    'released_readiness' — the guard/sidecar died while READINESS_HOLDS
-                           was still active (barrier or pre-adoption
-                           window): SIGCONTed the readiness-frozen pids,
+    'released_readiness' — the sidecar died while READINESS_HOLDS was
+                           still active in the pre-adoption window (guard
+                           alive): SIGCONTed the readiness-frozen pids,
                            wrote GUARD_DIED_DURING_READINESS.json, stopped
                            the arm.
 
@@ -241,27 +339,44 @@ def check_once(run_dir: Path,
     holds, h_corrupt = _read_holds_strict(run_dir)
     busy, b_corrupt = _read_busy(run_dir)
     marker_present = (run_dir / READINESS_MARKER).is_file()
+    arm_complete = (run_dir / ARM_COMPLETE_MARKER).is_file()
+
+    # NORMAL COMPLETION: after ARM_COMPLETE.json the guard (and sidecar)
+    # exiting is expected — never a false alarm. stop_arm has already
+    # cleared the holds; if any survive, release them and leave quietly.
+    if arm_complete:
+        for w, rec in sorted(readiness.items()):
+            _sigcont_pids([int(p) for p in rec.get("pids", [])])
+        for w, pids in sorted(holds.items()):
+            _sigcont_pids(list(pids))
+        return "idle_exit"
+
+    # GUARD LIFETIME: while ARM_COMPLETE is absent a missing/dead guard is
+    # fatal in EVERY phase (readiness, cycle, plain continuation).
+    guard_missing = guard_pid is None
+    if (guard_pid is not None and not guard_alive) or \
+            (guard_missing and grace_expired):
+        return _stop_guard_died(
+            run_dir, guard_pid, readiness, r_corrupt, holds, h_corrupt,
+            busy, marker_present, stop_arm_fn)
 
     # READINESS PHASE: readiness holds present (or unreadable) — the
     # barrier / pre-adoption window is active and we must NEVER idle-exit.
+    # The guard is alive here (checked above), so the only remaining owner
+    # to verify is the sidecar in the MSA pre-adoption window.
     in_readiness = bool(readiness) or r_corrupt
     if in_readiness:
-        # before the marker the GUARD owns the freeze; after it (MSA
-        # pre-adoption window) the SIDECAR must adopt the holds
         if not marker_present:
-            owner_pid, owner_alive = guard_pid, guard_alive
-            phase = "guard died during readiness barrier"
-        else:
-            owner_pid, owner_alive = side_pid, side_alive
-            phase = "sidecar died before readiness hold adoption"
-        if owner_alive:
+            return "ok"                      # barrier active, guard alive
+        if side_alive:
             return "ok"
-        if owner_pid is None and not grace_expired:
+        if side_pid is None and not grace_expired:
             return "ok"                      # startup race: pid not written
         return _stop_readiness(
-            run_dir, readiness, phase=phase, dead_pid=owner_pid,
-            marker_present=marker_present, corrupt=r_corrupt,
-            stop_arm_fn=stop_arm_fn)
+            run_dir, readiness,
+            phase="sidecar died before readiness hold adoption",
+            dead_pid=side_pid, marker_present=marker_present,
+            corrupt=r_corrupt, stop_arm_fn=stop_arm_fn)
 
     # CYCLE PHASE: no readiness holds. Monitor the sidecar.
     if side_pid is None or side_alive:
@@ -272,7 +387,9 @@ def check_once(run_dir: Path,
         return _stop_sidecar(run_dir, side_pid, holds, busy,
                              corrupt=True, stop_arm_fn=stop_arm_fn)
     if not holds and busy is None:
-        return "idle_exit"
+        # sidecar gone with nothing frozen: keep watching — the guard is
+        # still supervised until ARM_COMPLETE appears.
+        return "ok"
     return _stop_sidecar(run_dir, side_pid, holds, busy,
                          corrupt=False, stop_arm_fn=stop_arm_fn)
 
@@ -295,6 +412,10 @@ def main(argv: list[str] | None = None) -> int:
         if state == "released_readiness":
             print("[hold-watchdog] freeze owner died during the readiness "
                   "barrier: released frozen workers, stopped arm")
+            return 3
+        if state == "guard_died":
+            print("[hold-watchdog] continuation guard died before "
+                  "ARM_COMPLETE: released all holds, stopped arm")
             return 3
         if state == "idle_exit":
             print("[hold-watchdog] owner exited cleanly (no holds); done")

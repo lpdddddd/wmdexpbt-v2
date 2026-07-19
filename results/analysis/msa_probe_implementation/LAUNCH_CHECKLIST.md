@@ -85,16 +85,24 @@ launcher, in order:
      children-first/root-last → verify no survivor (robust against a
      supervisor respawning children mid-escalation);
 6. starts the external `hold_watchdog` for EVERY stateful arm (BASE/GATE
-   included). It covers the whole hold lifecycle: if the GUARD dies while
-   workers are readiness-frozen (before the marker, or — MSA arms — after
-   the marker but before adoption), it SIGCONTs the frozen workers,
-   writes `GUARD_DIED_DURING_READINESS.json` and stops the arm; if the
-   SIDECAR dies with `MSA_HOLDS.json` non-empty or `MSA_BUSY.json`
-   present (even with no holds), it releases the workers, writes
-   `MSA_SIDECAR_DIED.json` and stops the arm. It never idle-exits while
-   readiness holds exist and fails closed on an unreadable holds file.
-   All its stops are CALLER-SAFE (stop_arm skips `os.getpid()`, workers
-   first, other control processes after, holds files cleared);
+   included). It covers the whole hold lifecycle AND the guard's whole
+   lifetime: while `ARM_COMPLETE.json` is absent, a missing (past the
+   startup grace) or dead `continuation_guard.pid` is FATAL in every
+   phase — the watchdog SIGCONTs the UNION of readiness/MSA holds, writes
+   `CONTINUATION_GUARD_DIED.json` (guard pid, readiness-marker presence,
+   READINESS_HOLDS / MSA_HOLDS / MSA_BUSY, six worker committed frames,
+   timestamp; plus `GUARD_DIED_DURING_READINESS.json` when mid-barrier)
+   and caller-safely stops workers and sidecar. If the SIDECAR dies with
+   `MSA_HOLDS.json` non-empty or `MSA_BUSY.json` present (even with no
+   holds), it releases the workers, writes `MSA_SIDECAR_DIED.json` and
+   stops the arm; sidecar death in the pre-adoption window releases the
+   readiness holds and stops the arm. It never idle-exits while readiness
+   holds exist, fails closed on an unreadable holds file, and after
+   `ARM_COMPLETE.json` (normal completion) the guard's exit is never a
+   false positive. All its stops are CALLER-SAFE (stop_arm skips
+   `os.getpid()`, SIGCONT holds → failure marker → workers first → other
+   control processes incl. `continuation_guard.pid` → holds files
+   cleared);
 7. (MSA arms) starts the sidecar — which REQUIRES the readiness marker
    AND a validated `HOLD_SMOKE_CERTIFICATE.json` (eval_coexistence_ok
    PLUS git commit, task, wm profile, GPU model, driver must match the
@@ -106,10 +114,16 @@ launcher, in order:
 start_stateful_hold_smoke.sh  (DISPOSABLE, one throwaway worker on GPU 4)
            → hold + frozen-frame proof
            → SHARED-GPU EVAL COEXISTENCE: one real policy-only eval cell
-             (same task, same checkpoint, N=1, 512 envs) on GPU 4 WHILE
-             the frozen trainer holds its VRAM — must exit cleanly
+             (same task, same checkpoint, N=1, CERT_EVAL_NUM_ENVS=512
+             envs) on GPU 4 WHILE the frozen trainer holds its VRAM —
+             must exit cleanly WITHIN CERT_EVAL_TIMEOUT_S (default
+             1800 s; stdout/stderr go to cert_eval.log in the disposable
+             run_dir, never an unconsumed PIPE; on timeout the whole
+             evaluator process group is SIGTERM→SIGKILLed, survivors
+             verified gone, and the trainer hold is STILL released)
            → HOLD_SMOKE_CERTIFICATE.json (ok=true AND
-             eval_coexistence_ok=true)
+             eval_coexistence_ok=true AND eval_timed_out=false AND
+             eval_survivor_pids=[])
 launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
            → hold_watchdog started (guard + sidecar + readiness coverage)
            → sidecar validates the certificate at startup (fail closed,
@@ -265,6 +279,13 @@ bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
   - `MSA_SIDECAR_DIED.json` — the sidecar died mid-hold OR mid-cycle
     (busy marker present, even with no holds) — workers were SIGCONTed
     and the arm was stopped;
+  - `CONTINUATION_GUARD_DIED.json` — the guard died (or its pid file
+    never appeared past the startup grace) at ANY point before
+    `ARM_COMPLETE.json`; records guard pid, readiness-marker presence,
+    READINESS_HOLDS / MSA_HOLDS / MSA_BUSY and the six workers' latest
+    committed frames; the watchdog SIGCONTed the union of holds and
+    stopped workers + sidecar. Guard exit AFTER `ARM_COMPLETE.json` is
+    normal and never produces this marker;
   - a corrupt/unreadable holds file with a dead owner is treated as
     fail-closed (arm stopped), never as "no holds";
 - `COMMIT_TIMEOUT.json` — a durable tolerance commit did not confirm
@@ -294,6 +315,9 @@ bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
   readiness barrier / pre-adoption window; the watchdog released the
   frozen workers and stopped the arm; inspect `continuation_guard.log`
   (or `msa_sidecar.log` if the marker says the sidecar was the owner);
+- `CONTINUATION_GUARD_DIED.json` → the guard died before ARM_COMPLETE;
+  the watchdog released every hold and stopped the whole arm; inspect
+  `continuation_guard.log` for the crash before any relaunch;
 - `COMMIT_TIMEOUT.json` → arm stopped; check whether the worker's trainer
   was alive and committing ticks;
 - any worker's ledger frame regresses (must be monotonic) → kill arm,

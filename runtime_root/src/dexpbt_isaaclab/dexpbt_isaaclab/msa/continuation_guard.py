@@ -627,9 +627,10 @@ def stop_arm(run_dir: Path, reason: str,
        queued SIGTERM can act;
     2. write the stop marker (if any);
     3. terminate every worker's FULL process tree (escalating to SIGKILL);
-    4. terminate the OTHER control processes (sidecar, watchdog), NEVER
-       the caller — a pid equal to os.getpid() is skipped so cleanup can
-       finish and the caller exits naturally after stop_arm returns;
+    4. terminate the OTHER control processes (continuation guard, sidecar,
+       watchdog), NEVER the caller — a pid equal to os.getpid() is skipped
+       so cleanup can finish and the caller exits naturally after stop_arm
+       returns;
     5. delete MSA_HOLDS.json / READINESS_HOLDS.json (ownership is over —
        no stale record can mislead a restarted watchdog/guard).
     """
@@ -647,7 +648,8 @@ def stop_arm(run_dir: Path, reason: str,
         if pid is not None and pid != self_pid:
             _terminate_tree(pid, skip_pids={self_pid})
     # then the OTHER control processes; skip the caller's own pid
-    for pid_name in ("msa_sidecar.pid", "hold_watchdog.pid"):
+    for pid_name in ("continuation_guard.pid", "msa_sidecar.pid",
+                     "hold_watchdog.pid"):
         pf = run_dir / pid_name
         if not pf.is_file():
             continue

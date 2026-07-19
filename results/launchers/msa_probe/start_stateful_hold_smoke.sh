@@ -227,6 +227,7 @@ python -u -m dexpbt_isaaclab.msa.sidecar \
   --cert-out "$CERT_OUT" \
   --cert-gpu-index "$SMOKE_GPU" \
   --cert-eval-num-envs "${CERT_EVAL_NUM_ENVS:-512}" \
+  --cert-eval-timeout-s "${CERT_EVAL_TIMEOUT_S:-1800}" \
   --wm-profile "cser_dexpbt_conservative" \
   2>&1 | tee -a "$LOG"
 RC="${PIPESTATUS[0]}"
