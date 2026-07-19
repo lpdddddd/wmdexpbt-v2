@@ -24,6 +24,7 @@ SOURCE_RUN="/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conser
 RECOVER_LIST="/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/001/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/002/000161.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/003/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth,/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/005/000160.pth"
 TOLERANCE_LIST="0.023112487509668322,0.020284112534534084,0.02548998759231097,0.023658390476202464,0.019269906907807378,0.02130811615915868"
 CLOCK_LIST="691809:711360,711360:711360,715040:715040,682033:711360,711360:711360,711360:711360"
+LINEAGE_LIST="c91ec3ca-f19a-4016-86fb-4bd28d9eb2b5:200000000:4800000000,5931b868-2ff2-4b87-b2a0-b20027f6701f:200000000:4800000000,cff1c0dd-4a23-4f1a-bf6a-70e69f131329:640000000:4840000000,c88240b9-db78-49ab-ac0b-a27fd9ece951:200000000:4800000000,03ff385c-49de-43fd-80cc-8814bb7d06d7:200000000:4800000000,14838080-94c0-4f8d-b9e9-7565cf0993b1:200000000:4800000000"
 
 export DEXPBT_MAX_ACTIVE="${DEXPBT_MAX_ACTIVE:-6}"
 export DEXPBT_INTER_LAUNCH_DELAY_S="${DEXPBT_INTER_LAUNCH_DELAY_S:-180}"
@@ -94,6 +95,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --recover-checkpoint-per-policy "$RECOVER_LIST" \
   --tolerance-resume-per-policy "$TOLERANCE_LIST" \
   --curriculum-clock-resume-per-policy "$CLOCK_LIST" \
+  --lineage-resume-per-policy "$LINEAGE_LIST" \
   --extra \
   --seed "$BASE_SEED" \
   --pbt_ranking_metric success_aware_r_meta \

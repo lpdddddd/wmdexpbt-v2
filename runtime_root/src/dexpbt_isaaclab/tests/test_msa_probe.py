@@ -1064,10 +1064,12 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
             self.assertIn("--verify-only", text)
             self.assertIn("REFUSING TO LAUNCH: bootstrap verification",
                           text)
-            # explicit tolerance + env-clock resume (a bare --checkpoint
-            # resets tolerance AND restart-step-relative gates)
+            # explicit tolerance + env-clock + lineage resume (a bare
+            # --checkpoint resets tolerance, restart-step-relative gates
+            # AND mints a fresh lineage the guard rejects)
             self.assertIn("--tolerance-resume-per-policy", text)
             self.assertIn("--curriculum-clock-resume-per-policy", text)
+            self.assertIn("--lineage-resume-per-policy", text)
             # hard cap guard loop at the real cadence budget
             self.assertIn("continuation_guard.log", text)
             self.assertIn("--cap-frames 480000000", text)
@@ -1115,6 +1117,7 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
         self.assertIn('SMOKE_GPU="${SMOKE_GPU:-4}"', disp)
         self.assertIn("--num-envs 8192", disp)
         self.assertIn("--wm-profile", disp)
+        self.assertIn("--lineage-resume-per-policy", disp)
         self.assertIn("stop_arm", disp)   # disposable run torn down
 
     def test_six_gpu_metadata_recorded(self):

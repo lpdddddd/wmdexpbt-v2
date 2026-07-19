@@ -516,6 +516,33 @@ training-parameter or bootstrap-semantics change):
    naturally) → clear stale readiness/MSA holds files. Verified with real
    subprocess callers registered as sidecar, watchdog AND guard pids.
 
+## 5g. Source lineage propagation ("Propagate source lineage through stateful bootstrap", 2026-07-20)
+
+Root cause found by the first N=16 pilot: the guard's first-tick
+validation requires the committed meta's `lineage_id` to equal the
+manifest lineage, but a per-policy warm start never propagated it — a
+fresh workspace has no prior meta for the observer's fallback, so the
+observer minted a FRESH uuid and the guard (correctly, per spec:
+"lineage unchanged") stopped the arm with `GUARD_FAILED`. The same pilot
+proved the tolerance side of the stall reproduction works: worker 0's
+first committed tick held EXACTLY the source tolerance
+(0.023112487509668322).
+
+Fix (pure bootstrap plumbing, no algorithm change):
+
+1. **`launch_pbt.py`**: new `--lineage-resume-per-policy`
+   (`lineage_id:lineage_start_pf:weight_age_frame` triples, fail-closed
+   parser, requires `--tolerance-resume-per-policy`). Warm-started
+   policies now receive the pre-existing train.py flags
+   `--pbt_lineage_id_resume` / `--pbt_lineage_start_pf_resume` /
+   `--pbt_weight_age_frame_resume`, which the observer already consumed
+   on supervisor restarts.
+2. **`arms.py`**: `_lineage_list_from_tips` builds the list from each
+   tip checkpoint's sibling meta JSON, failing closed on a missing meta,
+   a missing field, or a meta/manifest lineage mismatch. Wired into all
+   four stateful arm launchers (`LINEAGE_LIST`) and the disposable
+   certificate smoke launcher.
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer

@@ -266,6 +266,43 @@ def parse_clock_resume_per_policy(
     return pairs
 
 
+def parse_lineage_resume_per_policy(
+    spec: str, num_policies: int
+) -> list[tuple[str, int, int]]:
+    """Parse --lineage-resume-per-policy:
+    'lineage_id:lineage_start_pf:weight_age_frame,...'.
+
+    Returns one (lineage_id, lineage_start_pf, weight_age_frame) triple per
+    policy, straight from the source run's tip meta. Without it a warm
+    start mints a FRESH lineage uuid (there is no prior meta in a fresh
+    workspace for the observer's fallback), which breaks state-faithful
+    continuation provenance. Raises on any malformed entry — a
+    half-restored lineage silently changes PBT ranking clocks.
+    """
+    triples: list[tuple[str, int, int]] = []
+    entries = [e.strip() for e in str(spec).split(",")]
+    if len(entries) != num_policies:
+        raise ValueError(
+            f"--lineage-resume-per-policy needs {num_policies} "
+            f"entries, got {len(entries)}")
+    for i, ent in enumerate(entries):
+        parts = ent.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"lineage resume entry {i} must be "
+                f"'lineage_id:start_pf:weight_age_frame', got {ent!r}")
+        lineage_id = parts[0].strip()
+        if not lineage_id:
+            raise ValueError(f"lineage resume entry {i}: empty lineage_id")
+        start_pf, weight_age = int(parts[1]), int(parts[2])
+        if start_pf < 0 or weight_age < 0:
+            raise ValueError(
+                f"lineage resume entry {i}: start_pf/weight_age_frame must "
+                f"be >= 0, got {ent!r}")
+        triples.append((lineage_id, start_pf, weight_age))
+    return triples
+
+
 def _read_status(run_dir: Path) -> dict[str, str]:
     status_path = run_dir / "status.txt"
     if not status_path.is_file():
@@ -771,6 +808,19 @@ def main() -> None:
         "restart_step) keep their source meaning on a state-faithful "
         "continuation. Requires --tolerance-resume-per-policy.",
     )
+    parser.add_argument(
+        "--lineage-resume-per-policy",
+        type=str,
+        default="",
+        help="Comma-separated 'lineage_id:lineage_start_pf:"
+        "weight_age_frame' triples, one per policy, from the source run's "
+        "tip metas. Passed as --pbt_lineage_id_resume / "
+        "--pbt_lineage_start_pf_resume / --pbt_weight_age_frame_resume so "
+        "a state-faithful continuation keeps the SOURCE lineage instead of "
+        "minting a fresh uuid on first launch (a fresh workspace has no "
+        "prior meta for the observer's fallback). Requires "
+        "--tolerance-resume-per-policy.",
+    )
     args = parser.parse_args()
 
     recover_per_policy: list[str] = []
@@ -823,6 +873,17 @@ def main() -> None:
             )
         clock_resume_per_policy = parse_clock_resume_per_policy(
             args.curriculum_clock_resume_per_policy, args.num_policies
+        )
+
+    lineage_resume_per_policy: list[tuple[str, int, int]] = []
+    if str(args.lineage_resume_per_policy or "").strip():
+        if not tolerance_resume_per_policy:
+            raise ValueError(
+                "--lineage-resume-per-policy requires "
+                "--tolerance-resume-per-policy"
+            )
+        lineage_resume_per_policy = parse_lineage_resume_per_policy(
+            args.lineage_resume_per_policy, args.num_policies
         )
 
     train_root = Path(args.train_root).resolve()
@@ -948,6 +1009,11 @@ def main() -> None:
                 lcu, fsr = clock_resume_per_policy[policy_idx]
                 cmd.append(f"--last_curriculum_update_resume={lcu}")
                 cmd.append(f"--frame_since_restart_resume={fsr}")
+            if lineage_resume_per_policy:
+                lid, spf, waf = lineage_resume_per_policy[policy_idx]
+                cmd.append(f"--pbt_lineage_id_resume={lid}")
+                cmd.append(f"--pbt_lineage_start_pf_resume={spf}")
+                cmd.append(f"--pbt_weight_age_frame_resume={waf}")
         print(f"Launch policy {policy_idx}: {' '.join(cmd)}", flush=True)
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = gpu

@@ -42,10 +42,14 @@ launcher, in order:
 3. runs `continuation_guard --verify-only` and aborts on any failure
    (checkpoint missing/tampered, mapping error, empty manifest field);
 4. passes `--recover-checkpoint-per-policy`,
-   `--tolerance-resume-per-policy` AND
+   `--tolerance-resume-per-policy`,
    `--curriculum-clock-resume-per-policy` (tolerance + restart-step clock,
    so `post_shrink_consolidation_until_restart_step` keeps its source
-   meaning); train.py writes a structured
+   meaning) AND `--lineage-resume-per-policy` (source
+   `lineage_id:lineage_start_pf:weight_age_frame` from each tip meta —
+   without it the observer mints a fresh lineage uuid in the fresh
+   workspace and the guard's first-tick lineage check fails, the
+   2026-07-20 pilot `GUARD_FAILED`); train.py writes a structured
    `policy_XX/RESUME_APPLIED.json` audit of what was applied;
 5. starts the `continuation_guard` loop:
    - **6/6 TRUE READINESS BARRIER + STALL REPRODUCTION GATE** — each

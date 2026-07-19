@@ -297,6 +297,7 @@ SOURCE_RUN="{source_run}"
 RECOVER_LIST="{recover_list}"
 TOLERANCE_LIST="{tolerance_list}"
 CLOCK_LIST="{clock_list}"
+LINEAGE_LIST="{lineage_list}"
 
 export DEXPBT_MAX_ACTIVE="${{DEXPBT_MAX_ACTIVE:-6}}"
 export DEXPBT_INTER_LAUNCH_DELAY_S="${{DEXPBT_INTER_LAUNCH_DELAY_S:-180}}"
@@ -367,6 +368,7 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
   --recover-checkpoint-per-policy "$RECOVER_LIST" \\
   --tolerance-resume-per-policy "$TOLERANCE_LIST" \\
   --curriculum-clock-resume-per-policy "$CLOCK_LIST" \\
+  --lineage-resume-per-policy "$LINEAGE_LIST" \\
   --extra \\
   --seed "$BASE_SEED" \\
 {base_flags}  >>"$LOG" 2>&1 &
@@ -583,6 +585,7 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
   --profile-per-policy "{profile}" \\
   --recover-checkpoint-per-policy "{smoke_ckpt}" \\
   --tolerance-resume-per-policy "{smoke_tol}" \\
+  --lineage-resume-per-policy "{smoke_lineage}" \\
   --extra \\
   --seed 42 \\
 {base_flags}  >>"$LOG" 2>&1 &
@@ -689,6 +692,41 @@ def _clock_list_from_source(source_run: Path, num_workers: int = 6) -> str:
     return ",".join(pairs)
 
 
+def _lineage_list_from_tips(tips: list["TipCheckpoint"]) -> str:
+    """Per-policy 'lineage_id:lineage_start_pf:weight_age_frame' resume
+    triples from each tip checkpoint's sibling meta JSON (fail closed on a
+    missing meta, a missing field, or a meta/manifest lineage mismatch).
+
+    Without this a warm-started worker mints a FRESH lineage uuid at its
+    first committed tick (fresh workspace = no prior meta for the
+    observer's fallback) and the continuation guard rejects it against the
+    manifest lineage.
+    """
+    triples = []
+    for t in tips:
+        meta_path = Path(t.checkpoint_path).with_suffix(".json")
+        if not meta_path.is_file():
+            raise FileNotFoundError(
+                f"worker {t.worker_id}: tip meta missing: {meta_path}")
+        meta = json.loads(meta_path.read_text())
+        lineage = str(meta.get("lineage_id") or "")
+        if not lineage:
+            raise ValueError(
+                f"worker {t.worker_id}: tip meta has no lineage_id")
+        if t.lineage_id and lineage != t.lineage_id:
+            raise ValueError(
+                f"worker {t.worker_id}: tip meta lineage {lineage} != "
+                f"manifest lineage {t.lineage_id}")
+        start_pf = meta.get("lineage_start_pf")
+        weight_age = meta.get("weight_age_frame")
+        if start_pf is None or weight_age is None:
+            raise ValueError(
+                f"worker {t.worker_id}: tip meta missing lineage_start_pf "
+                f"or weight_age_frame")
+        triples.append(f"{lineage}:{int(start_pf)}:{int(weight_age)}")
+    return ",".join(triples)
+
+
 def write_arm_launchers(out_dir: Path, manifest_csv: Path,
                         original_launcher: Path,
                         source_run: Path) -> list[Path]:
@@ -698,6 +736,7 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
     recover_list = ",".join(t.checkpoint_path for t in tips)
     tolerance_list = ",".join(f"{t.live_tolerance!r}" for t in tips)
     clock_list = _clock_list_from_source(source_run)
+    lineage_list = _lineage_list_from_tips(tips)
     out_dir.mkdir(parents=True, exist_ok=True)
     cert_default = str((out_dir / "HOLD_SMOKE_CERTIFICATE.json").resolve())
     written: list[Path] = []
@@ -720,6 +759,7 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
             arm=arm, arm_lower=arm.lower(), recover_list=recover_list,
             tolerance_list=tolerance_list,
             clock_list=clock_list,
+            lineage_list=lineage_list,
             source_run=str(source_run),
             cap_frames=CONTINUATION_FRAMES,
             max_iter=CONTINUATION_MAX_ITER,
@@ -747,6 +787,7 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
         profile=BASE_PROFILE,
         smoke_ckpt=smoke_tip.checkpoint_path,
         smoke_tol=f"{smoke_tip.live_tolerance!r}",
+        smoke_lineage=_lineage_list_from_tips([smoke_tip]),
         base_flags=_base_flags_block("BASE_STATEFUL", original_launcher)))
     disposable_path.chmod(0o755)
     written.append(disposable_path)

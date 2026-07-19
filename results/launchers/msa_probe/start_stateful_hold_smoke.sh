@@ -56,6 +56,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --profile-per-policy "cser_dexpbt_conservative" \
   --recover-checkpoint-per-policy "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth" \
   --tolerance-resume-per-policy "0.019269906907807378" \
+  --lineage-resume-per-policy "03ff385c-49de-43fd-80cc-8814bb7d06d7:200000000:4800000000" \
   --extra \
   --seed 42 \
   --pbt_ranking_metric success_aware_r_meta \

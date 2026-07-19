@@ -630,5 +630,91 @@ class TestClockResume(unittest.TestCase):
                              ",".join(["691809:711360"] * 6))
 
 
+class TestLineageResume(unittest.TestCase):
+    """A bare per-policy --checkpoint warm start mints a FRESH lineage
+    uuid at the first committed tick (fresh workspace = no prior meta for
+    the observer fallback), which the continuation guard rejects against
+    the manifest lineage — the 2026-07-20 pilot GUARD_FAILED. The source
+    lineage must be propagated explicitly."""
+
+    def test_parse_valid(self):
+        from dexpbt_isaaclab.scripts.launch_pbt import (
+            parse_lineage_resume_per_policy,
+        )
+        spec = ",".join(f"lin{w}:200000000:480000000{w}" for w in range(6))
+        triples = parse_lineage_resume_per_policy(spec, 6)
+        self.assertEqual(len(triples), 6)
+        self.assertEqual(triples[0], ("lin0", 200_000_000, 4_800_000_000))
+
+    def test_parse_rejects_bad_shapes(self):
+        from dexpbt_isaaclab.scripts.launch_pbt import (
+            parse_lineage_resume_per_policy,
+        )
+        with self.assertRaises(ValueError):
+            parse_lineage_resume_per_policy("a:1:2,b:3:4", 6)  # wrong count
+        with self.assertRaises(ValueError):
+            parse_lineage_resume_per_policy("a:1", 1)          # bad entry
+        with self.assertRaises(ValueError):
+            parse_lineage_resume_per_policy(":1:2", 1)         # empty id
+        with self.assertRaises(ValueError):
+            parse_lineage_resume_per_policy("a:-1:2", 1)       # negative
+
+    def _tips(self, root: Path, *, lineage_mismatch: bool = False,
+              drop_fields: bool = False):
+        from dexpbt_isaaclab.msa.arms import TipCheckpoint
+        tips = []
+        for w in range(2):
+            ws = root / f"{w:03d}"
+            ws.mkdir(parents=True)
+            ckpt = ws / "000160.pth"
+            ckpt.write_bytes(b"ckpt")
+            meta = {"frame": 5_000_000_000, "lineage_id": f"lin{w}",
+                    "lineage_start_pf": 200_000_000,
+                    "weight_age_frame": 4_800_000_000}
+            if drop_fields:
+                meta.pop("lineage_start_pf")
+            (ws / "000160.json").write_text(json.dumps(meta))
+            tips.append(TipCheckpoint(
+                worker_id=w, iteration=160, frame=5_000_000_000,
+                checkpoint_path=str(ckpt), live_tolerance=0.023,
+                lineage_id=("other" if lineage_mismatch else f"lin{w}")))
+        return tips
+
+    def test_arms_lineage_list_from_tips(self):
+        from dexpbt_isaaclab.msa.arms import _lineage_list_from_tips
+        with tempfile.TemporaryDirectory() as td:
+            tips = self._tips(Path(td))
+            self.assertEqual(
+                _lineage_list_from_tips(tips),
+                "lin0:200000000:4800000000,lin1:200000000:4800000000")
+
+    def test_arms_lineage_list_fails_closed(self):
+        from dexpbt_isaaclab.msa.arms import _lineage_list_from_tips
+        with tempfile.TemporaryDirectory() as td:
+            tips = self._tips(Path(td) / "a", lineage_mismatch=True)
+            with self.assertRaises(ValueError):
+                _lineage_list_from_tips(tips)   # meta != manifest lineage
+            tips = self._tips(Path(td) / "b", drop_fields=True)
+            with self.assertRaises(ValueError):
+                _lineage_list_from_tips(tips)   # missing lineage_start_pf
+            tips = self._tips(Path(td) / "c")
+            Path(tips[0].checkpoint_path).with_suffix(".json").unlink()
+            with self.assertRaises(FileNotFoundError):
+                _lineage_list_from_tips(tips)   # meta file missing
+
+    def test_launch_pbt_injects_lineage_resume_flags(self):
+        """The per-policy warm-start command line must carry the three
+        train.py resume flags (source-level check: the injection block
+        exists and maps triple -> flags)."""
+        import inspect
+        import dexpbt_isaaclab.scripts.launch_pbt as lp
+        src = inspect.getsource(lp)
+        for flag in ("--pbt_lineage_id_resume=",
+                     "--pbt_lineage_start_pf_resume=",
+                     "--pbt_weight_age_frame_resume="):
+            self.assertIn(flag, src)
+        self.assertIn("lineage_resume_per_policy[policy_idx]", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

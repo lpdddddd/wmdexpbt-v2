@@ -7,8 +7,10 @@ blocker patch ("Close MSA smoke, commit, and cap races"), the
 state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
 arms"), the synchronization pass ("Make readiness a hold barrier with
 sidecar adoption"), the watchdog/preflight pass ("Close readiness
-watchdog and shared-GPU preflight gaps") and the final orchestration
-patch ("Bound coexistence eval and supervise guard lifetime").
+watchdog and shared-GPU preflight gaps"), the final orchestration
+patch ("Bound coexistence eval and supervise guard lifetime") and the
+lineage propagation fix ("Propagate source lineage through stateful
+bootstrap", 2026-07-20).
 Environment: isaaclab311 python
 (CPU only; no Isaac import anywhere in the MSA package or its tests; no
 GPU used).
@@ -24,7 +26,21 @@ Three evidence tiers, kept separate on purpose:
    `LAUNCH_CHECKLIST.md`.
 
 ## MSA suite: `tests/test_msa_probe.py` — 143/143 passed
-## Bootstrap suite: `tests/test_state_bootstrap.py` — 32/32 passed
+## Bootstrap suite: `tests/test_state_bootstrap.py` — 37/37 passed
+
+Lineage propagation fix (2026-07-20): 5 new tests in
+`TestLineageResume` — `parse_lineage_resume_per_policy` valid/reject
+shapes, `_lineage_list_from_tips` happy path + fail-closed (meta missing,
+field missing, meta/manifest lineage mismatch), and a source-level check
+that `launch_pbt` injects `--pbt_lineage_id_resume` /
+`--pbt_lineage_start_pf_resume` / `--pbt_weight_age_frame_resume` on
+per-policy warm starts. Root cause covered: a bare per-policy
+`--checkpoint` mints a FRESH lineage uuid at the first committed tick
+(fresh workspace = no prior meta for the observer fallback), which the
+continuation guard rejects against the manifest lineage — the 2026-07-20
+pilot `GUARD_FAILED`. Launcher-content assertions extended to require
+`--lineage-resume-per-policy` in all stateful arm launchers and the
+disposable certificate smoke launcher.
 
 (72 retained from the pilot-integration pass + 23 safety-patch tests +
 15 orchestration-blocker tests, updated in place for the real 80M cadence,
