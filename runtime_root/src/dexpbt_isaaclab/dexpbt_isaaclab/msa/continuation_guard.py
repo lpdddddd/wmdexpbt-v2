@@ -29,8 +29,17 @@ MSA_STATEFUL / MSA_PERMUTED_STATEFUL:
      majority broke out of the source stall band on their own, the restore
      did not reproduce the stalled regime: STATE_FIDELITY_FAILED.json is
      written and the whole arm stops — MSA must not start.
-     Only when every check passes is FIRST_TICK_VALIDATED.json written
-     (atomically, 6/6 only) with the per-worker reproduction record.
+     READINESS IS A TRUE BARRIER: the moment a worker passes its
+     validations it is SIGSTOP-frozen (full tree, verified 'T' state,
+     persisted to READINESS_HOLDS.json) at its validated committed
+     boundary; validated workers stay frozen until 6/6 are ready. Any
+     failure SIGCONTs every readiness hold and stops the arm. Only when
+     every check passes is FIRST_TICK_VALIDATED.json written (atomically,
+     6/6 only) with the per-worker reproduction record. Non-MSA arms then
+     release all six SIMULTANEOUSLY (matched boundaries); MSA arms leave
+     the holds in place for the sidecar to adopt (READINESS_HOLDS.json ->
+     MSA_HOLDS.json) so the first PRE snapshot is taken at exactly the
+     validated frame.
    - MATCHED WORKER-LOCAL CAP: target[w] = baseline[w] + cap (default
      6 committed ticks = 480M at the REAL stage-3 cadence of 80M/tick;
      the base 20M pbt_interval is NOT the committed quantum). Each worker
@@ -66,9 +75,12 @@ from typing import Optional
 from dexpbt_isaaclab.msa.sidecar import (
     BUSY_FILE,
     HOLDS_FILE,
+    READINESS_HOLDS_FILE,
     _descendants,
+    _proc_state,
     latest_committed_meta,
     read_holds_file,
+    read_readiness_holds,
 )
 
 # REAL committed cadence: base pbt_interval 20M x stage-3 interval mult 4.0
@@ -94,6 +106,11 @@ NUM_WORKERS = 6
 MIN_REPRODUCED_WORKERS = 4
 TERM_GRACE_S = 20.0
 KILL_VERIFY_S = 10.0
+HOLD_VERIFY_TIMEOUT_S = 10.0
+# Arms whose sidecar ADOPTS the readiness holds (guard must NOT release
+# the frozen workers after writing the readiness marker).
+MSA_ARM_NAMES = ("MSA", "MSA_PERMUTED_ROUTE",
+                 "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL")
 
 
 def ckpt_head_hash(path: Path, head_bytes: int = 4 * 1024 * 1024) -> str:
@@ -335,26 +352,152 @@ def cap_action(entry: dict, meta: dict,
 
 
 # ---------------------------------------------------------------------------
+# readiness holds: the TRUE 6/6 barrier (workers frozen at their validated
+# first continuation tick until all six are ready)
+# ---------------------------------------------------------------------------
+
+def _write_readiness_holds(run_dir: Path, holds: dict[int, dict]) -> None:
+    path = Path(run_dir) / READINESS_HOLDS_FILE
+    if not holds:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(
+        {str(w): rec for w, rec in sorted(holds.items())}, indent=2))
+    os.replace(tmp, path)
+
+
+def _stopped(pid: int) -> bool:
+    return _proc_state(pid) in ("T", "t")
+
+
+def _freeze_worker_tree(run_dir: Path, worker_id: int,
+                        verify_timeout_s: float = HOLD_VERIFY_TIMEOUT_S,
+                        ) -> list[int]:
+    """SIGSTOP the worker's full process tree (children first, so the
+    supervisor cannot respawn mid-freeze) and VERIFY every surviving PID
+    reached the stopped state. On verification failure everything is
+    SIGCONTed and RuntimeError raised (fail closed)."""
+    root = _worker_root_pid(run_dir, worker_id)
+    if root is None:
+        raise RuntimeError(f"worker {worker_id}: no pid file — cannot "
+                           "freeze for the readiness barrier")
+    pids = [root] + _descendants(root)
+    for pid in reversed(pids):                  # children first, root last
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except (ProcessLookupError, OSError):
+            pass
+    deadline = time.monotonic() + max(0.0, verify_timeout_s)
+    pending = list(pids)
+    while pending:
+        pending = [p for p in pending if _alive(p) and not _stopped(p)]
+        if not pending:
+            break
+        if time.monotonic() > deadline:
+            for pid in reversed(pids):          # undo: never leave partial
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except (ProcessLookupError, OSError):
+                    pass
+            raise RuntimeError(
+                f"worker {worker_id}: pids {pending} did not reach the "
+                "stopped state within the verify window")
+        time.sleep(0.2)
+    return pids
+
+
+def hold_worker_for_readiness(run_dir: Path, workspace: Path,
+                              worker_id: int) -> tuple[dict, dict]:
+    """Freeze ONE worker at its first validated continuation tick and
+    persist the hold to READINESS_HOLDS.json.
+
+    Returns (hold_record, post-hold committed meta). Freezing FIRST and
+    reading the committed meta AFTER guarantees the recorded
+    validated_frame is the frame the worker is actually parked at (no tick
+    can slip in between); the caller re-validates on the returned meta.
+    Idempotent: an existing record whose PIDs are all still stopped is
+    reused (guard restart mid-readiness)."""
+    existing = read_readiness_holds(run_dir).get(int(worker_id))
+    if existing and existing.get("pids") and \
+            all(_stopped(int(p)) for p in existing["pids"]):
+        meta = latest_committed_meta(workspace / f"{worker_id:03d}") or {}
+        return existing, meta
+    pids = _freeze_worker_tree(run_dir, worker_id)
+    meta = latest_committed_meta(workspace / f"{worker_id:03d}") or {}
+    cur = meta.get("curriculum") or {}
+    record = {
+        "worker_id": int(worker_id),
+        "root_pid": int(pids[0]),
+        "pids": [int(p) for p in pids],
+        "validated_frame": int(meta.get("frame", -1)),
+        "validated_tolerance": float(
+            cur.get("success_tolerance", float("nan"))),
+        "lineage_id": str(meta.get("lineage_id") or ""),
+        "hold_timestamp": time.time(),
+    }
+    holds = read_readiness_holds(run_dir)
+    holds[int(worker_id)] = record
+    _write_readiness_holds(run_dir, holds)
+    return record, meta
+
+
+def release_readiness_holds(run_dir: Path,
+                            worker_ids: Optional[list[int]] = None) -> None:
+    """SIGCONT readiness-held workers (children before supervisor/root per
+    worker) and drop their records. With worker_ids=None ALL six are
+    released in one pass — the simultaneous release for BASE/GATE arms."""
+    holds = read_readiness_holds(run_dir)
+    ids = sorted(holds) if worker_ids is None else \
+        [int(w) for w in worker_ids if int(w) in holds]
+    for w in ids:
+        for pid in reversed([int(p) for p in holds[w].get("pids", [])]):
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except (ProcessLookupError, OSError):
+                pass
+    for w in ids:
+        holds.pop(w, None)
+    _write_readiness_holds(run_dir, holds)
+
+
+# ---------------------------------------------------------------------------
 # stop actions (SIGCONT -> SIGTERM -> grace -> re-enumerate -> SIGKILL)
 # ---------------------------------------------------------------------------
 
 def _sigcont_held_pids(run_dir: Path) -> None:
-    """SIGCONT every PID recorded in MSA_HOLDS.json (a stopped process
-    queues SIGTERM without acting on it). ONLY for whole-arm stops."""
+    """SIGCONT every PID recorded in MSA_HOLDS.json AND
+    READINESS_HOLDS.json (a stopped process queues SIGTERM without acting
+    on it). ONLY for whole-arm stops."""
     for pids in read_holds_file(run_dir).values():
         for pid in reversed(pids):              # children first, root last
             try:
                 os.kill(int(pid), signal.SIGCONT)
             except (ProcessLookupError, OSError):
                 pass
+    for rec in read_readiness_holds(run_dir).values():
+        for pid in reversed([int(p) for p in rec.get("pids", [])]):
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except (ProcessLookupError, OSError):
+                pass
 
 
 def _sigcont_worker_pids(run_dir: Path, worker_id: int) -> None:
-    """SIGCONT ONLY the pids MSA_HOLDS.json records for one worker —
-    a single-worker park must never wake the other held workers."""
+    """SIGCONT ONLY the pids MSA_HOLDS.json / READINESS_HOLDS.json record
+    for one worker — a single-worker park must never wake the others."""
     for pid in reversed(read_holds_file(run_dir).get(int(worker_id), [])):
         try:
             os.kill(int(pid), signal.SIGCONT)
+        except (ProcessLookupError, OSError):
+            pass
+    rec = read_readiness_holds(run_dir).get(int(worker_id)) or {}
+    for pid in reversed([int(p) for p in rec.get("pids", [])]):
+        try:
+            os.kill(pid, signal.SIGCONT)
         except (ProcessLookupError, OSError):
             pass
 
@@ -385,42 +528,59 @@ def _signal_all(pids: list[int], sig: int) -> None:
             pass
 
 
+def _kill_order(root_pid: int) -> list[int]:
+    """The signalling order for one worker tree: deepest descendants
+    FIRST, supervisor/root LAST. _descendants returns parent-before-child
+    per branch, so reversing [root, *descendants] yields children-first
+    with the root at the very end."""
+    return list(reversed([root_pid] + _descendants(root_pid)))
+
+
 def _terminate_tree(root_pid: int,
                     grace_s: float = TERM_GRACE_S,
                     verify_s: float = KILL_VERIFY_S) -> list[int]:
     """Escalating full-tree termination. Returns PIDs still alive at the
     end (empty == verified dead).
 
-    SIGCONT (a stopped process only queues signals) -> SIGTERM the whole
-    tree -> grace window -> RE-ENUMERATE the tree (children spawned or
-    missed between enumeration and delivery — the 2026-07-19 smoke showed
-    Isaac trainers surviving SIGTERM) -> SIGKILL survivors -> verify.
+    Order is ALWAYS descendants children-first, supervisor/root last —
+    for SIGCONT, SIGTERM and SIGKILL alike:
+    SIGCONT (a stopped process only queues signals) -> SIGTERM children
+    first, root last -> grace window -> RE-ENUMERATE the tree (a
+    supervisor may have respawned children during the grace, and the
+    2026-07-19 smoke showed Isaac trainers surviving SIGTERM) -> SIGKILL
+    children first, root last -> re-enumerate again and repeat within the
+    verify window until no survivor remains (a respawn between the
+    enumeration and the kill is caught by the next pass).
     """
-    def tree() -> list[int]:
-        return [root_pid] + _descendants(root_pid)
-
-    pids = tree()
-    _signal_all(pids, signal.SIGCONT)
-    _signal_all(pids, signal.SIGTERM)
+    first = _kill_order(root_pid)
+    known: set[int] = set(first)
+    _signal_all(first, signal.SIGCONT)
+    _signal_all(first, signal.SIGTERM)
     deadline = time.monotonic() + max(0.0, grace_s)
     while time.monotonic() < deadline:
-        if not any(_alive(p) for p in pids):
+        if not any(_alive(p) for p in first):
             break
         time.sleep(0.5)
-    survivors = sorted({p for p in (pids + tree()) if _alive(p)})
-    if survivors:
+    verify_deadline = time.monotonic() + max(0.5, verify_s)
+    while True:
+        # fresh children-first enumeration + EVERY pid ever seen that is
+        # still alive (children reparented to init after their parent
+        # died, or respawned between an enumeration and its kill pass)
+        fresh = _kill_order(root_pid)
+        known.update(fresh)
+        stale = [p for p in sorted(known) if p not in fresh and _alive(p)]
+        survivors = [p for p in fresh if _alive(p)] + stale
+        if not survivors:
+            return []
         _signal_all(survivors, signal.SIGCONT)
-        _signal_all(survivors, signal.SIGKILL)
-        deadline = time.monotonic() + max(0.0, verify_s)
-        while time.monotonic() < deadline:
-            survivors = [p for p in survivors if _alive(p)]
-            if not survivors:
-                break
-            time.sleep(0.5)
-    left = [p for p in survivors if _alive(p)]
-    if left:
-        print(f"[guard] WARNING: pids still alive after SIGKILL: {left}")
-    return left
+        _signal_all(survivors, signal.SIGKILL)     # children first, root last
+        if time.monotonic() > verify_deadline:
+            left = [p for p in survivors if _alive(p)]
+            if left:
+                print(f"[guard] WARNING: pids still alive after SIGKILL: "
+                      f"{left}")
+            return left
+        time.sleep(0.5)
 
 
 def _worker_root_pid(run_dir: Path, worker_id: int) -> Optional[int]:
@@ -496,12 +656,27 @@ def _load_observer_seed(workspace: Path, worker_id: int) -> Optional[dict]:
 def guard_loop(run_dir: Path, workspace: Path, config: dict,
                cap_frames: int = CONTINUATION_CAP_FRAMES,
                poll_s: float = POLL_S,
-               max_iterations: Optional[int] = None) -> int:
-    """0 = ARM_COMPLETE (all six parked at their cap); 2 = fail-closed."""
+               max_iterations: Optional[int] = None,
+               msa_handoff: Optional[bool] = None,
+               readiness_holds: bool = True) -> int:
+    """0 = ARM_COMPLETE (all six parked at their cap); 2 = fail-closed.
+
+    READINESS is a TRUE BARRIER: each worker is frozen (full-tree SIGSTOP,
+    persisted to READINESS_HOLDS.json) the moment it passes its first-tick
+    validations, and stays frozen until all six are ready. Non-MSA arms
+    then release all six SIMULTANEOUSLY; MSA arms leave the holds in place
+    for the sidecar to adopt (READINESS_HOLDS.json -> MSA_HOLDS.json), so
+    the first PRE snapshot comes from exactly the validated boundary."""
     resume = config["resume_checkpoints"]
     state_faithful = bool(config.get("state_faithful"))
+    if msa_handoff is None:
+        msa_handoff = str(config.get("arm", "")) in MSA_ARM_NAMES
     validated: dict[int, dict] = {}
     marker_written = (run_dir / READINESS_MARKER).is_file()
+    if marker_written and not msa_handoff and read_readiness_holds(run_dir):
+        # guard restart after the marker on a non-MSA arm: nobody may stay
+        # frozen (the simultaneous release already happened conceptually)
+        release_readiness_holds(run_dir)
     parked: dict[int, dict] = {}
     cap_pending: set[int] = set()
     it = 0
@@ -521,14 +696,31 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
                 continue
             if int(meta.get("frame", -1)) <= int(entry["frame"]):
                 continue     # not a continuation tick yet
-            if wid not in validated:
+            if not marker_written and wid not in validated:
+                if readiness_holds:
+                    # TRUE BARRIER: freeze the worker at its committed
+                    # boundary FIRST (its record lands in
+                    # READINESS_HOLDS.json, so every stop path SIGCONTs
+                    # it), then validate the POST-hold committed meta — no
+                    # tick can slip between validation and the freeze.
+                    try:
+                        _rec, held_meta = hold_worker_for_readiness(
+                            run_dir, workspace, wid)
+                        if held_meta:
+                            meta = held_meta
+                    except RuntimeError as exc:
+                        stop_arm(run_dir,
+                                 f"worker {wid}: readiness freeze failed: "
+                                 f"{exc}", "GUARD_FAILED")
+                        return 2
                 resume_applied = (_load_resume_applied(run_dir, wid)
                                   if state_faithful else
                                   {"applied": {"success_tolerance":
                                                float(entry["live_tolerance"])}})
                 verdict = check_first_tick(entry, meta, resume_applied)
                 if not verdict.ok:
-                    # readiness marker is NEVER written on any failure
+                    # readiness marker is NEVER written on any failure;
+                    # stop_arm SIGCONTs every readiness-held pid first
                     stop_arm(run_dir, f"worker {wid}: {verdict.reason}",
                              "GUARD_FAILED")
                     return 2
@@ -612,6 +804,23 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
                   f"({len(validated)}/{len(resume)} workers validated"
                   + (", stall reproduction gate PASSED" if state_faithful
                      else "") + ")")
+            if readiness_holds:
+                if msa_handoff:
+                    # MSA arms: workers STAY frozen at their validated
+                    # boundaries; the sidecar adopts READINESS_HOLDS.json
+                    # (-> MSA_HOLDS.json) and starts PRE_EVAL from exactly
+                    # these frames — never released in between.
+                    print("[guard] MSA arm: readiness holds retained for "
+                          "sidecar adoption "
+                          f"({READINESS_HOLDS_FILE} -> {HOLDS_FILE})")
+                else:
+                    # BASE/GATE arms: all six released SIMULTANEOUSLY so
+                    # every worker continues from its own validated tick
+                    # in sync.
+                    release_readiness_holds(run_dir)
+                    print("[guard] all six workers released "
+                          "simultaneously from their validated "
+                          "boundaries")
         if len(parked) == len(resume):
             # NORMAL completion — never failure semantics
             (run_dir / "ARM_COMPLETE.json").write_text(json.dumps({

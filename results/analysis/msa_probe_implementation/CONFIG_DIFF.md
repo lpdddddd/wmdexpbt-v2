@@ -102,10 +102,12 @@ Zero numeric gate changes. Additions only:
   ONE bounded wait (`--commit-max-wait-s`, default 3600 s) — on timeout
   the arm stops with `COMMIT_TIMEOUT.json`, promotion is never claimed;
 - eval subprocesses run over `--eval-devices ${MSA_EVAL_DEVICES:-
-  cuda:6,cuda:7}` (trainers occupy `DEXPBT_GPUS=0-5`) with a bounded
-  scheduler: at most ONE Isaac process per device, deterministic
-  round-robin over seeds, fail-closed cancellation; there is no cuda:0
-  default;
+  cuda:4,cuda:5}` (trainers occupy `DEXPBT_GPUS=0-5`; the eval devices
+  are SHARED with trainers 4/5, which are SIGSTOPped during eval
+  barriers but keep their VRAM) with a bounded scheduler: at most ONE
+  Isaac process per device, deterministic round-robin over seeds,
+  fail-closed cancellation; there is no cuda:0 default; the launcher
+  records the actual devices in `<run_dir>/EVAL_DEVICES.json`;
 - the promotion decision replaces the **cross-tolerance retention read**
   with the **same-tau rho** (`p_post/p_pre` at the worker's OWN tau,
   threshold 0.88 = the current applicable base-retention value). All other

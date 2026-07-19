@@ -262,7 +262,8 @@ that could only bite in production:
    (PRE 12, MID 6, POST 9 incl. 3 q_post), not 5. Launcher default is now
    `MSA_NUM_SEEDS=4` — an EXECUTION SMOKE for machinery validation only,
    never a method conclusion; N=16 pilot is explicit opt-in; N=256 stays
-   formal-only. Evals run over `--eval-devices cuda:6,cuda:7` with a
+   formal-only. Evals run over `--eval-devices` (default since §5d:
+   `cuda:4,cuda:5`, shared with the SIGSTOPped GPU4/5 trainers) with a
    bounded scheduler (at most ONE Isaac process per device, deterministic
    round-robin, fail-closed cancellation). `EVAL_COST_ESTIMATE.json`:
    N=4/2 GPUs ≈ 5.4 h; N=16/2 GPUs ≈ 21.6 h; N=256/2 GPUs ≈ 345.6 h
@@ -360,13 +361,80 @@ bootstrap can support the causal MSA question. This pass replaces it:
    tip checkpoints, same full control state, same seed; launchers run the
    bootstrap + fingerprint verification fail-closed before anything starts.
 
+## 5d. Experiment synchronization ("Make readiness a hold barrier with sidecar adoption", 2026-07-19)
+
+The state-faithful pass still let a validated worker keep training while
+the others caught up, so the six workers were NOT at matched intervention
+boundaries when `FIRST_TICK_VALIDATED.json` appeared. This pass fixes the
+last synchronization problems without touching the MSA algorithm,
+tau_plus, decision gates or the state reconstruction:
+
+1. **Readiness is a TRUE BARRIER** — the moment a worker passes
+   RESUME_APPLIED validation + control fidelity + its first-80M stall
+   reproduction checks, the guard SIGSTOPs its FULL process tree
+   (children first, verified `T` state) and persists
+   `READINESS_HOLDS.json` (worker id, root/children PIDs, validated
+   frame/tolerance/lineage, hold timestamp). The freeze happens BEFORE
+   the validation read is finalized (freeze → re-read committed meta →
+   validate), so no tick can slip between validation and the hold.
+   Validated workers stay frozen until all six are ready; any failure
+   SIGCONTs every readiness hold (all stop paths cover both
+   `MSA_HOLDS.json` and `READINESS_HOLDS.json`) and stops the arm. The
+   population stall-reproduction gate and `FIRST_TICK_VALIDATED.json`
+   only run/appear at 6/6.
+2. **Distinct handoffs** — `BASE_STATEFUL`/`GATE_RELAX_STATEFUL`: all six
+   SIGCONTed SIMULTANEOUSLY, `READINESS_HOLDS.json` deleted (synchronized
+   continuation from each validated tick). `MSA_STATEFUL`/
+   `MSA_PERMUTED_STATEFUL`: the guard retains the holds; the sidecar
+   ADOPTS them (`adopt_readiness_holds`: PIDs still `T`, committed frame
+   == the validated frame in the marker, imports `WorkerHolds` state,
+   atomically converts to `MSA_HOLDS.json`) and starts `PRE_EVAL` from
+   exactly that frozen boundary — the controller's `_snapshot_at` then
+   enforces PRE snapshot frame == that frame. Any adoption mismatch
+   releases everything and stops the arm (`GUARD_FAILED`).
+3. **Disposable GPU hold smoke** — the manual in-arm hold smoke releases
+   the target worker and waits for one extra committed tick, which breaks
+   the matched intervention boundary. It is now EXECUTION SMOKE ONLY
+   (default worker 4, exercising the shared-GPU path). The formal gate is
+   `start_stateful_hold_smoke.sh`: a one-shot throwaway worker (same
+   code, Isaac task, wm profile, 8192 envs, GPU 4) verified under
+   SIGSTOP/SIGCONT, producing `HOLD_SMOKE_CERTIFICATE.json` (git commit,
+   task/profile, GPU UUID/model, CUDA/driver, process-tree shape,
+   hold/resume frames, ok=true) and then torn down completely. The formal
+   MSA launchers refuse to start without the certificate file and the
+   sidecar re-validates its contents (commit/task/profile/GPU
+   model/driver) against the live environment at startup, fail closed.
+4. **Stop order** — `_terminate_tree` signals descendants children-first
+   and the supervisor/root LAST for SIGTERM and SIGKILL alike, with grace
+   → re-enumeration → SIGKILL → repeated re-enumeration inside the verify
+   window (accumulating every PID ever seen), so a supervisor respawning
+   children mid-escalation cannot leak a survivor (regression-tested with
+   a `trap '' TERM` respawn loop).
+5. **Six-GPU configuration** — trainers on `cuda:0`–`cuda:5`; eval on
+   `MSA_EVAL_DEVICES` (default `cuda:4,cuda:5`), SHARED with trainers 4/5
+   which are SIGSTOPped during eval barriers but keep their VRAM
+   allocated. The previous "trainers then share 0–3" wording was wrong
+   and is removed everywhere. The launcher records the actual devices in
+   `<run_dir>/EVAL_DEVICES.json`.
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
   with SIGSTOP is expected to be safe for single-GPU rl_games workers (no
-  NCCL peers). Run the prepared `run_hold_smoke.sh` (single worker, 60 s)
-  BEFORE any probe cycle — this is now ENFORCED: the formal sidecar's
-  cycle gate stays closed until `HOLD_SMOKE_PASSED.json` exists.
+  NCCL peers). Run the DISPOSABLE `start_stateful_hold_smoke.sh` FIRST —
+  this is now ENFORCED: the formal MSA launcher refuses to start without
+  `HOLD_SMOKE_CERTIFICATE.json` and the sidecar validates it (commit,
+  task, profile, GPU model, driver) fail-closed at startup.
+- If the guard process dies while workers are readiness-frozen (before
+  the sidecar adopts), the frozen workers stay stopped: the hold
+  watchdog only monitors the sidecar. Restarting the guard reuses the
+  persisted `READINESS_HOLDS.json` (idempotent re-validation); a manual
+  `stop_arm` releases everything. Acceptable for the pilot; a
+  guard-level watchdog can follow if needed.
+- The disposable certificate binds to (git commit, task, profile, GPU
+  model, driver) — any code change or driver update invalidates it and
+  the disposable smoke must be re-run (~one committed interval of GPU
+  time on GPU 4).
 - The durable tolerance commit waits for a live committed tick (~20M
   frames) per transition; a full cycle therefore spans several ticks of
   wall time. The bounded wait (`--commit-max-wait-s`, default 1 h) stops
@@ -385,10 +453,12 @@ bootstrap can support the causal MSA question. This pass replaces it:
 ## 7. Artifacts
 
 - code: `dexpbt_isaaclab/msa/` (10 modules incl. `hold_watchdog.py` and
-  `state_bootstrap.py`), `tests/test_msa_probe.py` (114 tests),
+  `state_bootstrap.py`), `tests/test_msa_probe.py` (125 tests),
   `tests/test_state_bootstrap.py` (32 tests)
 - launchers: `results/launchers/msa_probe/` (4 STATEFUL arm scripts +
-  4 configs + `run_hold_smoke.sh` + `EVAL_COST_ESTIMATE.json`)
+  4 configs + `start_stateful_hold_smoke.sh` (disposable certificate
+  smoke) + `run_hold_smoke.sh` (execution smoke only) +
+  `EVAL_COST_ESTIMATE.json`)
 - audit: `blocker_audit_3b_5b.json`, `STATE_SOURCE_AUDIT.md`
   (this directory)
 - docs: `STATE_MACHINE.md`, `CONFIG_DIFF.md`, `DRY_RUN_TRACE.md`,

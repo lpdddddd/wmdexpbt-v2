@@ -252,14 +252,19 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: (a) six-worker READINESS BARRIER + STALL REPRODUCTION
-# GATE — each worker's first committed tick must confirm the structured
-# RESUME_APPLIED.json tolerance resume, stay within ONE mastery shrink of
-# its source tolerance (two shrinks in one 80M interval = ungated legacy
-# fallback -> GUARD_FAILED), and keep the restored control state alive
-# (no default clobber -> STATE_FIDELITY_FAILED); >= 4/6 workers must hold
-# EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops the
-# arm; only then FIRST_TICK_VALIDATED.json is written;
+# Continuation guard: (a) six-worker TRUE READINESS BARRIER + STALL
+# REPRODUCTION GATE — each worker's first committed tick is validated
+# (structured RESUME_APPLIED.json tolerance resume; at most ONE mastery
+# shrink of its source tolerance — two shrinks in one 80M interval =
+# ungated legacy fallback -> GUARD_FAILED; restored control state alive,
+# no default clobber -> STATE_FIDELITY_FAILED) and the worker is then
+# IMMEDIATELY SIGSTOP-frozen at that boundary (READINESS_HOLDS.json);
+# validated workers stay frozen until 6/6 are ready; >= 4/6 workers must
+# hold EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops
+# the arm; only then FIRST_TICK_VALIDATED.json is written. Non-MSA arms
+# release all six SIMULTANEOUSLY; MSA arms leave the holds for the
+# sidecar to adopt (READINESS_HOLDS.json -> MSA_HOLDS.json), so the first
+# PRE snapshot comes from exactly the validated frame;
 # (b) matched worker-local cap — target = baseline + 480000000 (6
 # committed ticks at the REAL 80M cadence); park at first committed frame
 # >= target; overshoot beyond one tick (80M) of slack fails the arm; all

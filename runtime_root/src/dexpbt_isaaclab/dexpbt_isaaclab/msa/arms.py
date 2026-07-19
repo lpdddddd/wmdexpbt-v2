@@ -240,9 +240,22 @@ def arm_config(arm: str, tips: list[TipCheckpoint], source_run: str,
             ],
             "eval_device_note": "sidecar --eval-devices is REQUIRED; the "
                                 "launcher pins ${MSA_EVAL_DEVICES:-"
-                                "cuda:6,cuda:7} (GPUs outside DEXPBT_GPUS), "
-                                "never the trainers' cuda:0; at most one "
-                                "Isaac eval process per device",
+                                "cuda:4,cuda:5}: on this 6-GPU machine the "
+                                "eval devices are SHARED with trainers 4/5 "
+                                "(those trainers are SIGSTOPped during "
+                                "every eval barrier but keep their VRAM "
+                                "allocated); never the trainers' cuda:0; "
+                                "at most one Isaac eval process per "
+                                "device; actual devices recorded in "
+                                "EVAL_DEVICES.json",
+            "hold_smoke_note": "the formal sidecar requires the DISPOSABLE "
+                               "start_stateful_hold_smoke.sh certificate "
+                               "(HOLD_SMOKE_CERTIFICATE.json: git commit, "
+                               "task, profile, GPU model, driver must "
+                               "match); the in-arm run_hold_smoke.sh is "
+                               "execution-smoke only (it advances the "
+                               "released worker one extra committed tick "
+                               "past the matched boundary)",
             "bootstrap": {"seed": BOOTSTRAP_SEED, "repeats": BOOTSTRAP_REPEATS,
                           "quantile": 0.05,
                           "statistic": "criterion-local conditional panel "
@@ -359,14 +372,19 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: (a) six-worker READINESS BARRIER + STALL REPRODUCTION
-# GATE — each worker's first committed tick must confirm the structured
-# RESUME_APPLIED.json tolerance resume, stay within ONE mastery shrink of
-# its source tolerance (two shrinks in one 80M interval = ungated legacy
-# fallback -> GUARD_FAILED), and keep the restored control state alive
-# (no default clobber -> STATE_FIDELITY_FAILED); >= 4/6 workers must hold
-# EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops the
-# arm; only then FIRST_TICK_VALIDATED.json is written;
+# Continuation guard: (a) six-worker TRUE READINESS BARRIER + STALL
+# REPRODUCTION GATE — each worker's first committed tick is validated
+# (structured RESUME_APPLIED.json tolerance resume; at most ONE mastery
+# shrink of its source tolerance — two shrinks in one 80M interval =
+# ungated legacy fallback -> GUARD_FAILED; restored control state alive,
+# no default clobber -> STATE_FIDELITY_FAILED) and the worker is then
+# IMMEDIATELY SIGSTOP-frozen at that boundary (READINESS_HOLDS.json);
+# validated workers stay frozen until 6/6 are ready; >= 4/6 workers must
+# hold EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops
+# the arm; only then FIRST_TICK_VALIDATED.json is written. Non-MSA arms
+# release all six SIMULTANEOUSLY; MSA arms leave the holds for the
+# sidecar to adopt (READINESS_HOLDS.json -> MSA_HOLDS.json), so the first
+# PRE snapshot comes from exactly the validated frame;
 # (b) matched worker-local cap — target = baseline + {cap_frames} (6
 # committed ticks at the REAL 80M cadence); park at first committed frame
 # >= target; overshoot beyond one tick (80M) of slack fails the arm; all
@@ -391,25 +409,53 @@ _SIDECAR_BLOCK = """
 # stopped-state verification + MSA_HOLDS.json persistence, heterogeneous
 # per-worker tau_plus pins via msa_forced_success_tolerance, policy-only
 # evals in subprocesses with bounded per-device concurrency).
-# - the sidecar WAITS for BOTH the guard's FIRST_TICK_VALIDATED.json (6/6
-#   readiness barrier) AND HOLD_SMOKE_PASSED.json (written only by a fully
-#   successful run_hold_smoke.sh) before starting or resuming any cycle —
-#   it may be launched early but idles at the gate without touching
-#   MSA_HOLDS.json (execution order: launch arm -> 6/6 readiness ->
-#   run_hold_smoke.sh -> PASSED marker -> first N=4 cycle);
-# - MSA_EVAL_DEVICES defaults to cuda:6,cuda:7: trainers occupy DEXPBT_GPUS
-#   (0-5); eval devices are REQUIRED and never default onto cuda:0;
+# - the sidecar WAITS for the guard's FIRST_TICK_VALIDATED.json (6/6 TRUE
+#   readiness barrier: every worker is SIGSTOP-frozen at its validated
+#   first tick) and then ADOPTS the guard's READINESS_HOLDS.json (verifies
+#   stopped state + committed frame == validated frame, converts it to
+#   MSA_HOLDS.json) so the first PRE snapshot comes from EXACTLY the
+#   matched intervention boundary — workers are never released in between;
+# - the hold-smoke gate is the DISPOSABLE certificate: run
+#   start_stateful_hold_smoke.sh (same code / task / 8192 envs / shared
+#   eval GPU) BEFORE launching this arm; the sidecar validates
+#   HOLD_SMOKE_CERTIFICATE.json (git commit, task, profile, GPU model,
+#   driver) at startup and fail-closed stops the arm on any mismatch.
+#   NEVER run the in-arm run_hold_smoke.sh in a formal arm: it releases
+#   the target worker for an extra committed tick and breaks the matched
+#   boundary (execution smoke only);
+# - SIX-GPU MACHINE: trainers occupy DEXPBT_GPUS (cuda:0-5); eval shares
+#   cuda:4,cuda:5 with the trainers — safe because the GPU4/5 trainers are
+#   SIGSTOPped during every eval barrier (they keep their VRAM allocated;
+#   budget headroom on those two GPUs is required); the ACTUAL eval
+#   devices are recorded in $RUN_DIR/EVAL_DEVICES.json;
 # - MSA_NUM_SEEDS defaults to 4 = EXECUTION SMOKE (validates the machinery
 #   only, NEVER a method conclusion). Pilot N=16 must be set explicitly;
 #   formal N=256 is formal-only (~345h on 2 GPUs — do not).
+MSA_EVAL_DEVICES_ACTUAL="${{MSA_EVAL_DEVICES:-cuda:4,cuda:5}}"
+MSA_HOLD_SMOKE_CERT_ACTUAL="${{MSA_HOLD_SMOKE_CERT:-{cert_default}}}"
+if [[ ! -f "$MSA_HOLD_SMOKE_CERT_ACTUAL" ]]; then
+  echo "REFUSING TO LAUNCH SIDECAR: hold smoke certificate missing:" | tee -a "$LOG"
+  echo "  $MSA_HOLD_SMOKE_CERT_ACTUAL" | tee -a "$LOG"
+  echo "  run start_stateful_hold_smoke.sh first (disposable GPU smoke)" | tee -a "$LOG"
+  exit 3
+fi
+cat > "$RUN_DIR/EVAL_DEVICES.json" <<EOF
+{{
+  "eval_devices": "$MSA_EVAL_DEVICES_ACTUAL",
+  "trainer_gpus": "$DEXPBT_GPUS",
+  "shared_gpu_note": "trainers on the eval GPUs are SIGSTOPped during eval barriers but keep their VRAM allocated",
+  "hold_smoke_certificate": "$MSA_HOLD_SMOKE_CERT_ACTUAL"
+}}
+EOF
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \\
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
   --arm {arm} \\
   --rho-threshold {rho} \\
   --num-seeds "${{MSA_NUM_SEEDS:-4}}" \\
-  --eval-devices "${{MSA_EVAL_DEVICES:-cuda:6,cuda:7}}" \\
+  --eval-devices "$MSA_EVAL_DEVICES_ACTUAL" \\
   --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \\
-  --hold-smoke-marker "$RUN_DIR/HOLD_SMOKE_PASSED.json" \\
+  --hold-smoke-certificate "$MSA_HOLD_SMOKE_CERT_ACTUAL" \\
+  --wm-profile "{profile}" \\
   --commit-max-wait-s "${{MSA_COMMIT_MAX_WAIT_S:-3600}}" \\
   {permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
@@ -425,23 +471,35 @@ echo $! > "$RUN_DIR/hold_watchdog.pid"
 """
 
 _HOLD_SMOKE_TEMPLATE = """#!/usr/bin/env bash
-# Single-worker HOLD SMOKE for a running MSA arm. Prepared but NOT executed.
-# Validates SIGSTOP/SIGCONT against a live Isaac trainer BEFORE any probe
-# cycle: waits for the guard's readiness marker, holds ONE worker, verifies
-# its committed frame is frozen for the hold window, releases, verifies the
-# next committed tick appears. No tolerance writes, no MSA cycle, no eval.
+# Single-worker HOLD SMOKE for a running arm — EXECUTION SMOKE ONLY.
+#
+# FORBIDDEN in the formal four-arm comparison: this smoke RELEASES the
+# target worker and waits for one extra committed tick, which advances the
+# worker past its matched intervention boundary. The formal MSA arms use
+# the DISPOSABLE start_stateful_hold_smoke.sh certificate instead
+# (HOLD_SMOKE_CERTIFICATE.json), validated by the sidecar at startup.
+#
+# Default worker is 4: it trains on a SHARED eval GPU (cuda:4), so the
+# execution smoke exercises the shared-GPU hold path.
+#
+# Validates SIGSTOP/SIGCONT against a live Isaac trainer: waits for the
+# guard's readiness marker, holds ONE worker, verifies its committed frame
+# is frozen for the hold window, releases, verifies the next committed
+# tick appears. No tolerance writes, no MSA cycle, no eval.
 # Result: <run_dir>/HOLD_SMOKE_RESULT.json (release guaranteed either way).
-# GATE: HOLD_SMOKE_PASSED.json is written atomically ONLY when the frame
-# stayed frozen, the next committed tick appeared after release AND no
-# residual holds remain — the formal sidecar refuses to start any cycle
-# until it exists. Any failure writes HOLD_SMOKE_FAILED.json and
-# fail-closed stops the whole arm.
+# HOLD_SMOKE_PASSED.json is written atomically ONLY when the frame stayed
+# frozen, the next committed tick appeared after release AND no residual
+# holds remain. Any failure writes HOLD_SMOKE_FAILED.json and fail-closed
+# stops the whole arm.
 set -euo pipefail
 
 RUN_DIR="${1:?usage: run_hold_smoke.sh <run_dir> [worker] [seconds]}"
-WORKER="${2:-0}"
+WORKER="${2:-4}"
 HOLD_SECONDS="${3:-60}"
 RUNTIME_ROOT="/root/autodl-tmp/wmdexpbt/runtime_root"
+
+echo "WARNING: execution smoke only — the released worker will advance one"
+echo "extra committed tick; NEVER use inside the formal four-arm comparison."
 
 source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"
 cd "${RUNTIME_ROOT}/src/dexpbt_isaaclab"
@@ -454,6 +512,96 @@ python -u -m dexpbt_isaaclab.msa.sidecar \\
   --hold-smoke-worker "$WORKER" \\
   --hold-smoke-seconds "$HOLD_SECONDS"
 echo "hold smoke result: $RUN_DIR/HOLD_SMOKE_RESULT.json"
+"""
+
+_DISPOSABLE_SMOKE_TEMPLATE = """#!/usr/bin/env bash
+# DISPOSABLE GPU hold smoke — produces HOLD_SMOKE_CERTIFICATE.json.
+# GENERATED by dexpbt_isaaclab.msa.arms — prepared but NOT executed.
+#
+# Runs OUTSIDE the formal arms: launches ONE throwaway worker with the
+# SAME code, Isaac task, wm profile and 8192 envs on the shared eval GPU
+# (default cuda:4), waits for its first committed tick, SIGSTOPs it,
+# verifies the committed frame is frozen, SIGCONTs, verifies the next
+# committed tick appears — then writes the certificate and tears the
+# whole disposable run down. It produces NO method results; the formal
+# MSA launchers validate the certificate (git commit, task, profile, GPU
+# model, driver) at sidecar startup and refuse to run without it.
+set -euo pipefail
+
+if [[ "${{1:-}}" != "--i-know-what-i-am-doing" ]]; then
+  echo "REFUSING TO LAUNCH: pass --i-know-what-i-am-doing"
+  echo "(this starts ONE disposable GPU training worker on GPU ${{SMOKE_GPU:-4}})"
+  exit 2
+fi
+
+RUNTIME_ROOT="/root/autodl-tmp/wmdexpbt/runtime_root"
+RESULTS_ROOT="/root/autodl-tmp/wmdexpbt/results"
+DATE=$(date +%Y%m%d_%H%M%S)
+RUN_DIR="${{RESULTS_ROOT}}/runs/msa_hold_smoke_disposable_${{DATE}}"
+LOG="${{RUN_DIR}}/launch_master.log"
+CERT_OUT="${{MSA_HOLD_SMOKE_CERT:-{cert_default}}}"
+SMOKE_GPU="${{SMOKE_GPU:-4}}"
+HOLD_SECONDS="${{HOLD_SECONDS:-60}}"
+
+export DEXPBT_MAX_ACTIVE=1
+export NUM_POLICIES=1
+export DEXPBT_GPUS="$SMOKE_GPU"
+export DEXPBT_STARTUP_TIMEOUT_S="${{DEXPBT_STARTUP_TIMEOUT_S:-1200}}"
+
+mkdir -p "$RUN_DIR"
+source "${{RUNTIME_ROOT}}/scripts/env_dexpbt.sh"
+export TORCHDYNAMO_DISABLE=1
+export PYTHONUNBUFFERED=1
+cd "${{RUNTIME_ROOT}}/src/dexpbt_isaaclab"
+
+# one throwaway worker: same task / profile / env count as the formal
+# arms; recovered from worker-4 tip so the trainer shape is realistic
+nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
+  "$RUN_DIR" \\
+  --task {task} \\
+  --num-envs 8192 \\
+  --max-iterations {max_iter} \\
+  --pbt-interval-steps 20000000 \\
+  --pbt-start-after 200000000 \\
+  --pbt-initial-delay 50000000 \\
+  --profile-per-policy "{profile}" \\
+  --recover-checkpoint-per-policy "{smoke_ckpt}" \\
+  --tolerance-resume-per-policy "{smoke_tol}" \\
+  --extra \\
+  --seed 42 \\
+{base_flags}  >>"$LOG" 2>&1 &
+echo $! > "$RUN_DIR/nohup.pid"
+
+# certificate smoke: wait first committed tick -> hold -> verify frozen ->
+# release -> verify next tick -> write HOLD_SMOKE_CERTIFICATE.json
+set +e
+python -u -m dexpbt_isaaclab.msa.sidecar \\
+  --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
+  --arm MSA_STATEFUL \\
+  --task {task} \\
+  --readiness-marker "$RUN_DIR/UNUSED.json" \\
+  --certificate-smoke \\
+  --hold-smoke-worker 0 \\
+  --hold-smoke-seconds "$HOLD_SECONDS" \\
+  --cert-out "$CERT_OUT" \\
+  --cert-gpu-index "$SMOKE_GPU" \\
+  --wm-profile "{profile}" \\
+  2>&1 | tee -a "$LOG"
+RC="${{PIPESTATUS[0]}}"
+set -e
+
+# tear the disposable run down COMPLETELY (children-first escalation);
+# it must never keep training or occupy the GPU
+python - "$RUN_DIR" <<'PY'
+import sys
+from pathlib import Path
+from dexpbt_isaaclab.msa.continuation_guard import stop_arm
+stop_arm(Path(sys.argv[1]), "disposable hold smoke torn down",
+         marker_name=None, num_workers=1)
+PY
+
+echo "certificate: $CERT_OUT (ok must be true)"
+exit "$RC"
 """
 
 
@@ -533,20 +681,23 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
     tolerance_list = ",".join(f"{t.live_tolerance!r}" for t in tips)
     clock_list = _clock_list_from_source(source_run)
     out_dir.mkdir(parents=True, exist_ok=True)
+    cert_default = str((out_dir / "HOLD_SMOKE_CERTIFICATE.json").resolve())
     written: list[Path] = []
     for arm in ARM_NAMES:
         cfg = arm_config(arm, tips, str(source_run))
         cfg_path = out_dir / f"{arm.lower()}.config.json"
         cfg_path.write_text(json.dumps(cfg, indent=2))
         written.append(cfg_path)
+        wm_profile = (GATE_RELAX_PROFILE if arm == "GATE_RELAX_STATEFUL"
+                      else BASE_PROFILE)
         sidecar = ""
         if arm in MSA_ARM_NAMES:
             sidecar = _SIDECAR_BLOCK.format(
                 arm=arm, rho=MSA_RHO_THRESHOLD,
+                profile=wm_profile,
+                cert_default=cert_default,
                 permuted_flag=("--permuted-route "
                                if arm == "MSA_PERMUTED_STATEFUL" else ""))
-        wm_profile = (GATE_RELAX_PROFILE if arm == "GATE_RELAX_STATEFUL"
-                      else BASE_PROFILE)
         script = _LAUNCHER_TEMPLATE.format(
             arm=arm, arm_lower=arm.lower(), recover_list=recover_list,
             tolerance_list=tolerance_list,
@@ -561,11 +712,26 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
         sh_path.write_text(script)
         sh_path.chmod(0o755)
         written.append(sh_path)
-    # single-worker hold smoke launcher (prepared, never executed here)
+    # single-worker hold smoke launcher — EXECUTION SMOKE ONLY (never part
+    # of the formal four-arm comparison)
     smoke_path = out_dir / "run_hold_smoke.sh"
     smoke_path.write_text(_HOLD_SMOKE_TEMPLATE)
     smoke_path.chmod(0o755)
     written.append(smoke_path)
+    # DISPOSABLE certificate smoke launcher (one throwaway worker on the
+    # shared eval GPU; produces HOLD_SMOKE_CERTIFICATE.json)
+    smoke_tip = next(t for t in tips if t.worker_id == 4)
+    disposable_path = out_dir / "start_stateful_hold_smoke.sh"
+    disposable_path.write_text(_DISPOSABLE_SMOKE_TEMPLATE.format(
+        cert_default=cert_default,
+        task="DexPBT-Regrasping-KukaAllegro-Direct-v0",
+        max_iter=CONTINUATION_MAX_ITER,
+        profile=BASE_PROFILE,
+        smoke_ckpt=smoke_tip.checkpoint_path,
+        smoke_tol=f"{smoke_tip.live_tolerance!r}",
+        base_flags=_base_flags_block("BASE_STATEFUL", original_launcher)))
+    disposable_path.chmod(0o755)
+    written.append(disposable_path)
     # true per-cycle eval workload (27 cells) at each budget on 2 eval GPUs
     cost_path = out_dir / "EVAL_COST_ESTIMATE.json"
     cost_path.write_text(json.dumps({

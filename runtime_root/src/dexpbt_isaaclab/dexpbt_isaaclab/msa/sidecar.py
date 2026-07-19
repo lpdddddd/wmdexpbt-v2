@@ -5,15 +5,30 @@ supervisors. It is the ONLY writer of msa_* control fields (through the
 locked update_curriculum_control API) and never touches policy weights,
 optimizer, replay, PBT lineage or any observer-owned curriculum field.
 
-Readiness barrier: the sidecar REQUIRES --readiness-marker (the
-FIRST_TICK_VALIDATED.json written by continuation_guard once ALL SIX
-workers produced a validated first continuation tick) AND
---hold-smoke-marker (the HOLD_SMOKE_PASSED.json written only by a fully
-successful run_hold_smoke.sh). Until BOTH markers exist — and worker
-views are exactly {0..5} — the sidecar neither starts nor resumes any
-probe cycle and performs no holds (it cannot race the hold smoke over
-MSA_HOLDS.json). If the guard fails the arm (GUARD_FAILED) or the smoke
-fails (HOLD_SMOKE_FAILED.json), the sidecar releases all holds and exits.
+Readiness barrier + hold handoff: the guard SIGSTOPs every worker at its
+validated first continuation tick and records it in READINESS_HOLDS.json;
+FIRST_TICK_VALIDATED.json appears only when all six are frozen at their
+own boundary. The sidecar then ADOPTS those holds (verifies every PID is
+still stopped and every worker's committed frame equals the validated
+frame recorded in the marker, imports them into WorkerHolds and atomically
+converts READINESS_HOLDS.json -> MSA_HOLDS.json) and starts PRE_EVAL from
+exactly that frozen boundary — the workers are never released between
+validation and the first PRE snapshot, so no worker trains past its
+matched intervention boundary. Any adoption failure (PID no longer
+stopped, frame != validated frame) SIGCONTs everything and fail-closed
+stops the arm.
+
+Hold smoke gate: the sidecar REQUIRES --hold-smoke-certificate — the
+HOLD_SMOKE_CERTIFICATE.json produced by the DISPOSABLE
+start_stateful_hold_smoke.sh run (same code / Isaac task / 8192 envs /
+the shared eval GPU). The certificate must match the current git commit,
+task, wm profile and GPU environment, else the sidecar stops the arm
+fail-closed at startup. The in-arm run_hold_smoke.sh (--hold-smoke-only)
+remains for EXECUTION SMOKE only: it releases the target worker and waits
+for an extra committed tick, which breaks the matched intervention
+boundary, so it must NEVER be used inside the formal four-arm comparison.
+If the guard fails the arm (GUARD_FAILED) or a smoke fails
+(HOLD_SMOKE_FAILED.json), the sidecar releases all holds and exits.
 
 Cycle coordination: while a cycle is in flight (from before the first
 PRE_EVAL hold, through eval/probe/DECIDE and the durable COMMITTING
@@ -102,9 +117,11 @@ POLL_S = 30.0
 COMMIT_TOLERANCE_ATOL = 1e-6
 DEFAULT_COMMIT_MAX_WAIT_S = 3600.0
 HOLDS_FILE = "MSA_HOLDS.json"
+READINESS_HOLDS_FILE = "READINESS_HOLDS.json"
 BUSY_FILE = "MSA_BUSY.json"
 SMOKE_PASSED_FILE = "HOLD_SMOKE_PASSED.json"
 SMOKE_FAILED_FILE = "HOLD_SMOKE_FAILED.json"
+CERTIFICATE_FILE = "HOLD_SMOKE_CERTIFICATE.json"
 NUM_WORKERS = 6
 
 
@@ -203,16 +220,205 @@ def cycle_gate_ok(readiness_marker: Path, smoke_marker: Path,
                   views: list[WorkerView],
                   num_policies: int = NUM_WORKERS) -> tuple[bool, str]:
     """The FULL gate for starting/resuming any probe cycle: the guard's
-    6/6 readiness marker AND the manually-run hold smoke's PASSED marker.
-    Until both exist the sidecar idles (it never touches MSA_HOLDS.json in
-    that state, so it cannot race the hold smoke)."""
+    6/6 readiness marker AND the hold-smoke gate file (either the
+    execution-smoke PASSED marker or a validated disposable-smoke
+    certificate — the caller decides which path applies and validates the
+    certificate contents at startup). Until both exist the sidecar idles
+    (it never touches MSA_HOLDS.json in that state, so it cannot race a
+    hold smoke)."""
     ready, why = readiness_ok(readiness_marker, views, num_policies)
     if not ready:
         return False, why
     if not smoke_marker.is_file():
         return False, (f"hold smoke gate not passed: {smoke_marker} "
-                       "missing (run run_hold_smoke.sh first)")
+                       "missing (run the disposable hold smoke first)")
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# hold-smoke certificate (disposable GPU smoke, outside the formal arms)
+# ---------------------------------------------------------------------------
+
+def certificate_ok(cert: dict, *, git_commit: str, task: str, profile: str,
+                   gpu_names: dict[str, str],
+                   driver_version: str) -> tuple[bool, str]:
+    """Validate a HOLD_SMOKE_CERTIFICATE.json against the CURRENT arm
+    environment. The certificate is produced by the DISPOSABLE
+    start_stateful_hold_smoke.sh run (same code, Isaac task, 8192 envs,
+    shared eval GPU) — the formal arm never runs a hold smoke itself
+    (an in-arm smoke releases the worker for an extra committed tick and
+    breaks the matched intervention boundary).
+
+    Must match: ok flag, git commit, task, wm profile, GPU model of EVERY
+    eval device and driver version. UUID / CUDA version are recorded for
+    the audit trail but only the model+driver must match (any same-model
+    GPU on the same driver behaves identically for SIGSTOP semantics)."""
+    if not cert.get("ok"):
+        return False, "certificate has ok != true"
+    if str(cert.get("git_commit", "")) != str(git_commit):
+        return False, (f"certificate git commit {cert.get('git_commit')!r} "
+                       f"!= current {git_commit!r}")
+    if str(cert.get("task", "")) != str(task):
+        return False, (f"certificate task {cert.get('task')!r} != "
+                       f"arm task {task!r}")
+    if str(cert.get("wm_profile", "")) != str(profile):
+        return False, (f"certificate profile {cert.get('wm_profile')!r} != "
+                       f"arm profile {profile!r}")
+    gpu = cert.get("gpu") or {}
+    cert_name = str(gpu.get("name", ""))
+    cert_driver = str(gpu.get("driver_version", ""))
+    if not cert_name:
+        return False, "certificate has no GPU model"
+    for idx, name in sorted(gpu_names.items()):
+        if str(name) != cert_name:
+            return False, (f"eval GPU {idx} model {name!r} != certified "
+                           f"model {cert_name!r}")
+    if cert_driver != str(driver_version):
+        return False, (f"driver {driver_version!r} != certified "
+                       f"{cert_driver!r}")
+    return True, ""
+
+
+def _current_git_commit(repo_dir: Path) -> str:
+    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir),
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"git rev-parse failed in {repo_dir}: "
+                           f"{out.stderr.strip()}")
+    return out.stdout.strip()
+
+
+def _gpu_env(indices: list[str]) -> tuple[dict[str, str], str, str]:
+    """(name per requested GPU index, driver version, CUDA version) from
+    nvidia-smi. Raises when a requested index is not present — the gate
+    must fail closed on a machine that does not match the certificate."""
+    out = subprocess.run(
+        ["nvidia-smi",
+         "--query-gpu=index,name,uuid,driver_version",
+         "--format=csv,noheader"],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"nvidia-smi failed: {out.stderr.strip()}")
+    rows = {}
+    for line in out.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 4:
+            rows[parts[0]] = {"name": parts[1], "uuid": parts[2],
+                              "driver_version": parts[3]}
+    names: dict[str, str] = {}
+    driver = ""
+    for idx in indices:
+        if idx not in rows:
+            raise RuntimeError(f"eval GPU index {idx} not present "
+                               f"(available: {sorted(rows)})")
+        names[idx] = rows[idx]["name"]
+        driver = rows[idx]["driver_version"]
+    cuda = ""
+    smi = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
+    for token in smi.stdout.split():
+        if token.startswith("12.") or token.startswith("11."):
+            cuda = token
+            break
+    return names, driver, cuda
+
+
+def _tree_shape(root_pid: int) -> list[dict]:
+    """[{pid, comm}] for the worker tree — recorded in the certificate so
+    a later reader can see WHAT was actually SIGSTOPped."""
+    shape = []
+    for pid in [root_pid] + _descendants(root_pid):
+        try:
+            comm = (Path("/proc") / str(pid) / "comm").read_text().strip()
+        except OSError:
+            comm = "?"
+        shape.append({"pid": int(pid), "comm": comm})
+    return shape
+
+
+def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
+                      hold_seconds: float, cert_path: Path, *,
+                      task: str, profile: str, gpu_index: str,
+                      repo_dir: Path,
+                      first_tick_timeout_s: float = 4 * 3600.0,
+                      resume_timeout_s: float = 5400.0,
+                      poll_s: float = POLL_S) -> int:
+    """DISPOSABLE hold smoke: validates SIGSTOP/SIGCONT against a real
+    Isaac trainer OUTSIDE the formal arms and writes
+    HOLD_SMOKE_CERTIFICATE.json. Produces NO method results; the
+    disposable run is torn down by its launcher afterwards.
+
+    wait first committed tick -> record tree shape -> hold -> verify the
+    committed frame is frozen -> release -> verify the next committed tick
+    appears. ok=true only on the full success path; release guaranteed."""
+    holds = WorkerHolds(run_dir)
+    policy_ws = workspace / f"{worker_id:03d}"
+    cert: dict = {"ok": False, "task": str(task), "wm_profile": str(profile),
+                  "hold_seconds": float(hold_seconds),
+                  "worker_id": int(worker_id),
+                  "disposable_run_dir": str(run_dir),
+                  "timestamp": time.time()}
+    try:
+        cert["git_commit"] = _current_git_commit(repo_dir)
+        names, driver, cuda = _gpu_env([str(gpu_index)])
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid",
+             "--format=csv,noheader"], capture_output=True, text=True)
+        uuid_by_idx = {}
+        for line in smi.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2:
+                uuid_by_idx[parts[0]] = parts[1]
+        cert["gpu"] = {"index": str(gpu_index),
+                       "name": names[str(gpu_index)],
+                       "uuid": uuid_by_idx.get(str(gpu_index), ""),
+                       "driver_version": driver,
+                       "cuda_version": cuda}
+        deadline = time.monotonic() + first_tick_timeout_s
+        while latest_committed_meta(policy_ws) is None:
+            if time.monotonic() > deadline:
+                cert["error"] = ("no committed tick within "
+                                 f"{first_tick_timeout_s}s")
+                return 2
+            time.sleep(poll_s)
+        meta = latest_committed_meta(policy_ws) or {}
+        frame_before = int(meta.get("frame", -1))
+        cert["frame_before_hold"] = frame_before
+        pid_file = run_dir / f"policy_{worker_id:02d}" / "pid.txt"
+        cert["worker_tree"] = _tree_shape(int(pid_file.read_text().strip()))
+        holds.hold([worker_id])
+        time.sleep(float(hold_seconds))
+        frame_during = int((latest_committed_meta(policy_ws) or {})
+                           .get("frame", -1))
+        cert["frame_after_hold_window"] = frame_during
+        if frame_during != frame_before:
+            cert["error"] = (f"frame advanced during hold: {frame_before} "
+                             f"-> {frame_during}")
+            return 2
+        holds.release([worker_id])
+        resume_deadline = time.monotonic() + float(resume_timeout_s)
+        while True:
+            frame_after = int((latest_committed_meta(policy_ws) or {})
+                              .get("frame", -1))
+            if frame_after > frame_before:
+                cert["next_committed_frame"] = frame_after
+                break
+            if time.monotonic() > resume_deadline:
+                cert["error"] = (f"no new committed tick within "
+                                 f"{resume_timeout_s}s after release")
+                return 2
+            time.sleep(poll_s)
+        cert["ok"] = True
+        return 0
+    except Exception as exc:                             # noqa: BLE001
+        cert["error"] = f"{type(exc).__name__}: {exc}"
+        return 2
+    finally:
+        holds.release_all()
+        residual = read_holds_file(run_dir)
+        if cert["ok"] and residual:
+            cert["ok"] = False
+            cert["error"] = f"residual holds after release: {residual}"
+        _atomic_write_json(cert_path, cert)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +457,21 @@ def read_holds_file(run_dir: Path) -> dict[int, list[int]]:
         raw = json.loads(path.read_text())
         return {int(w): [int(p) for p in pids] for w, pids in raw.items()}
     except (json.JSONDecodeError, ValueError, OSError):
+        return {}
+
+
+def read_readiness_holds(run_dir: Path) -> dict[int, dict]:
+    """READINESS_HOLDS.json written by the continuation guard: one record
+    per worker frozen at its validated first continuation tick
+    ({worker_id, root_pid, pids, validated_frame, validated_tolerance,
+    lineage_id, hold_timestamp})."""
+    path = Path(run_dir) / READINESS_HOLDS_FILE
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+        return {int(w): dict(rec) for w, rec in raw.items()}
+    except (json.JSONDecodeError, ValueError, TypeError, OSError):
         return {}
 
 
@@ -351,6 +572,101 @@ class WorkerHolds:
 
     def release_all(self) -> None:
         self.release(sorted(self._held.keys()))
+
+    def adopt(self, records: dict[int, dict]) -> list[int]:
+        """Adopt readiness holds created by the continuation guard WITHOUT
+        releasing the workers: verify every recorded PID is still in the
+        stopped state, import them as this instance's held PIDs and persist
+        them to MSA_HOLDS.json (the watchdog/guard then treat them exactly
+        like sidecar-created holds). Raises on any PID that is dead or
+        running — the caller must fail closed."""
+        for w, rec in sorted(records.items()):
+            pids = [int(p) for p in rec.get("pids", [])]
+            if not pids:
+                raise RuntimeError(f"worker {w}: readiness hold record has "
+                                   "no PIDs")
+            bad = [p for p in pids if _proc_state(p) not in ("T", "t")]
+            if bad:
+                raise RuntimeError(
+                    f"worker {w}: readiness-held pids {bad} are no longer "
+                    "in the stopped state (dead or resumed)")
+        for w, rec in sorted(records.items()):
+            self._held[int(w)] = [int(p) for p in rec["pids"]]
+        self._persist()
+        return sorted(int(w) for w in records)
+
+
+def adopt_readiness_holds(holds: WorkerHolds, run_dir: Path, workspace: Path,
+                          readiness_marker: Path) -> list[int]:
+    """Seamless guard -> sidecar hold handoff for the FIRST MSA cycle.
+
+    The guard froze every worker at its validated first continuation tick
+    and left READINESS_HOLDS.json behind (MSA arms only). Before starting
+    PRE_EVAL the sidecar:
+
+    1. verifies every recorded PID is STILL stopped;
+    2. verifies every worker's newest COMMITTED frame equals the
+       validated_frame recorded in FIRST_TICK_VALIDATED.json — the PRE
+       snapshot must come from exactly that matched intervention boundary;
+    3. imports the holds into WorkerHolds (persisting MSA_HOLDS.json) and
+       atomically removes READINESS_HOLDS.json.
+
+    Any failure SIGCONTs EVERY readiness-held PID (children before root)
+    and raises — the caller must stop the whole arm (the workers were
+    never our holds to keep)."""
+    records = read_readiness_holds(run_dir)
+    if not records:
+        return []
+    try:
+        payload = json.loads(readiness_marker.read_text())
+        validated_frame = {int(r["worker_id"]): int(r["validated_frame"])
+                           for r in payload["workers"]}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"readiness marker unreadable during hold "
+                           f"adoption: {exc}") from exc
+    try:
+        for w, rec in sorted(records.items()):
+            want = validated_frame.get(int(w))
+            if want is None:
+                raise RuntimeError(
+                    f"worker {w} is readiness-held but absent from "
+                    f"{readiness_marker.name}")
+            rec_frame = int(rec.get("validated_frame", -1))
+            if rec_frame != want:
+                raise RuntimeError(
+                    f"worker {w}: readiness hold frame {rec_frame} != "
+                    f"marker validated frame {want}")
+            meta = latest_committed_meta(workspace / f"{w:03d}")
+            frame = int((meta or {}).get("frame", -1))
+            if frame != want:
+                raise RuntimeError(
+                    f"worker {w}: committed frame {frame} != validated "
+                    f"boundary {want} — the PRE snapshot would not come "
+                    "from the matched intervention boundary")
+        holds.adopt(records)
+    except Exception:
+        # fail closed: the workers must never be left frozen by a failed
+        # handoff — SIGCONT everything (children before supervisor/root).
+        for rec in records.values():
+            for pid in reversed([int(p) for p in rec.get("pids", [])]):
+                try:
+                    os.kill(pid, signal.SIGCONT)
+                except (ProcessLookupError, OSError):
+                    pass
+        try:
+            (Path(run_dir) / READINESS_HOLDS_FILE).unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    # conversion: MSA_HOLDS.json was persisted above; removing the guard's
+    # file completes the atomic ownership transfer (if we die between the
+    # two writes, both files describe the SAME stopped pids and every stop
+    # path SIGCONTs the union).
+    try:
+        (Path(run_dir) / READINESS_HOLDS_FILE).unlink()
+    except FileNotFoundError:
+        pass
+    return sorted(int(w) for w in records)
 
 
 # ---------------------------------------------------------------------------
@@ -705,9 +1021,28 @@ def main(argv: list[str] | None = None) -> int:
                          "continuation_guard; no cycle starts/resumes "
                          "before it exists")
     ap.add_argument("--hold-smoke-marker", default="",
-                    help="HOLD_SMOKE_PASSED.json written by the hold "
-                         "smoke; no cycle starts/resumes before it exists "
-                         "(REQUIRED unless --hold-smoke-only)")
+                    help="HOLD_SMOKE_PASSED.json written by the in-arm "
+                         "hold smoke — EXECUTION SMOKE ONLY (it releases "
+                         "the worker for an extra committed tick and "
+                         "breaks the matched intervention boundary); "
+                         "formal arms must use --hold-smoke-certificate")
+    ap.add_argument("--hold-smoke-certificate", default="",
+                    help="HOLD_SMOKE_CERTIFICATE.json produced by the "
+                         "DISPOSABLE start_stateful_hold_smoke.sh; must "
+                         "match the current git commit, task, wm profile "
+                         "and GPU environment (fail-closed at startup)")
+    ap.add_argument("--wm-profile", default="",
+                    help="the arm's wm strategy profile (certificate "
+                         "matching; REQUIRED with "
+                         "--hold-smoke-certificate)")
+    ap.add_argument("--certificate-smoke", action="store_true",
+                    help="disposable single-worker hold smoke producing "
+                         "HOLD_SMOKE_CERTIFICATE.json; no readiness "
+                         "marker, no tolerance writes, no cycle, no eval")
+    ap.add_argument("--cert-out", default="",
+                    help="certificate output path (--certificate-smoke)")
+    ap.add_argument("--cert-gpu-index", default="4",
+                    help="GPU index the disposable smoke worker trains on")
     ap.add_argument("--commit-max-wait-s", type=float,
                     default=DEFAULT_COMMIT_MAX_WAIT_S,
                     help="single bounded wait for a durable tolerance "
@@ -725,6 +1060,18 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = workspace.parent
     readiness_marker = Path(args.readiness_marker)
 
+    if args.certificate_smoke:
+        if not str(args.cert_out).strip():
+            ap.error("--cert-out is required with --certificate-smoke")
+        if not str(args.wm_profile).strip():
+            ap.error("--wm-profile is required with --certificate-smoke")
+        return certificate_smoke(
+            run_dir, workspace, args.hold_smoke_worker,
+            args.hold_smoke_seconds, Path(args.cert_out),
+            task=args.task, profile=args.wm_profile,
+            gpu_index=str(args.cert_gpu_index),
+            repo_dir=Path(__file__).resolve().parent)
+
     if args.hold_smoke_only:
         return hold_smoke(run_dir, workspace, args.hold_smoke_worker,
                           args.hold_smoke_seconds, readiness_marker)
@@ -734,9 +1081,43 @@ def main(argv: list[str] | None = None) -> int:
     eval_devices = [d for d in str(args.eval_devices).split(",") if d.strip()]
     if not eval_devices:
         ap.error("--eval-devices is required (unless --hold-smoke-only)")
-    if not str(args.hold_smoke_marker).strip():
-        ap.error("--hold-smoke-marker is required (unless --hold-smoke-only)")
-    smoke_marker = Path(args.hold_smoke_marker)
+    have_marker = bool(str(args.hold_smoke_marker).strip())
+    have_cert = bool(str(args.hold_smoke_certificate).strip())
+    if have_marker == have_cert:
+        ap.error("exactly ONE of --hold-smoke-marker (execution smoke "
+                 "only) or --hold-smoke-certificate (formal arms) is "
+                 "required")
+    if have_cert:
+        # fail-closed certificate validation at STARTUP: the disposable
+        # smoke must have certified this exact commit/task/profile/GPU env.
+        from dexpbt_isaaclab.msa.continuation_guard import stop_arm
+        cert_path = Path(args.hold_smoke_certificate)
+        try:
+            if not str(args.wm_profile).strip():
+                raise RuntimeError("--wm-profile is required with "
+                                   "--hold-smoke-certificate")
+            cert = json.loads(cert_path.read_text())
+            from dexpbt_isaaclab.msa.eval_bridge import device_index
+            indices = [device_index(d) for d in eval_devices]
+            gpu_names, driver, _cuda = _gpu_env(indices)
+            git_commit = _current_git_commit(Path(__file__).resolve().parent)
+            ok, why = certificate_ok(
+                cert, git_commit=git_commit, task=args.task,
+                profile=args.wm_profile, gpu_names=gpu_names,
+                driver_version=driver)
+            if not ok:
+                raise RuntimeError(why)
+        except Exception as exc:                         # noqa: BLE001
+            print(f"[msa-sidecar] hold smoke certificate INVALID: {exc}")
+            stop_arm(run_dir,
+                     f"hold smoke certificate invalid: {exc}",
+                     "GUARD_FAILED")
+            return 2
+        print(f"[msa-sidecar] hold smoke certificate validated: "
+              f"{cert_path}")
+        smoke_marker = cert_path
+    else:
+        smoke_marker = Path(args.hold_smoke_marker)
 
     permuted = args.permuted_route or args.arm == "MSA_PERMUTED_ROUTE"
     ctl, holds = build_controller(
@@ -796,6 +1177,28 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[msa-sidecar] waiting for gate: {why}")
                 time.sleep(POLL_S)
                 continue
+            # HOLD HANDOFF: the guard left every worker frozen at its
+            # validated boundary (READINESS_HOLDS.json). Adopt those holds
+            # (verify stopped state + committed frame == validated frame,
+            # convert to MSA_HOLDS.json) and start PRE_EVAL from EXACTLY
+            # that boundary — the workers are never released in between.
+            if (run_dir / READINESS_HOLDS_FILE).is_file():
+                try:
+                    adopted = adopt_readiness_holds(
+                        holds, run_dir, workspace, readiness_marker)
+                    print(f"[msa-sidecar] adopted readiness holds for "
+                          f"workers {adopted}; first PRE_EVAL starts from "
+                          "the frozen validated boundary")
+                except Exception as exc:                 # noqa: BLE001
+                    from dexpbt_isaaclab.msa.continuation_guard import (
+                        stop_arm,
+                    )
+                    print(f"[msa-sidecar] readiness hold adoption FAILED: "
+                          f"{exc}")
+                    stop_arm(run_dir,
+                             f"readiness hold adoption failed: {exc}",
+                             "GUARD_FAILED")
+                    return 2
             all_ids = [v.worker_id for v in views]
             try:
                 pending = ctl.pending_cycle(all_ids)

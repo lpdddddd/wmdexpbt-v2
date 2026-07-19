@@ -252,14 +252,19 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: (a) six-worker READINESS BARRIER + STALL REPRODUCTION
-# GATE — each worker's first committed tick must confirm the structured
-# RESUME_APPLIED.json tolerance resume, stay within ONE mastery shrink of
-# its source tolerance (two shrinks in one 80M interval = ungated legacy
-# fallback -> GUARD_FAILED), and keep the restored control state alive
-# (no default clobber -> STATE_FIDELITY_FAILED); >= 4/6 workers must hold
-# EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops the
-# arm; only then FIRST_TICK_VALIDATED.json is written;
+# Continuation guard: (a) six-worker TRUE READINESS BARRIER + STALL
+# REPRODUCTION GATE — each worker's first committed tick is validated
+# (structured RESUME_APPLIED.json tolerance resume; at most ONE mastery
+# shrink of its source tolerance — two shrinks in one 80M interval =
+# ungated legacy fallback -> GUARD_FAILED; restored control state alive,
+# no default clobber -> STATE_FIDELITY_FAILED) and the worker is then
+# IMMEDIATELY SIGSTOP-frozen at that boundary (READINESS_HOLDS.json);
+# validated workers stay frozen until 6/6 are ready; >= 4/6 workers must
+# hold EXACTLY their source tolerance or STATE_FIDELITY_FAILED.json stops
+# the arm; only then FIRST_TICK_VALIDATED.json is written. Non-MSA arms
+# release all six SIMULTANEOUSLY; MSA arms leave the holds for the
+# sidecar to adopt (READINESS_HOLDS.json -> MSA_HOLDS.json), so the first
+# PRE snapshot comes from exactly the validated frame;
 # (b) matched worker-local cap — target = baseline + 480000000 (6
 # committed ticks at the REAL 80M cadence); park at first committed frame
 # >= target; overshoot beyond one tick (80M) of slack fails the arm; all
@@ -281,25 +286,53 @@ echo $! > "$RUN_DIR/continuation_guard.pid"
 # stopped-state verification + MSA_HOLDS.json persistence, heterogeneous
 # per-worker tau_plus pins via msa_forced_success_tolerance, policy-only
 # evals in subprocesses with bounded per-device concurrency).
-# - the sidecar WAITS for BOTH the guard's FIRST_TICK_VALIDATED.json (6/6
-#   readiness barrier) AND HOLD_SMOKE_PASSED.json (written only by a fully
-#   successful run_hold_smoke.sh) before starting or resuming any cycle —
-#   it may be launched early but idles at the gate without touching
-#   MSA_HOLDS.json (execution order: launch arm -> 6/6 readiness ->
-#   run_hold_smoke.sh -> PASSED marker -> first N=4 cycle);
-# - MSA_EVAL_DEVICES defaults to cuda:6,cuda:7: trainers occupy DEXPBT_GPUS
-#   (0-5); eval devices are REQUIRED and never default onto cuda:0;
+# - the sidecar WAITS for the guard's FIRST_TICK_VALIDATED.json (6/6 TRUE
+#   readiness barrier: every worker is SIGSTOP-frozen at its validated
+#   first tick) and then ADOPTS the guard's READINESS_HOLDS.json (verifies
+#   stopped state + committed frame == validated frame, converts it to
+#   MSA_HOLDS.json) so the first PRE snapshot comes from EXACTLY the
+#   matched intervention boundary — workers are never released in between;
+# - the hold-smoke gate is the DISPOSABLE certificate: run
+#   start_stateful_hold_smoke.sh (same code / task / 8192 envs / shared
+#   eval GPU) BEFORE launching this arm; the sidecar validates
+#   HOLD_SMOKE_CERTIFICATE.json (git commit, task, profile, GPU model,
+#   driver) at startup and fail-closed stops the arm on any mismatch.
+#   NEVER run the in-arm run_hold_smoke.sh in a formal arm: it releases
+#   the target worker for an extra committed tick and breaks the matched
+#   boundary (execution smoke only);
+# - SIX-GPU MACHINE: trainers occupy DEXPBT_GPUS (cuda:0-5); eval shares
+#   cuda:4,cuda:5 with the trainers — safe because the GPU4/5 trainers are
+#   SIGSTOPped during every eval barrier (they keep their VRAM allocated;
+#   budget headroom on those two GPUs is required); the ACTUAL eval
+#   devices are recorded in $RUN_DIR/EVAL_DEVICES.json;
 # - MSA_NUM_SEEDS defaults to 4 = EXECUTION SMOKE (validates the machinery
 #   only, NEVER a method conclusion). Pilot N=16 must be set explicitly;
 #   formal N=256 is formal-only (~345h on 2 GPUs — do not).
+MSA_EVAL_DEVICES_ACTUAL="${MSA_EVAL_DEVICES:-cuda:4,cuda:5}"
+MSA_HOLD_SMOKE_CERT_ACTUAL="${MSA_HOLD_SMOKE_CERT:-/root/autodl-tmp/wmdexpbt/results/launchers/msa_probe/HOLD_SMOKE_CERTIFICATE.json}"
+if [[ ! -f "$MSA_HOLD_SMOKE_CERT_ACTUAL" ]]; then
+  echo "REFUSING TO LAUNCH SIDECAR: hold smoke certificate missing:" | tee -a "$LOG"
+  echo "  $MSA_HOLD_SMOKE_CERT_ACTUAL" | tee -a "$LOG"
+  echo "  run start_stateful_hold_smoke.sh first (disposable GPU smoke)" | tee -a "$LOG"
+  exit 3
+fi
+cat > "$RUN_DIR/EVAL_DEVICES.json" <<EOF
+{
+  "eval_devices": "$MSA_EVAL_DEVICES_ACTUAL",
+  "trainer_gpus": "$DEXPBT_GPUS",
+  "shared_gpu_note": "trainers on the eval GPUs are SIGSTOPped during eval barriers but keep their VRAM allocated",
+  "hold_smoke_certificate": "$MSA_HOLD_SMOKE_CERT_ACTUAL"
+}
+EOF
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \
   --arm MSA_STATEFUL \
   --rho-threshold 0.88 \
   --num-seeds "${MSA_NUM_SEEDS:-4}" \
-  --eval-devices "${MSA_EVAL_DEVICES:-cuda:6,cuda:7}" \
+  --eval-devices "$MSA_EVAL_DEVICES_ACTUAL" \
   --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \
-  --hold-smoke-marker "$RUN_DIR/HOLD_SMOKE_PASSED.json" \
+  --hold-smoke-certificate "$MSA_HOLD_SMOKE_CERT_ACTUAL" \
+  --wm-profile "cser_dexpbt_conservative" \
   --commit-max-wait-s "${MSA_COMMIT_MAX_WAIT_S:-3600}" \
   >>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"

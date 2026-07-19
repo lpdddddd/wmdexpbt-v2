@@ -410,12 +410,24 @@ class TestStallReproductionGate(unittest.TestCase):
 
 class TestGuardLoopStateFaithful(unittest.TestCase):
     """End-to-end guard loop on a state-faithful arm: structured
-    RESUME_APPLIED, control fidelity, stall reproduction, markers."""
+    RESUME_APPLIED, control fidelity, stall reproduction, markers, and
+    the true readiness barrier (workers frozen while validating)."""
+
+    def _reap(self, proc) -> None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
 
     def _setup_run(self, root: Path, tols: dict[int, float],
                    with_resume: bool = True):
         run_dir = root / "run"
         ws = run_dir / "dexpbt_8gpu_ws"
+        procs = {}
         for w in range(6):
             d = ws / f"{w:03d}"
             d.mkdir(parents=True)
@@ -438,6 +450,11 @@ class TestGuardLoopStateFaithful(unittest.TestCase):
                     collapse_freeze_until_env_frames=4_900_000_000))
             pol = run_dir / f"policy_{w:02d}"
             pol.mkdir(parents=True)
+            # a REAL process per worker: the readiness barrier SIGSTOPs it
+            proc = subprocess.Popen(["sleep", "300"])
+            self.addCleanup(self._reap, proc)
+            (pol / "pid.txt").write_text(str(proc.pid))
+            procs[w] = proc
             if with_resume:
                 (pol / "RESUME_APPLIED.json").write_text(json.dumps({
                     "policy_idx": w,

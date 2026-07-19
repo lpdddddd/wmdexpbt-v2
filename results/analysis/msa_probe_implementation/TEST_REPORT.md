@@ -3,10 +3,11 @@
 Date: 2026-07-19, updated the same date for the pilot-integration fix pass
 ("Fix MSA pilot integration and phase safety"), the pre-pilot safety patch
 ("Harden MSA readiness holds and pilot budget"), the final orchestration
-blocker patch ("Close MSA smoke, commit, and cap races") and the
+blocker patch ("Close MSA smoke, commit, and cap races"), the
 state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
-arms"). Environment: isaaclab311 python (CPU only; no Isaac import anywhere
-in the MSA package or its tests; no GPU used).
+arms") and the synchronization pass ("Make readiness a hold barrier with
+sidecar adoption"). Environment: isaaclab311 python (CPU only; no Isaac
+import anywhere in the MSA package or its tests; no GPU used).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -18,13 +19,16 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 114/114 passed
+## MSA suite: `tests/test_msa_probe.py` — 125/125 passed
 ## Bootstrap suite: `tests/test_state_bootstrap.py` — 32/32 passed
 
 (72 retained from the pilot-integration pass + 23 safety-patch tests +
 15 orchestration-blocker tests, updated in place for the real 80M cadence,
-the 480M cap and the stateful arm names + 4 new first-tick semantics tests;
-plus the 32-test state-bootstrap suite.)
+the 480M cap and the stateful arm names + 4 first-tick semantics tests +
+11 synchronization tests — readiness hold barrier, sidecar adoption,
+certificate gate, children-before-root termination, six-GPU metadata;
+plus the 32-test state-bootstrap suite, whose guard-loop tests now run
+against REAL per-worker processes frozen by the barrier.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -139,21 +143,46 @@ first-tick tests in the MSA suite):
 | first-tick semantics: RESUME_APPLIED structural check, one-shrink band, legacy-cascade rejection, reproduced flag | `TestContinuationGuard.test_first_tick_*` (updated) |
 | worker-local cap at real cadence: 480M target, 80M slack | `TestContinuationGuard.test_worker_local_cap_at_real_cadence`, `TestMatchedCap.*` (updated) |
 
+Synchronization coverage ("Make readiness a hold barrier with sidecar
+adoption"; 11 new tests + reworked barrier tests, all against REAL
+processes):
+
+| # | requirement | test(s) |
+|---|---|---|
+| 1 | an early validated worker is FROZEN — its frame/progress stops | `TestReadinessBarrier.test_early_frozen_worker_makes_no_progress` (real counter process), `test_guard_loop_partial_workers_no_marker` |
+| 2 | before 6/6 there is NO validated-but-unfrozen worker | `test_guard_loop_partial_workers_no_marker` (validated 0-2 in 'T', unvalidated 3-5 running; READINESS_HOLDS.json contents asserted) |
+| 3 | BASE/GATE: all six released SIMULTANEOUSLY, record removed | `test_guard_loop_writes_marker_only_after_all_six` |
+| 4 | MSA sidecar adopts the readiness holds seamlessly (never releases in between) | `TestReadinessBarrier.test_guard_loop_msa_handoff_keeps_workers_frozen`, `TestSidecarHoldAdoption.test_adopt_seamless` |
+| 5 | PRE snapshot frame EXACTLY equals the validated frame (mismatch fails closed) | `TestSidecarHoldAdoption.test_pre_snapshot_frame_equals_validated_frame` (+ controller `_snapshot_at` enforcement) |
+| 6 | sidecar adoption failure releases ALL workers and stops the arm | `test_adopt_failure_releases_all_and_stops_arm` |
+| 7 | children-before-root termination, robust to a supervisor respawning children | `TestTerminateTreeOrder.test_kill_order_children_before_root`, `test_supervisor_respawning_child_is_fully_stopped` (root with `trap '' TERM` + respawn loop) |
+| 8 | six-GPU metadata: launchers record MSA_EVAL_DEVICES (default cuda:4,cuda:5, shared with trainers 4/5) into EVAL_DEVICES.json | `TestOriginalProfileUnchanged.test_six_gpu_metadata_recorded` |
+| — | certificate gate: matching cert passes; ok=false / commit / task / profile / GPU model / driver mismatch fails closed; per-eval-device model check | `TestHoldSmokeCertificate.*` (3 tests) |
+| — | any readiness failure SIGCONTs the already-frozen workers before the arm stops | `test_guard_loop_any_failure_stops_arm_without_marker` (extended: no pid left in 'T') |
+
 ## Real execution order (enforced, not just procedural)
 
 ```
+start_stateful_hold_smoke.sh (DISPOSABLE) → HOLD_SMOKE_CERTIFICATE.json
 launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
-           → 6/6 readiness + stall reproduction (FIRST_TICK_VALIDATED.json)
-           → hold smoke (run_hold_smoke.sh)
-           → HOLD_SMOKE_PASSED.json
-           → first N=4 execution-smoke cycle
+           → sidecar validates the certificate (fail closed at startup)
+           → per-worker validation → immediate SIGSTOP freeze
+             (READINESS_HOLDS.json) → 6/6 → stall reproduction
+             → FIRST_TICK_VALIDATED.json
+           → BASE/GATE: simultaneous SIGCONT of all six
+           → MSA: sidecar adopts holds (→ MSA_HOLDS.json), first PRE_EVAL
+             from the frozen validated boundary
 ```
+
+The in-arm `run_hold_smoke.sh` is EXECUTION SMOKE ONLY (it advances the
+released worker one extra committed tick) and is forbidden in the formal
+four-arm comparison.
 
 ## Regression suites (per-file, one process per test module)
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 114 passed |
+| `tests/test_msa_probe.py` | 125 passed |
 | `tests/test_state_bootstrap.py` | 32 passed |
 | `tests/test_pbt_curriculum_p1.py` + `test_curriculum_freeze.py` + `test_env_mastery_curriculum.py` | 22 passed, 1 pre-existing failure (below) |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
@@ -186,10 +215,18 @@ Plan-only continuation-guard verification against the real manifest:
 `continuation_guard --verify-only` on `msa.config.json` →
 `BOOTSTRAP OK: 6/6 checkpoints verified (hash, mapping, fields)`.
 
-Hold/watchdog/hold-smoke tests use REAL processes (`sleep` children,
-actual SIGSTOP/SIGCONT and /proc state checks) — one tier above pure
-mocks, still no GPU. SIGSTOP against a live Isaac trainer remains
-GPU-unverified; the prepared `run_hold_smoke.sh` is the required first
-GPU validation step (see `LAUNCH_CHECKLIST.md`).
+Readiness hold / handoff dry run with REAL processes (six live workers
+frozen one by one by the guard, marker written with holds retained,
+sidecar adoption converting READINESS_HOLDS.json → MSA_HOLDS.json with
+frame verification, controller-style release): full trace appended to
+`DRY_RUN_TRACE.md` (PIDs verified in 'T' through the whole handoff,
+`PRE snapshot frame == validated frame` for all six).
+
+Hold/watchdog/hold-smoke/barrier tests use REAL processes (`sleep` and
+bash counter children, actual SIGSTOP/SIGCONT and /proc state checks) —
+one tier above pure mocks, still no GPU. SIGSTOP against a live Isaac
+trainer remains GPU-unverified; the prepared DISPOSABLE
+`start_stateful_hold_smoke.sh` (certificate producer) is the required
+first GPU validation step (see `LAUNCH_CHECKLIST.md`).
 
 No GPU was used at any point; no training was started.

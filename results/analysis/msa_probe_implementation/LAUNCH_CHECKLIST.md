@@ -21,7 +21,8 @@ proved the bare warm start does NOT reproduce the stall (empty
 | GATE_RELAX_STATEFUL | `results/launchers/msa_probe/start_gate_relax_stateful.sh` |
 | MSA_STATEFUL | `results/launchers/msa_probe/start_msa_stateful.sh` |
 | MSA_PERMUTED_STATEFUL | `results/launchers/msa_probe/start_msa_permuted_stateful.sh` |
-| hold smoke (single worker) | `results/launchers/msa_probe/run_hold_smoke.sh` |
+| **disposable GPU hold smoke** (produces the certificate) | `results/launchers/msa_probe/start_stateful_hold_smoke.sh` |
+| in-arm hold smoke — **EXECUTION SMOKE ONLY, forbidden in the formal four-arm comparison** | `results/launchers/msa_probe/run_hold_smoke.sh` |
 
 Each arm has a machine-readable `<arm>.config.json` next to it, embedding
 the resume checkpoints WITH bootstrap head hashes (`sha256_head`), live
@@ -47,28 +48,46 @@ launcher, in order:
    meaning); train.py writes a structured
    `policy_XX/RESUME_APPLIED.json` audit of what was applied;
 5. starts the `continuation_guard` loop:
-   - **6/6 readiness barrier + STALL REPRODUCTION GATE** — each worker's
-     first committed tick (one full 80M interval on the restored state)
-     must: confirm the RESUME_APPLIED tolerance structurally, stay within
-     ONE mastery shrink of its source tolerance (two shrinks in one
-     interval = legacy-fallback cascade → `GUARD_FAILED`), keep lineage,
-     and keep the restored control state alive (no default clobber of
-     last-mastered/peak/freeze fields → `STATE_FIDELITY_FAILED.json`).
-     Arm-level: ≥ 4/6 workers must hold EXACTLY their source tolerance,
-     else `STATE_FIDELITY_FAILED.json` and a full stop — the stall was
-     NOT reproduced and MSA must not start. Only then
-     `FIRST_TICK_VALIDATED.json` (with the per-worker reproduction
-     record) is written;
+   - **6/6 TRUE READINESS BARRIER + STALL REPRODUCTION GATE** — each
+     worker's first committed tick (one full 80M interval on the restored
+     state) must: confirm the RESUME_APPLIED tolerance structurally, stay
+     within ONE mastery shrink of its source tolerance (two shrinks in
+     one interval = legacy-fallback cascade → `GUARD_FAILED`), keep
+     lineage, and keep the restored control state alive (no default
+     clobber of last-mastered/peak/freeze fields →
+     `STATE_FIDELITY_FAILED.json`). The moment a worker passes, its FULL
+     process tree is SIGSTOP-frozen at that committed boundary (verified
+     `T` state; persisted to `READINESS_HOLDS.json` with worker id,
+     root/children PIDs, validated frame/tolerance/lineage, hold
+     timestamp) — an early worker can NEVER train past its matched
+     intervention boundary while the others catch up. If any worker
+     fails, every readiness hold is SIGCONTed and the arm stops
+     fail-closed. Arm-level: with 6/6 frozen, ≥ 4/6 workers must hold
+     EXACTLY their source tolerance, else `STATE_FIDELITY_FAILED.json`
+     and a full stop. Only then `FIRST_TICK_VALIDATED.json` (with the
+     per-worker reproduction record) is written;
+   - **handoff** — BASE_STATEFUL / GATE_RELAX_STATEFUL: all six workers
+     are SIGCONTed SIMULTANEOUSLY and `READINESS_HOLDS.json` is deleted
+     (matched continuation from each worker's validated tick).
+     MSA_STATEFUL / MSA_PERMUTED_STATEFUL: workers are NOT released; the
+     sidecar ADOPTS `READINESS_HOLDS.json` (verifies PIDs still `T`,
+     committed frame == validated frame, imports the WorkerHolds state,
+     atomically converts to `MSA_HOLDS.json`) and the first `PRE_EVAL`
+     snapshot comes from EXACTLY the validated frame — any mismatch fails
+     closed and stops the arm;
    - **matched worker-local cap** — target = baseline + 480M (6 committed
      ticks at the REAL 80M cadence); each worker parked at its FIRST
      committed frame ≥ target; overshoot beyond one tick (80M) of slack
      fails the arm; 6/6 parked → `ARM_COMPLETE.json` (normal completion)
      and a full stop of guard, sidecar, watchdog and every worker tree —
-     every stop now escalates SIGCONT → SIGTERM → 20 s grace →
-     re-enumerate → SIGKILL survivors → verify exit (Isaac trainers
-     survived bare SIGTERM in the smoke);
-6. (MSA arms) starts the sidecar — which WAITS for BOTH the readiness
-   marker AND `HOLD_SMOKE_PASSED.json` — and the external `hold_watchdog`
+     every stop escalates SIGCONT → SIGTERM (descendants children-first,
+     supervisor/root LAST) → 20 s grace → re-enumerate → SIGKILL
+     children-first/root-last → verify no survivor (robust against a
+     supervisor respawning children mid-escalation);
+6. (MSA arms) starts the sidecar — which REQUIRES the readiness marker
+   AND a validated `HOLD_SMOKE_CERTIFICATE.json` (git commit, task, wm
+   profile, GPU model, driver must match the current environment; checked
+   fail-closed at sidecar startup) — and the external `hold_watchdog`
    (releases SIGSTOPped workers and stops the arm if the sidecar dies
    mid-hold; also stops the arm if the sidecar dies while `MSA_BUSY.json`
    exists, even with no holds recorded).
@@ -76,16 +95,23 @@ launcher, in order:
 ## Mandatory execution order (MSA arms)
 
 ```
+start_stateful_hold_smoke.sh  (DISPOSABLE, one throwaway worker on GPU 4)
+           → HOLD_SMOKE_CERTIFICATE.json (ok=true)
 launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
-           → 6/6 readiness + stall reproduction (FIRST_TICK_VALIDATED.json)
-           → run_hold_smoke.sh → HOLD_SMOKE_PASSED.json
-           → first N=4 execution-smoke cycle
+           → sidecar validates the certificate at startup (fail closed)
+           → 6/6 readiness: each validated worker frozen (READINESS_HOLDS.json)
+           → stall reproduction gate → FIRST_TICK_VALIDATED.json
+           → sidecar ADOPTS the frozen workers (→ MSA_HOLDS.json)
+           → first N=4 execution-smoke cycle starts PRE_EVAL from the
+             validated boundary (PRE snapshot frame == validated frame)
 ```
 
-The formal sidecar enforces this order itself: it starts no cycle until
-both markers exist. A failed smoke writes `HOLD_SMOKE_FAILED.json` (a
-permanent stop marker), SIGCONTs everything and fail-closed stops the
-whole arm; the PASSED marker is never written on any failure path.
+The DISPOSABLE hold smoke runs BEFORE the arm and OUTSIDE it: the old
+in-arm `run_hold_smoke.sh` releases the target worker and waits for one
+extra committed tick, which advances it past the matched intervention
+boundary — it is therefore EXECUTION SMOKE ONLY and forbidden in the
+formal four-arm comparison. A failed disposable smoke leaves
+`ok=false` in the certificate and the formal sidecar refuses to start.
 
 ## Pre-launch checks
 
@@ -98,16 +124,20 @@ whole arm; the PASSED marker is never written on any failure path.
        `python -m dexpbt_isaaclab.msa.state_bootstrap --audit-cadence
        --source-run <source_run> --run-dir /tmp/x` reports
        `committed_tick_frames: 80000000, matches_module_constant: true`.
-3. [ ] GPUs 0–5 idle for training; two eval GPUs reserved for MSA eval
-       (`MSA_EVAL_DEVICES`; on the current 6-GPU machine use
-       `cuda:4,cuda:5` — trainers then share 0–3 — or run eval-heavy
-       phases sequentially); at most one Isaac eval process per device;
-       no other jobs (`nvidia-smi`).
+3. [ ] SIX-GPU configuration understood and idle (`nvidia-smi`): the six
+       trainers occupy `cuda:0`–`cuda:5`; MSA eval runs on
+       `MSA_EVAL_DEVICES` (default `cuda:4,cuda:5`) — the eval devices
+       are SHARED with trainers 4/5. That is safe because during every
+       eval barrier the GPU4/5 trainers are SIGSTOPped, but they KEEP
+       their VRAM allocated, so both GPUs need headroom for one Isaac
+       eval process on top of a resident (frozen) trainer. At most one
+       Isaac eval process per device. The launcher records the actual
+       devices in `<run_dir>/EVAL_DEVICES.json`.
 4. [ ] Disk headroom: each arm writes a new run dir (checkpoints ~180MB x
        6 workers x ~6 ticks for 480M frames ≈ 6.5GB per arm; MSA arms add
        read-only snapshots + eval raw ≈ +3GB).
 5. [ ] `python -m pytest tests/test_msa_probe.py tests/test_state_bootstrap.py -q`
-       green (114 + 32 tests).
+       green (125 + 32 tests).
 6. [ ] Dry-run regenerates cleanly (heterogeneous taus, 80M packets,
        post-hold packet starts):
        `python -m dexpbt_isaaclab.msa.dry_run --out /tmp/trace.md`.
@@ -121,16 +151,21 @@ whole arm; the PASSED marker is never written on any failure path.
        conclusion (27 eval cells ≈ 5.4 h on 2 GPUs). Pilot N=16
        (≈ 21.6 h) must be set explicitly; N=256 is formal-only and NOT
        affordable on 2 GPUs (≈ 345.6 h) — see `EVAL_COST_ESTIMATE.json`.
-9. [ ] **MANDATORY GPU gate — hold smoke BEFORE any probe cycle (ENFORCED
-       by the sidecar).** After the arm launches and
-       `FIRST_TICK_VALIDATED.json` appears, run
-       `bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60`.
-       Success (frame frozen during the hold + next committed tick after
-       release + no residual holds) atomically writes
-       `HOLD_SMOKE_PASSED.json`, which is the ONLY thing that opens the
-       sidecar's cycle gate. Failure writes `HOLD_SMOKE_FAILED.json` and
-       stops the arm. Watch the first cycle via `msa_sidecar.log` +
-       `nvidia-smi` through PRE_EVAL.
+9. [ ] **MANDATORY GPU gate — DISPOSABLE hold smoke BEFORE the arm
+       (ENFORCED by the sidecar).** Run
+       `bash results/launchers/msa_probe/start_stateful_hold_smoke.sh
+       --i-know-what-i-am-doing` (one throwaway worker, same code / task /
+       profile / 8192 envs, GPU 4). It verifies the frame is frozen under
+       SIGSTOP and the next committed tick appears after SIGCONT, writes
+       `HOLD_SMOKE_CERTIFICATE.json` (git commit, task, profile, GPU
+       UUID/model, CUDA/driver, process-tree shape, hold/resume frames,
+       ok=true) and tears the throwaway run down completely. The formal
+       MSA launcher refuses to start without the certificate file and the
+       sidecar re-validates its contents against the live environment at
+       startup. The certificate is INVALIDATED by any new commit / GPU /
+       driver change — re-run the disposable smoke then. Do NOT run
+       `run_hold_smoke.sh` inside a formal arm (it advances the released
+       worker one extra committed tick past the matched boundary).
 10. [ ] Confirm the bootstrap PRE-SEEDED `curriculum_control/` and
         `observer_state_seed/` in the new run dir (a fresh/empty control
         dir is now a launch BLOCKER, not the expected state — readiness no
@@ -139,22 +174,32 @@ whole arm; the PASSED marker is never written on any failure path.
 
 ## Launch commands (DO NOT RUN until all boxes are checked)
 
+### BASE_STATEFUL / GATE_RELAX_STATEFUL final start order
+
 ```bash
+# 1. launch (bootstrap + fingerprint + manifest verify are in-launcher)
 bash results/launchers/msa_probe/start_base_stateful.sh          --i-know-what-i-am-doing
-bash results/launchers/msa_probe/start_gate_relax_stateful.sh    --i-know-what-i-am-doing
-bash results/launchers/msa_probe/start_msa_stateful.sh           --i-know-what-i-am-doing
-bash results/launchers/msa_probe/start_msa_permuted_stateful.sh  --i-know-what-i-am-doing
-# then, for MSA arms, after FIRST_TICK_VALIDATED.json appears:
-bash results/launchers/msa_probe/run_hold_smoke.sh <run_dir> 0 60
-# the sidecar starts its first cycle only after HOLD_SMOKE_PASSED.json
+# 2. the guard freezes each validated worker; on 6/6 + stall reproduction
+#    it writes FIRST_TICK_VALIDATED.json and SIGCONTs all six
+#    SIMULTANEOUSLY (READINESS_HOLDS.json removed) — no manual step.
+# (same for start_gate_relax_stateful.sh)
 ```
 
-Recommended next GPU smoke (single arm, machinery validation):
+### MSA_STATEFUL / MSA_PERMUTED_STATEFUL final start order
 
 ```bash
+# 1. DISPOSABLE hold smoke (one throwaway worker on GPU 4) -> certificate
+bash results/launchers/msa_probe/start_stateful_hold_smoke.sh --i-know-what-i-am-doing
+# 2. verify: HOLD_SMOKE_CERTIFICATE.json has ok=true
+# 3. launch the arm (refuses without the certificate; the sidecar
+#    validates commit/task/profile/GPU env at startup)
 MSA_NUM_SEEDS=4 \
 MSA_EVAL_DEVICES=cuda:4,cuda:5 \
 bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
+# 4. the guard freezes each validated worker; on 6/6 it writes
+#    FIRST_TICK_VALIDATED.json and KEEPS the workers frozen; the sidecar
+#    adopts READINESS_HOLDS.json -> MSA_HOLDS.json and starts PRE_EVAL
+#    from the frozen validated boundary — no manual step, no in-arm smoke.
 ```
 
 ## Monitoring once launched
@@ -164,16 +209,23 @@ bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
   `<run_dir>/STATE_FINGERPRINT.json`, per-policy
   `policy_XX/RESUME_APPLIED.json` (written by train.py at env creation);
 - continuation guard: `<run_dir>/continuation_guard.log`; markers:
+  - `READINESS_HOLDS.json` — workers frozen at their validated boundaries
+    (present during the barrier; retained for MSA arms until the sidecar
+    adopts it, deleted on the simultaneous BASE/GATE release);
   - `FIRST_TICK_VALIDATED.json` — 6/6 readiness + stall reproduction
-    passed (sidecar may start);
+    passed (BASE/GATE workers released simultaneously; MSA sidecar adopts
+    the holds);
   - `STATE_FIDELITY_FAILED.json` — the restored state did NOT reproduce
     the stall (majority breakout, or control state default-clobbered);
     the arm was stopped and MSA never started;
   - `GUARD_FAILED` — fail-closed stop with the reason;
   - `ARM_COMPLETE.json` — NORMAL completion (all six parked at +480M);
-- hold smoke: `HOLD_SMOKE_RESULT.json` (detail),
-  `HOLD_SMOKE_PASSED.json` (gate open) / `HOLD_SMOKE_FAILED.json`
-  (permanent stop marker — arm was stopped);
+- hold smoke: `HOLD_SMOKE_CERTIFICATE.json` (disposable-smoke gate for
+  formal arms; ok must be true); for execution smokes only:
+  `HOLD_SMOKE_RESULT.json` (detail), `HOLD_SMOKE_PASSED.json` /
+  `HOLD_SMOKE_FAILED.json` (permanent stop marker — arm was stopped);
+- eval devices actually used: `<run_dir>/EVAL_DEVICES.json` (written by
+  the MSA launcher; default `cuda:4,cuda:5` shared with trainers 4/5);
 - MSA sidecar log: `<run_dir>/msa_sidecar.log`; hold state:
   `<run_dir>/MSA_HOLDS.json` (present only while workers are held);
   cycle state: `<run_dir>/MSA_BUSY.json` (present from before the first

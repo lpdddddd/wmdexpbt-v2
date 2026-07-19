@@ -1047,7 +1047,8 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
         if not LAUNCHER_DIR.exists():
             self.skipTest("arm launchers not generated in this checkout")
         for sh in LAUNCHER_DIR.glob("start_*.sh"):
-            if sh.name == "run_hold_smoke.sh":
+            if sh.name in ("run_hold_smoke.sh",
+                           "start_stateful_hold_smoke.sh"):
                 continue
             text = sh.read_text()
             # STATE-FAITHFUL bootstrap before anything launches (fail
@@ -1073,25 +1074,64 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
             text = (LAUNCHER_DIR / arm).read_text()
             # bounded multi-device eval, never the trainers' cuda:0
             self.assertIn("--eval-devices", text)
-            self.assertIn("cuda:6,cuda:7", text)
+            # SIX-GPU machine: eval SHARES cuda:4,cuda:5 with trainers
+            # 4/5 (SIGSTOPped during eval barriers, VRAM stays allocated)
+            self.assertIn("cuda:4,cuda:5", text)
+            self.assertNotIn("cuda:6,cuda:7", text)
+            self.assertNotIn("trainers then share 0-3", text)
             # N=4 execution-smoke default; pilot N=16 explicit only
             self.assertIn('--num-seeds "${MSA_NUM_SEEDS:-4}"', text)
             # 6/6 readiness barrier gate for the sidecar
             self.assertIn("--readiness-marker", text)
             self.assertIn("FIRST_TICK_VALIDATED.json", text)
-            # hold smoke gate: the sidecar also waits for the PASSED marker
-            self.assertIn("--hold-smoke-marker", text)
-            self.assertIn("HOLD_SMOKE_PASSED.json", text)
+            # hold smoke gate: DISPOSABLE certificate, validated at sidecar
+            # startup; the launcher refuses to start without the file
+            self.assertIn("--hold-smoke-certificate", text)
+            self.assertIn("HOLD_SMOKE_CERTIFICATE.json", text)
+            self.assertIn("--wm-profile", text)
+            self.assertIn("hold smoke certificate missing", text)
             # bounded durable-commit wait
             self.assertIn("--commit-max-wait-s", text)
             # external hold watchdog independent of the sidecar
             self.assertIn("hold_watchdog", text)
-        # prepared (never executed) single-worker hold smoke launcher
+        # the in-arm hold smoke is EXECUTION SMOKE ONLY (it advances the
+        # released worker one extra tick past the matched boundary) and
+        # exercises the shared-GPU path via worker 4
         smoke = (LAUNCHER_DIR / "run_hold_smoke.sh").read_text()
         self.assertIn("--hold-smoke-only", smoke)
-        self.assertIn("HOLD_SMOKE_PASSED.json", smoke)
+        self.assertIn("EXECUTION SMOKE ONLY", smoke)
+        self.assertIn("FORBIDDEN in the formal four-arm comparison", smoke)
+        self.assertIn('WORKER="${2:-4}"', smoke)
         self.assertIn("--hold-smoke-worker", smoke)
         self.assertIn("HOLD_SMOKE_RESULT.json", smoke)
+        # DISPOSABLE certificate smoke launcher (one throwaway worker on
+        # the shared eval GPU; produces the certificate the formal MSA
+        # launchers require)
+        disp = (LAUNCHER_DIR / "start_stateful_hold_smoke.sh").read_text()
+        self.assertIn("--certificate-smoke", disp)
+        self.assertIn("HOLD_SMOKE_CERTIFICATE.json", disp)
+        self.assertIn('SMOKE_GPU="${SMOKE_GPU:-4}"', disp)
+        self.assertIn("--num-envs 8192", disp)
+        self.assertIn("--wm-profile", disp)
+        self.assertIn("stop_arm", disp)   # disposable run torn down
+
+    def test_six_gpu_metadata_recorded(self):
+        # NEW TEST 8: the MSA launchers record the ACTUAL eval devices
+        # (default cuda:4,cuda:5 on this six-GPU machine) into run
+        # metadata, with the shared-GPU semantics spelled out.
+        if not LAUNCHER_DIR.exists():
+            self.skipTest("arm launchers not generated in this checkout")
+        for arm in ("start_msa_stateful.sh",
+                    "start_msa_permuted_stateful.sh"):
+            text = (LAUNCHER_DIR / arm).read_text()
+            self.assertIn(
+                'MSA_EVAL_DEVICES_ACTUAL="${MSA_EVAL_DEVICES:-cuda:4,cuda:5}"',
+                text)
+            self.assertIn('EVAL_DEVICES.json', text)
+            self.assertIn('"eval_devices": "$MSA_EVAL_DEVICES_ACTUAL"', text)
+            self.assertIn('"trainer_gpus": "$DEXPBT_GPUS"', text)
+            self.assertIn("SIGSTOPped during eval barriers", text)
+            self.assertIn("keep their VRAM", text)
 
 
 class TestAudit(unittest.TestCase):
@@ -1195,6 +1235,45 @@ def _guard_config(tol: float = 0.023,
         for w in range(6)}}
 
 
+def _reap(proc) -> None:
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _spawn_worker_procs(testcase, run_dir: Path, workers=range(6),
+                        cmd=("sleep", "300")) -> dict:
+    """One REAL 'trainer' process per worker with a pid.txt, so the guard's
+    readiness barrier has an actual process tree to SIGSTOP."""
+    import subprocess
+    procs = {}
+    for w in workers:
+        proc = subprocess.Popen(list(cmd))
+        testcase.addCleanup(_reap, proc)
+        d = Path(run_dir) / f"policy_{w:02d}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pid.txt").write_text(str(proc.pid))
+        procs[w] = proc
+    return procs
+
+
+def _write_marker_stub(run_dir: Path,
+                       frame: int = 5_080_000_000,
+                       tol: float = 0.023) -> None:
+    """A pre-existing FIRST_TICK_VALIDATED.json (readiness completed in an
+    earlier guard lifetime) so cap-focused tests skip the barrier."""
+    (Path(run_dir) / "FIRST_TICK_VALIDATED.json").write_text(json.dumps({
+        "workers": [{"worker_id": w, "validated_frame": frame,
+                     "validated_tolerance": tol, "lineage_id": f"lin{w}",
+                     "checkpoint_identity": {}} for w in range(6)],
+        "timestamp": 0.0, "num_workers": 6}))
+
+
 class TestReadinessBarrier(unittest.TestCase):
     """6/6 first-tick readiness: the guard writes FIRST_TICK_VALIDATED.json
     only after ALL SIX workers validated; the sidecar refuses to start or
@@ -1243,42 +1322,130 @@ class TestReadinessBarrier(unittest.TestCase):
             self.assertEqual(list(Path(td).glob("*.tmp.*")), [])
 
     def test_guard_loop_partial_workers_no_marker(self):
+        # NEW TESTS 1+2: an early worker is FROZEN at its validated tick
+        # (its frame cannot advance) and before 6/6 there is NO validated
+        # worker left unfrozen.
         from dexpbt_isaaclab.msa.continuation_guard import (
             READINESS_MARKER,
             guard_loop,
+            read_readiness_holds,
         )
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             # only 3 of 6 workers produced a continuation tick
             frames = {w: 5_020_000_000 for w in range(3)}
             frames.update({w: 5_000_000_000 for w in range(3, 6)})
             ws = _mk_workspace(run_dir, frames)
+            procs = _spawn_worker_procs(self, run_dir)
             rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
             self.assertEqual(rc, 0)   # still watching, nothing failed
             self.assertFalse((run_dir / READINESS_MARKER).exists())
             self.assertFalse((run_dir / "GUARD_FAILED").exists())
+            holds = read_readiness_holds(run_dir)
+            # every VALIDATED worker is frozen ('T'), nobody else is
+            self.assertEqual(sorted(holds), [0, 1, 2])
+            for w in range(3):
+                self.assertIn(_proc_state(procs[w].pid), ("T", "t"))
+                self.assertEqual(holds[w]["validated_frame"], 5_020_000_000)
+                self.assertIn("validated_tolerance", holds[w])
+                self.assertIn("lineage_id", holds[w])
+                self.assertIn("hold_timestamp", holds[w])
+                self.assertIn(procs[w].pid,
+                              [int(p) for p in holds[w]["pids"]])
+            for w in range(3, 6):    # not yet validated -> still running
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
+
+    def test_early_frozen_worker_makes_no_progress(self):
+        # NEW TEST 1 (progress check): a counter process stands in for a
+        # trainer; after the readiness freeze its output stops advancing.
+        import time as _time
+
+        from dexpbt_isaaclab.msa.continuation_guard import guard_loop
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            frames = {0: 5_020_000_000}
+            frames.update({w: 5_000_000_000 for w in range(1, 6)})
+            ws = _mk_workspace(run_dir, frames)
+            counter = run_dir / "counter.txt"
+            procs = _spawn_worker_procs(
+                self, run_dir, workers=[0],
+                cmd=("bash", "-c",
+                     f'i=0; while :; do i=$((i+1)); echo $i > "{counter}";'
+                     ' sleep 0.02; done'))
+            deadline = _time.monotonic() + 5
+            while not counter.exists() and _time.monotonic() < deadline:
+                _time.sleep(0.05)
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            self.assertEqual(rc, 0)
+            self.assertIn(_proc_state(procs[0].pid), ("T", "t"))
+            v1 = counter.read_text()
+            _time.sleep(0.5)
+            self.assertEqual(counter.read_text(), v1,
+                             "frozen worker still made progress")
+            # cleanup: release so no stopped child outlives the test
+            from dexpbt_isaaclab.msa.continuation_guard import (
+                release_readiness_holds,
+            )
+            release_readiness_holds(run_dir)
 
     def test_guard_loop_writes_marker_only_after_all_six(self):
+        # NEW TEST 3: with 6/6 ready on a non-MSA arm all six workers are
+        # released SIMULTANEOUSLY and the readiness holds file is gone.
         from dexpbt_isaaclab.msa.continuation_guard import (
+            READINESS_HOLDS_FILE,
             READINESS_MARKER,
             guard_loop,
         )
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             ws = _mk_workspace(run_dir,
                                {w: 5_020_000_000 for w in range(6)})
-            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            procs = _spawn_worker_procs(self, run_dir)
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1,
+                            msa_handoff=False)
             self.assertEqual(rc, 0)
             payload = json.loads((run_dir / READINESS_MARKER).read_text())
             self.assertEqual(
                 sorted(w["worker_id"] for w in payload["workers"]),
                 list(range(6)))
+            # simultaneous release: nobody stays frozen, record removed
+            self.assertFalse((run_dir / READINESS_HOLDS_FILE).exists())
+            for w in range(6):
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
+
+    def test_guard_loop_msa_handoff_keeps_workers_frozen(self):
+        # MSA arms: after the marker the workers STAY frozen at their
+        # validated boundaries for the sidecar to adopt.
+        from dexpbt_isaaclab.msa.continuation_guard import (
+            READINESS_MARKER,
+            guard_loop,
+            read_readiness_holds,
+        )
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            ws = _mk_workspace(run_dir,
+                               {w: 5_020_000_000 for w in range(6)})
+            procs = _spawn_worker_procs(self, run_dir)
+            config = dict(_guard_config())
+            config["arm"] = "MSA_STATEFUL"    # handoff derived from config
+            rc = guard_loop(run_dir, ws, config, max_iterations=1)
+            self.assertEqual(rc, 0)
+            self.assertTrue((run_dir / READINESS_MARKER).exists())
+            holds = read_readiness_holds(run_dir)
+            self.assertEqual(sorted(holds), list(range(6)))
+            for w in range(6):
+                self.assertIn(_proc_state(procs[w].pid), ("T", "t"))
 
     def test_guard_loop_any_failure_stops_arm_without_marker(self):
         from dexpbt_isaaclab.msa.continuation_guard import (
             READINESS_MARKER,
             guard_loop,
         )
+        from dexpbt_isaaclab.msa.sidecar import _proc_state
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
             ws = _mk_workspace(run_dir,
@@ -1288,10 +1455,16 @@ class TestReadinessBarrier(unittest.TestCase):
             meta = json.loads(bad.read_text())
             meta["curriculum"]["success_tolerance"] = 0.075
             bad.write_text(json.dumps(meta))
-            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
+            procs = _spawn_worker_procs(self, run_dir)
+            rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1,
+                            msa_handoff=False)
             self.assertEqual(rc, 2)
             self.assertTrue((run_dir / "GUARD_FAILED").exists())
             self.assertFalse((run_dir / READINESS_MARKER).exists())
+            # the already-frozen workers (0-3) were SIGCONTed and the whole
+            # arm terminated: nobody may be left SIGSTOPped
+            for w in range(6):
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
 
     def test_sidecar_readiness_gate(self):
         from dexpbt_isaaclab.msa.continuation_guard import (
@@ -1518,6 +1691,7 @@ class TestMatchedCap(unittest.TestCase):
             run_dir = Path(td)
             ws = _mk_workspace(
                 run_dir, {w: 5_000_000_000 + self.CAP for w in range(6)})
+            _write_marker_stub(run_dir)   # readiness completed earlier
             rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
             self.assertEqual(rc, 0)
             payload = json.loads(
@@ -1540,6 +1714,7 @@ class TestMatchedCap(unittest.TestCase):
             # more than one full committed tick past target: silent overrun
             frames[3] = 5_000_000_000 + self.CAP + 80_000_001
             ws = _mk_workspace(run_dir, frames)
+            _write_marker_stub(run_dir)   # readiness completed earlier
             rc = guard_loop(run_dir, ws, _guard_config(), max_iterations=1)
             self.assertEqual(rc, 2)
             self.assertTrue((run_dir / "GUARD_FAILED").exists())
@@ -2007,6 +2182,7 @@ class TestGuardMSACoordination(unittest.TestCase):
             frames = {w: 5_000_000_000 + 480_000_000 for w in range(6)}
             frames[3] = 5_000_000_000 + 480_000_000 + 80_000_001
             ws = _mk_workspace(run_dir, frames)
+            _write_marker_stub(run_dir)   # readiness completed earlier
             (run_dir / "MSA_BUSY.json").write_text(json.dumps(
                 {"intervention_id": "msa_x", "phase": "MID_EVAL",
                  "due_workers": list(range(6))}))
@@ -2026,6 +2202,7 @@ class TestGuardMSACoordination(unittest.TestCase):
             run_dir = Path(td)
             frames = {w: 5_000_000_000 + 480_000_000 for w in range(6)}
             ws = _mk_workspace(run_dir, frames)
+            _write_marker_stub(run_dir)   # readiness completed earlier
             busy = run_dir / "MSA_BUSY.json"
             busy.write_text(json.dumps({"phase": "PROMOTE",
                                         "status": "COMMITTING"}))
@@ -2062,6 +2239,232 @@ class TestGuardMSACoordination(unittest.TestCase):
             self.assertIn(_proc_state(w0.pid), (None, "Z"))
             # ... while worker 1's held process was NEVER SIGCONTed
             self.assertIn(_proc_state(w1.pid), ("T", "t"))
+
+
+class TestSidecarHoldAdoption(unittest.TestCase):
+    """MSA arms: the guard leaves READINESS_HOLDS.json behind (workers
+    frozen at their validated boundaries); the sidecar ADOPTS them —
+    verifying stopped state + committed frame == validated frame — and
+    atomically converts the record to MSA_HOLDS.json. Any failure releases
+    everything and stops the arm."""
+
+    FRAME = 5_080_000_000
+
+    def _handoff_run(self, td: Path):
+        """A run where the guard already completed the MSA handoff: six
+        frozen sleepers, READINESS_HOLDS.json + FIRST_TICK_VALIDATED.json
+        at the same validated frames."""
+        from dexpbt_isaaclab.msa.continuation_guard import guard_loop
+        run_dir = Path(td)
+        ws = _mk_workspace(run_dir, {w: self.FRAME for w in range(6)})
+        procs = _spawn_worker_procs(self, run_dir)
+        config = dict(_guard_config())
+        config["arm"] = "MSA_STATEFUL"
+        rc = guard_loop(run_dir, ws, config, max_iterations=1)
+        self.assertEqual(rc, 0)
+        return run_dir, ws, procs
+
+    def test_adopt_seamless(self):
+        # NEW TEST 4: the sidecar adopts the guard's readiness holds
+        # without ever releasing a worker.
+        from dexpbt_isaaclab.msa.sidecar import (
+            READINESS_HOLDS_FILE,
+            WorkerHolds,
+            _proc_state,
+            adopt_readiness_holds,
+            read_holds_file,
+            read_readiness_holds,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            run_dir, ws, procs = self._handoff_run(Path(td))
+            before = read_readiness_holds(run_dir)
+            holds = WorkerHolds(run_dir)
+            adopted = adopt_readiness_holds(
+                holds, run_dir, ws,
+                run_dir / "FIRST_TICK_VALIDATED.json")
+            self.assertEqual(adopted, list(range(6)))
+            # converted: MSA_HOLDS.json carries the SAME pids, the guard's
+            # readiness record is gone, and nobody was ever released
+            self.assertFalse((run_dir / READINESS_HOLDS_FILE).exists())
+            msa_holds = read_holds_file(run_dir)
+            for w in range(6):
+                self.assertEqual(msa_holds[w],
+                                 [int(p) for p in before[w]["pids"]])
+                self.assertIn(_proc_state(procs[w].pid), ("T", "t"))
+            # WorkerHolds internal state imported: release works normally
+            holds.release_all()
+            for w in range(6):
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
+
+    def test_pre_snapshot_frame_equals_validated_frame(self):
+        # NEW TEST 5: adoption verifies the newest COMMITTED frame equals
+        # the validated frame in FIRST_TICK_VALIDATED.json — the frozen
+        # boundary the first PRE snapshot must come from. A mismatch (the
+        # worker somehow committed past its validated tick) fails closed.
+        from dexpbt_isaaclab.msa.sidecar import (
+            WorkerHolds,
+            _proc_state,
+            adopt_readiness_holds,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            run_dir, ws, procs = self._handoff_run(Path(td))
+            # worker 3 commits ONE more tick past its validated boundary
+            d = ws / "003"
+            (d / "000162.pth").write_bytes(b"ckpt")
+            (d / "000162.json").write_text(json.dumps({
+                "frame": self.FRAME + 80_000_000, "lineage_id": "lin3",
+                "curriculum": {"success_tolerance": 0.023}}))
+            holds = WorkerHolds(run_dir)
+            with self.assertRaises(RuntimeError) as cm:
+                adopt_readiness_holds(
+                    holds, run_dir, ws,
+                    run_dir / "FIRST_TICK_VALIDATED.json")
+            self.assertIn("validated boundary", str(cm.exception))
+            self.assertIn("PRE snapshot", str(cm.exception))
+            # fail closed: EVERYONE released (never left frozen by a
+            # failed handoff)
+            for w in range(6):
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
+
+    def test_adopt_failure_releases_all_and_stops_arm(self):
+        # NEW TEST 6: a readiness-held PID that died (or resumed) fails
+        # the adoption; everything is released; the sidecar's caller then
+        # stops the whole arm (GUARD_FAILED path in main()).
+        from dexpbt_isaaclab.msa.sidecar import (
+            READINESS_HOLDS_FILE,
+            WorkerHolds,
+            _proc_state,
+            adopt_readiness_holds,
+            read_holds_file,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            run_dir, ws, procs = self._handoff_run(Path(td))
+            procs[2].kill()               # held worker 2 died under hold
+            procs[2].wait(timeout=5)
+            holds = WorkerHolds(run_dir)
+            with self.assertRaises(RuntimeError) as cm:
+                adopt_readiness_holds(
+                    holds, run_dir, ws,
+                    run_dir / "FIRST_TICK_VALIDATED.json")
+            self.assertIn("no longer in the stopped state",
+                          str(cm.exception))
+            # nothing adopted, nobody left frozen
+            self.assertEqual(read_holds_file(run_dir), {})
+            self.assertFalse((run_dir / READINESS_HOLDS_FILE).exists())
+            for w in range(6):
+                if w == 2:
+                    continue
+                self.assertNotIn(_proc_state(procs[w].pid), ("T", "t"))
+
+
+class TestTerminateTreeOrder(unittest.TestCase):
+    """Children-before-root termination with escalation, robust against a
+    supervisor that respawns its children."""
+
+    def test_kill_order_children_before_root(self):
+        # NEW TEST 7a: the signalling order is deepest descendants FIRST,
+        # supervisor/root LAST — for SIGTERM and SIGKILL alike.
+        import subprocess
+        import time as _time
+
+        from dexpbt_isaaclab.msa.continuation_guard import _kill_order
+        sup = subprocess.Popen(["bash", "-c", "sleep 300 & wait"])
+        self.addCleanup(_reap, sup)
+        deadline = _time.monotonic() + 5
+        order = _kill_order(sup.pid)
+        while len(order) < 2 and _time.monotonic() < deadline:
+            _time.sleep(0.05)
+            order = _kill_order(sup.pid)
+        self.assertGreaterEqual(len(order), 2)
+        self.assertEqual(order[-1], sup.pid)      # root LAST
+        for child in order[:-1]:                  # children strictly first
+            self.assertNotEqual(child, sup.pid)
+
+    def test_supervisor_respawning_child_is_fully_stopped(self):
+        # NEW TEST 7b: a supervisor that ignores SIGTERM and RESPAWNS its
+        # child after every kill — the escalation must re-enumerate,
+        # SIGKILL children-first/root-last and verify NO survivor remains
+        # (including a child respawned mid-escalation).
+        import subprocess
+        import time as _time
+
+        from dexpbt_isaaclab.msa.continuation_guard import (
+            _alive,
+            _terminate_tree,
+        )
+        sup = subprocess.Popen(
+            ["bash", "-c", 'trap "" TERM; while :; do sleep 300; done'])
+        self.addCleanup(_reap, sup)
+        deadline = _time.monotonic() + 5
+        from dexpbt_isaaclab.msa.continuation_guard import _kill_order
+        while len(_kill_order(sup.pid)) < 2 \
+                and _time.monotonic() < deadline:
+            _time.sleep(0.05)
+        seen = set(_kill_order(sup.pid))
+        left = _terminate_tree(sup.pid, grace_s=1.0, verify_s=8.0)
+        self.assertEqual(left, [])                # verified: no survivor
+        sup.wait(timeout=5)                       # reap the zombie root
+        for pid in seen:
+            self.assertFalse(_alive(pid),
+                             f"pid {pid} survived the escalation")
+
+
+class TestHoldSmokeCertificate(unittest.TestCase):
+    """The formal MSA sidecar requires the DISPOSABLE hold-smoke
+    certificate and validates commit/task/profile/GPU env at startup."""
+
+    CERT = {
+        "ok": True,
+        "git_commit": "abc123",
+        "task": "DexPBT-Regrasping-KukaAllegro-Direct-v0",
+        "wm_profile": "cser_dexpbt_conservative",
+        "gpu": {"index": "4", "name": "NVIDIA vGPU-32GB",
+                "uuid": "GPU-x", "driver_version": "550.54.15",
+                "cuda_version": "12.4"},
+        "worker_tree": [{"pid": 1, "comm": "bash"}],
+        "frame_before_hold": 5_000_000_000,
+        "next_committed_frame": 5_080_000_000,
+        "timestamp": 0.0,
+    }
+    ENV = dict(git_commit="abc123",
+               task="DexPBT-Regrasping-KukaAllegro-Direct-v0",
+               profile="cser_dexpbt_conservative",
+               gpu_names={"4": "NVIDIA vGPU-32GB", "5": "NVIDIA vGPU-32GB"},
+               driver_version="550.54.15")
+
+    def test_matching_certificate_passes(self):
+        from dexpbt_isaaclab.msa.sidecar import certificate_ok
+        ok, why = certificate_ok(dict(self.CERT), **self.ENV)
+        self.assertTrue(ok, why)
+
+    def test_mismatches_fail_closed(self):
+        from dexpbt_isaaclab.msa.sidecar import certificate_ok
+        cases = [
+            ({"ok": False}, "ok != true"),
+            ({"git_commit": "OTHER"}, "git commit"),
+            ({"task": "OtherTask-v0"}, "task"),
+            ({"wm_profile": "some_other_profile"}, "profile"),
+            ({"gpu": {**self.CERT["gpu"], "name": "NVIDIA A100"}},
+             "model"),
+            ({"gpu": {**self.CERT["gpu"], "driver_version": "999.99"}},
+             "driver"),
+        ]
+        for patch, needle in cases:
+            cert = dict(self.CERT)
+            cert.update(patch)
+            ok, why = certificate_ok(cert, **self.ENV)
+            self.assertFalse(ok, f"expected failure for {patch}")
+            self.assertIn(needle, why)
+
+    def test_eval_gpu_model_mismatch_fails(self):
+        # certificate was produced on GPU 4; if ANY current eval device
+        # has a different model the gate must fail closed.
+        from dexpbt_isaaclab.msa.sidecar import certificate_ok
+        env = dict(self.ENV)
+        env["gpu_names"] = {"4": "NVIDIA vGPU-32GB", "5": "NVIDIA T4"}
+        ok, why = certificate_ok(dict(self.CERT), **env)
+        self.assertFalse(ok)
+        self.assertIn("eval GPU 5", why)
 
 
 class TestWatchdogBusyNoHolds(unittest.TestCase):

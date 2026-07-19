@@ -135,7 +135,8 @@
         "estimated_wall_time_hours": 345.6
       }
     ],
-    "eval_device_note": "sidecar --eval-devices is REQUIRED; the launcher pins ${MSA_EVAL_DEVICES:-cuda:6,cuda:7} (GPUs outside DEXPBT_GPUS), never the trainers' cuda:0; at most one Isaac eval process per device",
+    "eval_device_note": "sidecar --eval-devices is REQUIRED; the launcher pins ${MSA_EVAL_DEVICES:-cuda:4,cuda:5}: on this 6-GPU machine the eval devices are SHARED with trainers 4/5 (those trainers are SIGSTOPped during every eval barrier but keep their VRAM allocated); never the trainers' cuda:0; at most one Isaac eval process per device; actual devices recorded in EVAL_DEVICES.json",
+    "hold_smoke_note": "the formal sidecar requires the DISPOSABLE start_stateful_hold_smoke.sh certificate (HOLD_SMOKE_CERTIFICATE.json: git commit, task, profile, GPU model, driver must match); the in-arm run_hold_smoke.sh is execution-smoke only (it advances the released worker one extra committed tick past the matched boundary)",
     "bootstrap": {
       "seed": 20260719,
       "repeats": 10000,
