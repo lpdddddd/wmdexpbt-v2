@@ -266,6 +266,17 @@ class CurriculumControlState:
     pre_floor_peak_guard_recent_peak: float = 0.0
     pre_floor_peak_guard_stable_ticks: int = 0
     pre_floor_peak_guard_reason: str = ""
+    # MSA probe (2026-07-19, base_retention_msa_probe profile only).
+    # Defaults are inert: msa_enabled=False means no runtime code path
+    # branches on any msa_* field, so existing base-retention runs are
+    # bit-for-bit unchanged. The two dict fields carry the serialized
+    # dexpbt_isaaclab.msa provenance + state machine INSIDE the existing
+    # control JSON / curriculum resume snapshot chain (no parallel
+    # checkpoint system). A pre-MSA checkpoint simply lacks these keys ->
+    # msa_provenance=None -> probe immediately due on resume.
+    msa_enabled: bool = False
+    msa_provenance: dict[str, Any] | None = None
+    msa_state_machine: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

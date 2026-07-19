@@ -1,0 +1,129 @@
+{
+  "run_dir": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631",
+  "window_frames": [
+    3000000000,
+    5000000000
+  ],
+  "num_policies": 6,
+  "per_policy": {
+    "p0": {
+      "no_shrink_intervals": 26,
+      "shrink_intervals": 5,
+      "first_blocker_counts": {
+        "rollback_collapse_freeze": 15,
+        "post_shrink_consolidation": 7,
+        "global_retention": 1,
+        "danger_zone": 2,
+        "other": 1
+      },
+      "gate_block_event_counts": {
+        "global_retention": 8,
+        "rollback_collapse_freeze": 59,
+        "danger_zone": 18
+      }
+    },
+    "p1": {
+      "no_shrink_intervals": 25,
+      "shrink_intervals": 6,
+      "first_blocker_counts": {
+        "rollback_collapse_freeze": 9,
+        "post_shrink_consolidation": 9,
+        "pre_floor_peak_guard": 1,
+        "late_floor_retention_gate": 1,
+        "other": 3,
+        "danger_zone": 2
+      },
+      "gate_block_event_counts": {
+        "late_floor_retention_gate": 23,
+        "rollback_collapse_freeze": 33,
+        "pre_floor_peak_guard": 3,
+        "global_retention": 1,
+        "danger_zone": 13
+      }
+    },
+    "p2": {
+      "no_shrink_intervals": 30,
+      "shrink_intervals": 1,
+      "first_blocker_counts": {
+        "late_floor_retention_gate": 5,
+        "rollback_collapse_freeze": 21,
+        "other": 1,
+        "post_shrink_consolidation": 2,
+        "pre_floor_peak_guard": 1
+      },
+      "gate_block_event_counts": {
+        "late_floor_retention_gate": 148,
+        "pre_floor_peak_guard": 5,
+        "danger_zone": 1,
+        "rollback_collapse_freeze": 110
+      }
+    },
+    "p3": {
+      "no_shrink_intervals": 30,
+      "shrink_intervals": 1,
+      "first_blocker_counts": {
+        "rollback_collapse_freeze": 17,
+        "late_floor_retention_gate": 10,
+        "other": 1,
+        "post_shrink_consolidation": 1,
+        "danger_zone": 1
+      },
+      "gate_block_event_counts": {
+        "rollback_collapse_freeze": 55,
+        "late_floor_retention_gate": 105,
+        "danger_zone": 7
+      }
+    },
+    "p4": {
+      "no_shrink_intervals": 27,
+      "shrink_intervals": 4,
+      "first_blocker_counts": {
+        "post_shrink_consolidation": 6,
+        "pre_floor_peak_guard": 3,
+        "rollback_collapse_freeze": 11,
+        "other": 3,
+        "danger_zone": 1,
+        "global_retention": 2,
+        "late_floor_retention_gate": 1
+      },
+      "gate_block_event_counts": {
+        "pre_floor_peak_guard": 5,
+        "late_floor_retention_gate": 44,
+        "global_retention": 6,
+        "danger_zone": 7,
+        "rollback_collapse_freeze": 13
+      }
+    },
+    "p5": {
+      "no_shrink_intervals": 30,
+      "shrink_intervals": 1,
+      "first_blocker_counts": {
+        "post_shrink_consolidation": 3,
+        "late_floor_retention_gate": 9,
+        "rollback_collapse_freeze": 18
+      },
+      "gate_block_event_counts": {
+        "late_floor_retention_gate": 150,
+        "rollback_collapse_freeze": 65
+      }
+    }
+  },
+  "total_first_blocker_counts": {
+    "rollback_collapse_freeze": 91,
+    "post_shrink_consolidation": 28,
+    "global_retention": 3,
+    "danger_zone": 6,
+    "other": 9,
+    "pre_floor_peak_guard": 5,
+    "late_floor_retention_gate": 26
+  },
+  "total_gate_block_event_counts": {
+    "global_retention": 15,
+    "rollback_collapse_freeze": 335,
+    "danger_zone": 46,
+    "late_floor_retention_gate": 470,
+    "pre_floor_peak_guard": 13
+  },
+  "dominant_first_blocker": "rollback_collapse_freeze",
+  "note": "read-only audit; attribution combines snapshot curriculum_blocked_by_* flags (env precedence) with frame-tagged curriculum_safety_events (observer gates); intervals are training_curve snapshots (~50M frames)"
+}

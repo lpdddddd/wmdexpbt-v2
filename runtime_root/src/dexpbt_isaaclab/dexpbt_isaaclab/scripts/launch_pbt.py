@@ -710,7 +710,35 @@ def main() -> None:
         default=3,
         help="Policy index that receives --recover-checkpoint on first launch.",
     )
+    parser.add_argument(
+        "--recover-checkpoint-per-policy",
+        type=str,
+        default="",
+        help="Comma-separated checkpoint paths, one per policy (length must "
+        "equal --num-policies). Each policy is warm-started from its own "
+        "checkpoint on first launch (continuation arms). Empty = unchanged "
+        "legacy behavior. Mutually exclusive with --recover-checkpoint.",
+    )
     args = parser.parse_args()
+
+    recover_per_policy: list[str] = []
+    if args.recover_checkpoint_per_policy:
+        if args.recover_checkpoint:
+            raise ValueError(
+                "--recover-checkpoint-per-policy and --recover-checkpoint "
+                "are mutually exclusive"
+            )
+        recover_per_policy = [
+            p.strip() for p in args.recover_checkpoint_per_policy.split(",")
+        ]
+        if len(recover_per_policy) != args.num_policies:
+            raise ValueError(
+                f"--recover-checkpoint-per-policy needs {args.num_policies} "
+                f"paths, got {len(recover_per_policy)}"
+            )
+        for p in recover_per_policy:
+            if not Path(p).is_file():
+                raise FileNotFoundError(f"per-policy recover checkpoint missing: {p}")
 
     train_root = Path(args.train_root).resolve()
     train_root.mkdir(parents=True, exist_ok=True)
@@ -820,6 +848,12 @@ def main() -> None:
             and not _run_is_active(run_dir)
         ):
             cmd.append(f"--checkpoint={args.recover_checkpoint}")
+        if (
+            recover_per_policy
+            and not _run_is_complete(run_dir)
+            and not _run_is_active(run_dir)
+        ):
+            cmd.append(f"--checkpoint={recover_per_policy[policy_idx]}")
         print(f"Launch policy {policy_idx}: {' '.join(cmd)}", flush=True)
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = gpu
