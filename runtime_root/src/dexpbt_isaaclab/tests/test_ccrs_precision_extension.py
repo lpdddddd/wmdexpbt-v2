@@ -10,7 +10,11 @@ Covers:
 - decision label thresholds (TARGET_REACHED / NEAR_TARGET /
   PRECISION_LIMIT);
 - offline analysis merging the read-only 0.018 base cells with the new
-  extension cells, without modifying the base results file.
+  extension cells, without modifying the base results file;
+- launcher run-control (fail-closed): default/plan never launch, unknown
+  args rejected with usage, preflight non-zero rc or FAIL output aborts
+  before any GPU work, shards never aggregate (single --aggregate-only by
+  the launcher), resume skips completed units, base results untouched.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
+import subprocess
 import unittest
 from pathlib import Path
 import sys
@@ -344,6 +350,173 @@ class TestOfflineAnalysis(unittest.TestCase):
             # 1.8-1.2cm have no data -> NaN, reported not fabricated
             by_tol = {p["tolerance_m"]: p for p in r["points"]}
             self.assertTrue(math.isnan(by_tol[0.016]["nsucc_mean"]))
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+LAUNCHER = (REPO_ROOT / "results" / "analysis"
+            / "ccrs_p1_precision_extension" / "run_extension.sh")
+BASE_CCRS_DIR = REPO_ROOT / "results" / "analysis" / "ccrs_base_retention"
+
+
+def _write_done_raw(raw_dir: Path, units) -> None:
+    """Write valid completed raw rows for all units (is_done => True)."""
+    from dexpbt_isaaclab.ccrs.eval_protocol import (
+        EpisodeSample, make_result_row, write_result_atomic)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    for u in units:
+        samples = [
+            EpisodeSample.create(
+                reset_seed=u.reset_seed, env_id=i, nsucc=40.0,
+                max_consecutive_successes=u.max_consecutive_successes,
+                terminal_error=0.005, terminal_error_valid=True,
+                dropped=False)
+            for i in range(u.num_episodes)
+        ]
+        row = make_result_row(
+            unit=u, samples=samples,
+            per_env_fingerprint={i: f"fp_{u.reset_seed}_{i}"
+                                 for i in range(u.num_episodes)},
+            git_sha="deadbeef", checkpoint_hash="cafebabe")
+        write_result_atomic(raw_dir, u, row)
+
+
+class TestLauncherRunControl(unittest.TestCase):
+    """Behavioral fail-closed tests against the REAL launcher script.
+
+    Every invocation here uses plan mode, a broken manifest, or an unknown
+    argument — none of these paths can reach the shard-launch section, so
+    no GPU is ever touched by this test class.
+    """
+
+    def _run(self, args: list[str], manifest: Path | None = None,
+             out: Path | None = None) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        if manifest is not None:
+            env["PRECISION_EXT_MANIFEST"] = str(manifest)
+        if out is not None:
+            env["PRECISION_EXT_OUT"] = str(out)
+        return subprocess.run(
+            ["bash", str(LAUNCHER), *args],
+            env=env, capture_output=True, text=True, timeout=120)
+
+    def test_default_is_plan_and_never_launches(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._run([], out=Path(td))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("ALL CHECKS PASSED", p.stdout)
+            self.assertIn("plan only", p.stdout)
+            self.assertNotIn("shard 0 ->", p.stdout)
+
+    def test_plan_arg_never_launches(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = self._run(["plan"], out=Path(td))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("plan only", p.stdout)
+            self.assertNotIn("shard 0 ->", p.stdout)
+
+    def test_unknown_arg_exits_with_usage(self):
+        p = self._run(["banana"])
+        self.assertEqual(p.returncode, 64)
+        self.assertIn("usage:", p.stderr)
+        self.assertNotIn("shard 0 ->", p.stdout)
+
+    def test_execute_aborts_on_preflight_nonzero_rc(self):
+        # nonexistent manifest -> checkpoint resolution error -> plan
+        # subprocess exits non-zero -> execute must abort before any launch
+        with tempfile.TemporaryDirectory() as td:
+            p = self._run(["execute"],
+                          manifest=Path(td) / "missing.csv", out=Path(td))
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("preflight ABORT", p.stderr)
+            self.assertNotIn("shard 0 ->", p.stdout)
+            self.assertNotIn("ALL CHECKS PASSED", p.stdout)
+
+    def test_execute_aborts_on_preflight_fail_output(self):
+        # manifest resolves but points at a missing checkpoint file ->
+        # plan rc=0 with FAIL lines -> execute must abort
+        with tempfile.TemporaryDirectory() as td:
+            m = Path(td) / "m.csv"
+            _write_manifest_csv(m, [_p1_row(str(Path(td) / "gone.pth"))])
+            p = self._run(["execute"], manifest=m, out=Path(td) / "out")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("preflight ABORT", p.stderr)
+            self.assertIn("FAIL", p.stderr)
+            self.assertNotIn("shard 0 ->", p.stdout)
+
+    def test_single_aggregate_only_call_in_launcher(self):
+        src = LAUNCHER.read_text()
+        self.assertEqual(src.count("--aggregate-only"), 1)
+        # aggregation must come after both-shards-succeeded gating
+        self.assertLess(src.index("shards failed"), src.index("--aggregate-only"))
+        self.assertIn("set -euo pipefail", src)
+
+
+class TestShardNoAggregateAndResume(unittest.TestCase):
+    def _prepared_dirs(self, td: Path):
+        """Temp manifest + checkpoint + out dir with ALL 16 units done."""
+        ck = td / "p1.pth"
+        ck.write_bytes(b"x" * 256)
+        m = td / "m.csv"
+        _write_manifest_csv(m, [_p1_row(str(ck))])
+        out = td / "ext_out"
+        base = td / "base_ccrs"
+        base.mkdir()
+        sentinel = base / "ccrs_results.jsonl"
+        sentinel.write_text('{"untouched": true}\n')
+        units = build_extension_units(resolve_p1_tip_checkpoint(m))
+        _write_done_raw(out / "raw", units)
+        return m, out, base, sentinel, units
+
+    def _run_module(self, args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "dexpbt_isaaclab.ccrs.precision_extension",
+             *args],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=120)
+
+    def test_resume_skips_done_units_and_shard_does_not_aggregate(self):
+        with tempfile.TemporaryDirectory() as td:
+            m, out, base, sentinel, units = self._prepared_dirs(Path(td))
+            for u in units:
+                from dexpbt_isaaclab.ccrs.eval_protocol import is_done
+                self.assertTrue(is_done(out / "raw", u))
+            # both shards execute: all units already done -> nothing runs,
+            # exit 0, and NO aggregation output is produced by shards
+            for shard in (0, 1):
+                p = self._run_module([
+                    "--manifest", str(m), "--out-dir", str(out),
+                    "--base-ccrs-dir", str(base),
+                    "--execute", "--shard-index", str(shard),
+                    "--num-shards", "2"])
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertIn("0 todo", p.stdout)
+                self.assertIn("aggregation deferred", p.stdout)
+            self.assertFalse((out / "extension_results.jsonl").exists(),
+                             "shards must not aggregate")
+            self.assertFalse((out / "extension_results.csv").exists())
+            self.assertFalse((out / "aggregation_provenance.json").exists())
+            # single aggregate-only call produces the merged results once
+            p = self._run_module([
+                "--manifest", str(m), "--out-dir", str(out),
+                "--base-ccrs-dir", str(base), "--aggregate-only"])
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn("aggregated 16 rows", p.stdout)
+            self.assertTrue((out / "extension_results.jsonl").is_file())
+            # original base results dir untouched throughout
+            self.assertEqual(sentinel.read_text(), '{"untouched": true}\n')
+            self.assertEqual([f.name for f in base.iterdir()],
+                             ["ccrs_results.jsonl"])
+
+    def test_execute_source_has_no_aggregate_in_shard_path(self):
+        src = (Path(__file__).resolve().parents[1] / "dexpbt_isaaclab"
+               / "ccrs" / "precision_extension.py").read_text()
+        # aggregate_raw_dir appears in imports and exactly one call site,
+        # inside the --aggregate-only branch
+        call_sites = [ln for ln in src.splitlines()
+                      if "aggregate_raw_dir(" in ln and "import" not in ln]
+        self.assertEqual(len(call_sites), 1, call_sites)
+        self.assertLess(src.index("args.aggregate_only"),
+                        src.index(call_sites[0].strip()))
 
 
 if __name__ == "__main__":

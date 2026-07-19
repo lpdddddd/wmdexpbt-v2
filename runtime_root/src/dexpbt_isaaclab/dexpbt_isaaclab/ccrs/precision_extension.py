@@ -17,7 +17,11 @@ Design (everything identical to the original CCRS protocol):
 - results go to a SEPARATE directory (results/analysis/
   ccrs_p1_precision_extension/) so the original ccrs_base_retention outputs
   are never modified;
-- resumable: completed units are skipped via the strict is_done check.
+- resumable: completed units are skipped via the strict is_done check;
+- shards (--execute) only run units and write raw JSON — they never
+  aggregate. Aggregation happens exactly once via --aggregate-only, called
+  by the launcher after all shards exited successfully (avoids concurrent
+  writes to extension_results.jsonl/csv + aggregation_provenance.json).
 
 Default mode is --plan (dry run): builds the unit manifest, runs the full
 preflight checklist, writes extension_manifest.csv + DRY_RUN_CHECKLIST.md
@@ -379,10 +383,13 @@ def main() -> None:
                   file=sys.stderr)
         else:
             print(f"[precision_extension] unit ok ({dt:.0f}s)")
-    n = aggregate_raw_dir(raw_dir, out_dir / "extension_results.jsonl",
-                          out_dir / "extension_results.csv")
+    # Shards NEVER aggregate: two shards would race on
+    # extension_results.jsonl/csv + aggregation_provenance.json. The
+    # launcher's main process runs --aggregate-only exactly once after ALL
+    # shards exited successfully; raw JSONs stay for resume on failure.
     print(f"[precision_extension] shard finished: "
-          f"{len(todo) - failures}/{len(todo)} ok; aggregated {n} rows")
+          f"{len(todo) - failures}/{len(todo)} ok "
+          "(aggregation deferred to the launcher's single --aggregate-only)")
     if failures:
         sys.exit(1)
 
