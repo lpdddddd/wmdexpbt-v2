@@ -1,6 +1,6 @@
 """Continuation guard for ALL base_retention_msa_probe arms.
 
-Two jobs, both fail-closed, shared by BASE_CONTINUATION / GATE_RELAX / MSA /
+Fail-closed jobs, shared by BASE_CONTINUATION / GATE_RELAX / MSA /
 MSA_PERMUTED_ROUTE (a bare --checkpoint warm start does NOT restore the
 curriculum tolerance by itself, and an rl_games epoch reset could silently
 re-run ~5B frames):
@@ -10,16 +10,34 @@ re-run ~5B frames):
    matches, worker mapping / lineage / frame / tolerance fields present.
    Non-zero exit MUST abort the launcher.
 
-2. guard loop (AFTER launch): for every worker,
-   - FIRST committed tick: live tolerance must equal the manifest tip
-     tolerance within 1e-6, lineage_id must match, frame must be >= the
-     5B baseline. Any mismatch stops the whole arm (fail closed).
-   - HARD CAP: a worker whose ledger exceeds baseline + cap (+1 tick of
-     slack) stops the whole arm — the continuation budget is worker-local
-     +100M frames, never a silent extra 5B.
+2. guard loop (AFTER launch):
+   - SIX-WORKER READINESS BARRIER: only after ALL SIX workers have produced
+     their first continuation committed tick AND every one passed the
+     checkpoint/frame/lineage/tolerance validation, the guard atomically
+     writes FIRST_TICK_VALIDATED.json (worker ids, validated frames,
+     tolerances, lineages, checkpoint identities, timestamp). The MSA
+     sidecar refuses to start/resume any probe cycle until this marker
+     exists. ANY worker failing first-tick validation stops the WHOLE arm
+     (GUARD_FAILED) and the readiness marker is never written.
+   - MATCHED +100M CAP: target[w] = baseline[w] + 100M. Each worker is
+     individually parked (its process tree stopped) at its FIRST committed
+     frame >= target[w]; the observed frame is recorded. An observed frame
+     beyond target + one tick of slack fails the arm (a worker must never
+     silently run to ~140M+ before anyone notices). When all six are
+     parked, ARM_COMPLETE.json is written (NORMAL completion, not a
+     failure) and the guard stops the sidecar, the watchdog and every
+     remaining worker process tree.
+   Regardless of the resume runner's max_iterations semantics (rl_games
+   max_epochs on a warm start), this worker-local cap is the FINAL
+   authority on the continuation budget.
 
-Pure decision logic lives in check_first_tick / check_cap so it is unit
-testable without processes; the loop and the stop actions are thin.
+Every stop path first SIGCONTs any PIDs recorded in MSA_HOLDS.json (a
+SIGTERM to a SIGSTOPped process would be queued, not delivered) and then
+terminates the FULL process tree of each worker, never just the supervisor.
+
+Pure decision logic lives in check_first_tick / cap_action /
+readiness_entry so it is unit testable without processes; the loop and
+the stop actions are thin.
 """
 
 from __future__ import annotations
@@ -34,12 +52,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from dexpbt_isaaclab.msa.sidecar import latest_committed_meta
+from dexpbt_isaaclab.msa.sidecar import (
+    HOLDS_FILE,
+    _descendants,
+    latest_committed_meta,
+    read_holds_file,
+)
 
 CONTINUATION_CAP_FRAMES = 100_000_000
 TICK_SLACK_FRAMES = 20_000_000
 TOLERANCE_ATOL = 1e-6
 POLL_S = 60.0
+READINESS_MARKER = "FIRST_TICK_VALIDATED.json"
+NUM_WORKERS = 6
 
 
 def ckpt_head_hash(path: Path, head_bytes: int = 4 * 1024 * 1024) -> str:
@@ -59,8 +84,9 @@ def verify_bootstrap(config: dict) -> list[str]:
     """Return a list of failures (empty == pass) for one ARM_CONFIG dict."""
     failures: list[str] = []
     resume = config.get("resume_checkpoints") or {}
-    if len(resume) != 6:
-        failures.append(f"expected 6 resume checkpoints, got {len(resume)}")
+    if len(resume) != NUM_WORKERS:
+        failures.append(f"expected {NUM_WORKERS} resume checkpoints, "
+                        f"got {len(resume)}")
     for key, entry in sorted(resume.items()):
         wid = int(key.lstrip("p"))
         path = Path(str(entry.get("path", "")))
@@ -89,7 +115,7 @@ def verify_bootstrap(config: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# first-tick and cap checks (pure)
+# first-tick, readiness and cap checks (pure)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -124,42 +150,139 @@ def check_first_tick(entry: dict, meta: dict,
     return GuardVerdict(True)
 
 
-def check_cap(entry: dict, meta: dict,
-              cap_frames: int = CONTINUATION_CAP_FRAMES,
-              slack: int = TICK_SLACK_FRAMES) -> GuardVerdict:
-    """Worker-local hard frame cap: baseline + cap (+ one tick of slack)."""
+def readiness_entry(worker_id: int, entry: dict, meta: dict) -> dict:
+    """One worker's validated line in FIRST_TICK_VALIDATED.json."""
+    cur = meta.get("curriculum") or {}
+    return {
+        "worker_id": int(worker_id),
+        "validated_frame": int(meta.get("frame", -1)),
+        "validated_tolerance": float(
+            cur.get("success_tolerance", float("nan"))),
+        "lineage_id": str(meta.get("lineage_id") or ""),
+        "checkpoint_identity": {
+            "resume_checkpoint": str(entry.get("path", "")),
+            "sha256_head": str(entry.get("sha256_head", "")),
+            "committed_prefix": str(meta.get("_committed_prefix", "")),
+        },
+    }
+
+
+def write_readiness_marker(run_dir: Path, records: dict[int, dict]) -> Path:
+    """Atomically write FIRST_TICK_VALIDATED.json — only with 6/6 records."""
+    if sorted(records.keys()) != list(range(NUM_WORKERS)):
+        raise ValueError(
+            f"readiness marker requires ALL {NUM_WORKERS} validated "
+            f"workers, got {sorted(records.keys())}")
+    marker = run_dir / READINESS_MARKER
+    payload = {
+        "workers": [records[w] for w in sorted(records)],
+        "timestamp": time.time(),
+        "num_workers": NUM_WORKERS,
+    }
+    tmp = marker.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, marker)                     # atomic on POSIX
+    return marker
+
+
+def cap_action(entry: dict, meta: dict,
+               cap_frames: int = CONTINUATION_CAP_FRAMES,
+               slack: int = TICK_SLACK_FRAMES) -> str:
+    """Matched +100M cap decision for one worker's committed frame:
+
+    'run'  — below target, keep training;
+    'park' — first committed frame >= target (within one tick of slack):
+             stop THIS worker safely, record the observed frame;
+    'fail' — beyond target + slack: the worker overshot a full tick past
+             its budget (must never silently run to ~140M), stop the arm.
+    """
     base_frame = int(entry["frame"])
     frame = int(meta.get("frame", -1))
-    limit = base_frame + int(cap_frames) + int(slack)
-    if frame > limit:
-        return GuardVerdict(False,
-                            f"frame {frame} exceeds hard cap {limit} "
-                            f"(baseline {base_frame} + {cap_frames} "
-                            f"+ slack {slack})")
-    return GuardVerdict(True)
+    target = base_frame + int(cap_frames)
+    if frame > target + int(slack):
+        return "fail"
+    if frame >= target:
+        return "park"
+    return "run"
 
 
 # ---------------------------------------------------------------------------
-# stop action + loop
+# stop actions (SIGCONT-before-terminate, full process trees)
 # ---------------------------------------------------------------------------
 
-def _stop_run(run_dir: Path, reason: str, marker_name: str) -> None:
-    (run_dir / marker_name).write_text(
-        json.dumps({"reason": reason, "time": time.time()}, indent=2))
-    for pid_file in sorted(run_dir.glob("policy_*/pid.txt")):
+def _sigcont_held_pids(run_dir: Path) -> None:
+    """SIGCONT every PID recorded in MSA_HOLDS.json (a stopped process
+    queues SIGTERM without acting on it)."""
+    for pids in read_holds_file(run_dir).values():
+        for pid in reversed(pids):              # children first, root last
+            try:
+                os.kill(int(pid), signal.SIGCONT)
+            except (ProcessLookupError, OSError):
+                pass
+
+
+def _terminate_tree(root_pid: int) -> None:
+    for pid in [root_pid] + _descendants(root_pid):
         try:
-            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
-        except (ValueError, OSError):
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
             pass
 
+
+def _worker_root_pid(run_dir: Path, worker_id: int) -> Optional[int]:
+    pid_file = run_dir / f"policy_{worker_id:02d}" / "pid.txt"
+    if not pid_file.is_file():
+        return None
+    try:
+        return int(pid_file.read_text().strip())
+    except ValueError:
+        return None
+
+
+def stop_worker(run_dir: Path, worker_id: int) -> None:
+    """Safely park ONE worker: SIGCONT its held PIDs, then terminate its
+    full process tree."""
+    _sigcont_held_pids(run_dir)
+    pid = _worker_root_pid(run_dir, worker_id)
+    if pid is not None:
+        _terminate_tree(pid)
+
+
+def stop_arm(run_dir: Path, reason: str,
+             marker_name: Optional[str] = None,
+             num_workers: int = NUM_WORKERS) -> None:
+    """Stop the WHOLE arm: SIGCONT held PIDs first, write the marker (if
+    any), kill sidecar + watchdog, terminate every worker's FULL tree."""
+    _sigcont_held_pids(run_dir)
+    if marker_name:
+        (run_dir / marker_name).write_text(
+            json.dumps({"reason": reason, "time": time.time()}, indent=2))
+    for pid_name in ("msa_sidecar.pid", "hold_watchdog.pid"):
+        pf = run_dir / pid_name
+        if pf.is_file():
+            try:
+                _terminate_tree(int(pf.read_text().strip()))
+            except (ValueError, OSError):
+                pass
+    for w in range(num_workers):
+        pid = _worker_root_pid(run_dir, w)
+        if pid is not None:
+            _terminate_tree(pid)
+
+
+# ---------------------------------------------------------------------------
+# guard loop
+# ---------------------------------------------------------------------------
 
 def guard_loop(run_dir: Path, workspace: Path, config: dict,
                cap_frames: int = CONTINUATION_CAP_FRAMES,
                poll_s: float = POLL_S,
                max_iterations: Optional[int] = None) -> int:
-    """0 = all workers finished under the cap; 2 = fail-closed stop."""
+    """0 = ARM_COMPLETE (all six parked at +100M); 2 = fail-closed stop."""
     resume = config["resume_checkpoints"]
-    first_tick_ok: set[int] = set()
+    validated: dict[int, dict] = {}
+    marker_written = (run_dir / READINESS_MARKER).is_file()
+    parked: dict[int, dict] = {}
     it = 0
     while True:
         it += 1
@@ -170,18 +293,53 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
                 continue
             if int(meta.get("frame", -1)) <= int(entry["frame"]):
                 continue     # not a continuation tick yet
-            if wid not in first_tick_ok:
+            if wid not in validated:
                 verdict = check_first_tick(entry, meta)
                 if not verdict.ok:
-                    _stop_run(run_dir, f"worker {wid}: {verdict.reason}",
-                              "GUARD_FAILED")
+                    # readiness marker is NEVER written on any failure
+                    stop_arm(run_dir, f"worker {wid}: {verdict.reason}",
+                             "GUARD_FAILED")
                     return 2
-                first_tick_ok.add(wid)
-            verdict = check_cap(entry, meta, cap_frames=cap_frames)
-            if not verdict.ok:
-                _stop_run(run_dir, f"worker {wid}: {verdict.reason}",
-                          "CAP_REACHED")
+                validated[wid] = readiness_entry(wid, entry, meta)
+            if wid in parked:
+                continue
+            action = cap_action(entry, meta, cap_frames=cap_frames)
+            if action == "fail":
+                stop_arm(
+                    run_dir,
+                    f"worker {wid}: observed frame {meta.get('frame')} "
+                    f"exceeds target + one tick of slack "
+                    f"(baseline {entry['frame']} + {cap_frames} "
+                    f"+ {TICK_SLACK_FRAMES})", "GUARD_FAILED")
                 return 2
+            if action == "park":
+                parked[wid] = {
+                    "worker_id": wid,
+                    "baseline_frame": int(entry["frame"]),
+                    "target_frame": int(entry["frame"]) + int(cap_frames),
+                    "observed_frame": int(meta.get("frame", -1)),
+                    "parked_at": time.time(),
+                }
+                stop_worker(run_dir, wid)
+                print(f"[guard] worker {wid} parked at "
+                      f"{parked[wid]['observed_frame']} "
+                      f"(target {parked[wid]['target_frame']})")
+        if not marker_written and len(validated) == len(resume):
+            write_readiness_marker(run_dir, validated)
+            marker_written = True
+            print(f"[guard] {READINESS_MARKER} written "
+                  f"({len(validated)}/{len(resume)} workers validated)")
+        if len(parked) == len(resume):
+            # NORMAL completion — never failure semantics
+            (run_dir / "ARM_COMPLETE.json").write_text(json.dumps({
+                "reason": "all six workers reached their worker-local "
+                          "+100M continuation target",
+                "workers": [parked[w] for w in sorted(parked)],
+                "cap_frames": int(cap_frames),
+                "time": time.time(),
+            }, indent=2))
+            stop_arm(run_dir, "ARM_COMPLETE", marker_name=None)
+            return 0
         if max_iterations is not None and it >= max_iterations:
             return 0
         time.sleep(poll_s)

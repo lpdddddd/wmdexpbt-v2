@@ -1,9 +1,10 @@
 # base_retention_msa_probe — Test Report
 
 Date: 2026-07-19, updated the same date for the pilot-integration fix pass
-("Fix MSA pilot integration and phase safety"). Environment: isaaclab311
-conda python (CPU only; no Isaac import anywhere in the MSA package or its
-tests; no GPU used).
+("Fix MSA pilot integration and phase safety") and again for the pre-pilot
+safety patch ("Harden MSA readiness holds and pilot budget"). Environment:
+isaaclab311 python (CPU only; no Isaac import anywhere in the MSA package
+or its tests; no GPU used).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -15,7 +16,9 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 72/72 passed
+## MSA suite: `tests/test_msa_probe.py` — 95/95 passed
+
+(72 retained from the previous pass + 23 new safety-patch tests.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -60,35 +63,65 @@ New pilot-integration coverage (this fix pass):
 | base-retention msa_enabled=False behavior unchanged | `TestEnvPinBehavior.test_msa_disabled_pin_is_inert`, `TestOriginalProfileUnchanged.test_msa_disabled_curriculum_behavior_unchanged` |
 | MSA pin applies only when enabled and outranks observer forced | `TestEnvPinBehavior.test_msa_enabled_pin_applies_and_blocks_shrink`, `test_msa_pin_has_priority_over_observer_forced` |
 | GATE_RELAX still exactly one 0.88→0.75 profile difference | `TestOriginalProfileUnchanged.test_gate_relax_goes_through_dedicated_profile`, `test_base_continuation_launcher_keeps_original_gates` |
-| launchers: guard preflight, tolerance resume, eval device, pilot N | `test_launchers_have_guard_tolerance_resume_and_eval_device`, `TestEvaluatorIsolation.test_eval_device_required`, `TestArmConfigs.test_arm_configs_matched_and_charged` |
+| launchers: guard preflight, tolerance resume, eval devices, smoke N | `test_launchers_have_guard_tolerance_resume_and_eval_device`, `TestEvaluatorIsolation.test_eval_device_required`, `TestArmConfigs.test_arm_configs_matched_and_charged` |
 
-## Full CPU suite (per-file, one process per test module)
+Pre-pilot safety-patch coverage ("Harden MSA readiness holds and pilot
+budget"; 23 new tests):
 
-89 test modules were each run in their own pytest process
-(`/tmp/per_file_results.txt`): **1240+ tests passed**, with exactly one
-failure:
+| requirement | test(s) |
+|---|---|
+| partial worker availability never starts a cycle | `TestReadinessBarrier.test_guard_loop_partial_workers_no_marker`, `test_sidecar_readiness_gate` |
+| readiness marker requires 6/6 validated workers, atomic, full contents | `test_readiness_marker_requires_6_of_6`, `test_marker_contents_and_atomic_write`, `test_guard_loop_writes_marker_only_after_all_six` |
+| any first-tick failure → GUARD_FAILED, no readiness marker | `test_guard_loop_any_failure_stops_arm_without_marker` |
+| tick between due detection and hold NOT counted as tau_plus exposure | `TestHoldRaceStartFrames.test_stale_tick_not_counted_as_tau_plus` |
+| snapshot frame == packet start / mid boundary frame | `test_snapshot_frame_equals_packet_start_frame` (+ controller `_snapshot_at` enforcement in every cycle test) |
+| hold verifies stopped state; MSA_HOLDS.json persisted/removed | `TestWorkerHoldsSafety.test_hold_verifies_stopped_and_persists` (real SIGSTOPped process), `test_hold_verification_failure_fails_closed` |
+| release order children before supervisor/root | `test_release_order_children_before_root` |
+| sidecar death watchdog releases held workers + stops arm | `TestHoldWatchdog.test_dead_sidecar_with_holds_releases_and_stops` (real stopped process resumed), `test_sidecar_alive_is_ok`, `test_dead_sidecar_no_holds_idle_exit` |
+| normal +100M cap → ARM_COMPLETE.json (6/6 parked, no failure marker) | `TestMatchedCap.test_all_six_parked_writes_arm_complete` |
+| cap never lets a worker run to ~140M | `test_overshoot_to_140m_fails_the_arm`, `TestContinuationGuard.test_hard_cap_100m` (run/park/fail) |
+| commit timeout: ONE bounded wait, no re-wait in cleanup, tau pin restored | `TestCommitTimeoutBounded.test_commit_timeout_single_bounded_wait` |
+| 2-device eval scheduler: max concurrency 1 per device, round-robin | `TestEvalScheduler.test_round_robin_and_max_one_per_device` |
+| eval job failure cancels remaining jobs (fail closed) | `test_failure_cancels_remaining_and_raises`, `test_device_validation` |
+| 27 eval cells cost math (5.4 h / 21.6 h / 345.6 h on 2 GPUs) | `TestEvalCostEstimate.test_27_cells_and_wall_times`, `test_cost_estimate_file_generated` |
+| N=4 launcher default (execution smoke), readiness/commit flags, watchdog | `test_launchers_have_guard_tolerance_resume_and_eval_device` |
+| hold smoke end-to-end (frozen frame, release, next tick, result JSON) | `TestHoldSmoke.test_hold_smoke_end_to_end` (real SIGSTOP on a live process) |
+| base-retention msa_enabled=False behavior unchanged | retained `TestEnvPinBehavior.*`, `TestOriginalProfileUnchanged.*` |
 
-- `tests/test_pbt_curriculum_p1.py::StableSourceTierTest::test_l2_usable_when_stable_fails`
-  — **pre-existing**: fails identically at the parent commit (verified via
-  `git stash`); it exercises observer source-tier selection unrelated to
-  this change.
+## Regression suites (per-file, one process per test module)
 
-Known pre-existing environment issue (unchanged): collecting many heavy
-profile suites in ONE pytest process segfaults during import/teardown
-(reproduced identically at the parent commit). Per-file runs are green.
+| suite | result |
+|---|---|
+| `tests/test_msa_probe.py` | 95 passed |
+| `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
+| `tests/test_wm_strategy_profiles.py` | 31 passed |
+| `tests/test_late_floor_retention_gate.py`, `test_env_mastery_curriculum.py`, `test_curriculum_adaptive_fast.py`, `test_hybrid_curriculum_safety.py`, `test_pbt_curriculum_inherit.py`, `test_curriculum_freeze_unit_conversion.py` | 76 passed |
+| `tests/test_profile_copy_health_gates.py`, `test_v13_elite_profiles.py`, `test_profile_copy_v12.py` | 37 passed |
+| `tests/test_pbt_curriculum_p1.py` | 11 passed, 1 pre-existing failure (`StableSourceTierTest::test_l2_usable_when_stable_fails`) — baseline: fails identically at the parent commit; unrelated |
+
+Known pre-existing environment issue (unchanged, NOT fixed on purpose):
+collecting many heavy profile suites in ONE pytest process segfaults
+during import/teardown (reproduced identically at the parent commit).
+Per-file runs are green.
 
 ## Production-style dry run (simulation tier)
 
 `python -m dexpbt_isaaclab.msa.dry_run` — 6 workers with the REAL
 heterogeneous 5B-tip tolerances (0.02247…0.02759, full precision, not
-6-decimal-friendly), 20M tick-quantized parallel trainer, N=16 pilot
-seeds: promoted=True, recipients=[1, 3, 0] (tie 0 vs 5 broken by worker
-id), total tau_plus dose = 6×20M + 3×20M, zero residual pins/holds, all
-invariants held. Permuted arm: same total dose. Full trace:
-`DRY_RUN_TRACE.md`.
+6-decimal-friendly), 20M tick-quantized parallel trainer, phase-barrier
+holds with post-hold packet-start reads: promoted=True,
+recipients=[1, 3, 0] (tie 0 vs 5 broken by worker id), total tau_plus
+dose = 6×20M + 3×20M, zero residual pins/holds, all invariants held.
+Permuted arm: same total dose. Full trace: `DRY_RUN_TRACE.md`.
 
 Plan-only continuation-guard verification against the real manifest:
 `continuation_guard --verify-only` on `msa.config.json` →
 `BOOTSTRAP OK: 6/6 checkpoints verified (hash, mapping, fields)`.
+
+Hold/watchdog/hold-smoke tests use REAL processes (`sleep` children,
+actual SIGSTOP/SIGCONT and /proc state checks) — one tier above pure
+mocks, still no GPU. SIGSTOP against a live Isaac trainer remains
+GPU-unverified; the prepared `run_hold_smoke.sh` is the required first
+GPU validation step (see `LAUNCH_CHECKLIST.md`).
 
 No GPU was used at any point; no training was started.

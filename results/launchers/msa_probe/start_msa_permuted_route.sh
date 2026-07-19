@@ -218,9 +218,13 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: first committed tick must match the manifest tip
-# tolerance (<=1e-6) / lineage / frame baseline, and every worker has a
-# HARD +100M frame cap. Any violation stops the whole arm (fail closed).
+# Continuation guard: (a) six-worker READINESS BARRIER — only after ALL SIX
+# workers pass first-committed-tick validation (tolerance <=1e-6, lineage,
+# frame baseline) it atomically writes FIRST_TICK_VALIDATED.json; any
+# failure stops the whole arm (GUARD_FAILED) with no readiness marker;
+# (b) matched +100M cap — each worker is parked at its FIRST committed
+# frame >= baseline+100M; overshoot beyond one tick of slack fails the arm;
+# all six parked -> ARM_COMPLETE.json (normal completion) and full stop.
 nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
   --config "$RUN_DIR/ARM_CONFIG.json" \
   --run-dir "$RUN_DIR" \
@@ -229,18 +233,34 @@ nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
 echo $! > "$RUN_DIR/continuation_guard.pid"
 
 # MSA probe sidecar: drives the probe state machine over the shared
-# curriculum_control chain (committed-tick views, phase-barrier holds,
-# heterogeneous per-worker tau_plus pins via msa_forced_success_tolerance,
-# policy-only evals in subprocesses pinned to a dedicated eval GPU).
-# MSA_EVAL_GPU defaults to 6: trainers occupy DEXPBT_GPUS (0-5); the eval
-# device is REQUIRED by the sidecar and never defaults onto cuda:0.
-# Pilot N=16 seeds; formal N=256 must be requested explicitly.
+# curriculum_control chain (committed-tick views, phase-barrier holds with
+# stopped-state verification + MSA_HOLDS.json persistence, heterogeneous
+# per-worker tau_plus pins via msa_forced_success_tolerance, policy-only
+# evals in subprocesses with bounded per-device concurrency).
+# - the sidecar WAITS for the guard's FIRST_TICK_VALIDATED.json (6/6
+#   readiness barrier) before starting or resuming any cycle;
+# - MSA_EVAL_DEVICES defaults to cuda:6,cuda:7: trainers occupy DEXPBT_GPUS
+#   (0-5); eval devices are REQUIRED and never default onto cuda:0;
+# - MSA_NUM_SEEDS defaults to 4 = EXECUTION SMOKE (validates the machinery
+#   only, NEVER a method conclusion). Pilot N=16 must be set explicitly;
+#   formal N=256 is formal-only (~345h on 2 GPUs — do not).
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \
   --arm MSA_PERMUTED_ROUTE \
   --rho-threshold 0.88 \
-  --num-seeds "${MSA_NUM_SEEDS:-16}" \
-  --eval-device "cuda:${MSA_EVAL_GPU:-6}" \
+  --num-seeds "${MSA_NUM_SEEDS:-4}" \
+  --eval-devices "${MSA_EVAL_DEVICES:-cuda:6,cuda:7}" \
+  --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \
+  --commit-max-wait-s "${MSA_COMMIT_MAX_WAIT_S:-3600}" \
   --permuted-route >>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
+
+# External hold watchdog (independent of the sidecar's finally block): if
+# the sidecar dies while workers are SIGSTOPped (MSA_HOLDS.json non-empty),
+# it SIGCONTs all recorded PIDs, writes MSA_SIDECAR_DIED.json and stops the
+# whole arm — never uncontrolled continuation training.
+nohup python -u -m dexpbt_isaaclab.msa.hold_watchdog \
+  --run-dir "$RUN_DIR" \
+  >>"$RUN_DIR/hold_watchdog.log" 2>&1 &
+echo $! > "$RUN_DIR/hold_watchdog.pid"
 echo "launched MSA_PERMUTED_ROUTE: run_dir=$RUN_DIR"

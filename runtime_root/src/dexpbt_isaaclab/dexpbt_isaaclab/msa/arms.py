@@ -38,7 +38,9 @@ from dexpbt_isaaclab.msa.controller import PROBE_PACKET_FRAMES
 from dexpbt_isaaclab.msa.eval_bridge import (
     FORMAL_NUM_SEEDS,
     PILOT_NUM_SEEDS,
+    SMOKE_NUM_SEEDS,
     build_seed_manifest,
+    eval_cost_estimate,
 )
 from dexpbt_isaaclab.msa.provenance import EXPOSURE_WINDOW_FRAMES
 
@@ -175,18 +177,31 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
             "top_k_recipients": TOP_K_RECIPIENTS,
             "permuted_route": arm == "MSA_PERMUTED_ROUTE",
             "permuted_route_seed": PERMUTED_ROUTE_SEED,
+            "eval_num_seeds_smoke": SMOKE_NUM_SEEDS,
             "eval_num_seeds_pilot": PILOT_NUM_SEEDS,
             "eval_num_seeds_formal": FORMAL_NUM_SEEDS,
-            "eval_num_seeds_note": "pilot N=16 is the launcher default; "
-                                   "formal N=256 must be requested "
-                                   "explicitly (never run by default)",
+            "eval_num_seeds_note": "N=4 execution smoke is the launcher "
+                                   "default (machinery validation only, "
+                                   "never a method conclusion); pilot N=16 "
+                                   "must be set explicitly (MSA_NUM_SEEDS); "
+                                   "formal N=256 is formal-only and not "
+                                   "affordable on 2 eval GPUs without "
+                                   "further optimization",
             "eval_seed_manifest_id_pilot": manifest_id,
             "eval_seed_first": seeds[0],
             "eval_seed_last": seeds[-1],
-            "eval_device_note": "sidecar --eval-device is REQUIRED; the "
-                                "launcher pins cuda:${MSA_EVAL_GPU} (a GPU "
-                                "outside DEXPBT_GPUS), never the trainers' "
-                                "cuda:0",
+            "eval_cells_per_cycle": {"pre": 12, "mid": 6, "post": 9,
+                                     "total": 27},
+            "eval_cost_estimates": [
+                eval_cost_estimate(SMOKE_NUM_SEEDS, 2),
+                eval_cost_estimate(PILOT_NUM_SEEDS, 2),
+                eval_cost_estimate(FORMAL_NUM_SEEDS, 2),
+            ],
+            "eval_device_note": "sidecar --eval-devices is REQUIRED; the "
+                                "launcher pins ${MSA_EVAL_DEVICES:-"
+                                "cuda:6,cuda:7} (GPUs outside DEXPBT_GPUS), "
+                                "never the trainers' cuda:0; at most one "
+                                "Isaac eval process per device",
             "bootstrap": {"seed": BOOTSTRAP_SEED, "repeats": BOOTSTRAP_REPEATS,
                           "quantile": 0.05,
                           "statistic": "criterion-local conditional panel "
@@ -269,9 +284,13 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: first committed tick must match the manifest tip
-# tolerance (<=1e-6) / lineage / frame baseline, and every worker has a
-# HARD +100M frame cap. Any violation stops the whole arm (fail closed).
+# Continuation guard: (a) six-worker READINESS BARRIER — only after ALL SIX
+# workers pass first-committed-tick validation (tolerance <=1e-6, lineage,
+# frame baseline) it atomically writes FIRST_TICK_VALIDATED.json; any
+# failure stops the whole arm (GUARD_FAILED) with no readiness marker;
+# (b) matched +100M cap — each worker is parked at its FIRST committed
+# frame >= baseline+100M; overshoot beyond one tick of slack fails the arm;
+# all six parked -> ARM_COMPLETE.json (normal completion) and full stop.
 nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \\
   --config "$RUN_DIR/ARM_CONFIG.json" \\
   --run-dir "$RUN_DIR" \\
@@ -283,20 +302,63 @@ echo $! > "$RUN_DIR/continuation_guard.pid"
 
 _SIDECAR_BLOCK = """
 # MSA probe sidecar: drives the probe state machine over the shared
-# curriculum_control chain (committed-tick views, phase-barrier holds,
-# heterogeneous per-worker tau_plus pins via msa_forced_success_tolerance,
-# policy-only evals in subprocesses pinned to a dedicated eval GPU).
-# MSA_EVAL_GPU defaults to 6: trainers occupy DEXPBT_GPUS (0-5); the eval
-# device is REQUIRED by the sidecar and never defaults onto cuda:0.
-# Pilot N=16 seeds; formal N=256 must be requested explicitly.
+# curriculum_control chain (committed-tick views, phase-barrier holds with
+# stopped-state verification + MSA_HOLDS.json persistence, heterogeneous
+# per-worker tau_plus pins via msa_forced_success_tolerance, policy-only
+# evals in subprocesses with bounded per-device concurrency).
+# - the sidecar WAITS for the guard's FIRST_TICK_VALIDATED.json (6/6
+#   readiness barrier) before starting or resuming any cycle;
+# - MSA_EVAL_DEVICES defaults to cuda:6,cuda:7: trainers occupy DEXPBT_GPUS
+#   (0-5); eval devices are REQUIRED and never default onto cuda:0;
+# - MSA_NUM_SEEDS defaults to 4 = EXECUTION SMOKE (validates the machinery
+#   only, NEVER a method conclusion). Pilot N=16 must be set explicitly;
+#   formal N=256 is formal-only (~345h on 2 GPUs — do not).
 nohup python -u -m dexpbt_isaaclab.msa.sidecar \\
   --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
   --arm {arm} \\
   --rho-threshold {rho} \\
-  --num-seeds "${{MSA_NUM_SEEDS:-16}}" \\
-  --eval-device "cuda:${{MSA_EVAL_GPU:-6}}" \\
+  --num-seeds "${{MSA_NUM_SEEDS:-4}}" \\
+  --eval-devices "${{MSA_EVAL_DEVICES:-cuda:6,cuda:7}}" \\
+  --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \\
+  --commit-max-wait-s "${{MSA_COMMIT_MAX_WAIT_S:-3600}}" \\
   {permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
+
+# External hold watchdog (independent of the sidecar's finally block): if
+# the sidecar dies while workers are SIGSTOPped (MSA_HOLDS.json non-empty),
+# it SIGCONTs all recorded PIDs, writes MSA_SIDECAR_DIED.json and stops the
+# whole arm — never uncontrolled continuation training.
+nohup python -u -m dexpbt_isaaclab.msa.hold_watchdog \\
+  --run-dir "$RUN_DIR" \\
+  >>"$RUN_DIR/hold_watchdog.log" 2>&1 &
+echo $! > "$RUN_DIR/hold_watchdog.pid"
+"""
+
+_HOLD_SMOKE_TEMPLATE = """#!/usr/bin/env bash
+# Single-worker HOLD SMOKE for a running MSA arm. Prepared but NOT executed.
+# Validates SIGSTOP/SIGCONT against a live Isaac trainer BEFORE any probe
+# cycle: waits for the guard's readiness marker, holds ONE worker, verifies
+# its committed frame is frozen for the hold window, releases, verifies the
+# next committed tick appears. No tolerance writes, no MSA cycle, no eval.
+# Result: <run_dir>/HOLD_SMOKE_RESULT.json (release guaranteed either way).
+set -euo pipefail
+
+RUN_DIR="${1:?usage: run_hold_smoke.sh <run_dir> [worker] [seconds]}"
+WORKER="${2:-0}"
+HOLD_SECONDS="${3:-60}"
+RUNTIME_ROOT="/root/autodl-tmp/wmdexpbt/runtime_root"
+
+source "${RUNTIME_ROOT}/scripts/env_dexpbt.sh"
+cd "${RUNTIME_ROOT}/src/dexpbt_isaaclab"
+
+python -u -m dexpbt_isaaclab.msa.sidecar \\
+  --workspace "$RUN_DIR/dexpbt_8gpu_ws" \\
+  --arm MSA \\
+  --readiness-marker "$RUN_DIR/FIRST_TICK_VALIDATED.json" \\
+  --hold-smoke-only \\
+  --hold-smoke-worker "$WORKER" \\
+  --hold-smoke-seconds "$HOLD_SECONDS"
+echo "hold smoke result: $RUN_DIR/HOLD_SMOKE_RESULT.json"
 """
 
 
@@ -382,6 +444,29 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
         sh_path.write_text(script)
         sh_path.chmod(0o755)
         written.append(sh_path)
+    # single-worker hold smoke launcher (prepared, never executed here)
+    smoke_path = out_dir / "run_hold_smoke.sh"
+    smoke_path.write_text(_HOLD_SMOKE_TEMPLATE)
+    smoke_path.chmod(0o755)
+    written.append(smoke_path)
+    # true per-cycle eval workload (27 cells) at each budget on 2 eval GPUs
+    cost_path = out_dir / "EVAL_COST_ESTIMATE.json"
+    cost_path.write_text(json.dumps({
+        "note": "one full MSA probe cycle; one Isaac process per "
+                "(cell, seed); at most one process per eval device",
+        "estimates": [
+            eval_cost_estimate(SMOKE_NUM_SEEDS, 2),
+            eval_cost_estimate(PILOT_NUM_SEEDS, 2),
+            eval_cost_estimate(FORMAL_NUM_SEEDS, 2),
+        ],
+        "verdicts": {
+            "N=4  x 2 GPUs": "~5.4 h  — execution smoke (machinery only)",
+            "N=16 x 2 GPUs": "~21.6 h — pilot (explicit opt-in)",
+            "N=256 x 2 GPUs": "~345.6 h — NOT acceptable without "
+                              "per-process batching / seed vectorization",
+        },
+    }, indent=2))
+    written.append(cost_path)
     return written
 
 

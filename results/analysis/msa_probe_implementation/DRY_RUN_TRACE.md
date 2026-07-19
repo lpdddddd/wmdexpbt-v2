@@ -1,7 +1,7 @@
 # MSA Probe Dry-Run Trace (production-style)
 
 - scenario: 6 workers with HETEROGENEOUS live tolerances (real 5B-tip values), tick-quantized parallel trainer (20,000,000 frames per committed tick), phase-barrier holds, N=16 pilot seeds (formal N=256 explicit only)
-- intervention_id: `msa_1784437808_e8789d02`
+- intervention_id: `msa_1784441129_e3eec47f`
 - arm: MSA
 
 ## Worker-local tolerances
@@ -17,7 +17,7 @@
 
 ## State machine transitions
 
-1. `NORMAL->PRE_EVAL [msa_1784437808_e8789d02]`
+1. `NORMAL->PRE_EVAL [msa_1784441129_e3eec47f]`
 1. `PRE_EVAL->COMMON_PROBE`
 1. `COMMON_PROBE->MID_EVAL`
 1. `MID_EVAL->ROUTE_SECOND_HALF`

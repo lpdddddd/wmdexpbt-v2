@@ -82,12 +82,38 @@ class WorkerView:
     is_floor_worker: bool = False
 
 
+class CommitTimeout(TimeoutError):
+    """A durable tolerance commit did not confirm within its bounded wait.
+
+    Carries enough context for the sidecar to write COMMIT_TIMEOUT.json and
+    stop the arm. The controller's crash cleanup MUST NOT start a second
+    full bounded wait after this (the synchronous pin-revert is enough)."""
+
+    def __init__(self, worker_id: int, target_tau: float,
+                 last_frame: int, last_tau: float, max_wait_s: float) -> None:
+        super().__init__(
+            f"worker {worker_id}: live tolerance did not reach "
+            f"{target_tau} within {max_wait_s}s (last committed frame "
+            f"{last_frame}, last live tau {last_tau})")
+        self.worker_id = int(worker_id)
+        self.target_tau = float(target_tau)
+        self.last_frame = int(last_frame)
+        self.last_tau = float(last_tau)
+        self.max_wait_s = float(max_wait_s)
+
+
 # --- injected side-effect callbacks (production wiring in sidecar.py) -------
 # evaluate(worker_id, snapshot_id, tau) -> SeedEvalResult   (idempotent)
 EvalFn = Callable[[int, str, float], SeedEvalResult]
-# snapshot(worker_id, tag) -> snapshot_id; tag carries the intervention id so
-# the production wiring can reuse an already-frozen snapshot on resume.
-SnapshotFn = Callable[[int, str], str]
+# snapshot(worker_id, tag) -> (snapshot_id, committed_frame); tag carries the
+# intervention id so the production wiring can reuse an already-frozen
+# snapshot on resume (returning the frame RECORDED at freeze time, never a
+# re-read). The controller checks the frame against the phase boundary.
+SnapshotFn = Callable[[int, str], tuple[str, int]]
+# refresh_view(worker_id) -> WorkerView from the CURRENT committed tick.
+# Called after a hold so packet start frames / snapshot frames can never be
+# one tick stale (the due-detection -> hold race).
+RefreshFn = Callable[[int], "WorkerView"]
 # pin_tolerance(worker_id, tol): set msa_forced_success_tolerance (locked).
 PinFn = Callable[[int, float], None]
 # commit_tolerance(worker_id, tol): durably make tol the live tolerance
@@ -144,6 +170,7 @@ class MSAController:
         train_until: TrainUntilFn,
         save_state: SaveStateFn,
         load_state: LoadStateFn,
+        refresh_view: RefreshFn,
         top_k: int = FORMAL_TOP_K,
         packet_frames: int = PROBE_PACKET_FRAMES,
         permuted_route: bool = False,
@@ -162,6 +189,7 @@ class MSAController:
         self._train_until = train_until
         self._save_state = save_state
         self._load_state = load_state
+        self._refresh_view = refresh_view
         self.machine = MSAProbeStateMachine()
 
     # -- persisted state helpers ---------------------------------------------
@@ -218,6 +246,8 @@ class MSAController:
                    for k, v in resume_cycle["tau_by_worker"].items()}
             tau_plus = {int(k): float(v)
                         for k, v in resume_cycle["tau_plus_by_worker"].items()}
+            # persisted packet boundaries are kept verbatim; the post-hold
+            # read below only VALIDATES current frame >= persisted frame.
             start_frames = {int(k): int(v)
                             for k, v in resume_cycle["start_frames"].items()}
             resumed = True
@@ -234,7 +264,11 @@ class MSAController:
             tau = {w: float(canonical_tau(by_id[w].active_tau)) for w in due}
             tau_plus = {w: float(canonical_tau(tau_plus_of(tau[w])))
                         for w in due}
-            start_frames = {w: int(by_id[w].frame) for w in due}
+            # start_frames are set AFTER the PRE_EVAL hold from the freshly
+            # re-read committed metas (a worker may commit one more tick
+            # between due detection and the hold; that tick was trained at
+            # tau and must NOT be counted as tau_plus exposure).
+            start_frames = {}
             resumed = False
 
         cycle: dict = dict(resume_cycle or {})
@@ -243,7 +277,6 @@ class MSAController:
             "due_workers": list(due),
             "tau_by_worker": {str(w): tau[w] for w in due},
             "tau_plus_by_worker": {str(w): tau_plus[w] for w in due},
-            "start_frames": {str(w): start_frames[w] for w in due},
             "status": "RUNNING",
             "packet_frames": self.packet_frames,
             "evaluator_manifest_id": self.evaluator_manifest_id,
@@ -260,7 +293,8 @@ class MSAController:
                 source_checkpoint_id=(by_id[w].source_checkpoint_id
                                       if w in by_id else ""),
                 active_tau=tau[w], proposed_tau=tau_plus[w],
-                due_frame=start_frames[w],
+                due_frame=start_frames.get(
+                    w, by_id[w].frame if w in by_id else 0),
                 evaluator_manifest_id=self.evaluator_manifest_id)
 
         def _has_segment(w: int, segment_type: str) -> bool:
@@ -280,18 +314,74 @@ class MSAController:
             self._release(ids)
             held.difference_update(ids)
 
+        def _refresh_held(ids: list[int]) -> dict[int, WorkerView]:
+            """Re-read the CURRENT committed tick of each held worker."""
+            return {w: self._refresh_view(w) for w in ids}
+
+        def _snapshot_at(w: int, tag: str, expected_frame: int) -> str:
+            """Snapshot and enforce it comes from the phase-boundary frame."""
+            snap, snap_frame = self.snapshot(w, tag)
+            if int(snap_frame) != int(expected_frame):
+                raise RuntimeError(
+                    f"worker {w}: snapshot {snap} is at committed frame "
+                    f"{snap_frame}, expected the phase boundary frame "
+                    f"{expected_frame} (stale/foreign committed prefix)")
+            return snap
+
         m = self.machine
         promoted_committed = False
         try:
-            # -- PRE_EVAL: barrier-hold, snapshot, p_pre(tau[w]), q_pre --------
+            # -- PRE_EVAL: barrier-hold FIRST, then re-read committed metas ----
             m.transition(MSAPhase.PRE_EVAL, intervention_id)
             m.intervention_id = intervention_id
             self._persist(due, provs, cycle)
             _hold(due)
+            # the packet start is the POST-hold committed frame: a tick that
+            # committed between due detection and the hold ran at tau and is
+            # excluded from the tau_plus exposure accounting.
+            fresh = _refresh_held(due)
+            for w in due:
+                fv = fresh[w]
+                if int(fv.worker_id) != int(w):
+                    raise RuntimeError(f"refresh returned worker "
+                                       f"{fv.worker_id} for {w}")
+                live = canonical_tau(fv.active_tau)
+                if resumed:
+                    # a resumed cycle may find the worker still pinned at
+                    # its own tau_plus (kill mid-cycle); anything else is a
+                    # foreign tolerance and fails closed.
+                    if live not in (canonical_tau(tau[w]),
+                                    canonical_tau(tau_plus[w])):
+                        raise RuntimeError(
+                            f"worker {w}: live tolerance {live} is neither "
+                            f"cycle tau {canonical_tau(tau[w])} nor "
+                            f"tau_plus {canonical_tau(tau_plus[w])} on "
+                            "resume")
+                elif live != canonical_tau(tau[w]):
+                    raise RuntimeError(
+                        f"worker {w}: live tolerance {live} != cycle tau "
+                        f"{canonical_tau(tau[w])} after hold (curriculum "
+                        "moved between due detection and hold)")
+                want_lin = (by_id[w].lineage_id if w in by_id else None)
+                if (want_lin and fv.lineage_id
+                        and str(fv.lineage_id) != str(want_lin)):
+                    raise RuntimeError(
+                        f"worker {w}: lineage {fv.lineage_id} != "
+                        f"{want_lin} after hold")
+                if resumed:
+                    if int(fv.frame) < start_frames[w]:
+                        raise RuntimeError(
+                            f"worker {w}: committed frame {fv.frame} < "
+                            f"persisted start frame {start_frames[w]} "
+                            "(ledger regressed)")
+                else:
+                    start_frames[w] = int(fv.frame)
+            cycle["start_frames"] = {str(w): start_frames[w] for w in due}
             pre_tau: dict[int, SeedEvalResult] = {}
             pre_plus: dict[int, SeedEvalResult] = {}
             for w in due:
-                snap = self.snapshot(w, f"{intervention_id}_pre")
+                snap = _snapshot_at(w, f"{intervention_id}_pre",
+                                    start_frames[w])
                 records[w].snapshot_pre_id = snap
                 cycle.setdefault("snapshots", {}).setdefault(str(w), {})["pre"] = snap
                 pre_tau[w] = self.evaluate(w, snap, tau[w])
@@ -310,8 +400,17 @@ class MSAController:
             observed = self._train_until(
                 {w: start_frames[w] + self.packet_frames for w in todo})
             _hold(due)
+            # the segment end / MID snapshot frame is the POST-hold committed
+            # frame (>= the barrier observation; a tick may commit between
+            # the barrier and the hold and still belongs to this packet,
+            # because the pin was active the whole time).
+            fresh_mid = _refresh_held(todo)
             for w in todo:
-                end = int(observed[w])
+                end = int(fresh_mid[w].frame)
+                if end < int(observed[w]):
+                    raise RuntimeError(
+                        f"worker {w}: post-hold frame {end} < barrier "
+                        f"observation {observed[w]} (ledger regressed)")
                 if end < start_frames[w] + self.packet_frames:
                     raise RuntimeError(
                         f"worker {w}: common probe barrier returned frame "
@@ -338,7 +437,8 @@ class MSAController:
             l_mid_by_worker: dict[int, float] = {}
             mid_plus: dict[int, SeedEvalResult] = {}
             for w in due:
-                snap = self.snapshot(w, f"{intervention_id}_mid")
+                snap = _snapshot_at(w, f"{intervention_id}_mid",
+                                    mid_frames[w])
                 records[w].snapshot_mid_id = snap
                 cycle.setdefault("snapshots", {}).setdefault(str(w), {})["mid"] = snap
                 mid_plus[w] = self.evaluate(w, snap, tau_plus[w])
@@ -379,8 +479,13 @@ class MSAController:
             observed2 = self._train_until(
                 {w: mid_frames[w] + self.packet_frames for w in second_todo})
             _hold(due)
+            fresh_post = _refresh_held(due)
             for w in second_todo:
-                end = int(observed2[w])
+                end = int(fresh_post[w].frame)
+                if end < int(observed2[w]):
+                    raise RuntimeError(
+                        f"worker {w}: post-hold frame {end} < barrier "
+                        f"observation {observed2[w]} (ledger regressed)")
                 if end < mid_frames[w] + self.packet_frames:
                     raise RuntimeError(
                         f"worker {w}: second probe barrier returned frame "
@@ -390,6 +495,7 @@ class MSAController:
                                       mid_frames[w], end, intervention_id)
                 records[w].add_segment(seg)
                 provs[w].record_exposure(seg)
+            post_frames = {w: int(fresh_post[w].frame) for w in due}
             self._persist(due, provs, cycle)
 
             # -- POST_EVAL: pins back at tau[w] (held); p_post(tau[w]) ---------
@@ -398,7 +504,8 @@ class MSAController:
             retention_by_worker: dict[int, RetentionResult] = {}
             for w in due:
                 self._pin(w, tau[w])      # revert pin; NO checkpoint reload
-                snap = self.snapshot(w, f"{intervention_id}_post")
+                snap = _snapshot_at(w, f"{intervention_id}_post",
+                                    post_frames[w])
                 records[w].snapshot_post_id = snap
                 cycle.setdefault("snapshots", {}).setdefault(str(w), {})["post"] = snap
                 post_tau = self.evaluate(w, snap, tau[w])
@@ -476,13 +583,18 @@ class MSAController:
                 _release(sorted(held))
             except Exception:
                 pass
-            # 3. durable revert + pin clear, best effort.
-            for w in due:
-                if not promoted_committed:
-                    try:
-                        self._commit(w, tau[w])
-                    except Exception:
-                        pass
+            # 3. durable revert + pin clear, best effort — EXCEPT after a
+            #    commit timeout: a durable commit is a bounded wait on live
+            #    ticks, and cleanup must never start a second full timeout
+            #    (the synchronous pin-revert above already restores tau at
+            #    the next tick; the sidecar stops the arm).
+            if not isinstance(err, TimeoutError):
+                for w in due:
+                    if not promoted_committed:
+                        try:
+                            self._commit(w, tau[w])
+                        except Exception:
+                            pass
             cycle["status"] = "FAILED"
             cycle["failed_phase"] = failed_phase
             cycle["error"] = f"{type(err).__name__}: {err}"

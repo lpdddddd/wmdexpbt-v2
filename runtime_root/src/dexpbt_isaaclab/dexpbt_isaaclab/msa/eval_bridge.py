@@ -24,18 +24,53 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from dexpbt_isaaclab.msa.decision import SeedEvalResult
 
-# Pre-registered evaluation sizes. The PILOT size is the default wiring;
-# FORMAL must be requested explicitly (never run by default).
+# Pre-registered evaluation sizes. SMOKE (N=4) is the launcher default —
+# an EXECUTION smoke to validate the machinery, never a method conclusion.
+# PILOT (N=16) must be set explicitly; FORMAL (N=256) is formal-only and
+# unaffordable on 2 GPUs without further optimization (see
+# eval_cost_estimate).
 SMOKE_NUM_SEEDS = 4
 PILOT_NUM_SEEDS = 16
 FORMAL_NUM_SEEDS = 256
 SEED_MANIFEST_BASE = 310_000  # ordered manifest: BASE+1 .. BASE+N
+
+# One full probe cycle evaluates 27 (snapshot, tolerance) cells:
+#   PRE : 6 workers x {tau, tau_plus}            = 12
+#   MID : 6 workers x {tau_plus}                 =  6
+#   POST: 6 workers x {tau} + 3 recipients q_post =  9
+EVAL_CELLS_PER_CYCLE = {"pre": 12, "mid": 6, "post": 9, "total": 27}
+MINUTES_PER_SEED_EVAL = 6.0   # one Isaac process per (cell, seed)
+
+
+def eval_cost_estimate(num_seeds: int, num_devices: int,
+                       minutes_per_seed: float = MINUTES_PER_SEED_EVAL,
+                       ) -> dict:
+    """Wall-clock estimate for ONE probe cycle's evaluation workload.
+
+    27 cells x N seeds Isaac process launches, spread over the eval devices
+    (one process per device at a time). At 6 min/seed:
+    N=4 / 2 GPUs ~ 5.4 h; N=16 / 2 GPUs ~ 21.6 h; N=256 / 2 GPUs ~ 345.6 h
+    (NOT acceptable without per-process batching or seed vectorization).
+    """
+    cells = EVAL_CELLS_PER_CYCLE["total"]
+    launches = cells * int(num_seeds)
+    wall_min = launches * float(minutes_per_seed) / max(1, int(num_devices))
+    return {
+        "eval_cells": dict(EVAL_CELLS_PER_CYCLE),
+        "seeds": int(num_seeds),
+        "devices": int(num_devices),
+        "estimated_process_launches": launches,
+        "minutes_per_seed": float(minutes_per_seed),
+        "estimated_wall_time_hours": round(wall_min / 60.0, 2),
+    }
 
 
 def canonical_tau(tau: float) -> str:
@@ -107,12 +142,7 @@ class EvalRequest:
     commands: list[list[str]] = field(default_factory=list)
 
     def gpu_index(self) -> str:
-        dev = str(self.eval_device).strip()
-        if not dev:
-            raise ValueError(
-                "EvalRequest.eval_device is required: refusing to default "
-                "onto the trainers' cuda:0")
-        return dev.split(":", 1)[1] if ":" in dev else dev
+        return device_index(self.eval_device)
 
     def build_env(self, base_env: Optional[dict] = None) -> dict:
         """Child-process environment with the eval GPU pinned."""
@@ -146,6 +176,84 @@ class EvalRequest:
             ])
         self.commands = cmds
         return cmds
+
+
+def device_index(dev: str) -> str:
+    """'cuda:7' -> '7'; '7' -> '7'; empty fails closed."""
+    dev = str(dev).strip()
+    if not dev:
+        raise ValueError("eval device is required: refusing to default "
+                         "onto the trainers' cuda:0")
+    return dev.split(":", 1)[1] if ":" in dev else dev
+
+
+def run_seed_jobs(commands: list[list[str]], devices: list[str], *,
+                  base_env: Optional[dict] = None,
+                  runner: Optional[Callable[[int, list[str], str], int]] = None,
+                  ) -> None:
+    """Run seed-eval subprocesses with BOUNDED per-device concurrency.
+
+    - job i is statically assigned to devices[i % D] (deterministic
+      round-robin; the raw-result manifest is deterministic anyway because
+      ccrs_eval names outputs by unit key, independent of scheduling);
+    - each device runs AT MOST ONE Isaac process at a time (two Isaac
+      processes on one GPU would OOM / thrash);
+    - any job failure cancels all remaining jobs and raises (fail closed —
+      load_seed_results would fail on the gap regardless, this just stops
+      burning GPU time).
+
+    `runner(job_index, cmd, device_index) -> returncode` is injectable for
+    tests; the default launches a subprocess with CUDA_VISIBLE_DEVICES
+    pinned to the assigned device.
+    """
+    if not devices:
+        raise ValueError("run_seed_jobs needs at least one eval device")
+    idxs = [device_index(d) for d in devices]
+    if len(set(idxs)) != len(idxs):
+        raise ValueError(f"duplicate eval devices: {devices}")
+    queues: dict[int, list[tuple[int, list[str]]]] = {
+        d: [] for d in range(len(devices))}
+    for i, cmd in enumerate(commands):
+        queues[i % len(devices)].append((i, cmd))
+    stop = threading.Event()
+    failures: list[tuple[int, str]] = []
+    lock = threading.Lock()
+
+    def _default_runner(i: int, cmd: list[str], gpu: str) -> int:
+        env = dict(base_env) if base_env is not None else dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = gpu
+        return subprocess.run(cmd, env=env).returncode
+
+    run = runner or _default_runner
+
+    def _drain(d: int) -> None:
+        for i, cmd in queues[d]:
+            if stop.is_set():
+                return                      # cancelled: fail closed
+            try:
+                rc = run(i, cmd, idxs[d])
+            except Exception as exc:
+                rc = None
+                with lock:
+                    failures.append((i, f"{type(exc).__name__}: {exc}"))
+                stop.set()
+                return
+            if rc != 0:
+                with lock:
+                    failures.append((i, f"exit code {rc}"))
+                stop.set()
+                return
+
+    threads = [threading.Thread(target=_drain, args=(d,), daemon=True)
+               for d in range(len(devices))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if failures:
+        raise RuntimeError(
+            f"eval jobs failed: {sorted(failures)[:3]}; remaining jobs "
+            "were cancelled (fail closed)")
 
 
 def load_seed_results(raw_dir: Path, snapshot: SnapshotSpec, tau: float,

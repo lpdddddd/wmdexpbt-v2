@@ -5,39 +5,55 @@ supervisors. It is the ONLY writer of msa_* control fields (through the
 locked update_curriculum_control API) and never touches policy weights,
 optimizer, replay, PBT lineage or any observer-owned curriculum field.
 
+Readiness barrier: the sidecar REQUIRES --readiness-marker (the
+FIRST_TICK_VALIDATED.json written by continuation_guard once ALL SIX
+workers produced a validated first continuation tick). Until the marker
+exists — and worker views are exactly {0..5} — the sidecar neither starts
+nor resumes any probe cycle. If the guard fails the arm (GUARD_FAILED),
+the sidecar releases all holds and exits.
+
 Wiring:
 - worker views        <- newest COMMITTED tick (LATEST.commit marker in
                          <workspace>/<policy>/, never a bare newest-file
                          glob) + live tau from the committed tick meta;
+                         refresh_view re-reads AFTER a hold so packet start
+                         frames can never be one tick stale;
 - hold/release        <- SIGSTOP/SIGCONT of the worker's training process
-                         tree (supervisor pid from policy_NN/pid.txt); a
-                         held worker cannot advance the policy while its
-                         snapshot is being evaluated (phase barrier);
+                         tree; hold VERIFIES the processes reached the
+                         stopped state; release resumes children before the
+                         supervisor/root; held PIDs are persisted to
+                         MSA_HOLDS.json so the external hold watchdog (and
+                         the guard's stop paths) can SIGCONT them if this
+                         process dies;
 - snapshot(w, tag)    <- freeze the newest committed checkpoint of worker w
-                         read-only under <workspace>/msa_snapshots/; the tag
-                         embeds the intervention id, so a resumed cycle
-                         reuses the existing frozen file (idempotent);
-- evaluate(...)       <- eval_bridge.EvalRequest -> one ccrs_eval subprocess
-                         per seed pinned to --eval-device (REQUIRED flag;
-                         never defaults onto the trainers' cuda:0), results
-                         read back per-seed with canonical tolerances
-                         (fail closed on gaps);
+                         read-only under <workspace>/msa_snapshots/ and
+                         record the frozen frame in <snap>.meta.json; a
+                         resumed cycle reuses the existing frozen file AND
+                         its recorded frame (idempotent);
+- evaluate(...)       <- eval_bridge.EvalRequest -> ccrs_eval subprocesses
+                         with BOUNDED per-device concurrency over
+                         --eval-devices (at most one Isaac process per GPU,
+                         seeds round-robin, fail-closed cancellation);
 - pin_tolerance       <- msa_forced_success_tolerance via locked update
                          (env-side pin: no shrink can fire during a packet);
-- commit_tolerance    <- pin -> wait until the live committed tick reports
-                         the tolerance -> sync curriculum_resume_snapshot ->
-                         clear the pin. Durable across restarts (promotion
-                         and stay-revert both go through this);
+- commit_tolerance    <- pin -> ONE bounded wait (--commit-max-wait-s) for a
+                         live committed tick reporting the tolerance ->
+                         sync curriculum_resume_snapshot -> clear the pin.
+                         On timeout raises controller.CommitTimeout; the
+                         main loop then writes COMMIT_TIMEOUT.json,
+                         releases all holds and stops the whole arm
+                         (cleanup never waits a second full timeout);
 - train_until         <- PARALLEL barrier polling all listed workers'
                          committed tick ledgers; returns OBSERVED frames;
 - save/load state     <- msa_provenance / msa_state_machine / msa_cycle
                          inside CurriculumControlState (single source of
                          truth, rides the existing resume chain).
 
-On startup the sidecar checks for a persisted in-flight cycle and resumes
-it idempotently (completed segments are skipped via provenance, snapshots
-and eval results are reused); a cycle marked FAILED is not resumed
-automatically.
+--hold-smoke-only: a standalone single-worker hold smoke (wait for
+readiness, hold one worker, verify its committed frame is frozen for
+--hold-smoke-seconds, release, verify the next committed tick appears).
+No tolerance writes, no cycle, no eval; result in HOLD_SMOKE_RESULT.json;
+release is guaranteed in a finally block.
 
 The heavy work happens in child processes; this process is pure python.
 """
@@ -55,6 +71,8 @@ from pathlib import Path
 from typing import Optional
 
 from dexpbt_isaaclab.msa.controller import (
+    CommitTimeout,
+    CycleFailure,
     MSAController,
     PROBE_PACKET_FRAMES,
     WorkerView,
@@ -63,14 +81,18 @@ from dexpbt_isaaclab.msa.decision import SeedEvalResult
 from dexpbt_isaaclab.msa.eval_bridge import (
     EvalRequest,
     FORMAL_NUM_SEEDS,
-    PILOT_NUM_SEEDS,
+    SMOKE_NUM_SEEDS,
     SnapshotSpec,
     build_seed_manifest,
     load_seed_results,
+    run_seed_jobs,
 )
 
 POLL_S = 30.0
 COMMIT_TOLERANCE_ATOL = 1e-6
+DEFAULT_COMMIT_MAX_WAIT_S = 3600.0
+HOLDS_FILE = "MSA_HOLDS.json"
+NUM_WORKERS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -114,21 +136,48 @@ def latest_committed_meta(policy_dir: Path) -> Optional[dict]:
     return None
 
 
+def _view_from_meta(worker_id: int, meta: dict) -> WorkerView:
+    cur = meta.get("curriculum", {})
+    return WorkerView(
+        worker_id=worker_id,
+        lineage_id=meta.get("lineage_id"),
+        active_tau=float(cur.get("success_tolerance", float("nan"))),
+        frame=int(meta.get("frame", 0)),
+        source_checkpoint_id=str(meta.get("checkpoint", "")),
+    )
+
+
 def _worker_views(workspace: Path, num_policies: int) -> list[WorkerView]:
     views = []
     for w in range(num_policies):
         meta = latest_committed_meta(workspace / f"{w:03d}")
         if meta is None:
             continue
-        cur = meta.get("curriculum", {})
-        views.append(WorkerView(
-            worker_id=w,
-            lineage_id=meta.get("lineage_id"),
-            active_tau=float(cur.get("success_tolerance", float("nan"))),
-            frame=int(meta.get("frame", 0)),
-            source_checkpoint_id=str(meta.get("checkpoint", "")),
-        ))
+        views.append(_view_from_meta(w, meta))
     return views
+
+
+def readiness_ok(marker_path: Path, views: list[WorkerView],
+                 num_policies: int = NUM_WORKERS) -> tuple[bool, str]:
+    """Gate for starting/resuming ANY probe cycle: the guard's readiness
+    marker must exist AND the committed worker views must be exactly
+    {0, .., num_policies-1} (a launcher that brought up only a subset must
+    never trigger a partial-panel cycle)."""
+    if not marker_path.is_file():
+        return False, f"readiness marker missing: {marker_path}"
+    try:
+        payload = json.loads(marker_path.read_text())
+        marker_ids = sorted(int(w["worker_id"]) for w in payload["workers"])
+    except (json.JSONDecodeError, KeyError, TypeError, OSError) as exc:
+        return False, f"readiness marker unreadable: {exc}"
+    if marker_ids != list(range(num_policies)):
+        return False, (f"readiness marker covers workers {marker_ids}, "
+                       f"expected {list(range(num_policies))}")
+    ids = sorted(v.worker_id for v in views)
+    if ids != list(range(num_policies)):
+        return False, (f"committed worker views {ids} != expected "
+                       f"{list(range(num_policies))} (partial launch?)")
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -149,12 +198,45 @@ def _descendants(pid: int) -> list[int]:
     return out
 
 
+def _proc_state(pid: int) -> Optional[str]:
+    """The one-letter /proc state ('T' = stopped) or None if gone."""
+    try:
+        text = (Path("/proc") / str(pid) / "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError, OSError):
+        return None
+    # field 3 comes after the parenthesized comm, which may contain spaces
+    return text.rsplit(")", 1)[1].split()[0]
+
+
+def read_holds_file(run_dir: Path) -> dict[int, list[int]]:
+    path = Path(run_dir) / HOLDS_FILE
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+        return {int(w): [int(p) for p in pids] for w, pids in raw.items()}
+    except (json.JSONDecodeError, ValueError, OSError):
+        return {}
+
+
 class WorkerHolds:
     """Pause/resume worker training process trees (idempotent).
 
+    - hold() SIGSTOPs children first (so the supervisor cannot respawn
+      mid-hold) and VERIFIES every surviving PID reached the stopped
+      state; a failed verification releases and raises (fail closed);
+    - release() SIGCONTs children BEFORE the supervisor/root, so the
+      supervisor never observes a still-stopped child on wakeup;
+    - held PIDs are persisted to <run_dir>/MSA_HOLDS.json on every hold
+      and the record is removed on release, so the external hold watchdog
+      (and the guard's stop paths) can SIGCONT them if the sidecar dies
+      without running its finally block.
+
     NOTE: correctness of SIGSTOP against a live Isaac trainer is NOT yet
-    GPU-verified; the launch checklist requires a supervised first hold.
+    GPU-verified; run the --hold-smoke-only mode first (see checklist).
     """
+
+    STOP_VERIFY_TIMEOUT_S = 10.0
 
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = Path(run_dir)
@@ -168,6 +250,34 @@ class WorkerHolds:
         root = int(pid_file.read_text().strip())
         return [root] + _descendants(root)
 
+    def _persist(self) -> None:
+        path = self.run_dir / HOLDS_FILE
+        if not self._held:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        tmp = path.with_suffix(f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(
+            {str(w): pids for w, pids in sorted(self._held.items())},
+            indent=2))
+        os.replace(tmp, path)
+
+    def _verify_stopped(self, pids: list[int]) -> None:
+        deadline = time.monotonic() + self.STOP_VERIFY_TIMEOUT_S
+        pending = list(pids)
+        while pending:
+            pending = [p for p in pending
+                       if _proc_state(p) not in (None, "T", "t")]
+            if not pending:
+                return
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"hold verification failed: pids {pending} did not "
+                    "reach stopped state")
+            time.sleep(0.2)
+
     def hold(self, worker_ids: list[int]) -> None:
         for w in worker_ids:
             if w in self._held:
@@ -179,18 +289,30 @@ class WorkerHolds:
                     os.kill(pid, signal.SIGSTOP)
                 except ProcessLookupError:
                     pass
+            try:
+                self._verify_stopped(pids)
+            except RuntimeError:
+                for pid in reversed(pids):      # fail closed: undo the hold
+                    try:
+                        os.kill(pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
+                raise
             self._held[w] = pids
+            self._persist()
 
     def release(self, worker_ids: list[int]) -> None:
         for w in worker_ids:
             pids = self._held.pop(w, None)
             if pids is None:
                 continue
-            for pid in pids:
+            # children BEFORE the supervisor/root (pids = [root, *children])
+            for pid in reversed(pids):
                 try:
                     os.kill(pid, signal.SIGCONT)
                 except ProcessLookupError:
                     pass
+            self._persist()
 
     def release_all(self) -> None:
         self.release(sorted(self._held.keys()))
@@ -202,9 +324,10 @@ class WorkerHolds:
 
 def build_controller(workspace: Path, *, task: str, rho_threshold: float,
                      permuted_route: bool, num_seeds: int,
-                     eval_num_envs: int, eval_device: str,
+                     eval_num_envs: int, eval_devices: list[str],
                      python_exe: str,
                      packet_frames: int = PROBE_PACKET_FRAMES,
+                     commit_max_wait_s: float = DEFAULT_COMMIT_MAX_WAIT_S,
                      ) -> tuple[MSAController, WorkerHolds]:
     manifest_id, seeds = build_seed_manifest(num_seeds)
     snap_dir = workspace / "msa_snapshots"
@@ -213,42 +336,60 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
     control_dir = workspace / "curriculum_control"
     run_dir = workspace.parent
     holds = WorkerHolds(run_dir)
+    if not eval_devices:
+        raise ValueError("--eval-devices is required (e.g. cuda:6,cuda:7)")
 
     snapshots: dict[str, SnapshotSpec] = {}
 
-    def snapshot(worker_id: int, tag: str) -> str:
-        """Freeze the newest COMMITTED checkpoint; idempotent per tag."""
+    def snapshot(worker_id: int, tag: str) -> tuple[str, int]:
+        """Freeze the newest COMMITTED checkpoint; idempotent per tag.
+        Returns (snapshot_id, frame RECORDED at freeze time) — a reused
+        snapshot keeps its original frame from <snap>.meta.json, never a
+        re-read of the live ledger."""
         snap_id = f"w{worker_id}_{tag}"
         existing = snap_dir / f"{snap_id}.pth"
-        meta = latest_committed_meta(workspace / f"{worker_id:03d}")
-        if meta is None:
-            raise FileNotFoundError(
-                f"no committed checkpoint for worker {worker_id}")
-        if existing.is_file():
+        side_meta = snap_dir / f"{snap_id}.meta.json"
+        if existing.is_file() and side_meta.is_file():
+            frozen = json.loads(side_meta.read_text())
             spec = SnapshotSpec(snapshot_id=snap_id, worker_id=worker_id,
-                                frame=int(meta.get("frame", 0)),
+                                frame=int(frozen["frame"]),
                                 path=str(existing))
         else:
+            meta = latest_committed_meta(workspace / f"{worker_id:03d}")
+            if meta is None:
+                raise FileNotFoundError(
+                    f"no committed checkpoint for worker {worker_id}")
             spec = SnapshotSpec.freeze(
                 Path(meta["_committed_ckpt"]), snap_id, worker_id,
                 int(meta.get("frame", 0)), snap_dir)
+            side_meta.write_text(json.dumps({
+                "frame": spec.frame,
+                "committed_prefix": meta.get("_committed_prefix", ""),
+                "source": meta.get("_committed_ckpt", "")}))
         snapshots[snap_id] = spec
-        return snap_id
+        return snap_id, spec.frame
 
     def evaluate(worker_id: int, snapshot_id: str, tau: float) -> SeedEvalResult:
         spec = snapshots[snapshot_id]
         req = EvalRequest(snapshot=spec, tau=tau, manifest_id=manifest_id,
                           seeds=seeds, task=task,
                           run_id=f"msa_{run_dir.name}",
-                          raw_dir=str(raw_dir), eval_device=eval_device,
+                          raw_dir=str(raw_dir),
+                          eval_device=eval_devices[0],
                           num_envs=eval_num_envs,
                           num_episodes=eval_num_envs)
-        env = req.build_env()
-        for cmd in req.build_commands(python_exe):
-            # ccrs_eval exits 0 immediately when the unit is already done,
-            # so a resumed cycle never re-runs completed evals.
-            subprocess.run(cmd, check=True, env=env)
+        # ccrs_eval exits 0 immediately when the unit is already done, so a
+        # resumed cycle never re-runs completed evals. Bounded concurrency:
+        # at most one Isaac process per eval device, fail closed.
+        run_seed_jobs(req.build_commands(python_exe), eval_devices)
         return load_seed_results(raw_dir, spec, tau, manifest_id, seeds)
+
+    def refresh_view(worker_id: int) -> WorkerView:
+        meta = latest_committed_meta(workspace / f"{worker_id:03d}")
+        if meta is None:
+            raise FileNotFoundError(
+                f"refresh_view: no committed tick for worker {worker_id}")
+        return _view_from_meta(worker_id, meta)
 
     def _control_path(worker_id: int) -> Path:
         return control_dir / f"{worker_id:03d}.json"
@@ -265,18 +406,19 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         update_curriculum_control(_control_path(worker_id), _mutate)
 
     def commit_tolerance(worker_id: int, tol: float,
-                         max_wait_s: float = 3600.0) -> None:
+                         max_wait_s: float = commit_max_wait_s) -> None:
         """Durably make tol the worker's live tolerance, then clear the pin.
 
-        pin -> wait for a committed tick reporting the tolerance -> sync
-        curriculum_resume_snapshot (so a supervisor crash-restart resumes
-        the SAME tolerance) -> clear the pin. The env keeps the value after
-        the pin clears because the mastery curriculum only ever shrinks
-        from the current live tolerance.
+        pin -> ONE bounded wait for a committed tick reporting the
+        tolerance -> sync curriculum_resume_snapshot (so a supervisor
+        crash-restart resumes the SAME tolerance) -> clear the pin. The env
+        keeps the value after the pin clears because the mastery curriculum
+        only ever shrinks from the current live tolerance.
 
         MUST be called with the worker RUNNING (the controller releases
-        holds before committing); a bounded wait guards against a dead
-        trainer during crash cleanup.
+        holds before committing). On timeout raises CommitTimeout — the
+        pin stays in place (the next tick would still apply it) and the
+        MAIN LOOP stops the arm; cleanup never re-waits.
         """
         from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
             update_curriculum_control,
@@ -293,10 +435,10 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
             if abs(live - float(tol)) <= COMMIT_TOLERANCE_ATOL:
                 break
             if time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"worker {worker_id}: live tolerance did not reach "
-                    f"{tol} within {max_wait_s}s (pin left in place so the "
-                    "next tick still applies it)")
+                raise CommitTimeout(
+                    worker_id, tol,
+                    last_frame=int((meta or {}).get("frame", -1)),
+                    last_tau=live, max_wait_s=float(max_wait_s))
             time.sleep(POLL_S)
         snapshot_cur = dict(cur)
         snapshot_cur["success_tolerance"] = float(tol)
@@ -367,9 +509,89 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         train_until=train_until,
         save_state=save_state,
         load_state=load_state,
+        refresh_view=refresh_view,
         packet_frames=packet_frames,
         permuted_route=permuted_route)
     return ctl, holds
+
+
+# ---------------------------------------------------------------------------
+# hold smoke (single worker, no tolerance writes, no cycle, no eval)
+# ---------------------------------------------------------------------------
+
+def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
+               hold_seconds: float, readiness_marker: Path,
+               resume_timeout_s: float = 5400.0,
+               readiness_timeout_s: float = 24 * 3600.0,
+               poll_s: float = POLL_S) -> int:
+    """Standalone SIGSTOP/SIGCONT validation of ONE worker.
+
+    wait readiness -> record committed frame -> hold -> wait hold_seconds
+    -> confirm the committed frame did NOT advance -> release -> confirm
+    the NEXT committed tick appears within resume_timeout_s. Writes
+    HOLD_SMOKE_RESULT.json; release is guaranteed (finally)."""
+    result: dict = {"worker_id": int(worker_id),
+                    "hold_seconds": float(hold_seconds),
+                    "ok": False, "timestamp": time.time()}
+    out_path = run_dir / "HOLD_SMOKE_RESULT.json"
+    holds = WorkerHolds(run_dir)
+    policy_ws = workspace / f"{worker_id:03d}"
+    try:
+        deadline = time.monotonic() + readiness_timeout_s
+        while not readiness_marker.is_file():
+            if time.monotonic() > deadline:
+                result["error"] = (f"readiness marker never appeared: "
+                                   f"{readiness_marker}")
+                return 2
+            time.sleep(poll_s)
+        meta = latest_committed_meta(policy_ws)
+        if meta is None:
+            result["error"] = f"no committed tick for worker {worker_id}"
+            return 2
+        frame_before = int(meta.get("frame", -1))
+        result["frame_before_hold"] = frame_before
+        holds.hold([worker_id])
+        result["held"] = True
+        time.sleep(float(hold_seconds))
+        meta2 = latest_committed_meta(policy_ws) or {}
+        frame_during = int(meta2.get("frame", -1))
+        result["frame_after_hold_window"] = frame_during
+        if frame_during != frame_before:
+            result["error"] = (f"frame advanced during hold: "
+                               f"{frame_before} -> {frame_during}")
+            return 2
+        holds.release([worker_id])
+        result["released"] = True
+        resume_deadline = time.monotonic() + float(resume_timeout_s)
+        while True:
+            meta3 = latest_committed_meta(policy_ws) or {}
+            frame_after = int(meta3.get("frame", -1))
+            if frame_after > frame_before:
+                result["next_committed_frame"] = frame_after
+                break
+            if time.monotonic() > resume_deadline:
+                result["error"] = (f"no new committed tick within "
+                                   f"{resume_timeout_s}s after release")
+                return 2
+            time.sleep(poll_s)
+        result["ok"] = True
+        return 0
+    finally:
+        holds.release_all()          # guaranteed release, success or not
+        result["residual_holds"] = read_holds_file(run_dir)
+        out_path.write_text(json.dumps(result, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# main loop
+# ---------------------------------------------------------------------------
+
+def _stop_markers_present(run_dir: Path) -> Optional[str]:
+    for name in ("GUARD_FAILED", "MSA_SIDECAR_DIED.json",
+                 "COMMIT_TIMEOUT.json", "ARM_COMPLETE.json"):
+        if (run_dir / name).is_file():
+            return name
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -378,27 +600,58 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--arm", required=True,
                     choices=["MSA", "MSA_PERMUTED_ROUTE"])
     ap.add_argument("--task", default="DexPBT-Regrasping-KukaAllegro-Direct-v0")
-    ap.add_argument("--rho-threshold", type=float, required=True)
+    ap.add_argument("--rho-threshold", type=float, default=None)
     ap.add_argument("--permuted-route", action="store_true")
-    ap.add_argument("--num-policies", type=int, default=6)
-    ap.add_argument("--num-seeds", type=int, default=PILOT_NUM_SEEDS,
-                    help=f"pilot default {PILOT_NUM_SEEDS}; formal "
-                         f"{FORMAL_NUM_SEEDS} must be requested explicitly")
+    ap.add_argument("--num-policies", type=int, default=NUM_WORKERS)
+    ap.add_argument("--num-seeds", type=int, default=SMOKE_NUM_SEEDS,
+                    help=f"execution-smoke default {SMOKE_NUM_SEEDS} "
+                         "(machinery validation only, NOT a method "
+                         "conclusion); pilot 16 must be set explicitly; "
+                         f"formal {FORMAL_NUM_SEEDS} is formal-only")
     ap.add_argument("--eval-num-envs", type=int, default=512)
-    ap.add_argument("--eval-device", required=True,
-                    help="GPU for the eval subprocesses (e.g. cuda:7). "
-                         "REQUIRED: never defaults onto the trainers' GPUs")
+    ap.add_argument("--eval-devices", default="",
+                    help="comma list of eval GPUs (e.g. cuda:6,cuda:7). "
+                         "REQUIRED for cycles: at most one Isaac process "
+                         "per device; never defaults onto the trainers' "
+                         "cuda:0")
+    ap.add_argument("--readiness-marker", required=True,
+                    help="FIRST_TICK_VALIDATED.json written by "
+                         "continuation_guard; no cycle starts/resumes "
+                         "before it exists")
+    ap.add_argument("--commit-max-wait-s", type=float,
+                    default=DEFAULT_COMMIT_MAX_WAIT_S,
+                    help="single bounded wait for a durable tolerance "
+                         "commit; on timeout the arm is stopped")
     ap.add_argument("--once", action="store_true",
                     help="run at most one probe cycle then exit")
+    ap.add_argument("--hold-smoke-only", action="store_true",
+                    help="single-worker hold smoke; no tolerance writes, "
+                         "no cycle, no eval")
+    ap.add_argument("--hold-smoke-worker", type=int, default=0)
+    ap.add_argument("--hold-smoke-seconds", type=float, default=60.0)
     args = ap.parse_args(argv)
 
     workspace = Path(args.workspace)
+    run_dir = workspace.parent
+    readiness_marker = Path(args.readiness_marker)
+
+    if args.hold_smoke_only:
+        return hold_smoke(run_dir, workspace, args.hold_smoke_worker,
+                          args.hold_smoke_seconds, readiness_marker)
+
+    if args.rho_threshold is None:
+        ap.error("--rho-threshold is required (unless --hold-smoke-only)")
+    eval_devices = [d for d in str(args.eval_devices).split(",") if d.strip()]
+    if not eval_devices:
+        ap.error("--eval-devices is required (unless --hold-smoke-only)")
+
     permuted = args.permuted_route or args.arm == "MSA_PERMUTED_ROUTE"
     ctl, holds = build_controller(
         workspace, task=args.task, rho_threshold=args.rho_threshold,
         permuted_route=permuted, num_seeds=args.num_seeds,
-        eval_num_envs=args.eval_num_envs, eval_device=args.eval_device,
-        python_exe=sys.executable)
+        eval_num_envs=args.eval_num_envs, eval_devices=eval_devices,
+        python_exe=sys.executable,
+        commit_max_wait_s=args.commit_max_wait_s)
 
     def _write_cycle_summary(result) -> None:
         out = workspace / "msa_cycles"
@@ -417,26 +670,57 @@ def main(argv: list[str] | None = None) -> int:
                 "resumed": result.resumed,
             }, indent=2, default=str))
 
+    def _stop_arm_commit_timeout(err: CommitTimeout) -> None:
+        (run_dir / "COMMIT_TIMEOUT.json").write_text(json.dumps({
+            "worker_id": err.worker_id,
+            "target_tau": err.target_tau,
+            "last_observed_frame": err.last_frame,
+            "last_observed_tau": err.last_tau,
+            "max_wait_s": err.max_wait_s,
+            "time": time.time(),
+        }, indent=2))
+        holds.release_all()
+        from dexpbt_isaaclab.msa.continuation_guard import stop_arm
+        stop_arm(run_dir, f"commit timeout: {err}", marker_name=None)
+
     try:
         while True:
+            marker = _stop_markers_present(run_dir)
+            if marker:
+                print(f"[msa-sidecar] stop marker {marker} present; "
+                      "releasing holds and exiting")
+                return 0 if marker == "ARM_COMPLETE.json" else 2
             views = _worker_views(workspace, args.num_policies)
+            ready, why = readiness_ok(readiness_marker, views,
+                                      args.num_policies)
+            if not ready:
+                print(f"[msa-sidecar] waiting for readiness: {why}")
+                time.sleep(POLL_S)
+                continue
             all_ids = [v.worker_id for v in views]
-            pending = ctl.pending_cycle(all_ids)
-            if pending is not None:
-                print(f"[msa-sidecar] resuming in-flight cycle "
-                      f"{pending.get('intervention_id')}")
-                result = ctl.run_cycle(views, resume_cycle=pending)
-                _write_cycle_summary(result)
-            else:
-                due = ctl.due_workers(views)
-                if due:
-                    result = ctl.run_cycle(views)
+            try:
+                pending = ctl.pending_cycle(all_ids)
+                if pending is not None:
+                    print(f"[msa-sidecar] resuming in-flight cycle "
+                          f"{pending.get('intervention_id')}")
+                    result = ctl.run_cycle(views, resume_cycle=pending)
                     _write_cycle_summary(result)
+                else:
+                    due = ctl.due_workers(views)
+                    if due:
+                        result = ctl.run_cycle(views)
+                        _write_cycle_summary(result)
+            except CycleFailure as err:
+                if isinstance(err.__cause__, CommitTimeout):
+                    _stop_arm_commit_timeout(err.__cause__)
+                    return 4
+                raise
             if args.once:
                 return 0
             time.sleep(POLL_S)
     finally:
-        # never leave a worker stopped if the sidecar dies
+        # never leave a worker stopped if the sidecar dies (the external
+        # hold watchdog covers the cases where this block never runs)
         holds.release_all()
 
 

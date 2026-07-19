@@ -218,9 +218,13 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
 
 echo $! > "$RUN_DIR/nohup.pid"
 
-# Continuation guard: first committed tick must match the manifest tip
-# tolerance (<=1e-6) / lineage / frame baseline, and every worker has a
-# HARD +100M frame cap. Any violation stops the whole arm (fail closed).
+# Continuation guard: (a) six-worker READINESS BARRIER — only after ALL SIX
+# workers pass first-committed-tick validation (tolerance <=1e-6, lineage,
+# frame baseline) it atomically writes FIRST_TICK_VALIDATED.json; any
+# failure stops the whole arm (GUARD_FAILED) with no readiness marker;
+# (b) matched +100M cap — each worker is parked at its FIRST committed
+# frame >= baseline+100M; overshoot beyond one tick of slack fails the arm;
+# all six parked -> ARM_COMPLETE.json (normal completion) and full stop.
 nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
   --config "$RUN_DIR/ARM_CONFIG.json" \
   --run-dir "$RUN_DIR" \

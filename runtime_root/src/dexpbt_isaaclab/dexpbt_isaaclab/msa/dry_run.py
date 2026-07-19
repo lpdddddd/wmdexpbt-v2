@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from dexpbt_isaaclab.msa.controller import (
+    CommitTimeout,
     MSAController,
     PROBE_PACKET_FRAMES,
     ProbeCycleResult,
@@ -90,16 +91,29 @@ class FakeWorld:
     # crash injection: raise InjectedCrash when this phase-tagged action
     # runs; crash_hard=True raises HardKill (BaseException) instead so the
     # controller cleanup is bypassed (kill -9 simulation).
-    crash_on: Optional[str] = None     # "pre"/"mid"/"post"/"eval"/"common_train"/"commit"
+    crash_on: Optional[str] = None     # "pre"/"mid"/"post"/"eval"/"common_train"/"commit"/"commit_timeout"
     crash_hard: bool = False
+    commit_calls: int = 0
 
     def _boom(self, msg: str) -> None:
         if self.crash_hard:
             raise HardKill(msg)
         raise InjectedCrash(msg)
 
+    # -- committed-tick view refresh (post-hold re-read) ------------------------
+    def refresh_view(self, worker_id: int) -> WorkerView:
+        """The CURRENT committed tick of one worker (like re-reading the
+        newest committed meta in production). Live tolerance mid-cycle may
+        legitimately be a pinned tau_plus; the controller only validates it
+        against tau in PRE_EVAL, before any pin."""
+        return WorkerView(
+            worker_id=worker_id, lineage_id=f"lin_{worker_id}",
+            active_tau=self.live_tolerance[worker_id],
+            frame=self.frame[worker_id],
+            source_checkpoint_id=f"ws/{worker_id:03d}/000160.pth")
+
     # -- snapshots ------------------------------------------------------------
-    def snapshot(self, worker_id: int, tag: str) -> str:
+    def snapshot(self, worker_id: int, tag: str) -> tuple[str, int]:
         if worker_id not in self.held:
             raise AssertionError(
                 f"snapshot of worker {worker_id} while NOT held "
@@ -107,8 +121,10 @@ class FakeWorld:
         snap_id = f"w{worker_id}_{tag}"
         if snap_id not in self.snapshots:      # idempotent reuse on resume
             self.snapshots[snap_id] = (worker_id, self.skill_tau[worker_id],
-                                       self.skill_plus[worker_id])
-        return snap_id
+                                       self.skill_plus[worker_id],
+                                       self.frame[worker_id])
+        # the frame RECORDED at freeze time, never a re-read (resume reuse)
+        return snap_id, self.snapshots[snap_id][3]
 
     # -- evaluation -----------------------------------------------------------
     def evaluate(self, worker_id: int, snapshot_id: str,
@@ -119,7 +135,7 @@ class FakeWorld:
         if worker_id not in self.held:
             raise AssertionError(
                 f"evaluation of worker {worker_id} while NOT held")
-        _, s_tau, s_plus = self.snapshots[snapshot_id]
+        _, s_tau, s_plus, _ = self.snapshots[snapshot_id]
         w_tau = float(canonical_tau(self.taus[worker_id]))
         w_plus = float(canonical_tau(tau_plus_of(self.taus[worker_id])))
         if abs(tau - w_plus) < 1e-15:
@@ -144,6 +160,14 @@ class FakeWorld:
         self.live_tolerance[worker_id] = float(tol)
 
     def commit_tolerance(self, worker_id: int, tol: float) -> None:
+        self.commit_calls += 1
+        if self.crash_on == "commit_timeout":
+            # bounded commit wait expired (only ONE bounded wait allowed:
+            # cleanup must not call commit again after this)
+            raise CommitTimeout(worker_id, tol,
+                                last_frame=self.frame[worker_id],
+                                last_tau=self.live_tolerance[worker_id],
+                                max_wait_s=1800.0)
         if self.crash_on == "commit":
             self.crash_on = None    # crash once; cleanup commits then succeed
             self._boom("injected commit crash")
@@ -259,6 +283,7 @@ def make_world(*, permuted: bool = False,
         train_until=world.train_until,
         save_state=world.save_state,
         load_state=world.load_state,
+        refresh_view=world.refresh_view,
         packet_frames=PROBE_PACKET_FRAMES)
     return world, ctl, views
 

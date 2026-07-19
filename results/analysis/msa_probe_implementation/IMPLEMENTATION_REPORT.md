@@ -209,31 +209,93 @@ bootstrap verification and a +100M worker-local hard frame cap:
    dedicated eval GPU.
 4. `MSA_PERMUTED_ROUTE` — routing negative control (same total dose).
 
-## 5. Known limitations / open points before launch
+## 5. Pre-pilot safety patch ("Harden MSA readiness holds and pilot budget")
+
+A final patch pass before any pilot execution, fixing run-control gaps
+that could only bite in production:
+
+1. **Six-worker readiness barrier.** `continuation_guard` now writes
+   `FIRST_TICK_VALIDATED.json` ATOMICALLY only after ALL SIX workers
+   produced a validated first continuation tick (frame/tolerance/lineage/
+   checkpoint identity + timestamp recorded per worker). Any failure →
+   `GUARD_FAILED`, whole arm stopped, marker never written. The sidecar
+   has a REQUIRED `--readiness-marker` and refuses to start OR resume any
+   cycle until the marker exists and committed worker views are exactly
+   {0..5} — a launcher that brought up a subset can never trigger a
+   partial-panel cycle.
+2. **Post-hold packet starts.** PRE_EVAL now holds FIRST, then re-reads
+   every worker's newest committed meta (`refresh_view`); the packet
+   start frames and the pre snapshots come from that post-hold read, and
+   worker/tau/lineage are re-validated against the cycle. A tick that
+   committed between due detection and the hold ran at tau and is
+   EXCLUDED from tau_plus exposure (unit-tested). Snapshots now return
+   their recorded frozen frame (`<snap>.meta.json`) and the controller
+   enforces snapshot frame == phase boundary frame for pre/mid/post.
+   Resume keeps persisted start_frames and validates current >= persisted.
+3. **Hold safety + external watchdog.** `WorkerHolds` verifies every PID
+   reached the stopped state (undo + fail closed otherwise), releases
+   children BEFORE the supervisor/root, and persists `MSA_HOLDS.json`.
+   A separate `hold_watchdog` process (independent of the sidecar's
+   `finally`) SIGCONTs all recorded PIDs if the sidecar dies with active
+   holds, writes `MSA_SIDECAR_DIED.json` and stops the whole arm. Every
+   guard stop path SIGCONTs held PIDs first and terminates FULL process
+   trees, never just the supervisor.
+4. **Hold smoke mode.** `--hold-smoke-only --hold-smoke-worker N
+   --hold-smoke-seconds S`: readiness-gated single-worker hold check
+   (frame frozen during hold, next committed tick after release), no
+   tolerance writes / cycle / eval, `HOLD_SMOKE_RESULT.json`, release
+   guaranteed. Prepared launcher: `run_hold_smoke.sh` (not executed).
+5. **Matched +100M cap.** `target[w] = baseline[w] + 100M`; each worker
+   is individually parked at its FIRST committed frame >= target;
+   overshoot beyond one tick of slack fails the arm (a worker can never
+   silently run to ~140M). All six parked → `ARM_COMPLETE.json` (NORMAL
+   completion — the old failure-semantics CAP_REACHED marker is gone)
+   and guard/sidecar/watchdog/worker trees are fully stopped. Whatever
+   the resume runner's `max_iterations` semantics (rl_games `max_epochs`
+   on a warm start), this worker-local cap is the final authority.
+6. **Bounded durable commits.** `--commit-max-wait-s` (default 3600); on
+   timeout `CommitTimeout` carries worker/target-tau/last-frame/last-tau,
+   the sidecar writes `COMMIT_TIMEOUT.json`, releases all holds and stops
+   the arm. Crash cleanup restores the original-tau PIN synchronously and
+   NEVER starts a second full bounded wait; promotion is never claimed.
+7. **True eval cost + smoke budget.** One cycle = **27 eval cells**
+   (PRE 12, MID 6, POST 9 incl. 3 q_post), not 5. Launcher default is now
+   `MSA_NUM_SEEDS=4` — an EXECUTION SMOKE for machinery validation only,
+   never a method conclusion; N=16 pilot is explicit opt-in; N=256 stays
+   formal-only. Evals run over `--eval-devices cuda:6,cuda:7` with a
+   bounded scheduler (at most ONE Isaac process per device, deterministic
+   round-robin, fail-closed cancellation). `EVAL_COST_ESTIMATE.json`:
+   N=4/2 GPUs ≈ 5.4 h; N=16/2 GPUs ≈ 21.6 h; N=256/2 GPUs ≈ 345.6 h
+   (unacceptable without further optimization).
+
+## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
   with SIGSTOP is expected to be safe for single-GPU rl_games workers (no
-  NCCL peers), but the launch checklist requires a supervised first hold
-  on one worker before an unattended pilot.
+  NCCL peers). Run the prepared `run_hold_smoke.sh` (single worker, 60 s)
+  and inspect `HOLD_SMOKE_RESULT.json` BEFORE any probe cycle.
 - The durable tolerance commit waits for a live committed tick (~20M
   frames) per transition; a full cycle therefore spans several ticks of
-  wall time. Bounded waits (1h default) prevent a dead trainer from
-  hanging the sidecar during cleanup.
-- Pilot eval cost: N=16 seeds × 512 envs × ~6 min/unit on the dedicated
-  eval GPU ⇒ ~1.6 h per eval point; a full cycle has 5 eval points
-  (p_pre, q_pre, q_mid, p_post, q_post-recipients) ⇒ roughly 8–9 h of
-  eval on cuda:6 while training holds/continues per the phase plan.
+  wall time. The bounded wait (`--commit-max-wait-s`, default 1 h) stops
+  the arm instead of hanging on a dead trainer.
+- Training GPUs idle during eval barriers: with N=4 that is ~5.4 h of
+  paused training per cycle across the eval waves; acceptable for the
+  execution smoke, a real cost consideration for N=16.
 - `snapshot_pre/mid/post` freeze the newest COMMITTED checkpoint
-  (LATEST.commit); PBT save cadence defines the snapshot lag (≤ one tick).
+  (LATEST.commit); PBT save cadence defines the snapshot lag (≤ one tick,
+  now provably aligned with the packet boundary via the post-hold read).
 - The known pre-existing environment segfault when several heavy profile
   test suites are collected in one pytest process (and the pre-existing
   `test_l2_usable_when_stable_fails` failure) reproduce identically at the
   parent commit; they are unrelated to this change (see `TEST_REPORT.md`).
 
-## 6. Artifacts
+## 7. Artifacts
 
-- code: `dexpbt_isaaclab/msa/` (8 modules), `tests/test_msa_probe.py`
-- launchers: `results/launchers/msa_probe/` (4 scripts + 4 configs)
+- code: `dexpbt_isaaclab/msa/` (9 modules incl. `hold_watchdog.py`),
+  `tests/test_msa_probe.py` (95 tests)
+- launchers: `results/launchers/msa_probe/` (4 arm scripts + 4 configs +
+  `run_hold_smoke.sh` + `EVAL_COST_ESTIMATE.json`)
 - audit: `blocker_audit_3b_5b.json` (this directory)
 - docs: `STATE_MACHINE.md`, `CONFIG_DIFF.md`, `DRY_RUN_TRACE.md`,
-  `TEST_REPORT.md`, `LAUNCH_CHECKLIST.md` (this directory)
+  `TEST_REPORT.md`, `LAUNCH_CHECKLIST.md`, `EVAL_COST_ESTIMATE.json`
+  (this directory)

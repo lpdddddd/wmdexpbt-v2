@@ -70,13 +70,61 @@
     "top_k_recipients": 3,
     "permuted_route": true,
     "permuted_route_seed": 777001,
+    "eval_num_seeds_smoke": 4,
     "eval_num_seeds_pilot": 16,
     "eval_num_seeds_formal": 256,
-    "eval_num_seeds_note": "pilot N=16 is the launcher default; formal N=256 must be requested explicitly (never run by default)",
+    "eval_num_seeds_note": "N=4 execution smoke is the launcher default (machinery validation only, never a method conclusion); pilot N=16 must be set explicitly (MSA_NUM_SEEDS); formal N=256 is formal-only and not affordable on 2 eval GPUs without further optimization",
     "eval_seed_manifest_id_pilot": "msa_seeds_310000_16_75e53d173fbafadc",
     "eval_seed_first": 310001,
     "eval_seed_last": 310016,
-    "eval_device_note": "sidecar --eval-device is REQUIRED; the launcher pins cuda:${MSA_EVAL_GPU} (a GPU outside DEXPBT_GPUS), never the trainers' cuda:0",
+    "eval_cells_per_cycle": {
+      "pre": 12,
+      "mid": 6,
+      "post": 9,
+      "total": 27
+    },
+    "eval_cost_estimates": [
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 4,
+        "devices": 2,
+        "estimated_process_launches": 108,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 5.4
+      },
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 16,
+        "devices": 2,
+        "estimated_process_launches": 432,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 21.6
+      },
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 256,
+        "devices": 2,
+        "estimated_process_launches": 6912,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 345.6
+      }
+    ],
+    "eval_device_note": "sidecar --eval-devices is REQUIRED; the launcher pins ${MSA_EVAL_DEVICES:-cuda:6,cuda:7} (GPUs outside DEXPBT_GPUS), never the trainers' cuda:0; at most one Isaac eval process per device",
     "bootstrap": {
       "seed": 20260719,
       "repeats": 10000,

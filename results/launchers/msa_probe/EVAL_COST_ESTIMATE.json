@@ -1,0 +1,49 @@
+{
+  "note": "one full MSA probe cycle; one Isaac process per (cell, seed); at most one process per eval device",
+  "estimates": [
+    {
+      "eval_cells": {
+        "pre": 12,
+        "mid": 6,
+        "post": 9,
+        "total": 27
+      },
+      "seeds": 4,
+      "devices": 2,
+      "estimated_process_launches": 108,
+      "minutes_per_seed": 6.0,
+      "estimated_wall_time_hours": 5.4
+    },
+    {
+      "eval_cells": {
+        "pre": 12,
+        "mid": 6,
+        "post": 9,
+        "total": 27
+      },
+      "seeds": 16,
+      "devices": 2,
+      "estimated_process_launches": 432,
+      "minutes_per_seed": 6.0,
+      "estimated_wall_time_hours": 21.6
+    },
+    {
+      "eval_cells": {
+        "pre": 12,
+        "mid": 6,
+        "post": 9,
+        "total": 27
+      },
+      "seeds": 256,
+      "devices": 2,
+      "estimated_process_launches": 6912,
+      "minutes_per_seed": 6.0,
+      "estimated_wall_time_hours": 345.6
+    }
+  ],
+  "verdicts": {
+    "N=4  x 2 GPUs": "~5.4 h  \u2014 execution smoke (machinery only)",
+    "N=16 x 2 GPUs": "~21.6 h \u2014 pilot (explicit opt-in)",
+    "N=256 x 2 GPUs": "~345.6 h \u2014 NOT acceptable without per-process batching / seed vectorization"
+  }
+}
