@@ -28,6 +28,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from typing import Optional
 
 from dexpbt_isaaclab.ccrs.analysis import (
     CCRSTable,
@@ -61,6 +62,46 @@ def decision_label(nsucc_mean_at_1cm: float) -> str:
     if nsucc_mean_at_1cm >= NEAR_TARGET_NSUCC:
         return "NEAR_TARGET"
     return "PRECISION_LIMIT"
+
+
+# Relative drop (vs the previous, looser tolerance) that marks the onset of
+# clear capability decline on the curve.
+DROP_ONSET_REL = 0.20
+
+
+def drop_onset_tolerance(points: list[dict]) -> Optional[float]:
+    """First tolerance (walking loose -> tight) whose nsucc_mean falls by
+    >= DROP_ONSET_REL relative to the previous point. None if no clear drop."""
+    prev = None
+    for p in sorted(points, key=lambda x: -x["tolerance_m"]):
+        v = p["nsucc_mean"]
+        if isinstance(v, float) and math.isnan(v):
+            continue
+        if prev is not None and prev > 0 and (prev - v) / prev >= DROP_ONSET_REL:
+            return p["tolerance_m"]
+        prev = v
+    return None
+
+
+def recommendation(label: str, points: list[dict]) -> dict:
+    """Single next-step recommendation from the pre-registered label."""
+    if label == "TARGET_REACHED":
+        return {"action": "STOP",
+                "rationale": "p1 tip already has the target 1 cm capability "
+                             "(nsucc_mean >= 40); no further training."}
+    if label == "NEAR_TARGET":
+        return {"action": "PRECISION_CONTINUATION",
+                "rationale": "1 cm capability is close (30 <= nsucc < 40); "
+                             "continue fine-tolerance curriculum from p1 tip."}
+    if label == "PRECISION_LIMIT":
+        onset = drop_onset_tolerance(points)
+        where = (f"capability drops clearly from {onset * 100:.1f} cm on"
+                 if onset is not None else "no single clear drop onset")
+        return {"action": "SENTINEL_GRID_RETENTION",
+                "drop_onset_tolerance_m": onset,
+                "rationale": "1 cm capability is far from target "
+                             f"(nsucc < 30); {where}."}
+    return {"action": "NO_DATA", "rationale": "no 1 cm cells available"}
 
 
 def _cell_ci(table: CCRSTable, key: CellKey, metric: str,
@@ -149,6 +190,7 @@ def analyze(extension_jsonl: Path, base_jsonl: Path, out_dir: Path,
             "near_target_threshold": NEAR_TARGET_NSUCC,
             "label": label,
         },
+        "recommendation": recommendation(label, points),
         "points": points,
         "n_boot": n_boot,
     }
@@ -174,8 +216,8 @@ def _write_report(result: dict, path: Path) -> None:
         "# p1 tip fixed-precision extension — final analysis",
         "",
         f"Checkpoint: p{P1_TIP_WORKER_ID} it{P1_TIP_ITERATION} (5B frames). "
-        "0.018 cm cells reused read-only from ccrs_base_retention; "
-        "0.016–0.010 m cells from the extension sweep. Same protocol "
+        "1.8 cm cells reused read-only from ccrs_base_retention; "
+        "1.6–1.0 cm cells from the extension sweep. Same protocol "
         "(policy_only, deterministic, 512 envs, 512 first episodes, "
         "paired resets, M=50).",
         "",
@@ -197,6 +239,7 @@ def _write_report(result: dict, path: Path) -> None:
             f"| {_fmt(q50)} | {_fmt(p['dropped_rate'])} "
             f"| {p['n_samples']} | {p['source']} |"
         )
+    rec = result.get("recommendation", {})
     lines += [
         "",
         "## Decision (pre-registered)",
@@ -208,10 +251,16 @@ def _write_report(result: dict, path: Path) -> None:
         f"NEAR_TARGET >= {d['near_target_threshold']:.0f}; "
         "PRECISION_LIMIT below)",
         "",
+        "## Recommendation (single)",
+        "",
+        f"- action: **{rec.get('action', 'n/a')}**",
+        f"- rationale: {rec.get('rationale', 'n/a')}",
+        "",
         "Figure: `figures/p1_precision_capability_curve.png`.",
         "",
         "Single checkpoint, single population run; the 4 evaluation seeds "
-        "quantify evaluation uncertainty only.",
+        "quantify evaluation uncertainty only. This report does not modify "
+        "the main CCRS conclusions.",
         "",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)

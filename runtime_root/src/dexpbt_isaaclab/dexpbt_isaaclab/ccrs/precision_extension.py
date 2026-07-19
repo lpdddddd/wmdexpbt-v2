@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import subprocess
 import sys
 import time
@@ -223,7 +224,9 @@ def preflight(
 
 def write_manifest(units: list[EvalUnit], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    # PID-unique tmp name: concurrent writers must not clobber each other's
+    # tmp file (atomic-replace still yields a consistent final file).
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
     with tmp.open("w", newline="") as f:
         w = csv.writer(f)
         w.writerow(MANIFEST_COLUMNS)
@@ -281,7 +284,7 @@ def write_checklist(res: PreflightResult, units: list[EvalUnit],
         "",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(f".tmp.{os.getpid()}")
     tmp.write_text("\n".join(lines))
     tmp.replace(path)
 

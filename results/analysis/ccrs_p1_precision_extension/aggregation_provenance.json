@@ -1,0 +1,14 @@
+{
+  "n_rows": 16,
+  "unique_git_sha": [
+    "c0270d12278d501352341a5efbd0f9d84ec572bd"
+  ],
+  "unique_evaluator_source_sha256": [
+    "1615c757c9b2085c"
+  ],
+  "unique_analysis_protocol_version": [
+    "v2.1_frontier"
+  ],
+  "any_git_dirty": true,
+  "mixed_provenance": false
+}

@@ -251,6 +251,31 @@ class TestDecisionLabel(unittest.TestCase):
         self.assertEqual(decision_label(0.0), "PRECISION_LIMIT")
         self.assertEqual(decision_label(float("nan")), "NO_DATA")
 
+    def test_single_recommendation_per_label(self):
+        from dexpbt_isaaclab.ccrs.precision_analysis import (
+            drop_onset_tolerance, recommendation)
+        pts = [
+            {"tolerance_m": 0.018, "nsucc_mean": 40.8},
+            {"tolerance_m": 0.016, "nsucc_mean": 37.0},
+            {"tolerance_m": 0.014, "nsucc_mean": 28.8},  # -22% -> onset
+            {"tolerance_m": 0.012, "nsucc_mean": 14.8},
+            {"tolerance_m": 0.010, "nsucc_mean": 4.7},
+        ]
+        self.assertEqual(recommendation("TARGET_REACHED", pts)["action"],
+                         "STOP")
+        self.assertEqual(recommendation("NEAR_TARGET", pts)["action"],
+                         "PRECISION_CONTINUATION")
+        rec = recommendation("PRECISION_LIMIT", pts)
+        self.assertEqual(rec["action"], "SENTINEL_GRID_RETENTION")
+        self.assertAlmostEqual(rec["drop_onset_tolerance_m"], 0.014)
+        self.assertAlmostEqual(drop_onset_tolerance(pts), 0.014)
+        # flat curve -> no onset, still a single recommendation
+        flat = [{"tolerance_m": t, "nsucc_mean": 20.0}
+                for t in (0.018, 0.014, 0.010)]
+        rec2 = recommendation("PRECISION_LIMIT", flat)
+        self.assertEqual(rec2["action"], "SENTINEL_GRID_RETENTION")
+        self.assertIsNone(rec2["drop_onset_tolerance_m"])
+
 
 def _result_row(worker, it, tol, seed, nsuccs, m=50):
     samples = [

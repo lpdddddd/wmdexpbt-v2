@@ -1,0 +1,153 @@
+{
+  "checkpoint": {
+    "worker_id": 1,
+    "iteration": 160
+  },
+  "analysis_tolerances_m": [
+    0.018,
+    0.016,
+    0.014,
+    0.012,
+    0.01
+  ],
+  "decision": {
+    "tolerance_m": 0.01,
+    "nsucc_mean_at_1cm": 4.66455078125,
+    "target_reached_threshold": 40.0,
+    "near_target_threshold": 30.0,
+    "label": "PRECISION_LIMIT"
+  },
+  "recommendation": {
+    "action": "SENTINEL_GRID_RETENTION",
+    "drop_onset_tolerance_m": 0.014,
+    "rationale": "1 cm capability is far from target (nsucc < 30); capability drops clearly from 1.4 cm on."
+  },
+  "points": [
+    {
+      "tolerance_m": 0.018,
+      "tolerance_cm": 1.8,
+      "source": "ccrs_base_retention (reused, not re-run)",
+      "nsucc_mean": 40.77294921875,
+      "nsucc_mean_ci95": [
+        39.9599609375,
+        41.55810546875
+      ],
+      "normalized_nsucc": 0.8154589843749999,
+      "normalized_nsucc_ci95": [
+        0.7991992187499988,
+        0.8311621093749989
+      ],
+      "n_samples": 2048,
+      "terminal_error_n_valid": 2048,
+      "terminal_error_quantiles": {
+        "q10": 0.0047293879557400945,
+        "q25": 0.0069516574731096625,
+        "q50": 0.010563483461737633,
+        "q75": 0.023926807567477226,
+        "q90": 0.9678465723991394
+      },
+      "dropped_rate": 0.1767578125
+    },
+    {
+      "tolerance_m": 0.016,
+      "tolerance_cm": 1.6,
+      "source": "extension",
+      "nsucc_mean": 36.95458984375,
+      "nsucc_mean_ci95": [
+        35.8447265625,
+        38.0625
+      ],
+      "normalized_nsucc": 0.7390917968749997,
+      "normalized_nsucc_ci95": [
+        0.7168945312499985,
+        0.76125
+      ],
+      "n_samples": 2048,
+      "terminal_error_n_valid": 2048,
+      "terminal_error_quantiles": {
+        "q10": 0.004952157149091363,
+        "q25": 0.007412197883240879,
+        "q50": 0.012844169046729803,
+        "q75": 0.024039081297814846,
+        "q90": 0.9290174484252929
+      },
+      "dropped_rate": 0.16162109375
+    },
+    {
+      "tolerance_m": 0.014,
+      "tolerance_cm": 1.4,
+      "source": "extension",
+      "nsucc_mean": 28.84765625,
+      "nsucc_mean_ci95": [
+        27.802734375,
+        29.84619140625
+      ],
+      "normalized_nsucc": 0.5769531249999988,
+      "normalized_nsucc_ci95": [
+        0.5560546874999975,
+        0.5969238281249994
+      ],
+      "n_samples": 2048,
+      "terminal_error_n_valid": 2048,
+      "terminal_error_quantiles": {
+        "q10": 0.006086605042219162,
+        "q25": 0.010342852212488651,
+        "q50": 0.017023957334458828,
+        "q75": 0.023421610239893198,
+        "q90": 0.751099544763565
+      },
+      "dropped_rate": 0.12353515625
+    },
+    {
+      "tolerance_m": 0.012,
+      "tolerance_cm": 1.2,
+      "source": "extension",
+      "nsucc_mean": 14.82373046875,
+      "nsucc_mean_ci95": [
+        13.99951171875,
+        15.62939453125
+      ],
+      "normalized_nsucc": 0.2964746093749995,
+      "normalized_nsucc_ci95": [
+        0.27999023437499915,
+        0.3125878906249992
+      ],
+      "n_samples": 2048,
+      "terminal_error_n_valid": 2048,
+      "terminal_error_quantiles": {
+        "q10": 0.012406280729919672,
+        "q25": 0.014098489191383123,
+        "q50": 0.017457651905715466,
+        "q75": 0.02220494905486703,
+        "q90": 0.038569935783743854
+      },
+      "dropped_rate": 0.07470703125
+    },
+    {
+      "tolerance_m": 0.01,
+      "tolerance_cm": 1.0,
+      "source": "extension",
+      "nsucc_mean": 4.66455078125,
+      "nsucc_mean_ci95": [
+        4.34716796875,
+        4.9814453125
+      ],
+      "normalized_nsucc": 0.09329101562500029,
+      "normalized_nsucc_ci95": [
+        0.08694335937500032,
+        0.09962890625000051
+      ],
+      "n_samples": 2048,
+      "terminal_error_n_valid": 2048,
+      "terminal_error_quantiles": {
+        "q10": 0.011079892888665198,
+        "q25": 0.012688348768278956,
+        "q50": 0.01557703223079443,
+        "q75": 0.019302010536193848,
+        "q90": 0.024094917066395282
+      },
+      "dropped_rate": 0.03271484375
+    }
+  ],
+  "n_boot": 2000
+}
