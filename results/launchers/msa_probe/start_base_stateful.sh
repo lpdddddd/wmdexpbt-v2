@@ -280,4 +280,20 @@ nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \
   --cap-frames 480000000 \
   >>"$RUN_DIR/continuation_guard.log" 2>&1 &
 echo $! > "$RUN_DIR/continuation_guard.pid"
+
+# External hold watchdog (ALL stateful arms), independent of the guard's
+# and the sidecar's finally blocks. It covers the WHOLE hold lifecycle:
+# - readiness phase: if the guard dies while workers are SIGSTOP-frozen in
+#   READINESS_HOLDS.json (before the marker, or — for MSA arms — after the
+#   marker but before the sidecar adopts), it SIGCONTs the frozen workers,
+#   writes GUARD_DIED_DURING_READINESS.json and stops the whole arm;
+# - cycle phase (MSA): if the sidecar dies with MSA_HOLDS.json non-empty OR
+#   MSA_BUSY.json present (even mid-COMMITTING with no holds), it releases
+#   the held workers, writes MSA_SIDECAR_DIED.json and stops the arm.
+# It never idle-exits while readiness holds exist and fails closed on an
+# unreadable holds file (no uncontrolled continuation training).
+nohup python -u -m dexpbt_isaaclab.msa.hold_watchdog \
+  --run-dir "$RUN_DIR" \
+  >>"$RUN_DIR/hold_watchdog.log" 2>&1 &
+echo $! > "$RUN_DIR/hold_watchdog.pid"
 echo "launched BASE_STATEFUL: run_dir=$RUN_DIR"

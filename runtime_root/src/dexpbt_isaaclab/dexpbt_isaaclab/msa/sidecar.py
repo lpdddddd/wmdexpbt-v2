@@ -21,9 +21,13 @@ stops the arm.
 Hold smoke gate: the sidecar REQUIRES --hold-smoke-certificate — the
 HOLD_SMOKE_CERTIFICATE.json produced by the DISPOSABLE
 start_stateful_hold_smoke.sh run (same code / Isaac task / 8192 envs /
-the shared eval GPU). The certificate must match the current git commit,
-task, wm profile and GPU environment, else the sidecar stops the arm
-fail-closed at startup. The in-arm run_hold_smoke.sh (--hold-smoke-only)
+the shared eval GPU). That disposable run also proves SHARED-GPU EVAL
+COEXISTENCE: while the throwaway trainer is SIGSTOPped (still holding its
+VRAM) it launches one real policy-only eval cell on the SAME GPU and
+requires it to start and exit cleanly (no CUDA OOM / Isaac startup
+failure). The certificate must have eval_coexistence_ok=true and match
+the current git commit, task, wm profile and GPU environment, else the
+sidecar stops the arm fail-closed at startup. The in-arm run_hold_smoke.sh (--hold-smoke-only)
 remains for EXECUTION SMOKE only: it releases the target worker and waits
 for an extra committed tick, which breaks the matched intervention
 boundary, so it must NEVER be used inside the formal four-arm comparison.
@@ -249,12 +253,18 @@ def certificate_ok(cert: dict, *, git_commit: str, task: str, profile: str,
     (an in-arm smoke releases the worker for an extra committed tick and
     breaks the matched intervention boundary).
 
-    Must match: ok flag, git commit, task, wm profile, GPU model of EVERY
-    eval device and driver version. UUID / CUDA version are recorded for
-    the audit trail but only the model+driver must match (any same-model
-    GPU on the same driver behaves identically for SIGSTOP semantics)."""
+    Must match: ok flag, the shared-GPU eval coexistence proof
+    (eval_coexistence_ok), git commit, task, wm profile, GPU model of
+    EVERY eval device and driver version. UUID / CUDA version are recorded
+    for the audit trail but only the model+driver must match (any
+    same-model GPU on the same driver behaves identically for SIGSTOP
+    semantics and for running an eval cell beside a frozen trainer)."""
     if not cert.get("ok"):
         return False, "certificate has ok != true"
+    if cert.get("eval_coexistence_ok") is not True:
+        return False, ("certificate missing eval_coexistence_ok=true "
+                       "(the shared-GPU eval-beside-frozen-trainer preflight "
+                       "was not proven)")
     if str(cert.get("git_commit", "")) != str(git_commit):
         return False, (f"certificate git commit {cert.get('git_commit')!r} "
                        f"!= current {git_commit!r}")
@@ -322,6 +332,62 @@ def _gpu_env(indices: list[str]) -> tuple[dict[str, str], str, str]:
     return names, driver, cuda
 
 
+def _gpu_memory_used(index: str) -> Optional[int]:
+    """Used VRAM (MiB) on one GPU index, or None if unavailable."""
+    out = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used",
+         "--format=csv,noheader,nounits", "-i", str(index)],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    try:
+        return int(out.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _run_coexistence_eval(policy_ws: Path, meta: dict, worker_id: int,
+                          gpu_index: str, task: str, run_dir: Path,
+                          eval_num_envs: int, python_exe: str,
+                          ) -> tuple[int, str, Optional[int]]:
+    """Launch ONE real policy-only eval cell (N=1) on the SAME GPU as the
+    frozen trainer, through the production eval_bridge. Returns
+    (returncode, stderr tail, peak VRAM seen during the eval). Proves the
+    eval process can start and run beside a SIGSTOPped trainer that is
+    still holding its VRAM — no CUDA OOM, no Isaac startup failure."""
+    from dexpbt_isaaclab.msa.eval_bridge import (
+        EvalRequest,
+        SnapshotSpec,
+        build_seed_manifest,
+    )
+    manifest_id, seeds = build_seed_manifest(1)
+    snap_dir = run_dir / "cert_eval_snapshot"
+    raw_dir = run_dir / "cert_eval_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    spec = SnapshotSpec.freeze(
+        Path(meta["_committed_ckpt"]), f"cert_w{worker_id}", worker_id,
+        int(meta.get("frame", 0)), snap_dir)
+    tau = float((meta.get("curriculum") or {}).get("success_tolerance", 0.02))
+    req = EvalRequest(snapshot=spec, tau=tau, manifest_id=manifest_id,
+                      seeds=seeds, task=task,
+                      run_id=f"cert_{run_dir.name}", raw_dir=str(raw_dir),
+                      eval_device=f"cuda:{gpu_index}",
+                      num_envs=int(eval_num_envs),
+                      num_episodes=int(eval_num_envs))
+    cmd = req.build_commands(python_exe)[0]
+    env = req.build_env()
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    mem_peak: Optional[int] = None
+    while proc.poll() is None:
+        m = _gpu_memory_used(gpu_index)
+        if m is not None:
+            mem_peak = m if mem_peak is None else max(mem_peak, m)
+        time.sleep(2.0)
+    _out, err = proc.communicate()
+    return proc.returncode, (err or "")[-2000:], mem_peak
+
+
 def _tree_shape(root_pid: int) -> list[dict]:
     """[{pid, comm}] for the worker tree — recorded in the certificate so
     a later reader can see WHAT was actually SIGSTOPped."""
@@ -338,23 +404,36 @@ def _tree_shape(root_pid: int) -> list[dict]:
 def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
                       hold_seconds: float, cert_path: Path, *,
                       task: str, profile: str, gpu_index: str,
-                      repo_dir: Path,
+                      repo_dir: Path, eval_num_envs: int = 512,
+                      python_exe: Optional[str] = None,
                       first_tick_timeout_s: float = 4 * 3600.0,
                       resume_timeout_s: float = 5400.0,
                       poll_s: float = POLL_S) -> int:
     """DISPOSABLE hold smoke: validates SIGSTOP/SIGCONT against a real
-    Isaac trainer OUTSIDE the formal arms and writes
-    HOLD_SMOKE_CERTIFICATE.json. Produces NO method results; the
-    disposable run is torn down by its launcher afterwards.
+    Isaac trainer AND the shared-GPU eval coexistence path OUTSIDE the
+    formal arms, then writes HOLD_SMOKE_CERTIFICATE.json. Produces NO
+    method results; the disposable run is torn down by its launcher after.
 
-    wait first committed tick -> record tree shape -> hold -> verify the
-    committed frame is frozen -> release -> verify the next committed tick
-    appears. ok=true only on the full success path; release guaranteed."""
+    wait first committed tick -> record tree shape + VRAM -> hold ->
+    verify the committed frame is frozen -> WHILE the trainer is frozen
+    (still holding its VRAM) launch ONE real policy-only eval cell (N=1,
+    eval_num_envs) on the SAME GPU and require it to exit cleanly (no CUDA
+    OOM, no Isaac startup failure) -> release -> verify the next committed
+    tick appears. ok=true only when BOTH the hold behaviour AND the
+    shared-GPU eval succeeded; release guaranteed."""
     holds = WorkerHolds(run_dir)
     policy_ws = workspace / f"{worker_id:03d}"
-    cert: dict = {"ok": False, "task": str(task), "wm_profile": str(profile),
+    python_exe = python_exe or sys.executable
+    cert: dict = {"ok": False, "eval_coexistence_ok": False,
+                  "task": str(task), "wm_profile": str(profile),
                   "hold_seconds": float(hold_seconds),
                   "worker_id": int(worker_id),
+                  "eval_device": f"cuda:{gpu_index}",
+                  "eval_num_envs": int(eval_num_envs),
+                  "eval_exit_code": None, "eval_error": "",
+                  "gpu_memory_before_hold": None,
+                  "gpu_memory_while_trainer_frozen": None,
+                  "gpu_memory_during_eval": None,
                   "disposable_run_dir": str(run_dir),
                   "timestamp": time.time()}
     try:
@@ -383,6 +462,7 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
         meta = latest_committed_meta(policy_ws) or {}
         frame_before = int(meta.get("frame", -1))
         cert["frame_before_hold"] = frame_before
+        cert["gpu_memory_before_hold"] = _gpu_memory_used(gpu_index)
         pid_file = run_dir / f"policy_{worker_id:02d}" / "pid.txt"
         cert["worker_tree"] = _tree_shape(int(pid_file.read_text().strip()))
         holds.hold([worker_id])
@@ -393,6 +473,24 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
         if frame_during != frame_before:
             cert["error"] = (f"frame advanced during hold: {frame_before} "
                              f"-> {frame_during}")
+            return 2
+        # SHARED-GPU COEXISTENCE: while the trainer is still SIGSTOPped and
+        # holding its VRAM, run one real eval cell on the SAME GPU.
+        cert["gpu_memory_while_trainer_frozen"] = _gpu_memory_used(gpu_index)
+        try:
+            rc_eval, err_tail, mem_during = _run_coexistence_eval(
+                policy_ws, meta, worker_id, str(gpu_index), task, run_dir,
+                eval_num_envs, python_exe)
+            cert["eval_exit_code"] = rc_eval
+            cert["gpu_memory_during_eval"] = mem_during
+            if rc_eval != 0:
+                cert["eval_error"] = f"eval exited {rc_eval}: {err_tail}"
+                cert["error"] = "shared-GPU eval coexistence failed"
+                return 2
+            cert["eval_coexistence_ok"] = True
+        except Exception as exc:                         # noqa: BLE001
+            cert["eval_error"] = f"{type(exc).__name__}: {exc}"
+            cert["error"] = "shared-GPU eval coexistence raised"
             return 2
         holds.release([worker_id])
         resume_deadline = time.monotonic() + float(resume_timeout_s)
@@ -418,6 +516,11 @@ def certificate_smoke(run_dir: Path, workspace: Path, worker_id: int,
         if cert["ok"] and residual:
             cert["ok"] = False
             cert["error"] = f"residual holds after release: {residual}"
+        # ok requires the coexistence proof too (defensive: never certify
+        # without it even if a future edit reorders the success path)
+        if cert["ok"] and not cert.get("eval_coexistence_ok"):
+            cert["ok"] = False
+            cert["error"] = "eval coexistence not proven"
         _atomic_write_json(cert_path, cert)
 
 
@@ -1043,6 +1146,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="certificate output path (--certificate-smoke)")
     ap.add_argument("--cert-gpu-index", default="4",
                     help="GPU index the disposable smoke worker trains on")
+    ap.add_argument("--cert-eval-num-envs", type=int, default=512,
+                    help="env count for the shared-GPU coexistence eval "
+                         "cell run beside the frozen trainer "
+                         "(--certificate-smoke)")
     ap.add_argument("--commit-max-wait-s", type=float,
                     default=DEFAULT_COMMIT_MAX_WAIT_S,
                     help="single bounded wait for a durable tolerance "
@@ -1070,6 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
             args.hold_smoke_seconds, Path(args.cert_out),
             task=args.task, profile=args.wm_profile,
             gpu_index=str(args.cert_gpu_index),
+            eval_num_envs=args.cert_eval_num_envs,
             repo_dir=Path(__file__).resolve().parent)
 
     if args.hold_smoke_only:

@@ -5,9 +5,11 @@ Date: 2026-07-19, updated the same date for the pilot-integration fix pass
 ("Harden MSA readiness holds and pilot budget"), the final orchestration
 blocker patch ("Close MSA smoke, commit, and cap races"), the
 state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
-arms") and the synchronization pass ("Make readiness a hold barrier with
-sidecar adoption"). Environment: isaaclab311 python (CPU only; no Isaac
-import anywhere in the MSA package or its tests; no GPU used).
+arms"), the synchronization pass ("Make readiness a hold barrier with
+sidecar adoption") and the watchdog/preflight pass ("Close readiness
+watchdog and shared-GPU preflight gaps"). Environment: isaaclab311 python
+(CPU only; no Isaac import anywhere in the MSA package or its tests; no
+GPU used).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -19,16 +21,19 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
-## MSA suite: `tests/test_msa_probe.py` — 125/125 passed
+## MSA suite: `tests/test_msa_probe.py` — 135/135 passed
 ## Bootstrap suite: `tests/test_state_bootstrap.py` — 32/32 passed
 
 (72 retained from the pilot-integration pass + 23 safety-patch tests +
 15 orchestration-blocker tests, updated in place for the real 80M cadence,
 the 480M cap and the stateful arm names + 4 first-tick semantics tests +
 11 synchronization tests — readiness hold barrier, sidecar adoption,
-certificate gate, children-before-root termination, six-GPU metadata;
-plus the 32-test state-bootstrap suite, whose guard-loop tests now run
-against REAL per-worker processes frozen by the barrier.)
+certificate gate, children-before-root termination, six-GPU metadata +
+10 watchdog/preflight tests — caller-safe stop_arm (real subprocess
+callers), readiness-phase watchdog coverage, fail-closed corrupt holds,
+eval-coexistence certificate gate; plus the 32-test state-bootstrap
+suite, whose guard-loop tests run against REAL per-worker processes
+frozen by the barrier.)
 
 Original 15 required behaviors (spec section J) — retained:
 
@@ -160,18 +165,54 @@ processes):
 | — | certificate gate: matching cert passes; ok=false / commit / task / profile / GPU model / driver mismatch fails closed; per-eval-device model check | `TestHoldSmokeCertificate.*` (3 tests) |
 | — | any readiness failure SIGCONTs the already-frozen workers before the arm stops | `test_guard_loop_any_failure_stops_arm_without_marker` (extended: no pid left in 'T') |
 
+Watchdog/preflight coverage ("Close readiness watchdog and shared-GPU
+preflight gaps"; 10 new tests, real processes):
+
+| # | requirement | test(s) |
+|---|---|---|
+| P0-1 A | stop_arm called FROM the process registered as msa_sidecar.pid: all six workers exit AND the caller reaches its post-stop_arm completion marker (never killed mid-cleanup) | `TestStopArmCallerSafe.test_caller_is_sidecar_kills_workers_and_watchdog_sibling` (real python subprocess caller) |
+| P0-1 B | same from a process registered as hold_watchdog.pid | `test_caller_is_watchdog_kills_workers_and_sidecar_sibling` |
+| P0-1 C | the sibling control process (the one that is NOT the caller) IS terminated; holds files cleared (no stale ownership) | asserted inside tests A and B |
+| P0-1 | the real watchdog path (check_once → default stop_arm) is caller-safe end to end | `test_watchdog_check_once_stop_is_caller_safe` |
+| P0-2 1 | guard dies mid-barrier with PARTIAL readiness holds → all frozen pids SIGCONTed, GUARD_DIED_DURING_READINESS.json, arm stopped | `TestReadinessWatchdog.test_guard_death_partial_readiness_releases_and_stops` |
+| P0-2 2 | 6/6 marker written, sidecar dies BEFORE adoption (readiness holds still present) → release all + stop | `test_sidecar_death_before_adoption_releases_and_stops` |
+| P0-2 3 | READINESS_HOLDS non-empty → never idle_exit | `test_readiness_present_never_idle` |
+| P0-2 4 | corrupt/partial readiness file → fail closed (never the empty set); startup grace tolerated while pid files are absent | `test_corrupt_readiness_fails_closed` |
+| P0-2 5 | after normal adoption (readiness gone, MSA_HOLDS + live sidecar) no double release / no false kill | `test_normal_adoption_no_false_action`, `test_guard_alive_during_barrier_is_ok` |
+| P0-2 6 | watchdog calling stop_arm never kills itself first | `TestStopArmCallerSafe.test_watchdog_check_once_stop_is_caller_safe` |
+| P1 | certificate WITHOUT eval_coexistence_ok (old cert, or coexistence failed) rejected by the formal sidecar gate | `TestHoldSmokeCertificate.test_certificate_without_coexistence_proof_rejected`, `test_mismatches_fail_closed` (eval_coexistence_ok=false case) |
+
+CPU tests vs real GPU validation for P1: the eval-coexistence smoke itself
+(Isaac eval cell on GPU4 beside a SIGSTOPped VRAM-holding trainer) is GPU
+work and was NOT executed in this pass — only the launcher/certificate
+plumbing and the fail-closed gate are CPU-tested. The certificate can ONLY
+be produced by actually running `start_stateful_hold_smoke.sh` on the six-
+GPU machine; no GPU smoke result is claimed here.
+
 ## Real execution order (enforced, not just procedural)
 
 ```
 start_stateful_hold_smoke.sh (DISPOSABLE) → HOLD_SMOKE_CERTIFICATE.json
+  (hold + frozen-frame proof + SHARED-GPU EVAL COEXISTENCE: one real
+   policy-only eval cell, N=1, 512 envs, on the SAME GPU while the frozen
+   trainer holds its VRAM → eval_coexistence_ok=true required)
 launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
-           → sidecar validates the certificate (fail closed at startup)
+           → hold watchdog started for EVERY stateful arm (guard +
+             sidecar + readiness + MSA holds coverage)
+           → sidecar validates the certificate incl. eval_coexistence_ok
+             (fail closed at startup)
            → per-worker validation → immediate SIGSTOP freeze
              (READINESS_HOLDS.json) → 6/6 → stall reproduction
              → FIRST_TICK_VALIDATED.json
            → BASE/GATE: simultaneous SIGCONT of all six
            → MSA: sidecar adopts holds (→ MSA_HOLDS.json), first PRE_EVAL
              from the frozen validated boundary
+failure paths (all caller-safe, workers first, caller last):
+  guard dies in barrier      → watchdog SIGCONTs readiness holds, writes
+                               GUARD_DIED_DURING_READINESS.json, stops arm
+  sidecar dies pre-adoption  → watchdog releases readiness holds, stops arm
+  sidecar dies mid-cycle     → watchdog releases MSA holds, writes
+                               MSA_SIDECAR_DIED.json, stops arm
 ```
 
 The in-arm `run_hold_smoke.sh` is EXECUTION SMOKE ONLY (it advances the
@@ -182,7 +223,7 @@ four-arm comparison.
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 125 passed |
+| `tests/test_msa_probe.py` | 135 passed |
 | `tests/test_state_bootstrap.py` | 32 passed |
 | `tests/test_pbt_curriculum_p1.py` + `test_curriculum_freeze.py` + `test_env_mastery_curriculum.py` | 22 passed, 1 pre-existing failure (below) |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |

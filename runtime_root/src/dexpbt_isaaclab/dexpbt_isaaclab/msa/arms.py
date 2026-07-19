@@ -400,6 +400,22 @@ nohup python -u -m dexpbt_isaaclab.msa.continuation_guard \\
   --cap-frames {cap_frames} \\
   >>"$RUN_DIR/continuation_guard.log" 2>&1 &
 echo $! > "$RUN_DIR/continuation_guard.pid"
+
+# External hold watchdog (ALL stateful arms), independent of the guard's
+# and the sidecar's finally blocks. It covers the WHOLE hold lifecycle:
+# - readiness phase: if the guard dies while workers are SIGSTOP-frozen in
+#   READINESS_HOLDS.json (before the marker, or — for MSA arms — after the
+#   marker but before the sidecar adopts), it SIGCONTs the frozen workers,
+#   writes GUARD_DIED_DURING_READINESS.json and stops the whole arm;
+# - cycle phase (MSA): if the sidecar dies with MSA_HOLDS.json non-empty OR
+#   MSA_BUSY.json present (even mid-COMMITTING with no holds), it releases
+#   the held workers, writes MSA_SIDECAR_DIED.json and stops the arm.
+# It never idle-exits while readiness holds exist and fails closed on an
+# unreadable holds file (no uncontrolled continuation training).
+nohup python -u -m dexpbt_isaaclab.msa.hold_watchdog \\
+  --run-dir "$RUN_DIR" \\
+  >>"$RUN_DIR/hold_watchdog.log" 2>&1 &
+echo $! > "$RUN_DIR/hold_watchdog.pid"
 {sidecar}echo "launched {arm}: run_dir=$RUN_DIR"
 """
 
@@ -459,15 +475,9 @@ nohup python -u -m dexpbt_isaaclab.msa.sidecar \\
   --commit-max-wait-s "${{MSA_COMMIT_MAX_WAIT_S:-3600}}" \\
   {permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
-
-# External hold watchdog (independent of the sidecar's finally block): if
-# the sidecar dies while workers are SIGSTOPped (MSA_HOLDS.json non-empty),
-# it SIGCONTs all recorded PIDs, writes MSA_SIDECAR_DIED.json and stops the
-# whole arm — never uncontrolled continuation training.
-nohup python -u -m dexpbt_isaaclab.msa.hold_watchdog \\
-  --run-dir "$RUN_DIR" \\
-  >>"$RUN_DIR/hold_watchdog.log" 2>&1 &
-echo $! > "$RUN_DIR/hold_watchdog.pid"
+# NOTE: the external hold watchdog is started once for ALL stateful arms
+# in the main launcher body (above), so it already covers this sidecar's
+# MSA_HOLDS.json / MSA_BUSY.json in addition to the readiness barrier.
 """
 
 _HOLD_SMOKE_TEMPLATE = """#!/usr/bin/env bash
@@ -521,11 +531,15 @@ _DISPOSABLE_SMOKE_TEMPLATE = """#!/usr/bin/env bash
 # Runs OUTSIDE the formal arms: launches ONE throwaway worker with the
 # SAME code, Isaac task, wm profile and 8192 envs on the shared eval GPU
 # (default cuda:4), waits for its first committed tick, SIGSTOPs it,
-# verifies the committed frame is frozen, SIGCONTs, verifies the next
-# committed tick appears — then writes the certificate and tears the
-# whole disposable run down. It produces NO method results; the formal
-# MSA launchers validate the certificate (git commit, task, profile, GPU
-# model, driver) at sidecar startup and refuse to run without it.
+# verifies the committed frame is frozen, then — WHILE the trainer is
+# frozen and still holding its VRAM — launches one real policy-only eval
+# cell (N=1) on the SAME GPU and requires it to exit cleanly (no CUDA
+# OOM / Isaac startup failure), SIGCONTs, verifies the next committed
+# tick appears — then writes the certificate (eval_coexistence_ok=true)
+# and tears the whole disposable run down. It produces NO method results;
+# the formal MSA launchers validate the certificate (eval_coexistence_ok,
+# git commit, task, profile, GPU model, driver) at sidecar startup and
+# refuse to run without it.
 set -euo pipefail
 
 if [[ "${{1:-}}" != "--i-know-what-i-am-doing" ]]; then
@@ -585,6 +599,7 @@ python -u -m dexpbt_isaaclab.msa.sidecar \\
   --hold-smoke-seconds "$HOLD_SECONDS" \\
   --cert-out "$CERT_OUT" \\
   --cert-gpu-index "$SMOKE_GPU" \\
+  --cert-eval-num-envs "${{CERT_EVAL_NUM_ENVS:-512}}" \\
   --wm-profile "{profile}" \\
   2>&1 | tee -a "$LOG"
 RC="${{PIPESTATUS[0]}}"

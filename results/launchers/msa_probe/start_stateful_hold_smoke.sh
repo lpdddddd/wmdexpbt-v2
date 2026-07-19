@@ -5,11 +5,15 @@
 # Runs OUTSIDE the formal arms: launches ONE throwaway worker with the
 # SAME code, Isaac task, wm profile and 8192 envs on the shared eval GPU
 # (default cuda:4), waits for its first committed tick, SIGSTOPs it,
-# verifies the committed frame is frozen, SIGCONTs, verifies the next
-# committed tick appears — then writes the certificate and tears the
-# whole disposable run down. It produces NO method results; the formal
-# MSA launchers validate the certificate (git commit, task, profile, GPU
-# model, driver) at sidecar startup and refuse to run without it.
+# verifies the committed frame is frozen, then — WHILE the trainer is
+# frozen and still holding its VRAM — launches one real policy-only eval
+# cell (N=1) on the SAME GPU and requires it to exit cleanly (no CUDA
+# OOM / Isaac startup failure), SIGCONTs, verifies the next committed
+# tick appears — then writes the certificate (eval_coexistence_ok=true)
+# and tears the whole disposable run down. It produces NO method results;
+# the formal MSA launchers validate the certificate (eval_coexistence_ok,
+# git commit, task, profile, GPU model, driver) at sidecar startup and
+# refuse to run without it.
 set -euo pipefail
 
 if [[ "${1:-}" != "--i-know-what-i-am-doing" ]]; then
@@ -222,6 +226,7 @@ python -u -m dexpbt_isaaclab.msa.sidecar \
   --hold-smoke-seconds "$HOLD_SECONDS" \
   --cert-out "$CERT_OUT" \
   --cert-gpu-index "$SMOKE_GPU" \
+  --cert-eval-num-envs "${CERT_EVAL_NUM_ENVS:-512}" \
   --wm-profile "cser_dexpbt_conservative" \
   2>&1 | tee -a "$LOG"
 RC="${PIPESTATUS[0]}"

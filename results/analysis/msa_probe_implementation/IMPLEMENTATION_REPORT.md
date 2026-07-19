@@ -417,6 +417,58 @@ tau_plus, decision gates or the state reconstruction:
    and is removed everywhere. The launcher records the actual devices in
    `<run_dir>/EVAL_DEVICES.json`.
 
+## 5e. Watchdog + shared-GPU preflight ("Close readiness watchdog and shared-GPU preflight gaps", 2026-07-19)
+
+The last three formal-experiment blockers, orchestration-only (no MSA
+algorithm, no training parameters, no bootstrap/controller/evaluator
+refactor):
+
+1. **Caller-safe `stop_arm` (P0-1).** The old order terminated
+   `msa_sidecar.pid` / `hold_watchdog.pid` BEFORE the workers — but
+   stop_arm is called BY the sidecar (certificate/adoption/commit-timeout
+   fail paths) and BY the watchdog, so a self-referential pid file killed
+   the caller mid-cleanup and worker termination could never run. New
+   order: SIGCONT all MSA + readiness holds → terminate all six worker
+   trees (full children-first escalation) → terminate the OTHER control
+   processes, skipping any pid equal to `os.getpid()` (the caller exits
+   naturally after stop_arm returns) → delete both holds files (no stale
+   ownership). `_terminate_tree` gained `skip_pids` so the caller is
+   protected even if it appears inside an enumerated tree. Verified with
+   REAL subprocess callers registered as sidecar/watchdog pids: workers
+   die, the sibling control process dies, the caller reaches its
+   post-stop_arm completion marker.
+2. **Readiness-phase watchdog (P0-2).** `hold_watchdog` now reads
+   `READINESS_HOLDS.json`, `MSA_HOLDS.json`, `FIRST_TICK_VALIDATED.json`,
+   `continuation_guard.pid` AND `msa_sidecar.pid`, and is launched for
+   EVERY stateful arm (BASE/GATE included) by the main launcher body.
+   While readiness holds exist it never idle-exits. Before the marker the
+   GUARD owns the freeze: if it dies, the watchdog SIGCONTs every
+   readiness-held pid, writes `GUARD_DIED_DURING_READINESS.json` and
+   stops the arm (caller-safe). After the marker but before adoption
+   (MSA pre-adoption window) the SIDECAR is the owner: its death equally
+   releases the readiness holds and stops the arm. After adoption the
+   existing MSA_HOLDS/MSA_BUSY logic applies unchanged. A holds file that
+   exists but cannot be parsed is NEVER treated as empty (fail closed:
+   dead owner → stop the arm); an owner pid file that has not appeared
+   yet is tolerated for a bounded startup grace (`--startup-grace-s`,
+   default 120 s) before it counts as dead.
+3. **Shared-GPU eval coexistence smoke (P1).** The disposable certificate
+   smoke previously proved only SIGSTOP/SIGCONT; it now ALSO proves that
+   an Isaac eval can run on the SAME GPU while the frozen trainer holds
+   its VRAM: after the frozen-frame check and BEFORE release, it launches
+   one real policy-only eval cell through the production `eval_bridge`
+   (same task, the trainer's own committed checkpoint frozen read-only,
+   N=1 seed, `eval_num_envs=512`, `CUDA_VISIBLE_DEVICES` pinned to the
+   smoke GPU) and requires a clean exit — any CUDA OOM or Isaac startup
+   failure fails the certificate. New certificate fields:
+   `eval_coexistence_ok`, `eval_device`, `eval_num_envs`,
+   `eval_exit_code`, `eval_error`, `gpu_memory_before_hold`,
+   `gpu_memory_while_trainer_frozen`, `gpu_memory_during_eval` (sampled
+   peak). `certificate_ok` (the formal sidecar's startup gate) now
+   REJECTS any certificate without `eval_coexistence_ok=true`, so old
+   certificates are invalid and the disposable smoke must be re-run. The
+   eval output is an execution certificate only — never a method result.
+
 ## 6. Known limitations / open points before launch
 
 - **SIGSTOP holds are not GPU-verified.** Pausing a live Isaac trainer
@@ -425,16 +477,20 @@ tau_plus, decision gates or the state reconstruction:
   this is now ENFORCED: the formal MSA launcher refuses to start without
   `HOLD_SMOKE_CERTIFICATE.json` and the sidecar validates it (commit,
   task, profile, GPU model, driver) fail-closed at startup.
-- If the guard process dies while workers are readiness-frozen (before
-  the sidecar adopts), the frozen workers stay stopped: the hold
-  watchdog only monitors the sidecar. Restarting the guard reuses the
-  persisted `READINESS_HOLDS.json` (idempotent re-validation); a manual
-  `stop_arm` releases everything. Acceptable for the pilot; a
-  guard-level watchdog can follow if needed.
+- ~~If the guard process dies while workers are readiness-frozen, the
+  frozen workers stay stopped~~ — CLOSED in §5e: the hold watchdog now
+  covers the readiness barrier and the MSA pre-adoption window for every
+  stateful arm (SIGCONT + `GUARD_DIED_DURING_READINESS.json` + caller-safe
+  arm stop).
 - The disposable certificate binds to (git commit, task, profile, GPU
   model, driver) — any code change or driver update invalidates it and
   the disposable smoke must be re-run (~one committed interval of GPU
-  time on GPU 4).
+  time on GPU 4). Certificates produced BEFORE the §5e coexistence
+  extension lack `eval_coexistence_ok` and are rejected by design.
+- The shared-GPU eval coexistence proof itself is GPU work: it has NOT
+  been executed in this pass (only the launcher and the fail-closed gate
+  are CPU-tested). Re-running `start_stateful_hold_smoke.sh` is the
+  single next allowed GPU command.
 - The durable tolerance commit waits for a live committed tick (~20M
   frames) per transition; a full cycle therefore spans several ticks of
   wall time. The bounded wait (`--commit-max-wait-s`, default 1 h) stops
@@ -453,7 +509,7 @@ tau_plus, decision gates or the state reconstruction:
 ## 7. Artifacts
 
 - code: `dexpbt_isaaclab/msa/` (10 modules incl. `hold_watchdog.py` and
-  `state_bootstrap.py`), `tests/test_msa_probe.py` (125 tests),
+  `state_bootstrap.py`), `tests/test_msa_probe.py` (135 tests),
   `tests/test_state_bootstrap.py` (32 tests)
 - launchers: `results/launchers/msa_probe/` (4 STATEFUL arm scripts +
   4 configs + `start_stateful_hold_smoke.sh` (disposable certificate

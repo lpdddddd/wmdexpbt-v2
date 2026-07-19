@@ -538,7 +538,9 @@ def _kill_order(root_pid: int) -> list[int]:
 
 def _terminate_tree(root_pid: int,
                     grace_s: float = TERM_GRACE_S,
-                    verify_s: float = KILL_VERIFY_S) -> list[int]:
+                    verify_s: float = KILL_VERIFY_S,
+                    skip_pids: "frozenset[int] | set[int]" = frozenset(),
+                    ) -> list[int]:
     """Escalating full-tree termination. Returns PIDs still alive at the
     end (empty == verified dead).
 
@@ -551,8 +553,14 @@ def _terminate_tree(root_pid: int,
     children first, root last -> re-enumerate again and repeat within the
     verify window until no survivor remains (a respawn between the
     enumeration and the kill is caught by the next pass).
+
+    skip_pids are NEVER signalled or counted as survivors — used by
+    stop_arm to keep a self-invoking caller (the sidecar / watchdog /
+    guard whose own pid is being cleaned up) alive until the whole arm is
+    down, even if the caller somehow appears inside the enumerated tree.
     """
-    first = _kill_order(root_pid)
+    skip = {int(p) for p in skip_pids}
+    first = [p for p in _kill_order(root_pid) if p not in skip]
     known: set[int] = set(first)
     _signal_all(first, signal.SIGCONT)
     _signal_all(first, signal.SIGTERM)
@@ -566,7 +574,7 @@ def _terminate_tree(root_pid: int,
         # fresh children-first enumeration + EVERY pid ever seen that is
         # still alive (children reparented to init after their parent
         # died, or respawned between an enumeration and its kill pass)
-        fresh = _kill_order(root_pid)
+        fresh = [p for p in _kill_order(root_pid) if p not in skip]
         known.update(fresh)
         stale = [p for p in sorted(known) if p not in fresh and _alive(p)]
         survivors = [p for p in fresh if _alive(p)] + stale
@@ -607,26 +615,56 @@ def stop_arm(run_dir: Path, reason: str,
              marker_name: Optional[str] = None,
              num_workers: int = NUM_WORKERS,
              marker_payload: Optional[dict] = None) -> None:
-    """Stop the WHOLE arm: SIGCONT held PIDs first, write the marker (if
-    any), kill sidecar + watchdog, terminate every worker's FULL tree
-    (escalating to SIGKILL after the grace window)."""
+    """Stop the WHOLE arm — CALLER-SAFE.
+
+    stop_arm is invoked both externally (guard loop) and by the very
+    processes it tears down (the sidecar on a fail-closed path, the hold
+    watchdog on sidecar death). If it terminated a control pid that equals
+    os.getpid() FIRST, it would kill the caller mid-cleanup and the
+    workers would never be stopped. Order and self-protection:
+
+    1. SIGCONT every held pid (MSA_HOLDS.json + READINESS_HOLDS.json) so a
+       queued SIGTERM can act;
+    2. write the stop marker (if any);
+    3. terminate every worker's FULL process tree (escalating to SIGKILL);
+    4. terminate the OTHER control processes (sidecar, watchdog), NEVER
+       the caller — a pid equal to os.getpid() is skipped so cleanup can
+       finish and the caller exits naturally after stop_arm returns;
+    5. delete MSA_HOLDS.json / READINESS_HOLDS.json (ownership is over —
+       no stale record can mislead a restarted watchdog/guard).
+    """
+    self_pid = os.getpid()
     _sigcont_held_pids(run_dir)
     if marker_name:
         payload = {"reason": reason, "time": time.time()}
         if marker_payload:
             payload.update(marker_payload)
         (run_dir / marker_name).write_text(json.dumps(payload, indent=2))
-    for pid_name in ("msa_sidecar.pid", "hold_watchdog.pid"):
-        pf = run_dir / pid_name
-        if pf.is_file():
-            try:
-                _terminate_tree(int(pf.read_text().strip()))
-            except (ValueError, OSError):
-                pass
+    # workers FIRST: a self-invoking caller (sidecar/watchdog/guard) has
+    # already stopped every trainer before it can possibly end its own run
     for w in range(num_workers):
         pid = _worker_root_pid(run_dir, w)
-        if pid is not None:
-            _terminate_tree(pid)
+        if pid is not None and pid != self_pid:
+            _terminate_tree(pid, skip_pids={self_pid})
+    # then the OTHER control processes; skip the caller's own pid
+    for pid_name in ("msa_sidecar.pid", "hold_watchdog.pid"):
+        pf = run_dir / pid_name
+        if not pf.is_file():
+            continue
+        try:
+            cpid = int(pf.read_text().strip())
+        except (ValueError, OSError):
+            continue
+        if cpid == self_pid:
+            continue        # never kill the caller before it returns
+        _terminate_tree(cpid, skip_pids={self_pid})
+    # ownership released: clear stale holds so a restarted watchdog/guard
+    # cannot act on records for already-terminated workers
+    for name in (HOLDS_FILE, READINESS_HOLDS_FILE):
+        try:
+            (run_dir / name).unlink()
+        except FileNotFoundError:
+            pass
 
 
 # ---------------------------------------------------------------------------

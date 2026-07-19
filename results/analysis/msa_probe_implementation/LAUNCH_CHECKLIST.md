@@ -84,21 +84,36 @@ launcher, in order:
      supervisor/root LAST) → 20 s grace → re-enumerate → SIGKILL
      children-first/root-last → verify no survivor (robust against a
      supervisor respawning children mid-escalation);
-6. (MSA arms) starts the sidecar — which REQUIRES the readiness marker
-   AND a validated `HOLD_SMOKE_CERTIFICATE.json` (git commit, task, wm
-   profile, GPU model, driver must match the current environment; checked
-   fail-closed at sidecar startup) — and the external `hold_watchdog`
-   (releases SIGSTOPped workers and stops the arm if the sidecar dies
-   mid-hold; also stops the arm if the sidecar dies while `MSA_BUSY.json`
-   exists, even with no holds recorded).
+6. starts the external `hold_watchdog` for EVERY stateful arm (BASE/GATE
+   included). It covers the whole hold lifecycle: if the GUARD dies while
+   workers are readiness-frozen (before the marker, or — MSA arms — after
+   the marker but before adoption), it SIGCONTs the frozen workers,
+   writes `GUARD_DIED_DURING_READINESS.json` and stops the arm; if the
+   SIDECAR dies with `MSA_HOLDS.json` non-empty or `MSA_BUSY.json`
+   present (even with no holds), it releases the workers, writes
+   `MSA_SIDECAR_DIED.json` and stops the arm. It never idle-exits while
+   readiness holds exist and fails closed on an unreadable holds file.
+   All its stops are CALLER-SAFE (stop_arm skips `os.getpid()`, workers
+   first, other control processes after, holds files cleared);
+7. (MSA arms) starts the sidecar — which REQUIRES the readiness marker
+   AND a validated `HOLD_SMOKE_CERTIFICATE.json` (eval_coexistence_ok
+   PLUS git commit, task, wm profile, GPU model, driver must match the
+   current environment; checked fail-closed at sidecar startup).
 
 ## Mandatory execution order (MSA arms)
 
 ```
 start_stateful_hold_smoke.sh  (DISPOSABLE, one throwaway worker on GPU 4)
-           → HOLD_SMOKE_CERTIFICATE.json (ok=true)
+           → hold + frozen-frame proof
+           → SHARED-GPU EVAL COEXISTENCE: one real policy-only eval cell
+             (same task, same checkpoint, N=1, 512 envs) on GPU 4 WHILE
+             the frozen trainer holds its VRAM — must exit cleanly
+           → HOLD_SMOKE_CERTIFICATE.json (ok=true AND
+             eval_coexistence_ok=true)
 launch arm → state bootstrap + fingerprint (in-launcher, fail closed)
-           → sidecar validates the certificate at startup (fail closed)
+           → hold_watchdog started (guard + sidecar + readiness coverage)
+           → sidecar validates the certificate at startup (fail closed,
+             incl. eval_coexistence_ok)
            → 6/6 readiness: each validated worker frozen (READINESS_HOLDS.json)
            → stall reproduction gate → FIRST_TICK_VALIDATED.json
            → sidecar ADOPTS the frozen workers (→ MSA_HOLDS.json)
@@ -137,7 +152,7 @@ formal four-arm comparison. A failed disposable smoke leaves
        6 workers x ~6 ticks for 480M frames ≈ 6.5GB per arm; MSA arms add
        read-only snapshots + eval raw ≈ +3GB).
 5. [ ] `python -m pytest tests/test_msa_probe.py tests/test_state_bootstrap.py -q`
-       green (125 + 32 tests).
+       green (135 + 32 tests).
 6. [ ] Dry-run regenerates cleanly (heterogeneous taus, 80M packets,
        post-hold packet starts):
        `python -m dexpbt_isaaclab.msa.dry_run --out /tmp/trace.md`.
@@ -155,17 +170,28 @@ formal four-arm comparison. A failed disposable smoke leaves
        (ENFORCED by the sidecar).** Run
        `bash results/launchers/msa_probe/start_stateful_hold_smoke.sh
        --i-know-what-i-am-doing` (one throwaway worker, same code / task /
-       profile / 8192 envs, GPU 4). It verifies the frame is frozen under
-       SIGSTOP and the next committed tick appears after SIGCONT, writes
-       `HOLD_SMOKE_CERTIFICATE.json` (git commit, task, profile, GPU
-       UUID/model, CUDA/driver, process-tree shape, hold/resume frames,
-       ok=true) and tears the throwaway run down completely. The formal
-       MSA launcher refuses to start without the certificate file and the
-       sidecar re-validates its contents against the live environment at
-       startup. The certificate is INVALIDATED by any new commit / GPU /
-       driver change — re-run the disposable smoke then. Do NOT run
-       `run_hold_smoke.sh` inside a formal arm (it advances the released
-       worker one extra committed tick past the matched boundary).
+       profile / 8192 envs, GPU 4). It verifies (a) the frame is frozen
+       under SIGSTOP, (b) **shared-GPU eval coexistence**: while the
+       trainer is still frozen and holding its VRAM, one real policy-only
+       eval cell (same task, the trainer's own committed checkpoint, N=1,
+       `eval_num_envs=512`) launches on the SAME GPU 4 through the
+       production eval_bridge and exits cleanly — no CUDA OOM, no Isaac
+       startup failure, and (c) the next committed tick appears after
+       SIGCONT. It writes `HOLD_SMOKE_CERTIFICATE.json` (git commit, task,
+       profile, GPU UUID/model, CUDA/driver, process-tree shape,
+       hold/resume frames, eval_coexistence_ok / eval_device /
+       eval_num_envs / eval_exit_code / eval_error, VRAM before hold /
+       while frozen / during eval, ok=true) and tears the throwaway run
+       down completely. The formal MSA launcher refuses to start without
+       the certificate file and the sidecar re-validates its contents —
+       INCLUDING `eval_coexistence_ok=true` — against the live environment
+       at startup; certificates produced before the coexistence extension
+       are rejected by design. The certificate is INVALIDATED by any new
+       commit / GPU / driver change — re-run the disposable smoke then.
+       The eval result is an execution certificate ONLY, never a method
+       result. Do NOT run `run_hold_smoke.sh` inside a formal arm (it
+       advances the released worker one extra committed tick past the
+       matched boundary).
 10. [ ] Confirm the bootstrap PRE-SEEDED `curriculum_control/` and
         `observer_state_seed/` in the new run dir (a fresh/empty control
         dir is now a launch BLOCKER, not the expected state — readiness no
@@ -231,9 +257,16 @@ bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
   cycle state: `<run_dir>/MSA_BUSY.json` (present from before the first
   hold of a cycle until DONE / failure cleanup — while it exists the
   guard defers park/cap actions as `cap_pending`);
-- hold watchdog: `<run_dir>/hold_watchdog.log`; `MSA_SIDECAR_DIED.json`
-  means the sidecar died mid-hold OR mid-cycle (busy marker present,
-  even with no holds) — workers were SIGCONTed and the arm was stopped;
+- hold watchdog (launched for EVERY stateful arm):
+  `<run_dir>/hold_watchdog.log`;
+  - `GUARD_DIED_DURING_READINESS.json` — the guard (or, in the MSA
+    pre-adoption window, the sidecar) died while workers were
+    readiness-frozen; the watchdog SIGCONTed them and stopped the arm;
+  - `MSA_SIDECAR_DIED.json` — the sidecar died mid-hold OR mid-cycle
+    (busy marker present, even with no holds) — workers were SIGCONTed
+    and the arm was stopped;
+  - a corrupt/unreadable holds file with a dead owner is treated as
+    fail-closed (arm stopped), never as "no holds";
 - `COMMIT_TIMEOUT.json` — a durable tolerance commit did not confirm
   within `--commit-max-wait-s`; includes the per-worker
   `commit_acks_by_worker` table; the arm was stopped, promotion NOT
@@ -257,6 +290,10 @@ bash results/launchers/msa_probe/start_msa_stateful.sh --i-know-what-i-am-doing
   abort);
 - `MSA_SIDECAR_DIED.json` → watchdog already released workers and stopped
   the arm; inspect `msa_sidecar.log` for the crash;
+- `GUARD_DIED_DURING_READINESS.json` → the freeze owner died during the
+  readiness barrier / pre-adoption window; the watchdog released the
+  frozen workers and stopped the arm; inspect `continuation_guard.log`
+  (or `msa_sidecar.log` if the marker says the sidecar was the owner);
 - `COMMIT_TIMEOUT.json` → arm stopped; check whether the worker's trainer
   was alive and committing ticks;
 - any worker's ledger frame regresses (must be monotonic) → kill arm,
