@@ -45,7 +45,7 @@ nohup bash "${RUNTIME_ROOT}/scripts/launch_8gpu_dexpbt.sh" \
   --pbt-interval-steps 20000000 \
   --pbt-start-after 200000000 \
   --pbt-initial-delay 50000000 \
-  --profile-per-policy "cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative" \
+  --profile-per-policy "cser_dexpbt_conservative_gate_relax,cser_dexpbt_conservative_gate_relax,cser_dexpbt_conservative_gate_relax,cser_dexpbt_conservative_gate_relax,cser_dexpbt_conservative_gate_relax,cser_dexpbt_conservative_gate_relax" \
   --recover-checkpoint-per-policy "$RECOVER_LIST" \
   --extra \
   --seed "$BASE_SEED" \

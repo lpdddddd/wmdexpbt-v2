@@ -3,7 +3,9 @@
 Date: 2026-07-19. Environment: isaaclab311 conda python (CPU only; no Isaac
 import anywhere in the MSA package or its tests; no GPU used).
 
-## New suite: `tests/test_msa_probe.py` — 40/40 passed
+## New suite: `tests/test_msa_probe.py` — 41/41 passed
+
+(41st test added in the GATE_RELAX profile-delivery fix, see addendum below.)
 
 Coverage of the 15 required behaviors (spec section J):
 
@@ -34,7 +36,7 @@ resume checkpoints, probe dose parity between MSA and MSA_PERMUTED_ROUTE).
 
 | suite | result |
 |---|---|
-| `tests/test_msa_probe.py` | 40 passed |
+| `tests/test_msa_probe.py` | 41 passed |
 | `tests/test_ccrs_toolkit.py` + `tests/test_ccrs_precision_extension.py` | 116 passed |
 | `tests/test_late_floor_retention_gate.py`, `test_env_mastery_curriculum.py`, `test_curriculum_adaptive_fast.py`, `test_hybrid_curriculum_safety.py`, `test_pbt_curriculum_inherit.py`, `test_curriculum_freeze_unit_conversion.py` | 76 passed |
 | `tests/test_pbt_curriculum_p1.py` | 11 passed, 1 pre-existing failure (`StableSourceTierTest::test_l2_usable_when_stable_fails`) — verified identical at the pre-change commit via `git stash`; unrelated to this task |
@@ -48,3 +50,23 @@ Permuted arm: recipients=[3, 2, 1] under seed 777001 with identical total
 dose. Full trace: `DRY_RUN_TRACE.md`.
 
 No GPU was used at any point; no training was started.
+
+## Addendum: GATE_RELAX profile-delivery fix (same date)
+
+Launcher/log exploration confirmed that `apply_wm_strategy_profile` is
+authoritative for non-legacy profiles: profile-table values override
+explicit CLI args, and `late_floor_retention_min_retention` (0.88) is in
+the `cser_dexpbt_conservative` table. The originally generated GATE_RELAX
+launcher relied on a CLI flag alone, which would have been silently
+reverted at startup. Fix: registered a dedicated
+`cser_dexpbt_conservative_gate_relax` profile (id 21; single-key table
+diff to 0.75), pointed the GATE_RELAX launcher's `--profile-per-policy`
+at it, and added fail-closed validation in `msa.arms` plus
+`TestArmConfigs.test_gate_relax_goes_through_dedicated_profile`.
+Re-verified: `tests/test_msa_probe.py` 41 passed;
+`tests/test_wm_strategy_profiles.py` 31 passed;
+`tests/test_profile_copy_health_gates.py` + `tests/test_v13_elite_profiles.py`
+19 passed; `tests/test_profile_copy_v12.py` 18 passed. (Running the four
+profile suites in one pytest process segfaults at teardown — reproduced
+identically at the pre-change commit via `git stash`; pre-existing,
+unrelated.)

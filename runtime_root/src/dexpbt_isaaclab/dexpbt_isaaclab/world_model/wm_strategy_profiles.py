@@ -37,6 +37,12 @@ PROFILE_IDS: dict[str, int] = {
     "unified_elite_wm_pbt": 18,
     "cser_dexpbt": 19,
     "cser_dexpbt_conservative": 20,
+    # base_retention_msa_probe GATE_RELAX arm (2026-07-19): identical to
+    # cser_dexpbt_conservative except late_floor_retention_min_retention
+    # 0.88 -> 0.75 (the pre-existing hard minimum). Needed because profile
+    # expansion is authoritative: a launcher-level CLI override of a
+    # profile-controlled flag would be silently reverted to the table value.
+    "cser_dexpbt_conservative_gate_relax": 21,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -91,6 +97,11 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "CSER-v0 conservative: same as cser_dexpbt but keeps low-weight "
         "EliteBank actor distill (elite,archive) as early fallback."
     ),
+    "cser_dexpbt_conservative_gate_relax": (
+        "GATE_RELAX continuation arm of base_retention_msa_probe: "
+        "cser_dexpbt_conservative with late_floor_retention_min_retention "
+        "relaxed 0.88 -> 0.75 (the existing hard minimum). No other change."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -113,6 +124,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "unified_elite_wm_pbt": "unified",
     "cser_dexpbt": "unified",
     "cser_dexpbt_conservative": "unified",
+    "cser_dexpbt_conservative_gate_relax": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -135,6 +147,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "unified_elite_wm_pbt": 1.0,
     "cser_dexpbt": 1.0,
     "cser_dexpbt_conservative": 1.0,
+    "cser_dexpbt_conservative_gate_relax": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -736,6 +749,12 @@ _CSER_DEXPBT_CONSERVATIVE: dict[str, Any] = {
     "pre_floor_peak_guard_freeze_frames": 200_000_000,
 }
 
+# GATE_RELAX arm (base_retention_msa_probe): single-value diff.
+_CSER_DEXPBT_CONSERVATIVE_GATE_RELAX: dict[str, Any] = {
+    **_CSER_DEXPBT_CONSERVATIVE,
+    "late_floor_retention_min_retention": 0.75,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -756,6 +775,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "unified_elite_wm_pbt": _UNIFIED_ELITE_WM_PBT,
     "cser_dexpbt": _CSER_DEXPBT,
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
+    "cser_dexpbt_conservative_gate_relax": _CSER_DEXPBT_CONSERVATIVE_GATE_RELAX,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.

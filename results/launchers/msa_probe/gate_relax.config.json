@@ -1,6 +1,7 @@
 {
   "arm": "GATE_RELAX",
   "profile": "base_retention_msa_probe",
+  "wm_strategy_profile": "cser_dexpbt_conservative_gate_relax",
   "resume_checkpoints": {
     "p0": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",
@@ -59,7 +60,7 @@
       "flag": "--late_floor_retention_min_retention",
       "old": "0.88",
       "new": "0.75",
-      "note": "already the configured hard minimum (late_floor_retention_hard_min_retention)"
+      "note": "already the configured hard minimum (late_floor_retention_hard_min_retention); applied via the dedicated cser_dexpbt_conservative_gate_relax profile table because profile expansion is authoritative over CLI"
     }
   ]
 }

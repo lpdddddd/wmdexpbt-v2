@@ -56,6 +56,14 @@ GATE_RELAX_FLAG = "--late_floor_retention_min_retention"
 GATE_RELAX_OLD = "0.88"
 GATE_RELAX_NEW = "0.75"
 
+# Profile expansion is AUTHORITATIVE for non-legacy profiles: a
+# profile-controlled flag set on the CLI is silently reverted to the table
+# value at startup. late_floor_retention_min_retention IS profile-controlled
+# (in _CSER_DEXPBT_CONSERVATIVE), so GATE_RELAX must select a dedicated
+# profile carrying the 0.75 table value; the CLI flag alone would be a no-op.
+BASE_PROFILE = "cser_dexpbt_conservative"
+GATE_RELAX_PROFILE = "cser_dexpbt_conservative_gate_relax"
+
 # The base-retention same-tau retention threshold consumed by the MSA
 # promotion gate (rho >= this). Reuses the CURRENT applicable original
 # threshold; MSA does not invent a new number.
@@ -108,9 +116,11 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
     if arm not in ARM_NAMES:
         raise ValueError(f"unknown arm {arm}")
     manifest_id, seeds = build_seed_manifest(FORMAL_NUM_SEEDS)
+    wm_profile = GATE_RELAX_PROFILE if arm == "GATE_RELAX" else BASE_PROFILE
     cfg: dict = {
         "arm": arm,
         "profile": "base_retention_msa_probe",
+        "wm_strategy_profile": wm_profile,
         "resume_checkpoints": {
             f"p{t.worker_id}": {
                 "path": t.checkpoint_path,
@@ -138,7 +148,9 @@ def arm_config(arm: str, tips: list[TipCheckpoint], base_seed: int = 42) -> dict
             {"flag": GATE_RELAX_FLAG, "old": GATE_RELAX_OLD,
              "new": GATE_RELAX_NEW,
              "note": "already the configured hard minimum "
-                     "(late_floor_retention_hard_min_retention)"}]
+                     "(late_floor_retention_hard_min_retention); applied via "
+                     f"the dedicated {GATE_RELAX_PROFILE} profile table "
+                     "because profile expansion is authoritative over CLI"}]
     if arm in ("MSA", "MSA_PERMUTED_ROUTE"):
         cfg["msa"] = {
             "tau_plus_rule": "max(0.010, 0.95 * tau)",
@@ -211,7 +223,7 @@ nohup bash "${{RUNTIME_ROOT}}/scripts/launch_8gpu_dexpbt.sh" \\
   --pbt-interval-steps 20000000 \\
   --pbt-start-after 200000000 \\
   --pbt-initial-delay 50000000 \\
-  --profile-per-policy "cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative,cser_dexpbt_conservative" \\
+  --profile-per-policy "{profile_list}" \\
   --recover-checkpoint-per-policy "$RECOVER_LIST" \\
   --extra \\
   --seed "$BASE_SEED" \\
@@ -262,9 +274,32 @@ def _base_flags_block(arm: str, original_launcher: Path) -> str:
     return block
 
 
+def _validate_gate_relax_profile() -> None:
+    """Fail closed if the dedicated GATE_RELAX profile is missing or wrong
+    (profile expansion would silently revert a CLI-only override)."""
+    from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+        PROFILE_TABLES,
+    )
+    table = PROFILE_TABLES.get(GATE_RELAX_PROFILE)
+    if table is None:
+        raise ValueError(f"profile {GATE_RELAX_PROFILE} not registered")
+    got = table.get("late_floor_retention_min_retention")
+    if abs(float(got) - float(GATE_RELAX_NEW)) > 1e-12:
+        raise ValueError(
+            f"{GATE_RELAX_PROFILE} table has "
+            f"late_floor_retention_min_retention={got}, expected "
+            f"{GATE_RELAX_NEW}")
+    base = PROFILE_TABLES[BASE_PROFILE]
+    extra = {k for k in table if table[k] != base.get(k)}
+    if extra != {"late_floor_retention_min_retention"}:
+        raise ValueError(f"{GATE_RELAX_PROFILE} diff vs {BASE_PROFILE} must "
+                         f"be exactly one key, got {sorted(extra)}")
+
+
 def write_arm_launchers(out_dir: Path, manifest_csv: Path,
                         original_launcher: Path) -> list[Path]:
     """Write <arm>.sh + <arm>.config.json for all four arms. Never executes."""
+    _validate_gate_relax_profile()
     tips = resolve_tip_checkpoints(manifest_csv)
     recover_list = ",".join(t.checkpoint_path for t in tips)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -280,9 +315,11 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
                 arm=arm, rho=MSA_RHO_THRESHOLD,
                 permuted_flag=("--permuted-route "
                                if arm == "MSA_PERMUTED_ROUTE" else ""))
+        wm_profile = GATE_RELAX_PROFILE if arm == "GATE_RELAX" else BASE_PROFILE
         script = _LAUNCHER_TEMPLATE.format(
             arm=arm, arm_lower=arm.lower(), recover_list=recover_list,
             max_iter=CONTINUATION_MAX_ITER,
+            profile_list=",".join([wm_profile] * 6),
             base_flags=_base_flags_block(arm, original_launcher),
             sidecar=sidecar)
         sh_path = out_dir / f"start_{arm.lower()}.sh"

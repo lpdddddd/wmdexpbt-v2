@@ -439,6 +439,43 @@ class TestOriginalProfileUnchanged(unittest.TestCase):
         for sh in launcher_dir.glob("start_*.sh"):
             self.assertIn("REFUSING TO LAUNCH", sh.read_text())
 
+    def test_gate_relax_goes_through_dedicated_profile(self):
+        """Profile expansion is authoritative: a CLI-only override of
+        late_floor_retention_min_retention would be silently reverted to the
+        profile table value. GATE_RELAX must therefore select the dedicated
+        cser_dexpbt_conservative_gate_relax profile; all other arms keep the
+        original profile."""
+        from dexpbt_isaaclab.world_model.wm_strategy_profiles import (
+            PROFILE_IDS,
+            PROFILE_TABLES,
+        )
+        table = PROFILE_TABLES["cser_dexpbt_conservative_gate_relax"]
+        base = PROFILE_TABLES["cser_dexpbt_conservative"]
+        self.assertEqual(table["late_floor_retention_min_retention"], 0.75)
+        # exactly one key differs from the base profile
+        diff = {k for k in table if table[k] != base.get(k)}
+        self.assertEqual(diff, {"late_floor_retention_min_retention"})
+        self.assertEqual(set(base) | {"late_floor_retention_min_retention"},
+                         set(table) | set(base))
+        self.assertIn("cser_dexpbt_conservative_gate_relax", PROFILE_IDS)
+        # base profile table itself is untouched
+        self.assertEqual(base["late_floor_retention_min_retention"], 0.88)
+
+        launcher_dir = Path("/root/autodl-tmp/wmdexpbt/results/launchers/msa_probe")
+        if not launcher_dir.exists():
+            self.skipTest("arm launchers not generated in this checkout")
+        relax = (launcher_dir / "start_gate_relax.sh").read_text()
+        self.assertIn('--profile-per-policy "'
+                      + ",".join(["cser_dexpbt_conservative_gate_relax"] * 6)
+                      + '"', relax)
+        for other in ("start_base_continuation.sh", "start_msa.sh",
+                      "start_msa_permuted_route.sh"):
+            text = (launcher_dir / other).read_text()
+            self.assertIn('--profile-per-policy "'
+                          + ",".join(["cser_dexpbt_conservative"] * 6)
+                          + '"', text)
+            self.assertNotIn("gate_relax", text)
+
 
 class TestAudit(unittest.TestCase):
     def test_audit_synthetic_run(self):

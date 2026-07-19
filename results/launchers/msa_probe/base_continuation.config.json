@@ -1,6 +1,7 @@
 {
   "arm": "BASE_CONTINUATION",
   "profile": "base_retention_msa_probe",
+  "wm_strategy_profile": "cser_dexpbt_conservative",
   "resume_checkpoints": {
     "p0": {
       "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",

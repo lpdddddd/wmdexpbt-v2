@@ -101,7 +101,10 @@ matched seed 42 and +100M worker-local frames:
 
 1. `BASE_CONTINUATION` — original flags, unchanged.
 2. `GATE_RELAX` — single change: `late_floor_retention_min_retention`
-   0.88 → 0.75 (the pre-existing hard minimum).
+   0.88 → 0.75 (the pre-existing hard minimum). Delivered via a dedicated
+   `cser_dexpbt_conservative_gate_relax` profile (single-key table diff),
+   NOT via the CLI flag alone: profile expansion is authoritative and would
+   silently revert a CLI-only override back to 0.88. See `CONFIG_DIFF.md`.
 3. `MSA` — probe sidecar; original numeric gates; cross-tolerance retention
    read replaced by same-tau rho (threshold 0.88).
 4. `MSA_PERMUTED_ROUTE` — routing negative control (same total dose).

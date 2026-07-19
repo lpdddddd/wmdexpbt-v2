@@ -54,6 +54,25 @@ patience, freeze frames, every other gate — is unchanged (asserted by
 which diffs the two generated scripts and requires exactly one differing
 line).
 
+**Delivery mechanism (important):** profile expansion
+(`apply_wm_strategy_profile`) is *authoritative* for non-legacy profiles —
+a profile-controlled flag set on the CLI is silently reverted to the
+profile-table value at startup, and `late_floor_retention_min_retention`
+IS in the `cser_dexpbt_conservative` table (0.88). A CLI-only override
+would therefore be a no-op. The GATE_RELAX arm instead selects a dedicated
+profile `cser_dexpbt_conservative_gate_relax` (id 21, registered in
+`world_model/wm_strategy_profiles.py`), whose table is byte-identical to
+`cser_dexpbt_conservative` except `late_floor_retention_min_retention:
+0.75`. The launcher passes it via `--profile-per-policy` for all six
+workers; the CLI flag is also set to 0.75 for legibility and now matches
+the table. This single-key diff is asserted by
+`TestArmConfigs.test_gate_relax_goes_through_dedicated_profile` and
+validated fail-closed at launcher-generation time
+(`msa.arms._validate_gate_relax_profile`). This also survives PBT
+restarts: `profile_controlled_restart_skip_flags` strips
+profile-controlled flags from restart argv, and the authoritative table
+re-applies 0.75.
+
 ## Arm 3 — MSA
 
 Zero numeric gate changes. Additions only:
