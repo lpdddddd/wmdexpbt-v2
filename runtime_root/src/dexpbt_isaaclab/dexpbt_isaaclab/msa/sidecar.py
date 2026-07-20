@@ -140,6 +140,79 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+def handle_cycle_failure(
+    run_dir: Path,
+    err: "CycleFailure",
+    *,
+    release_holds_fn,
+    stop_arm_fn=None,
+    num_policies: int = NUM_WORKERS,
+) -> None:
+    """Fail-closed arm stop for any non-CommitTimeout CycleFailure.
+
+    Writes MSA_CYCLE_FAILED.json, releases holds, and stops the whole arm
+    so trainers cannot keep running after MSA_BUSY was cleared by cleanup.
+    """
+    from dexpbt_isaaclab.msa.continuation_guard import (
+        stop_arm as _default_stop_arm,
+        _worker_root_pid,
+    )
+    stop = stop_arm_fn or _default_stop_arm
+    cycle = getattr(err, "cycle", None) or {}
+    cause = err.__cause__
+    payload = {
+        "intervention_id": cycle.get("intervention_id"),
+        "error": str(err),
+        "cause_type": (type(cause).__name__ if cause is not None
+                       else type(err).__name__),
+        "cause_message": str(cause) if cause is not None else str(err),
+        "cycle_phase": cycle.get("failed_phase") or cycle.get("phase"),
+        "cycle_status": cycle.get("status"),
+        "commit_acks_by_worker": cycle.get("commit_acks_by_worker"),
+        "final_tol_by_worker": cycle.get("final_tol_by_worker"),
+        "final_committed_frame_by_worker": cycle.get(
+            "final_committed_frame_by_worker"),
+        "observed_cycle_dose_by_worker": cycle.get(
+            "observed_cycle_dose_by_worker"),
+        "budget_admission": cycle.get("budget_admission"),
+        "durable_commits_completed": bool(
+            getattr(err, "durable_commits_completed", False)
+            or cycle.get("durable_commits_completed")),
+        "rollback_claimed": bool(cycle.get("rollback_claimed", False)),
+        "applied_final_tol_by_worker": cycle.get(
+            "applied_final_tol_by_worker"),
+        "timestamp": time.time(),
+    }
+    marker_written = False
+    try:
+        _atomic_write_json(run_dir / "MSA_CYCLE_FAILED.json", payload)
+        marker_written = True
+    except Exception as write_err:                      # noqa: BLE001
+        print(f"[msa-sidecar] FAILED to write MSA_CYCLE_FAILED.json: "
+              f"{write_err}; still stopping the arm")
+    try:
+        release_holds_fn()
+    except Exception as rel_err:                        # noqa: BLE001
+        print(f"[msa-sidecar] release_all after CycleFailure failed: "
+              f"{rel_err}")
+    stop(run_dir,
+         f"cycle failure: {err}",
+         marker_name=None if marker_written else "MSA_CYCLE_FAILED.json",
+         marker_payload=None if marker_written else payload)
+    for w in range(int(num_policies)):
+        wpid = _worker_root_pid(run_dir, w)
+        if wpid is None:
+            continue
+        try:
+            os.kill(wpid, 0)
+            alive = True
+        except OSError:
+            alive = False
+        if alive:
+            print(f"[msa-sidecar] WARNING: worker {w} pid {wpid} still "
+                  "alive after stop_arm")
+
+
 # ---------------------------------------------------------------------------
 # committed-tick discovery (LATEST.commit marker, never newest-file glob)
 # ---------------------------------------------------------------------------
@@ -1226,7 +1299,8 @@ def hold_smoke(run_dir: Path, workspace: Path, worker_id: int,
 
 def _stop_markers_present(run_dir: Path) -> Optional[str]:
     for name in ("GUARD_FAILED", "MSA_SIDECAR_DIED.json",
-                 "COMMIT_TIMEOUT.json", SMOKE_FAILED_FILE,
+                 "COMMIT_TIMEOUT.json", "MSA_CYCLE_FAILED.json",
+                 SMOKE_FAILED_FILE,
                  "STATE_FIDELITY_FAILED.json",
                  "ARM_COMPLETE.json"):
         if (run_dir / name).is_file():
@@ -1453,6 +1527,12 @@ def main(argv: list[str] | None = None) -> int:
         from dexpbt_isaaclab.msa.continuation_guard import stop_arm
         stop_arm(run_dir, f"commit timeout: {err}", marker_name=None)
 
+    def _stop_arm_cycle_failure(err: CycleFailure) -> None:
+        handle_cycle_failure(
+            run_dir, err,
+            release_holds_fn=holds.release_all,
+            num_policies=args.num_policies)
+
     try:
         while True:
             marker = _stop_markers_present(run_dir)
@@ -1523,7 +1603,8 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(err.__cause__, CommitTimeout):
                     _stop_arm_commit_timeout(err.__cause__)
                     return 4
-                raise
+                _stop_arm_cycle_failure(err)
+                return 3
             if args.once:
                 return 0
             time.sleep(POLL_S)

@@ -1,9 +1,11 @@
 # base_retention_msa_probe — Test Report
 
-Date: 2026-07-19, updated through 2026-07-20 for the budget-boundary fix
-("Anchor MSA budget admission at frozen frame"). Environment: isaaclab311
-python under `runtime_root/envs/isaaclab311` (CPU only; no Isaac import in
-the MSA package or its tests; no GPU used; no smoke / formal experiment).
+Date: 2026-07-20, updated for completion/failure supervision
+("Close MSA completion and failure supervision races"). Environment:
+isaaclab311 python under `runtime_root/envs/isaaclab311` (CPU only for
+this patch's unit suites; no Isaac import in the MSA package or its
+tests; **no GPU used by pytest**; no smoke / formal experiment during
+the CPU gate).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -11,11 +13,48 @@ Three evidence tiers, kept separate on purpose:
 2. **Production-style simulation** — heterogeneous-tau full-cycle dry run
    against a tick-quantized parallel fake trainer with held-worker
    assertions and crash injection (`DRY_RUN_TRACE.md`).
-3. **GPU validation** — NOT performed (no GPU tasks were run). SIGSTOP
-   holds and live commit-wait behavior remain GPU-unverified; see
-   `LAUNCH_CHECKLIST.md`.
+3. **GPU validation** — performed only AFTER this patch is committed and
+   the hold-smoke certificate matches PATCH_SHA (see launch section).
 
-## Frozen-frame budget boundary fix (2026-07-20)
+## Completion / failure supervision fix (2026-07-20)
+
+Exact commands (cwd =
+`runtime_root/src/dexpbt_isaaclab`, python =
+`runtime_root/envs/isaaclab311/bin/python`):
+
+```
+../../envs/isaaclab311/bin/python -m pytest -q tests/test_msa_probe.py
+# 143 passed
+
+../../envs/isaaclab311/bin/python -m pytest -q tests/test_state_bootstrap.py
+# 37 passed
+
+../../envs/isaaclab311/bin/python -m pytest -q tests/test_msa_selective_budget.py
+# 31 passed
+
+cd /root/autodl-tmp/wmdexpbt && bash -n results/launchers/msa_probe/*.sh
+# OK
+```
+
+Combined CPU gate: **211 passed**. GPU not used by these suites; no
+experiment started at this stage.
+
+New coverage in `tests/test_msa_selective_budget.py`:
+
+| # | behavior | test(s) |
+|---|---|---|
+| 1 | dose fail while still COMMITTING / DECIDE\|PROMOTE; one commit/worker; no extra 80M tick; FAILED | `TestCompletionOrderingAndNoExtraCommit.test_dose_fail_stays_committing_until_cleanup_no_extra_tick` |
+| 2 | stay + post-commit validation fail → no repeat tau commit | `test_stay_decision_dose_fail_no_repeat_commit` |
+| 3 | selective promote + validation fail → no false rollback / second commit | `test_selective_promote_dose_fail_no_false_rollback` |
+| 4 | COMMITTING resume validation fail → acked workers not re-committed | `test_committing_resume_dose_fail_no_recommit_acked` |
+| 5 | success: DONE/NORMAL only after dose validation | `test_success_path_done_only_after_dose_validation` |
+| 6 | CycleFailure → MSA_CYCLE_FAILED.json + stop_arm | `TestCycleFailureStopsArm.test_cycle_failure_writes_marker_and_calls_stop_arm` |
+| 7 | CommitTimeout still single bounded wait (no second wait) | `test_commit_timeout_path_unchanged_marker` (+ `TestCommitTimeoutBounded` in probe suite) |
+
+Prior frozen-frame admission / full-dose / selective replay / bootstrap /
+readiness suites retained and green.
+
+## Prior: Frozen-frame budget boundary fix (2026-07-20)
 
 Exact commands (cwd =
 `runtime_root/src/dexpbt_isaaclab`, python =
@@ -50,7 +89,7 @@ pilot (at most one new cycle), not an iterative 0.02→0.01 path.
 orchestration must not be claimed bit-for-bit run-identical.
 
 ## MSA suite: `tests/test_msa_probe.py` — 143/143 passed
-## Selective/budget suite: `tests/test_msa_selective_budget.py` — 24/24 passed
+## Selective/budget suite: `tests/test_msa_selective_budget.py` — 31/31 passed
 ## Bootstrap suite: `tests/test_state_bootstrap.py` — 37/37 passed
 
 ## Prior selective/budget suite (pre-boundary-fix): 17/17 passed

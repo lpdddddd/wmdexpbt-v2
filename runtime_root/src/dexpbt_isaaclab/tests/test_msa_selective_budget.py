@@ -578,5 +578,275 @@ class TestGuardReservationOverrun(unittest.TestCase):
             "fail")
 
 
+class TestCompletionOrderingAndNoExtraCommit(unittest.TestCase):
+    """Dose validation must finish before DONE/NORMAL; cleanup after
+    durable commits must never emit an extra confirmation tick."""
+
+    TIP = 5_000_000_000
+    CAP = 480_000_000
+    TICK = 80_000_000
+
+    def _caps(self):
+        tip = self.TIP
+        return {w: tip + self.CAP for w in range(6)}
+
+    def _install_overshoot(self, world, ctl, extra: int = 200_000_000):
+        real = world.commit_tolerance
+
+        def overshoot(wid, tol):
+            real(wid, tol)
+            world.frame[wid] += int(extra)
+
+        world.commit_tolerance = overshoot
+        ctl._commit = overshoot
+
+    def test_dose_fail_stays_committing_until_cleanup_no_extra_tick(self):
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        from dexpbt_isaaclab.msa.state_machine import MSAPhase
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=self._caps(), run_dir=run_dir)
+            seen = []
+            frames_at_validate = {}
+            real_fin = ctl._finalize_cycle_dose
+
+            def wrap(due, start_frames, cycle, admission):
+                seen.append((str(cycle.get("status")),
+                             ctl.machine.phase.value,
+                             int(world.commit_calls)))
+                frames_at_validate.update(
+                    {w: int(world.frame[w]) for w in due})
+                return real_fin(due, start_frames, cycle, admission)
+
+            ctl._finalize_cycle_dose = wrap
+            self._install_overshoot(world, ctl)
+            with self.assertRaises(CycleFailure) as ctx:
+                ctl.run_cycle(views)
+            self.assertTrue(seen)
+            status, phase, commits_at_val = seen[0]
+            self.assertEqual(status, "COMMITTING")
+            self.assertIn(phase, (MSAPhase.DECIDE.value,
+                                  MSAPhase.PROMOTE.value))
+            self.assertEqual(commits_at_val, 6)
+            self.assertEqual(world.commit_calls, 6)
+            for w, fr in frames_at_validate.items():
+                self.assertEqual(int(world.frame[w]), fr)
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["status"], "FAILED")
+            self.assertTrue(cycle.get("durable_commits_completed"))
+            self.assertFalse(cycle.get("rollback_claimed", True))
+            self.assertTrue(ctx.exception.durable_commits_completed)
+            self.assertEqual(
+                cycle["commit_acks_by_worker"],
+                {str(w): True for w in range(6)})
+            self.assertIn("final_committed_frame_by_worker", cycle)
+            self.assertIn("observed_cycle_dose_by_worker", cycle)
+
+    def test_stay_decision_dose_fail_no_repeat_commit(self):
+        from dexpbt_isaaclab.msa import controller as cmod
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        from dexpbt_isaaclab.msa.decision import PromotionDecision
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=self._caps(), run_dir=run_dir)
+
+            def force_stay(panel_stat, retention_by_worker,
+                           retention_threshold, extra_safety_gates=None):
+                return PromotionDecision(
+                    promote=False,
+                    first_blocking_gate="injected_stay",
+                    panel_lower_quantile=float(
+                        panel_stat.get("lower_quantile", 0.0)),
+                    retention={w: vars(r)
+                               for w, r in retention_by_worker.items()},
+                )
+
+            self._install_overshoot(world, ctl)
+            frames_snap = {}
+            real_fin = ctl._finalize_cycle_dose
+
+            def wrap(due, start_frames, cycle, admission):
+                frames_snap.update({w: int(world.frame[w]) for w in due})
+                return real_fin(due, start_frames, cycle, admission)
+
+            ctl._finalize_cycle_dose = wrap
+            orig = cmod.decide_promotion
+            cmod.decide_promotion = force_stay
+            try:
+                with self.assertRaises(CycleFailure):
+                    ctl.run_cycle(views)
+            finally:
+                cmod.decide_promotion = orig
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["decision"], "stay")
+            self.assertEqual(world.commit_calls, 6)
+            for w, fr in frames_snap.items():
+                self.assertEqual(int(world.frame[w]), fr)
+            self.assertFalse(cycle.get("rollback_claimed", True))
+            self.assertTrue(cycle.get("durable_commits_completed"))
+
+    def test_selective_promote_dose_fail_no_false_rollback(self):
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                promotion_mode=PROMOTION_MODE_SELECTIVE,
+                cap_target_by_worker=self._caps(), run_dir=run_dir)
+            self._install_overshoot(world, ctl)
+            frames_snap = {}
+            real_fin = ctl._finalize_cycle_dose
+
+            def wrap(due, start_frames, cycle, admission):
+                frames_snap.update({w: int(world.frame[w]) for w in due})
+                return real_fin(due, start_frames, cycle, admission)
+
+            ctl._finalize_cycle_dose = wrap
+            with self.assertRaises(CycleFailure) as ctx:
+                ctl.run_cycle(views)
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["decision"], "promote")
+            self.assertTrue(cycle.get("selected_for_promotion"))
+            self.assertEqual(world.commit_calls, 6)
+            for w, fr in frames_snap.items():
+                self.assertEqual(int(world.frame[w]), fr)
+            self.assertFalse(cycle.get("rollback_claimed", True))
+            self.assertIn("applied_final_tol_by_worker", cycle)
+            self.assertTrue(ctx.exception.durable_commits_completed)
+
+    def test_committing_resume_dose_fail_no_recommit_acked(self):
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=self._caps(),
+                run_dir=run_dir,
+                crash_commit_workers={4, 5},
+                crash_hard=True,
+            )
+            with self.assertRaises(dr.HardKill):
+                ctl.run_cycle(views)
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["status"], "COMMITTING")
+            acked = {w for w in range(6)
+                     if cycle["commit_acks_by_worker"][str(w)]}
+            self.assertEqual(acked, {0, 1, 2, 3})
+            commits_after_kill = int(world.commit_calls)
+            frames_acked = {w: int(world.frame[w]) for w in acked}
+
+            world.crash_hard = False
+            world.crash_commit_workers = set()
+            world2, ctl2, views2 = dr.make_world(
+                world=world, cap_target_by_worker=self._caps(),
+                run_dir=run_dir)
+            self._install_overshoot(world, ctl2)
+            pending = ctl2.pending_cycle(list(range(6)))
+            with self.assertRaises(CycleFailure):
+                ctl2.run_cycle(views2, resume_cycle=pending)
+            self.assertEqual(world.commit_calls - commits_after_kill, 2)
+            for w in acked:
+                self.assertEqual(int(world.frame[w]), frames_acked[w])
+            done = world.state_store[0]["msa_cycle"]
+            self.assertEqual(done["status"], "FAILED")
+            self.assertTrue(done.get("durable_commits_completed"))
+            self.assertFalse(done.get("rollback_claimed", True))
+
+    def test_success_path_done_only_after_dose_validation(self):
+        from dexpbt_isaaclab.msa.state_machine import MSAPhase
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=self._caps(), run_dir=run_dir)
+            seen = []
+            real_fin = ctl._finalize_cycle_dose
+
+            def wrap(due, start_frames, cycle, admission):
+                seen.append((str(cycle.get("status")),
+                             ctl.machine.phase.value))
+                out = real_fin(due, start_frames, cycle, admission)
+                self.assertEqual(cycle.get("status"), "COMMITTING")
+                self.assertNotEqual(ctl.machine.phase, MSAPhase.NORMAL)
+                return out
+
+            ctl._finalize_cycle_dose = wrap
+            result = ctl.run_cycle(views)
+            self.assertTrue(seen)
+            self.assertEqual(seen[0][0], "COMMITTING")
+            self.assertIn(seen[0][1], (MSAPhase.DECIDE.value,
+                                       MSAPhase.PROMOTE.value))
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["status"], "DONE")
+            self.assertEqual(ctl.machine.phase, MSAPhase.NORMAL)
+            self.assertIsNotNone(result.observed_cycle_dose_by_worker)
+
+
+class TestCycleFailureStopsArm(unittest.TestCase):
+    def test_cycle_failure_writes_marker_and_calls_stop_arm(self):
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        from dexpbt_isaaclab.msa.sidecar import handle_cycle_failure
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            stops = []
+            released = []
+
+            err = CycleFailure(
+                "injected cycle failure",
+                cycle={
+                    "intervention_id": "msa_test",
+                    "status": "FAILED",
+                    "failed_phase": "COMMITTING",
+                    "commit_acks_by_worker": {"0": True},
+                    "final_tol_by_worker": {"0": 0.02},
+                    "final_committed_frame_by_worker": {"0": 1},
+                    "observed_cycle_dose_by_worker": {"0": 1},
+                    "budget_admission": {"required_reserve": 400_000_000},
+                    "durable_commits_completed": True,
+                    "rollback_claimed": False,
+                },
+                durable_commits_completed=True,
+            )
+            err.__cause__ = RuntimeError("reserved ceiling")
+
+            def stop(rd, reason, marker_name=None, marker_payload=None,
+                     num_workers=6):
+                stops.append({
+                    "run_dir": Path(rd),
+                    "reason": reason,
+                    "marker_name": marker_name,
+                })
+
+            handle_cycle_failure(
+                run_dir, err,
+                release_holds_fn=lambda: released.append(True),
+                stop_arm_fn=stop,
+                num_policies=6)
+            self.assertTrue((run_dir / "MSA_CYCLE_FAILED.json").is_file())
+            body = json.loads(
+                (run_dir / "MSA_CYCLE_FAILED.json").read_text())
+            self.assertEqual(body["intervention_id"], "msa_test")
+            self.assertEqual(body["cause_type"], "RuntimeError")
+            self.assertIn("reserved ceiling", body["cause_message"])
+            self.assertTrue(body["durable_commits_completed"])
+            self.assertFalse(body["rollback_claimed"])
+            self.assertEqual(released, [True])
+            self.assertEqual(len(stops), 1)
+            self.assertEqual(stops[0]["run_dir"], run_dir)
+            self.assertIsNone(stops[0]["marker_name"])
+
+    def test_commit_timeout_path_unchanged_marker(self):
+        """CommitTimeout still uses COMMIT_TIMEOUT.json (regression)."""
+        from dexpbt_isaaclab.msa.controller import CommitTimeout, CycleFailure
+        world, ctl, views = dr.make_world(crash_on="commit_timeout")
+        with self.assertRaises(CycleFailure) as cm:
+            ctl.run_cycle(views)
+        cause = cm.exception.__cause__
+        self.assertIsInstance(cause, CommitTimeout)
+        self.assertEqual(world.commit_calls, 6)
+        cycle = world.state_store[0]["msa_cycle"]
+        self.assertEqual(cycle["status"], "FAILED")
+        self.assertFalse(cycle.get("durable_commits_completed", False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

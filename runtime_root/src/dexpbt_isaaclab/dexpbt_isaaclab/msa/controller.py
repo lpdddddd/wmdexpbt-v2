@@ -188,7 +188,20 @@ class ProbeCycleResult:
 
 
 class CycleFailure(RuntimeError):
-    """Raised after cleanup when a probe cycle failed; safe to re-run."""
+    """Raised after cleanup when a probe cycle failed; the sidecar MUST
+    stop the whole arm (MSA_CYCLE_FAILED.json + stop_arm). Carries a
+    snapshot of the failed cycle for the failure marker."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cycle: Optional[dict] = None,
+        durable_commits_completed: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.cycle = dict(cycle) if cycle else {}
+        self.durable_commits_completed = bool(durable_commits_completed)
 
 
 class MSAController:
@@ -418,12 +431,15 @@ class MSAController:
         provs = {w: self.load_provenance(w) or MSAProvenance(worker_id=w)
                  for w in due}
         promoted = cycle.get("decision") == "promote"
+        durable_commits_completed = False
         try:
             self._persist(due, provs, cycle)        # re-arms the busy marker
             # workers are RUNNING here (holds died with the old process /
             # were released by the watchdog); commit only the un-acked.
             todo = [w for w in due if not acks[str(w)]]
             self._commit_all(todo, final_tol, cycle, provs)
+            # ALL due workers now have durable acks (pre-existing or new).
+            durable_commits_completed = True
             start_frames = {int(k): int(v)
                             for k, v in cycle.get("start_frames", {}).items()}
             admission = None
@@ -435,6 +451,7 @@ class MSAController:
             elif cycle.get("budget_admission"):
                 admission = CycleBudgetAdmission.from_dict(
                     cycle["budget_admission"])
+            # still COMMITTING / DECIDE|PROMOTE until dose validation passes
             finals, doses = self._finalize_cycle_dose(
                 due, start_frames, cycle, admission)
             cycle["status"] = "DONE"
@@ -464,18 +481,24 @@ class MSAController:
                 final_committed_frame_by_worker=dict(finals),
                 observed_cycle_dose_by_worker=dict(doses))
         except Exception as err:
-            # promotion is NOT claimed; un-acked workers revert to their
-            # own tau via a synchronous pin (never a second bounded wait
-            # after a commit timeout).
-            for w in due:
-                if not acks[str(w)]:
-                    try:
-                        self._pin(w, tau[w])
-                    except Exception:
-                        pass
+            # After durable commits succeed, NEVER re-commit (no extra
+            # confirmation tick) and do not claim a successful rollback.
+            if not durable_commits_completed:
+                for w in due:
+                    if not acks[str(w)]:
+                        try:
+                            self._pin(w, tau[w])
+                        except Exception:
+                            pass
             cycle["status"] = "FAILED"
             cycle["failed_phase"] = m.phase.value
             cycle["error"] = f"{type(err).__name__}: {err}"
+            cycle["durable_commits_completed"] = bool(
+                durable_commits_completed)
+            cycle["rollback_claimed"] = False
+            if durable_commits_completed:
+                cycle["applied_final_tol_by_worker"] = {
+                    str(w): final_tol[w] for w in due}
             m.abort(f"COMMITTING: {type(err).__name__}")
             try:
                 self._persist(due, provs, cycle)
@@ -489,7 +512,10 @@ class MSAController:
                     pass
             raise CycleFailure(
                 f"MSA cycle {intervention_id} failed while COMMITTING: "
-                f"{err}") from err
+                f"{err}",
+                cycle=cycle,
+                durable_commits_completed=durable_commits_completed,
+            ) from err
 
     # -- one full probe cycle -------------------------------------------------
     def run_cycle(self, workers: list[WorkerView],
@@ -673,6 +699,7 @@ class MSAController:
 
         m = self.machine
         promoted_committed = False
+        durable_commits_completed = False
         try:
             # -- PRE_EVAL: barrier-hold FIRST (unless already frozen by the
             # budget admission barrier), then re-read committed metas ------
@@ -965,17 +992,23 @@ class MSAController:
             # extra ticks while earlier ones wait for their ack).
             _release(due)
             self._commit_all(due, final_tol, cycle, provs)
+            durable_commits_completed = True
+            # promotion is durably applied once every worker's final_tol
+            # commit has acked (selective or global); stay commits are
+            # equally durable — either way, no cleanup re-commit allowed.
+            if promote_any:
+                promoted_committed = True
+            # FULL cycle dose WHILE still COMMITTING / DECIDE|PROMOTE.
+            # DONE / NORMAL / clear-busy / clear-reservation only after
+            # validation passes (never before).
+            finals, doses = self._finalize_cycle_dose(
+                due, start_frames, cycle, admission)
             cycle["status"] = "DONE"
             m.transition(MSAPhase.NORMAL,
                          "promotion applied" if promote_any
                          else first_blocking_gate)
-            # FULL cycle dose: refresh AFTER commit acks so the confirmation
-            # tick is included; fail-closed vs reserved ceiling / dose / cap.
-            finals, doses = self._finalize_cycle_dose(
-                due, start_frames, cycle, admission)
             self._persist(due, provs, cycle)
             self._set_busy(None)
-            promoted_committed = promote_any
             if self.run_dir is not None:
                 clear_reservation(self.run_dir)
 
@@ -1006,36 +1039,46 @@ class MSAController:
                 observed_cycle_dose_by_worker=dict(doses))
 
         except Exception as err:
-            # -- crash cleanup: nobody may be left running at tau_plus ---------
+            # -- crash cleanup -------------------------------------------------
             failed_phase = m.phase.value
-            # 1. synchronous pin-revert first (effective at the next tick
-            #    even if the durable commit below cannot complete);
-            for w in due:
-                if not promoted_committed:
-                    try:
-                        self._pin(w, tau[w])
-                    except Exception:
-                        pass
-            # 2. clear all holds (a durable commit needs running workers);
-            try:
-                _release(sorted(held))
-            except Exception:
-                pass
-            # 3. durable revert + pin clear, best effort — EXCEPT after a
-            #    commit timeout: a durable commit is a bounded wait on live
-            #    ticks, and cleanup must never start a second full timeout
-            #    (the synchronous pin-revert above already restores tau at
-            #    the next tick; the sidecar stops the arm).
-            if not isinstance(err, TimeoutError):
+            if not durable_commits_completed:
+                # 1. synchronous pin-revert first (effective at the next tick
+                #    even if the durable commit below cannot complete);
                 for w in due:
                     if not promoted_committed:
                         try:
-                            self._commit(w, tau[w])
+                            self._pin(w, tau[w])
                         except Exception:
                             pass
+                # 2. clear all holds (a durable commit needs running workers);
+                try:
+                    _release(sorted(held))
+                except Exception:
+                    pass
+                # 3. durable revert + pin clear, best effort — EXCEPT after a
+                #    commit timeout: never a second full bounded wait.
+                if not isinstance(err, TimeoutError):
+                    for w in due:
+                        if not promoted_committed:
+                            try:
+                                self._commit(w, tau[w])
+                            except Exception:
+                                pass
+            else:
+                # Durable commits already applied (promote OR stay). Do NOT
+                # re-commit (no extra 80M tick) and do NOT claim rollback.
+                try:
+                    _release(sorted(held))
+                except Exception:
+                    pass
+                cycle["applied_final_tol_by_worker"] = {
+                    str(w): final_tol[w] for w in due}
+                cycle["rollback_claimed"] = False
             cycle["status"] = "FAILED"
             cycle["failed_phase"] = failed_phase
             cycle["error"] = f"{type(err).__name__}: {err}"
+            cycle["durable_commits_completed"] = bool(
+                durable_commits_completed)
             m.abort(f"{failed_phase}: {type(err).__name__}")
             for w in due:
                 records[w].final_decision = "abort"
@@ -1047,7 +1090,8 @@ class MSAController:
                 pass
             # cleanup is complete: only now may the busy marker go away
             # (a hard kill skips this whole handler and leaves it in place
-            # for the watchdog / guard to act on).
+            # for the watchdog / guard to act on). Sidecar MUST still
+            # stop_arm on CycleFailure so trainers cannot keep running.
             self._set_busy(None)
             if self.run_dir is not None:
                 try:
@@ -1056,4 +1100,7 @@ class MSAController:
                     pass
             raise CycleFailure(
                 f"MSA cycle {intervention_id} failed in {failed_phase}: "
-                f"{err}") from err
+                f"{err}",
+                cycle=cycle,
+                durable_commits_completed=durable_commits_completed,
+            ) from err
