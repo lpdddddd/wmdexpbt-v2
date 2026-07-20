@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from dexpbt_isaaclab.msa.controller import (
@@ -23,7 +24,11 @@ from dexpbt_isaaclab.msa.controller import (
     ProbeCycleResult,
     WorkerView,
 )
-from dexpbt_isaaclab.msa.decision import SeedEvalResult
+from dexpbt_isaaclab.msa.decision import (
+    PROMOTION_MODE_GLOBAL,
+    PROMOTION_MODE_SELECTIVE,
+    SeedEvalResult,
+)
 from dexpbt_isaaclab.msa.eval_bridge import (
     PILOT_NUM_SEEDS,
     build_seed_manifest,
@@ -260,6 +265,10 @@ class FakeWorld:
 
 
 def make_world(*, permuted: bool = False,
+               promotion_mode: str = PROMOTION_MODE_GLOBAL,
+               population_worker_ids: Optional[list[int]] = None,
+               cap_target_by_worker: Optional[dict[int, int]] = None,
+               run_dir: Optional[Path] = None,
                learn_rates: dict[int, float] | None = None,
                skill_tau: float = 0.55, skill_plus: float = 0.30,
                num_seeds: int = DRY_RUN_NUM_SEEDS,
@@ -267,6 +276,8 @@ def make_world(*, permuted: bool = False,
                taus: dict[int, float] | None = None,
                world: FakeWorld | None = None,
                crash_on: Optional[str] = None,
+               crash_commit_workers: Optional[set[int]] = None,
+               crash_hard: bool = False,
                ) -> tuple[FakeWorld, MSAController, list[WorkerView]]:
     manifest_id, seeds = build_seed_manifest(num_seeds)
     if world is None:
@@ -283,6 +294,9 @@ def make_world(*, permuted: bool = False,
             world.live_tolerance[w] = world.taus[w]
             world.pinned_tolerance[w] = 0.0
     world.crash_on = crash_on
+    if crash_commit_workers is not None:
+        world.crash_commit_workers = set(crash_commit_workers)
+    world.crash_hard = crash_hard
     views = [
         WorkerView(worker_id=w, lineage_id=f"lin_{w}",
                    active_tau=world.taus[w], frame=world.frame[w],
@@ -302,15 +316,37 @@ def make_world(*, permuted: bool = False,
         load_state=world.load_state,
         refresh_view=world.refresh_view,
         set_busy=world.set_busy,
-        packet_frames=PROBE_PACKET_FRAMES)
+        packet_frames=PROBE_PACKET_FRAMES,
+        promotion_mode=promotion_mode,
+        population_worker_ids=population_worker_ids,
+        cap_target_by_worker=cap_target_by_worker,
+        run_dir=run_dir)
     return world, ctl, views
 
 
 def run_dry_run(*, permuted: bool = False,
+                promotion_mode: str = PROMOTION_MODE_GLOBAL,
+                cap_target_by_worker: Optional[dict[int, int]] = None,
                 ) -> tuple[FakeWorld, MSAController, ProbeCycleResult]:
-    world, ctl, views = make_world(permuted=permuted)
+    world, ctl, views = make_world(permuted=permuted,
+                                   promotion_mode=promotion_mode,
+                                   cap_target_by_worker=cap_target_by_worker)
     result = ctl.run_cycle(views)
     return world, ctl, result
+
+
+def run_selective_dry_run() -> tuple[FakeWorld, MSAController, ProbeCycleResult]:
+    """Same six-worker scenario as run_dry_run(), but decided under
+    worker_local_selective: per-worker eligibility (own bootstrap L_mid CI,
+    same-tau rho) instead of one panel-wide gate. In the default scenario
+    all six workers are individually eligible, but max_promote_per_cycle=3
+    and min_population_anchors=3 (TOP_K_RECIPIENTS / MIN_POPULATION_ANCHORS
+    in decision.py) cap the cycle to promoting only the 3 workers with the
+    strongest worker-local L_mid lower bound, ranked by
+    (-L_mid_lower_quantile, -rho, worker_id); the rest remain population
+    anchors at their own tau — the per-worker ranking + anchor reservation
+    global_panel cannot express (its single gate is all-or-nothing)."""
+    return run_dry_run(promotion_mode=PROMOTION_MODE_SELECTIVE)
 
 
 def format_trace(world: FakeWorld, ctl: MSAController,
@@ -362,9 +398,11 @@ def format_trace(world: FakeWorld, ctl: MSAController,
         "",
         "## Retention (worker-local tau) and decision",
         "",
-        f"- panel L_mid 5th-pct (criterion-local conditional panel): "
+        f"- promotion_mode: {result.promotion_mode}",
+        f"- panel L_mid 5th-pct (criterion-local conditional panel"
+        f"{' — DIAGNOSTIC ONLY under worker_local_selective' if result.promotion_mode == PROMOTION_MODE_SELECTIVE else ''}): "
         f"{result.panel_stat['lower_quantile']:+.4f}",
-        f"- promoted: {result.promoted}",
+        f"- promoted (any worker committed to tau_plus): {result.promoted}",
         f"- first_blocking_gate: {result.first_blocking_gate}",
         "",
         "| worker | tau | p_pre | p_post | rho | unavailable |",
@@ -376,6 +414,40 @@ def format_trace(world: FakeWorld, ctl: MSAController,
         lines.append(f"| p{w} | {canonical_tau(d['tau'])} | "
                      f"{d['p_pre']:.3f} | {d['p_post']:.3f} "
                      f"| {rho} | {d['retention_unavailable']} |")
+    if result.promotion_mode == PROMOTION_MODE_SELECTIVE:
+        lines += [
+            "",
+            "## Worker-local selective promotion",
+            "",
+            "- selected_for_promotion (pinned to tau_plus permanently): "
+            f"{result.selected_for_promotion}",
+            "- anchor_workers (kept at tau[w] this cycle so >= "
+            "min_population_anchors stay unpromoted): "
+            f"{result.anchor_workers}",
+            "",
+            "| worker | eligible | rejection_reason | final_tol |",
+            "|---|---|---|---|",
+        ]
+        eligible_by_worker = result.eligible_by_worker or {}
+        reasons = result.rejection_reason_by_worker or {}
+        final_tol = result.final_tol_by_worker or {}
+        for w in sorted(eligible_by_worker):
+            reason = reasons.get(w, "") or "-"
+            tol = final_tol.get(w)
+            tol_str = "n/a" if tol is None else f"{canonical_tau(tol)}"
+            lines.append(f"| p{w} | {eligible_by_worker[w]} | {reason} "
+                         f"| {tol_str} |")
+    if result.budget_admission is not None:
+        adm = result.budget_admission
+        lines += [
+            "",
+            "## Cycle budget admission",
+            "",
+            "- required_reserve (worst-case cycle dose): "
+            f"{adm['required_reserve']:,} frames",
+            f"- budget_eligible_workers: {adm['budget_eligible_workers']}",
+            f"- budget_ineligible_workers: {adm['budget_ineligible_workers']}",
+        ]
     total_plus = sum(v for (w, k), v in world.trained_frames_at_tol.items()
                      if k == "tau_plus")
     lines += [
@@ -405,14 +477,23 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True)
     ap.add_argument("--permuted", action="store_true")
+    ap.add_argument("--selective", action="store_true",
+                    help="drive DECIDE under promotion_mode="
+                         "worker_local_selective instead of global_panel "
+                         "(see run_selective_dry_run)")
     args = ap.parse_args(argv)
     from pathlib import Path
-    world, ctl, result = run_dry_run(permuted=args.permuted)
+    promotion_mode = (PROMOTION_MODE_SELECTIVE if args.selective
+                      else PROMOTION_MODE_GLOBAL)
+    world, ctl, result = run_dry_run(permuted=args.permuted,
+                                     promotion_mode=promotion_mode)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(format_trace(world, ctl, result))
     print(f"wrote {out}")
     print(json.dumps({"promoted": result.promoted,
+                      "promotion_mode": result.promotion_mode,
+                      "selected_for_promotion": result.selected_for_promotion,
                       "first_blocking_gate": result.first_blocking_gate,
                       "recipients": result.routing.recipients,
                       "tau_by_worker": result.tau_by_worker}, indent=2))

@@ -283,3 +283,167 @@ def decide_promotion(
         promote=True, first_blocking_gate="none",
         panel_lower_quantile=lq,
         retention={x: vars(y) for x, y in retention_by_worker.items()})
+
+
+# ---------------------------------------------------------------------------
+# Worker-local selective promotion (MSA_SELECTIVE_STATEFUL)
+# ---------------------------------------------------------------------------
+
+PROMOTION_MODE_GLOBAL = "global_panel"
+PROMOTION_MODE_SELECTIVE = "worker_local_selective"
+MIN_POPULATION_ANCHORS = 3
+
+
+def worker_bootstrap_lower_quantile(
+    paired_diffs: Sequence[float],
+    n_boot: int = BOOTSTRAP_REPEATS,
+    seed: int = BOOTSTRAP_SEED,
+    quantile: float = PANEL_QUANTILE,
+) -> dict:
+    """Per-worker paired bootstrap of (mid - pre) seed diffs; returns the
+    pre-registered lower quantile of the mean replicates.
+
+    Same PRNG contract as the panel statistic (deterministic for a fixed
+    seed). This is a CONDITIONAL CI for THIS worker's paired evals — not a
+    population CI over independent training seeds.
+    """
+    diffs = list(paired_diffs)
+    if len(diffs) < 2:
+        raise ValueError("need >=2 paired seed diffs for worker bootstrap")
+    rng = random.Random(seed)
+    means: list[float] = []
+    n = len(diffs)
+    for _ in range(n_boot):
+        s = 0.0
+        for _ in range(n):
+            s += diffs[rng.randrange(n)]
+        means.append(s / n)
+    means.sort()
+    idx = min(len(means) - 1, max(0, int(quantile * len(means))))
+    return {
+        "statistic": "worker_mean_L_mid",
+        "point": sum(diffs) / n,
+        "lower_quantile": means[idx],
+        "quantile": quantile,
+        "n_boot": n_boot,
+        "prng_seed": seed,
+        "n_seeds": n,
+        "note": ("criterion-local conditional worker L_mid bootstrap; "
+                 "NOT a population CI over independent training seeds"),
+    }
+
+
+@dataclass
+class SelectivePromotionDecision:
+    """Per-worker promote/stay under worker_local_selective mode."""
+    promote_any: bool
+    selected_for_promotion: list[int]
+    anchor_workers: list[int]
+    eligible_by_worker: dict[int, bool]
+    rejection_reason_by_worker: dict[int, str]
+    l_mid_ci_by_worker: dict[int, dict]
+    retention: dict
+    panel_lower_quantile: float
+    first_blocking_gate: str            # cycle-level diagnostic
+    final_tol_by_worker: dict[int, float]
+    details: dict = field(default_factory=dict)
+
+
+def decide_selective_promotion(
+    paired_diffs_by_worker: dict[int, Sequence[float]],
+    retention_by_worker: dict[int, RetentionResult],
+    tau_by_worker: dict[int, float],
+    tau_plus_by_worker: dict[int, float],
+    retention_threshold: float,
+    *,
+    population_worker_ids: Sequence[int],
+    max_promote: int = TOP_K_RECIPIENTS,
+    min_anchors: int = MIN_POPULATION_ANCHORS,
+    panel_stat: Optional[dict] = None,
+) -> SelectivePromotionDecision:
+    """Worker-local selective promotion.
+
+    eligible[w] requires ALL of:
+      1. p_pre[w] >= MIN_P_PRE_FOR_RETENTION (via retention_unavailable)
+      2. worker L_mid lower confidence bound > 0
+      3. rho[w] >= retention_threshold (point gate; no invented rho CI)
+      4. eval pairing already enforced by callers (ManifestMismatch)
+
+    Selection: eligible sorted by (-L_mid_lo, -rho, worker_id); take at most
+    ``max_promote`` such that at least ``min_anchors`` population workers
+    remain unpromoted. Panel statistic is recorded as a diagnostic only —
+    it is NOT a veto.
+    """
+    l_mid_ci: dict[int, dict] = {}
+    eligible: dict[int, bool] = {}
+    reasons: dict[int, str] = {}
+    due = sorted(retention_by_worker.keys())
+    for w in due:
+        r = retention_by_worker[w]
+        diffs = list(paired_diffs_by_worker.get(w, []))
+        try:
+            ci = worker_bootstrap_lower_quantile(diffs)
+        except ValueError as exc:
+            ci = {"lower_quantile": float("-inf"), "error": str(exc)}
+        l_mid_ci[w] = ci
+        if r.retention_unavailable or r.p_pre < MIN_P_PRE_FOR_RETENTION:
+            eligible[w] = False
+            reasons[w] = "p_pre<0.01_or_unavailable"
+            continue
+        if float(ci.get("lower_quantile", float("-inf"))) <= 0:
+            eligible[w] = False
+            reasons[w] = "L_mid_lower_quantile<=0"
+            continue
+        if r.rho is None or r.rho < retention_threshold:
+            eligible[w] = False
+            reasons[w] = "same_tau_retention"
+            continue
+        eligible[w] = True
+        reasons[w] = ""
+
+    ranked = sorted(
+        (w for w in due if eligible[w]),
+        key=lambda w: (
+            -float(l_mid_ci[w]["lower_quantile"]),
+            -(float(retention_by_worker[w].rho or 0.0)),
+            w,
+        ),
+    )
+    pop = sorted(int(x) for x in population_worker_ids)
+    n_pop = len(pop) if pop else max(len(due), 6)
+    # selected <= max_promote AND (n_pop - selected) >= min_anchors
+    max_by_anchors = max(0, n_pop - int(min_anchors))
+    k = min(int(max_promote), max_by_anchors, len(ranked))
+    selected = ranked[:k]
+    selected_set = set(selected)
+    anchors = [w for w in pop if w not in selected_set]
+    if not pop:
+        anchors = [w for w in due if w not in selected_set]
+
+    final_tol = {w: float(tau_by_worker[w]) for w in due}
+    for w in selected:
+        final_tol[w] = float(tau_plus_by_worker[w])
+
+    panel_lq = float((panel_stat or {}).get("lower_quantile", float("nan")))
+    if not selected:
+        gate = "no_eligible_workers"
+    else:
+        gate = "none"
+    return SelectivePromotionDecision(
+        promote_any=bool(selected),
+        selected_for_promotion=list(selected),
+        anchor_workers=list(anchors),
+        eligible_by_worker=dict(eligible),
+        rejection_reason_by_worker=dict(reasons),
+        l_mid_ci_by_worker=dict(l_mid_ci),
+        retention={w: vars(r) for w, r in retention_by_worker.items()},
+        panel_lower_quantile=panel_lq,
+        first_blocking_gate=gate,
+        final_tol_by_worker=final_tol,
+        details={
+            "promotion_mode": PROMOTION_MODE_SELECTIVE,
+            "max_promote": int(max_promote),
+            "min_anchors": int(min_anchors),
+            "panel_is_diagnostic_only": True,
+        },
+    )

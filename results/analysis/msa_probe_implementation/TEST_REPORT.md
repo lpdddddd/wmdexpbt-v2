@@ -26,6 +26,13 @@ Three evidence tiers, kept separate on purpose:
    `LAUNCH_CHECKLIST.md`.
 
 ## MSA suite: `tests/test_msa_probe.py` — 143/143 passed
+## Selective/budget suite: `tests/test_msa_selective_budget.py` — 17/17 passed
+
+Budget admission + worker-local selective promotion + Cycle 1/2 real-data
+replay (global reproduces false/false; selective promotes w3+w2 then
+w0+w1, rejects w5 on ρ). Full combined run: 197 passed.
+
+## MSA suite (prior): `tests/test_msa_probe.py` — 143/143 passed
 ## Bootstrap suite: `tests/test_state_bootstrap.py` — 37/37 passed
 
 Lineage propagation fix (2026-07-20): 5 new tests in

@@ -41,13 +41,24 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
+from dexpbt_isaaclab.msa.budget import (
+    admit_cycle_budget,
+    clear_reservation,
+    load_reservation,
+    write_reservation,
+)
 from dexpbt_isaaclab.msa.decision import (
+    PROMOTION_MODE_GLOBAL,
+    PROMOTION_MODE_SELECTIVE,
     RetentionResult,
     RoutingResult,
     SeedEvalResult,
+    SelectivePromotionDecision,
     decide_promotion,
+    decide_selective_promotion,
     l_mid,
     panel_bootstrap_lower_quantile,
     route_second_half,
@@ -158,6 +169,16 @@ class ProbeCycleResult:
     tau_plus_by_worker: dict[int, float] = field(default_factory=dict)
     records: dict[int, dict] = field(default_factory=dict)
     resumed: bool = False
+    # -- worker_local_selective / budget admission (optional; unset ==
+    # global_panel with no budget gating, preserving the original result
+    # shape bit-for-bit) --------------------------------------------------
+    promotion_mode: str = PROMOTION_MODE_GLOBAL
+    selected_for_promotion: Optional[list[int]] = None
+    anchor_workers: Optional[list[int]] = None
+    eligible_by_worker: Optional[dict[int, bool]] = None
+    rejection_reason_by_worker: Optional[dict[int, str]] = None
+    budget_admission: Optional[dict] = None
+    final_tol_by_worker: Optional[dict[int, float]] = None
 
 
 class CycleFailure(RuntimeError):
@@ -186,6 +207,10 @@ class MSAController:
         top_k: int = FORMAL_TOP_K,
         packet_frames: int = PROBE_PACKET_FRAMES,
         permuted_route: bool = False,
+        promotion_mode: str = PROMOTION_MODE_GLOBAL,
+        population_worker_ids: Optional[list[int]] = None,
+        cap_target_by_worker: Optional[dict[int, int]] = None,
+        run_dir: Optional[Path] = None,
     ) -> None:
         self.evaluate = evaluate
         self.snapshot = snapshot
@@ -194,6 +219,21 @@ class MSAController:
         self.top_k = int(top_k)
         self.packet_frames = int(packet_frames)
         self.permuted_route = bool(permuted_route)
+        self.promotion_mode = str(promotion_mode)
+        self.population_worker_ids = (list(population_worker_ids)
+                                      if population_worker_ids is not None
+                                      else None)
+        # worker -> hard frame ceiling for this population (baseline_tip +
+        # CONTINUATION_CAP); when set, a FRESH cycle is gated by
+        # admit_cycle_budget BEFORE PRE_EVAL so a worker can never be
+        # admitted into a probe cycle it cannot finish inside its cap.
+        self.cap_target_by_worker = (dict(cap_target_by_worker)
+                                     if cap_target_by_worker is not None
+                                     else None)
+        # run_dir for CYCLE_BUDGET_RESERVATION.json persistence (mirrors
+        # set_busy's coordination role: a sidecar restart must reuse the
+        # SAME admission, never re-admit or double-reserve).
+        self.run_dir = Path(run_dir) if run_dir is not None else None
         self._pin = pin_tolerance
         self._commit = commit_tolerance
         self._hold = hold_workers
@@ -332,6 +372,8 @@ class MSAController:
             m.transition(MSAPhase.NORMAL, "committing resumed")
             self._persist(due, provs, cycle)
             self._set_busy(None)
+            if self.run_dir is not None:
+                clear_reservation(self.run_dir)
             return ProbeCycleResult(
                 intervention_id=intervention_id, due_workers=due,
                 routing=None,
@@ -345,7 +387,11 @@ class MSAController:
                 first_blocking_gate=str(cycle.get("first_blocking_gate",
                                                   "")),
                 tau_by_worker=dict(tau), tau_plus_by_worker=dict(tau_plus),
-                resumed=True)
+                resumed=True,
+                promotion_mode=str(cycle.get("promotion_mode",
+                                             PROMOTION_MODE_GLOBAL)),
+                final_tol_by_worker=dict(final_tol),
+                budget_admission=cycle.get("budget_admission"))
         except Exception as err:
             # promotion is NOT claimed; un-acked workers revert to their
             # own tau via a synchronous pin (never a second bounded wait
@@ -365,6 +411,11 @@ class MSAController:
             except Exception:
                 pass
             self._set_busy(None)
+            if self.run_dir is not None:
+                try:
+                    clear_reservation(self.run_dir)
+                except Exception:
+                    pass
             raise CycleFailure(
                 f"MSA cycle {intervention_id} failed while COMMITTING: "
                 f"{err}") from err
@@ -378,6 +429,7 @@ class MSAController:
                 and str(resume_cycle.get("status")) == "COMMITTING"):
             return self._resume_committing(resume_cycle)
 
+        admission = None
         if resume_cycle is not None:
             intervention_id = str(resume_cycle["intervention_id"])
             due = [int(w) for w in resume_cycle["due_workers"]]
@@ -390,6 +442,14 @@ class MSAController:
             start_frames = {int(k): int(v)
                             for k, v in resume_cycle["start_frames"].items()}
             resumed = True
+            # a mid-cycle resume NEVER re-admits or double-reserves: the
+            # sidecar restart just re-reads the SAME reservation this
+            # intervention already wrote (if any).
+            if self.run_dir is not None:
+                existing = load_reservation(self.run_dir)
+                if (existing is not None
+                        and str(existing.intervention_id) == intervention_id):
+                    admission = existing
         else:
             due = self.due_workers(workers)
             intervention_id = f"msa_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -410,6 +470,33 @@ class MSAController:
             start_frames = {}
             resumed = False
 
+            # -- BUDGET ADMISSION: refuse workers who cannot finish the
+            # worst-case cycle dose inside their hard cap. Runs BEFORE any
+            # hold / persist / busy marker so an all-ineligible cycle
+            # leaves the panel completely untouched. -----------------------
+            if self.cap_target_by_worker is not None:
+                latest_frame_by_worker = {w: int(by_id[w].frame) for w in due}
+                admission = admit_cycle_budget(
+                    intervention_id=intervention_id,
+                    due_workers=due,
+                    latest_frame_by_worker=latest_frame_by_worker,
+                    cap_target_by_worker=self.cap_target_by_worker,
+                    packet_frames=self.packet_frames)
+                if self.run_dir is not None:
+                    write_reservation(self.run_dir, admission)
+                due = list(admission.budget_eligible_workers)
+                if not due:
+                    return ProbeCycleResult(
+                        intervention_id=intervention_id, due_workers=[],
+                        routing=None, l_mid_by_worker={}, panel_stat=None,
+                        retention_by_worker={}, promoted=False,
+                        first_blocking_gate="all_budget_ineligible",
+                        budget_admission=admission.to_dict())
+                tau = {w: float(canonical_tau(by_id[w].active_tau))
+                       for w in due}
+                tau_plus = {w: float(canonical_tau(tau_plus_of(tau[w])))
+                           for w in due}
+
         cycle: dict = dict(resume_cycle or {})
         cycle.update({
             "intervention_id": intervention_id,
@@ -419,7 +506,11 @@ class MSAController:
             "status": "RUNNING",
             "packet_frames": self.packet_frames,
             "evaluator_manifest_id": self.evaluator_manifest_id,
+            "promotion_mode": cycle.get("promotion_mode", self.promotion_mode),
         })
+        if admission is not None and "budget_admission" not in cycle:
+            cycle["budget_admission"] = admission.to_dict()
+            cycle.setdefault("observed_cycle_dose_by_worker", {})
 
         provs: dict[int, MSAProvenance] = {}
         records: dict[int, InterventionRecord] = {}
@@ -664,29 +755,76 @@ class MSAController:
                 for w in due
             }
             panel_stat = panel_bootstrap_lower_quantile(paired)
-            decision = decide_promotion(panel_stat, retention_by_worker,
-                                        self.retention_threshold)
-            for w in due:
-                records[w].first_blocking_gate = decision.first_blocking_gate
-                records[w].final_decision = ("promote" if decision.promote
-                                             else "stay")
-                provs[w].record_intervention(records[w])
+            cycle["panel_stat"] = dict(panel_stat)
 
-            final_tol = dict(tau)
-            if decision.promote:
-                m.transition(MSAPhase.PROMOTE, "all gates passed")
-                final_tol = dict(tau_plus)
+            sel: Optional[SelectivePromotionDecision] = None
+            if self.promotion_mode == PROMOTION_MODE_SELECTIVE:
+                population_ids = (self.population_worker_ids
+                                  if self.population_worker_ids is not None
+                                  else list(range(6)))
+                sel = decide_selective_promotion(
+                    paired, retention_by_worker, tau, tau_plus,
+                    self.retention_threshold,
+                    population_worker_ids=population_ids,
+                    panel_stat=panel_stat)
+                promote_any = sel.promote_any
+                first_blocking_gate = sel.first_blocking_gate
+                final_tol = dict(sel.final_tol_by_worker)
+                decision_label = "promote" if promote_any else "stay"
                 for w in due:
-                    self._pin(w, tau_plus[w])
+                    if w in sel.selected_for_promotion:
+                        records[w].first_blocking_gate = "none"
+                        records[w].final_decision = "promote"
+                    else:
+                        reason = (sel.rejection_reason_by_worker.get(w)
+                                 or first_blocking_gate)
+                        records[w].first_blocking_gate = reason
+                        records[w].final_decision = "stay"
+                    provs[w].record_intervention(records[w])
+                cycle["eligible_by_worker"] = {
+                    str(w): bool(v) for w, v in sel.eligible_by_worker.items()}
+                cycle["rejection_reason_by_worker"] = dict(
+                    sel.rejection_reason_by_worker)
+                cycle["l_mid_ci_by_worker"] = {
+                    str(w): v for w, v in sel.l_mid_ci_by_worker.items()}
+                cycle["selected_for_promotion"] = list(sel.selected_for_promotion)
+                cycle["anchor_workers"] = list(sel.anchor_workers)
+            else:
+                # global_panel: BIT-FOR-BIT the original single-gate path.
+                decision = decide_promotion(panel_stat, retention_by_worker,
+                                            self.retention_threshold)
+                promote_any = decision.promote
+                first_blocking_gate = decision.first_blocking_gate
+                final_tol = dict(tau)
+                if promote_any:
+                    final_tol = dict(tau_plus)
+                decision_label = "promote" if promote_any else "stay"
+                for w in due:
+                    records[w].first_blocking_gate = decision.first_blocking_gate
+                    records[w].final_decision = decision_label
+                    provs[w].record_intervention(records[w])
+
+            if promote_any:
+                m.transition(MSAPhase.PROMOTE,
+                            "all gates passed"
+                            if self.promotion_mode == PROMOTION_MODE_GLOBAL
+                            else "selective promotion")
+                pin_targets = (due if self.promotion_mode ==
+                              PROMOTION_MODE_GLOBAL else sel.selected_for_promotion)
+                for w in pin_targets:
+                    self._pin(w, final_tol[w])
 
             # -- COMMITTING: persisted BEFORE any durable commit ---------------
             # The machine stays in PROMOTE (promote) / DECIDE (stay) and the
             # cycle is NOT DONE until every worker's durable commit is
             # acknowledged; a crash between DECIDE and the last ack resumes
             # into _resume_committing (commits only, no re-eval/re-train).
+            # final_tol may be MIXED under worker_local_selective (some due
+            # workers at tau_plus, others at their own tau); _commit_all
+            # already commits each worker to its OWN final_tol[w] entry.
             cycle["status"] = "COMMITTING"
-            cycle["decision"] = ("promote" if decision.promote else "stay")
-            cycle["first_blocking_gate"] = decision.first_blocking_gate
+            cycle["decision"] = decision_label
+            cycle["first_blocking_gate"] = first_blocking_gate
             cycle["final_tol_by_worker"] = {str(w): final_tol[w] for w in due}
             cycle["commit_acks_by_worker"] = {str(w): False for w in due}
             cycle["retention_by_worker"] = {
@@ -701,11 +839,21 @@ class MSAController:
             self._commit_all(due, final_tol, cycle, provs)
             cycle["status"] = "DONE"
             m.transition(MSAPhase.NORMAL,
-                         "promotion applied" if decision.promote
-                         else decision.first_blocking_gate)
+                         "promotion applied" if promote_any
+                         else first_blocking_gate)
+            # best-effort dose bookkeeping: the last frame OBSERVED within
+            # the cycle (post second-probe hold) minus the packet start;
+            # the actual post-commit tick (if any) is not re-read here, so
+            # this is a lower bound on the true consumed dose.
+            if "budget_admission" in cycle:
+                cycle["observed_cycle_dose_by_worker"] = {
+                    str(w): int(post_frames[w]) - int(start_frames[w])
+                    for w in due}
             self._persist(due, provs, cycle)
             self._set_busy(None)
-            promoted_committed = decision.promote
+            promoted_committed = promote_any
+            if self.run_dir is not None:
+                clear_reservation(self.run_dir)
 
             return ProbeCycleResult(
                 intervention_id=intervention_id, due_workers=due,
@@ -713,11 +861,23 @@ class MSAController:
                 panel_stat=panel_stat,
                 retention_by_worker={w: vars(r)
                                      for w, r in retention_by_worker.items()},
-                promoted=decision.promote,
-                first_blocking_gate=decision.first_blocking_gate,
+                promoted=promote_any,
+                first_blocking_gate=first_blocking_gate,
                 tau_by_worker=dict(tau), tau_plus_by_worker=dict(tau_plus),
                 records={w: vars(records[w]) for w in due},
-                resumed=resumed)
+                resumed=resumed,
+                promotion_mode=self.promotion_mode,
+                selected_for_promotion=(list(sel.selected_for_promotion)
+                                        if sel is not None else None),
+                anchor_workers=(list(sel.anchor_workers)
+                               if sel is not None else None),
+                eligible_by_worker=(dict(sel.eligible_by_worker)
+                                   if sel is not None else None),
+                rejection_reason_by_worker=(dict(sel.rejection_reason_by_worker)
+                                           if sel is not None else None),
+                budget_admission=(admission.to_dict()
+                                  if admission is not None else None),
+                final_tol_by_worker=dict(final_tol))
 
         except Exception as err:
             # -- crash cleanup: nobody may be left running at tau_plus ---------
@@ -763,6 +923,11 @@ class MSAController:
             # (a hard kill skips this whole handler and leaves it in place
             # for the watchdog / guard to act on).
             self._set_busy(None)
+            if self.run_dir is not None:
+                try:
+                    clear_reservation(self.run_dir)
+                except Exception:
+                    pass
             raise CycleFailure(
                 f"MSA cycle {intervention_id} failed in {failed_phase}: "
                 f"{err}") from err

@@ -1,0 +1,97 @@
+{
+  "intervention_id": "msa_1784492852_5fa1236a",
+  "due_workers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "tau_by_worker": {
+    "0": 0.0231124875097,
+    "1": 0.0202841125345,
+    "2": 0.0254899875923,
+    "3": 0.0236583904762,
+    "4": 0.0192699069078,
+    "5": 0.0213081161592
+  },
+  "tau_plus_by_worker": {
+    "0": 0.0219568631342,
+    "1": 0.0192699069078,
+    "2": 0.0242154882127,
+    "3": 0.0224754709524,
+    "4": 0.0183064115624,
+    "5": 0.0202427103512
+  },
+  "l_mid_by_worker": {
+    "0": -0.29560302734375005,
+    "1": -0.07398681640624971,
+    "2": 0.03146484375000014,
+    "3": 0.2869873046874999,
+    "4": -0.05621337890624989,
+    "5": -0.47427978515625
+  },
+  "panel_stat": {
+    "statistic": "panel_median_L_mid",
+    "lower_quantile": -0.07104492187500003,
+    "quantile": 0.05,
+    "n_boot": 10000,
+    "prng_seed": 20260719,
+    "n_workers": 6,
+    "note": "criterion-local conditional panel statistic: each worker's L_mid is measured at its OWN tau_plus; the panel median conditions on this checkpoint panel and is NOT a population CI over independent seeds"
+  },
+  "retention_by_worker": {
+    "0": {
+      "tau": 0.0231124875097,
+      "p_pre": 0.73922119140625,
+      "p_post": 0.49945800781249994,
+      "rho": 0.6756543421900028,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "1": {
+      "tau": 0.0202841125345,
+      "p_pre": 0.8095629882812502,
+      "p_post": 0.815908203125,
+      "rho": 1.007837827242104,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "2": {
+      "tau": 0.0254899875923,
+      "p_pre": 0.8055517578125,
+      "p_post": 0.74494384765625,
+      "rho": 0.9247622395849119,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "3": {
+      "tau": 0.0236583904762,
+      "p_pre": 0.5276293945312499,
+      "p_post": 0.8110815429687499,
+      "rho": 1.5372182660318254,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "4": {
+      "tau": 0.0192699069078,
+      "p_pre": 0.7434765624999999,
+      "p_post": 0.7635888671875,
+      "rho": 1.027051699679504,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "5": {
+      "tau": 0.0213081161592,
+      "p_pre": 0.6956982421874999,
+      "p_post": 0.2818847656249999,
+      "rho": 0.4051825181254781,
+      "retention_unavailable": false,
+      "reason": ""
+    }
+  },
+  "promoted": false,
+  "first_blocking_gate": "panel_lower_quantile",
+  "resumed": false
+}

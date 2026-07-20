@@ -1,0 +1,42 @@
+{
+  "sidecar_pid": 750450,
+  "holds_found": {
+    "2": [
+      753357,
+      753379,
+      753380,
+      753381
+    ],
+    "3": [
+      754630,
+      754651,
+      754652,
+      754653
+    ],
+    "4": [
+      755970,
+      755991,
+      755992,
+      755993
+    ]
+  },
+  "sigcont_delivered": {
+    "2": [],
+    "3": [],
+    "4": []
+  },
+  "busy_marker": {
+    "intervention_id": "msa_1784551259_a03ee1cf",
+    "phase": "PRE_EVAL",
+    "status": "RUNNING",
+    "due_workers": [
+      2,
+      3,
+      4
+    ],
+    "timestamp": 1784551259.262027
+  },
+  "holds_corrupt": false,
+  "time": 1784551375.0981977,
+  "action": "released held workers, stopping the whole arm (no uncontrolled continuation training)"
+}

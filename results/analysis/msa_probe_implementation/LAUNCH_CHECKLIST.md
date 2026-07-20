@@ -21,6 +21,7 @@ proved the bare warm start does NOT reproduce the stall (empty
 | GATE_RELAX_STATEFUL | `results/launchers/msa_probe/start_gate_relax_stateful.sh` |
 | MSA_STATEFUL | `results/launchers/msa_probe/start_msa_stateful.sh` |
 | MSA_PERMUTED_STATEFUL | `results/launchers/msa_probe/start_msa_permuted_stateful.sh` |
+| **MSA_SELECTIVE_STATEFUL** (worker-local promote) | `results/launchers/msa_probe/start_msa_selective_stateful.sh` |
 | **disposable GPU hold smoke** (produces the certificate) | `results/launchers/msa_probe/start_stateful_hold_smoke.sh` |
 | in-arm hold smoke — **EXECUTION SMOKE ONLY, forbidden in the formal four-arm comparison** | `results/launchers/msa_probe/run_hold_smoke.sh` |
 

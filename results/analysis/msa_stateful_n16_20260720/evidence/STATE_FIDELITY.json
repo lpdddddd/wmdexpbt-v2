@@ -1,0 +1,1146 @@
+{
+  "schema_version": 1,
+  "source_run": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631",
+  "run_dir": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431",
+  "timestamp": 1784489671.5811267,
+  "state_faithful": true,
+  "committed_tick_frames": 80000000,
+  "workers": [
+    {
+      "worker_id": 0,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 33.2327880859375,
+          "restored": 33.2327880859375,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 3920000000,
+          "restored": 3920000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.023112487509668322,
+          "restored": 0.023112487509668322,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.024328934220703497,
+          "restored": 0.024328934220703497,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 4840000000,
+          "restored": 4840000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 32.29931640625,
+          "restored": 32.29931640625,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 1.0,
+          "restored": 1.0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 2,
+          "restored": 2,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": 3960000000,
+          "restored": 3960000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 2160000000,
+          "restored": 2160000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": 4600000000,
+          "restored": 4600000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 4160000000,
+          "restored": 4160000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.023112487509668322,
+          "restored": 0.023112487509668322,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 3,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=False); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.023112487509668322,
+          "restored": 0.023112487509668322,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 691809,
+          "restored": 691809,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 0,
+          "restored": 0,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    },
+    {
+      "worker_id": 1,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 43.4085693359375,
+          "restored": 43.4085693359375,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 5120000000,
+          "restored": 5120000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.020284112534534084,
+          "restored": 0.020284112534534084,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.02135169740477272,
+          "restored": 0.02135169740477272,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 4760000000,
+          "restored": 4760000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 42.4007568359375,
+          "restored": 42.4007568359375,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 0.9915955591208453,
+          "restored": 0.9915955591208453,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 1,
+          "restored": 1,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": 4920000000,
+          "restored": 4920000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 5140000000,
+          "restored": 5140000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 1720000000,
+          "restored": 1720000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": 3440000000,
+          "restored": 3440000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 5170000000,
+          "restored": 5170000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.020284112534534084,
+          "restored": 0.020284112534534084,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 0,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=True); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.020284112534534084,
+          "restored": 0.020284112534534084,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 0,
+          "restored": 0,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    },
+    {
+      "worker_id": 2,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 44.83447265625,
+          "restored": 44.83447265625,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 5120000000,
+          "restored": 5120000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.02548998759231097,
+          "restored": 0.02548998759231097,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.02548998759231097,
+          "restored": 0.02548998759231097,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 4360000000,
+          "restored": 4360000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 34.164306640625,
+          "restored": 34.164306640625,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 0.8918297112994711,
+          "restored": 0.8918297112994711,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 6,
+          "restored": 6,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 6,
+          "restored": 6,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": 3880000000,
+          "restored": 3880000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 2200000000,
+          "restored": 2200000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": -1,
+          "restored": -1,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 5250000000,
+          "restored": 5250000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5080000000,
+          "restored": 5080000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.02548998759231097,
+          "restored": 0.02548998759231097,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 0,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=False); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.02548998759231097,
+          "restored": 0.02548998759231097,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 715040,
+          "restored": 715040,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 715040,
+          "restored": 715040,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 12208,
+          "restored": 12208,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    },
+    {
+      "worker_id": 3,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 41.2491455078125,
+          "restored": 41.2491455078125,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 3600000000,
+          "restored": 3600000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.023658390476202464,
+          "restored": 0.023658390476202464,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.023658390476202464,
+          "restored": 0.023658390476202464,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 39.6588134765625,
+          "restored": 39.6588134765625,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 0.9614456975612066,
+          "restored": 0.9614456975612066,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": -1000000000000000000,
+          "restored": -1000000000000000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 1960000000,
+          "restored": 1960000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": 2440000000,
+          "restored": 2440000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 4690000000,
+          "restored": 4690000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.023658390476202464,
+          "restored": 0.023658390476202464,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 1,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=False); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.023658390476202464,
+          "restored": 0.023658390476202464,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 682033,
+          "restored": 682033,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 0,
+          "restored": 0,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    },
+    {
+      "worker_id": 4,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 40.2425537109375,
+          "restored": 40.2425537109375,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 4960000000,
+          "restored": 4960000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.019269906907807378,
+          "restored": 0.019269906907807378,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.019269906907807378,
+          "restored": 0.019269906907807378,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 4520000000,
+          "restored": 4520000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 37.6373291015625,
+          "restored": 37.6373291015625,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 0.9567644558086998,
+          "restored": 0.9567644558086998,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 1,
+          "restored": 1,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 1,
+          "restored": 1,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": 4680000000,
+          "restored": 4680000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 2000000000,
+          "restored": 2000000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": 2680000000,
+          "restored": 2680000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 5250000000,
+          "restored": 5250000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.019269906907807378,
+          "restored": 0.019269906907807378,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 0,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=True); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.019269906907807378,
+          "restored": 0.019269906907807378,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 0,
+          "restored": 0,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    },
+    {
+      "worker_id": 5,
+      "faithful": true,
+      "fields": {
+        "control_json_non_msa_fields": {
+          "source": "131 fields",
+          "restored": "identical",
+          "category": "copied_exact",
+          "match": true
+        },
+        "control_msa_cleared": {
+          "source": "-",
+          "restored": "cleared",
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.recent_peak_nsucc_mean": {
+          "source": 44.995361328125,
+          "restored": 44.995361328125,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.collapse_freeze_until": {
+          "source": 5040000000,
+          "restored": 5040000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.wm_curriculum_freeze_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_tolerance": {
+          "source": 0.02130811615915868,
+          "restored": 0.02130811615915868,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_tolerance": {
+          "source": 0.02130811615915868,
+          "restored": 0.02130811615915868,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_frame": {
+          "source": 4680000000,
+          "restored": 4680000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_nsucc_mean": {
+          "source": 36.9365234375,
+          "restored": 36.9365234375,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_mastered_safe_global_retention": {
+          "source": 0.9177945075010768,
+          "restored": 0.9177945075010768,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.repeated_collapse_count": {
+          "source": 2,
+          "restored": 2,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.rollback_count": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.last_rollback_frame": {
+          "source": -1000000000000000000,
+          "restored": -1000000000000000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.floor_recovery_protect_until": {
+          "source": 0,
+          "restored": 0,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_floor_frame": {
+          "source": 1880000000,
+          "restored": 1880000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.first_hard_floor_frame": {
+          "source": 2360000000,
+          "restored": 2360000000,
+          "category": "copied_exact",
+          "match": true
+        },
+        "seed.curriculum_safety_freeze_until": {
+          "source": 5250000000,
+          "restored": 5250000000,
+          "category": "copied_exact",
+          "match": true,
+          "note": "max(rollback_freeze_until, late_floor_freeze_until): both source gates funnel into the same observer freeze map"
+        },
+        "seed.window_last_sample_frame": {
+          "source": 5000000000,
+          "restored": 5000000000,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_last_sample_tolerance": {
+          "source": 0.02130811615915868,
+          "restored": 0.02130811615915868,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.window_len": {
+          "source": 8,
+          "restored": 8,
+          "category": "rebuilt_from_metas",
+          "match": true
+        },
+        "seed.shrinks_since_rollback": {
+          "source": "unpersisted (source observer memory)",
+          "restored": 0,
+          "category": "rebuilt_from_metas",
+          "match": true,
+          "note": "exact when the rebuild horizon covers last_rollback_frame (covers=False); otherwise a conservative lower bound"
+        },
+        "env.success_tolerance": {
+          "source": 0.02130811615915868,
+          "restored": 0.02130811615915868,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.last_curriculum_update": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.frame_since_restart": {
+          "source": 711360,
+          "restored": 711360,
+          "category": "env_clock",
+          "match": true
+        },
+        "env.curriculum_freeze_frames_after_restart": {
+          "source": 0,
+          "restored": 0,
+          "category": "env_clock",
+          "match": true
+        },
+        "lost.promising_protect_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.mutation_frozen_until": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.late_floor_retention_patience_count": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        },
+        "lost.floor_recovery_score_history": {
+          "source": "unpersisted in source",
+          "restored": "default",
+          "category": "default_lost",
+          "match": false
+        }
+      }
+    }
+  ],
+  "env_clocks": {
+    "0": {
+      "success_tolerance": 0.023112487509668322,
+      "last_curriculum_update": 691809,
+      "frame_since_restart": 711360,
+      "curriculum_freeze_frames_after_restart": 0
+    },
+    "1": {
+      "success_tolerance": 0.020284112534534084,
+      "last_curriculum_update": 711360,
+      "frame_since_restart": 711360,
+      "curriculum_freeze_frames_after_restart": 0
+    },
+    "2": {
+      "success_tolerance": 0.02548998759231097,
+      "last_curriculum_update": 715040,
+      "frame_since_restart": 715040,
+      "curriculum_freeze_frames_after_restart": 12208
+    },
+    "3": {
+      "success_tolerance": 0.023658390476202464,
+      "last_curriculum_update": 682033,
+      "frame_since_restart": 711360,
+      "curriculum_freeze_frames_after_restart": 0
+    },
+    "4": {
+      "success_tolerance": 0.019269906907807378,
+      "last_curriculum_update": 711360,
+      "frame_since_restart": 711360,
+      "curriculum_freeze_frames_after_restart": 0
+    },
+    "5": {
+      "success_tolerance": 0.02130811615915868,
+      "last_curriculum_update": 711360,
+      "frame_since_restart": 711360,
+      "curriculum_freeze_frames_after_restart": 0
+    }
+  },
+  "known_losses": {
+    "promising_protect_until": "restored as default; see STATE_SOURCE_AUDIT.md for the behavioral impact assessment",
+    "mutation_frozen_until": "restored as default; see STATE_SOURCE_AUDIT.md for the behavioral impact assessment",
+    "late_floor_retention_patience_count": "restored as default; see STATE_SOURCE_AUDIT.md for the behavioral impact assessment",
+    "floor_recovery_score_history": "restored as default; see STATE_SOURCE_AUDIT.md for the behavioral impact assessment"
+  }
+}

@@ -20,21 +20,38 @@ Modules (pure python; no Isaac import anywhere in this package):
 - decision:    routing (top-k by criterion-local L_mid, stable tie-break;
                permuted-route control arm), same-tau retention rho, paired
                bootstrap panel statistic, promotion gates +
-               first_blocking_gate.
+               first_blocking_gate; PROMOTION_MODE_GLOBAL (one panel-wide
+               gate) vs PROMOTION_MODE_SELECTIVE (per-worker eligibility +
+               ranked, anchor-preserving selection via
+               decide_selective_promotion).
+- budget:      worst-case cycle-dose admission (admit_cycle_budget):
+               refuses a due worker into a new probe cycle unless its
+               remaining worker-local frames cover the worst-case
+               COMMON_PROBE + SECOND_PROBE + COMMITTING dose; reservation
+               persisted (CYCLE_BUDGET_RESERVATION.json) so a sidecar
+               restart never re-admits or double-reserves.
 - controller:  drives one probe cycle (heterogeneous per-worker tau /
                tau_plus, PARALLEL 20M-committed-tick exposure packets,
                phase-barrier holds around every eval, persisted +
-               idempotently resumable cycles, crash cleanup).
+               idempotently resumable cycles, crash cleanup); optionally
+               gates admission through budget.admit_cycle_budget and
+               decides promotion through decision.decide_selective_promotion
+               when promotion_mode="worker_local_selective".
 - sidecar:     production wiring (committed-tick worker views, SIGSTOP/
                SIGCONT holds, locked msa_* control updates, durable
                tolerance commits synced into the resume snapshot,
                explicit eval GPU).
 - continuation_guard: fail-closed bootstrap verification + first-tick
                tolerance/lineage validation + worker-local +100M hard
-               frame cap for ALL four continuation arms.
+               frame cap for ALL continuation arms; while an MSA cycle's
+               budget reservation is in flight, also enforces the
+               reserved per-worker dose ceiling (fails closed on overrun,
+               otherwise defers cap/park exactly like the ordinary busy
+               marker).
 - audit:       read-only 3B-5B first-blocker log audit.
-- arms:        continuation arm configs (BASE_CONTINUATION / GATE_RELAX /
-               MSA / MSA_PERMUTED_ROUTE) and dry-run launcher plan.
+- arms:        continuation arm configs (BASE_STATEFUL / GATE_RELAX_STATEFUL /
+               MSA_STATEFUL / MSA_PERMUTED_STATEFUL / MSA_SELECTIVE_STATEFUL)
+               and dry-run launcher plan.
 
 Design constraints honored throughout:
 - tolerances are HETEROGENEOUS: every worker keeps its own tau[w] and

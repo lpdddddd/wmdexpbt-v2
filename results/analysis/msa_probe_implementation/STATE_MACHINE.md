@@ -106,3 +106,17 @@ holds/pins.
 - Resume from a checkpoint without provenance (any pre-MSA checkpoint):
   immediately due — no fresh 100M wait.
 - At tau <= 0.010 there is no tighter sentinel: never due.
+
+
+## Promotion modes (2026-07-20)
+
+- `global_panel` (default, MSA_STATEFUL): panel L_mid lower quantile >0
+  AND every due worker ρ≥threshold → **all** due workers commit τ⁺.
+- `worker_local_selective` (MSA_SELECTIVE_STATEFUL): per-worker L_mid CI
+  + ρ gates; top-3 eligible commit τ⁺; others stay at τ; ≥3 population
+  anchors. Panel statistic recorded as diagnostic only.
+
+## Cycle budget admission
+
+Before PRE_EVAL: `remaining >= 2*(packet+tick)+tick`. Failure → no
+MSA_BUSY, `MSA_NO_NEW_CYCLE.json`, guard proceeds to ARM_COMPLETE.

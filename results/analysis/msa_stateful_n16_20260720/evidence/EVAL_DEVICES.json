@@ -1,0 +1,6 @@
+{
+  "eval_devices": "cuda:4,cuda:5",
+  "trainer_gpus": "0,1,2,3,4,5",
+  "shared_gpu_note": "trainers on the eval GPUs are SIGSTOPped during eval barriers but keep their VRAM allocated",
+  "hold_smoke_certificate": "/root/autodl-tmp/wmdexpbt/results/launchers/msa_probe/HOLD_SMOKE_CERTIFICATE.json"
+}

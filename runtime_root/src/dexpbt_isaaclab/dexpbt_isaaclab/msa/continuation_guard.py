@@ -72,6 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from dexpbt_isaaclab.msa.budget import load_reservation
 from dexpbt_isaaclab.msa.sidecar import (
     BUSY_FILE,
     HOLDS_FILE,
@@ -110,7 +111,8 @@ HOLD_VERIFY_TIMEOUT_S = 10.0
 # Arms whose sidecar ADOPTS the readiness holds (guard must NOT release
 # the frozen workers after writing the readiness marker).
 MSA_ARM_NAMES = ("MSA", "MSA_PERMUTED_ROUTE",
-                 "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL")
+                 "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL",
+                 "MSA_SELECTIVE_STATEFUL")
 
 
 def ckpt_head_hash(path: Path, head_bytes: int = 4 * 1024 * 1024) -> str:
@@ -328,6 +330,29 @@ def write_readiness_marker(run_dir: Path, records: dict[int, dict],
     tmp.write_text(json.dumps(payload, indent=2))
     os.replace(tmp, marker)                     # atomic on POSIX
     return marker
+
+
+def _reserved_ceiling_by_worker(run_dir: Path) -> dict[int, int]:
+    """Per-worker worst-case dose ceiling for the IN-FLIGHT MSA cycle, if
+    any (budget.admit_cycle_budget's reservation). Prefers the copy the
+    sidecar mirrors into MSA_BUSY.json (no reservation file parsing on the
+    guard's hot path); falls back to CYCLE_BUDGET_RESERVATION.json
+    directly so an older busy marker without the mirrored field still
+    enforces the ceiling."""
+    busy_path = Path(run_dir) / BUSY_MARKER
+    if busy_path.is_file():
+        try:
+            payload = json.loads(busy_path.read_text())
+            ceilings = payload.get("reserved_ceiling_by_worker")
+            if ceilings:
+                return {int(k): int(v) for k, v in ceilings.items()}
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            pass
+    reservation = load_reservation(Path(run_dir))
+    if reservation is not None:
+        return {int(k): int(v)
+               for k, v in reservation.reserved_ceiling_by_worker.items()}
+    return {}
 
 
 def cap_action(entry: dict, meta: dict,
@@ -729,11 +754,33 @@ def guard_loop(run_dir: Path, workspace: Path, config: dict,
         # iteration, so the park/cap verdict after the busy marker clears
         # is always based on fresh frames.
         busy = (run_dir / BUSY_MARKER).is_file()
+        # worker-local worst-case dose ceilings reserved by the in-flight
+        # cycle's budget admission (empty when not busy or the arm does not
+        # gate on cap_target_by_worker, e.g. the original MSA_STATEFUL).
+        reserved_ceilings = _reserved_ceiling_by_worker(run_dir) if busy else {}
         for key, entry in sorted(resume.items()):
             wid = int(key.lstrip("p"))
             meta = latest_committed_meta(workspace / f"{wid:03d}")
             if meta is None:
                 continue
+            if busy and wid in reserved_ceilings:
+                # the admitted worst-case dose is a HARD ceiling: any
+                # observed frame past it means the cycle's dose model was
+                # violated (a bug, not a normal park) — fail closed
+                # immediately rather than deferring like an ordinary cap.
+                frame_now = int(meta.get("frame", -1))
+                ceiling = reserved_ceilings[wid]
+                if frame_now > ceiling:
+                    stop_arm(
+                        run_dir,
+                        f"worker {wid}: observed frame {frame_now} exceeds "
+                        f"its reserved cycle-budget ceiling {ceiling} while "
+                        "an MSA probe cycle is in flight (worst-case dose "
+                        "overrun)", "GUARD_FAILED")
+                    return 2
+                # frame_now <= ceiling: still within the admitted worst-case
+                # dose; fall through to the ordinary busy-deferral below —
+                # cap/park actions must never fire mid-cycle.
             if int(meta.get("frame", -1)) <= int(entry["frame"]):
                 continue     # not a continuation tick yet
             if not marker_written and wid not in validated:

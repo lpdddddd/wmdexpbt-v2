@@ -1,0 +1,61 @@
+{
+  "intervention_id": "msa_1784527942_af1468d9",
+  "due_workers": [
+    0,
+    1,
+    5
+  ],
+  "tau_by_worker": {
+    "0": 0.0243289342207,
+    "1": 0.0202841125345,
+    "5": 0.0202427103512
+  },
+  "tau_plus_by_worker": {
+    "0": 0.0231124875097,
+    "1": 0.0192699069078,
+    "5": 0.0192305748336
+  },
+  "l_mid_by_worker": {
+    "0": 0.17192382812499996,
+    "1": 0.16992431640625016,
+    "5": 0.06812988281249999
+  },
+  "panel_stat": {
+    "statistic": "panel_median_L_mid",
+    "lower_quantile": 0.15985839843750005,
+    "quantile": 0.05,
+    "n_boot": 10000,
+    "prng_seed": 20260719,
+    "n_workers": 3,
+    "note": "criterion-local conditional panel statistic: each worker's L_mid is measured at its OWN tau_plus; the panel median conditions on this checkpoint panel and is NOT a population CI over independent seeds"
+  },
+  "retention_by_worker": {
+    "0": {
+      "tau": 0.0243289342207,
+      "p_pre": 0.5474023437500001,
+      "p_post": 0.69025146484375,
+      "rho": 1.2609581831805043,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "1": {
+      "tau": 0.0202841125345,
+      "p_pre": 0.5769580078124998,
+      "p_post": 0.7872875976562501,
+      "rho": 1.3645492167466429,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "5": {
+      "tau": 0.0202427103512,
+      "p_pre": 0.55044189453125,
+      "p_post": 0.41035888671875,
+      "rho": 0.7455080923086476,
+      "retention_unavailable": false,
+      "reason": ""
+    }
+  },
+  "promoted": false,
+  "first_blocking_gate": "same_tau_retention_w5",
+  "resumed": false
+}

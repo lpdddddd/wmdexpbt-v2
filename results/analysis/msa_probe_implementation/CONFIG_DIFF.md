@@ -143,3 +143,18 @@ Probe packets train through the normal supervisor loop under a forced
 tolerance, so every probe frame lands on the worker's monotonic frame
 ledger and is charged against the same 100M continuation budget
 (`max_iterations` already includes them — no free extra training).
+
+
+## MSA_SELECTIVE_STATEFUL (2026-07-20)
+
+Same source tips / state-faithful bootstrap / eval devices / certificate
+gate as MSA_STATEFUL. Sole intentional diffs:
+
+- `msa.promotion_mode = worker_local_selective`
+- `msa.max_promote_per_cycle = 3`
+- `msa.min_population_anchors = 3`
+- sidecar CLI `--promotion-mode worker_local_selective`
+- cycle budget admission enabled (shared with all MSA arms that pass
+  `cap_target_by_worker`)
+
+MSA_STATEFUL / MSA_PERMUTED_STATEFUL / BASE / GATE_RELAX unchanged.

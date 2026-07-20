@@ -1,0 +1,397 @@
+{
+  "count": 56,
+  "files": [
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w0_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "0c67629f2c27b391ef587cbd61a12c67f0386d2b48347c00019bc9a1458890af",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w0_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w0_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "822b86f40c6d871cb69735e43a66f654076ed0ef3ccc5811520548ff791273bd",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_post.pth",
+      "name": "w0_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w0_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "dbb1da20a8f986614f4319e3b11c949519b90b38ed34317b6575afd3e8e84b7e",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w0_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_mid.meta.json",
+      "name": "w0_msa_1784527942_af1468d9_mid.meta.json",
+      "bytes": 187,
+      "sha256": "88157f61adb77e83482338767243d713482db7f78198b54afe605831d24b5ddc",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_mid.pth",
+      "name": "w0_msa_1784527942_af1468d9_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_post.meta.json",
+      "name": "w0_msa_1784527942_af1468d9_post.meta.json",
+      "bytes": 187,
+      "sha256": "107cc7fadbe6953b0d8a38191130167dc31cececacc8723599c3a3db7610d747",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_post.pth",
+      "name": "w0_msa_1784527942_af1468d9_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_pre.meta.json",
+      "name": "w0_msa_1784527942_af1468d9_pre.meta.json",
+      "bytes": 187,
+      "sha256": "f3d60da050a07a21fe71af98714cb3fc2dac890cb94f1198b021d6e411420d8a",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w0_msa_1784527942_af1468d9_pre.pth",
+      "name": "w0_msa_1784527942_af1468d9_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w1_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "89deb2b98fc7383f5f3b8c55440351dafd48ef6979b0f8748cc13344e98e5f03",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w1_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w1_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "ed155e4bd7f2cc5ee1e49677385c54b0c7e06312870a1949fffa1d34fca18de1",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_post.pth",
+      "name": "w1_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w1_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "b40582211a1b33fd5b9139ecec31bc944f6a5935cdfb180913af2dede4856f00",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w1_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_mid.meta.json",
+      "name": "w1_msa_1784527942_af1468d9_mid.meta.json",
+      "bytes": 187,
+      "sha256": "91d21d343669234712afe045dd6fa9b178d048c9afc6f61f2b9720a2545d44af",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_mid.pth",
+      "name": "w1_msa_1784527942_af1468d9_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_post.meta.json",
+      "name": "w1_msa_1784527942_af1468d9_post.meta.json",
+      "bytes": 187,
+      "sha256": "d0f17bad9de2179df900d1208cff19f0a5dcf350b0e9395c5f9487a74e3bed52",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_post.pth",
+      "name": "w1_msa_1784527942_af1468d9_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_pre.meta.json",
+      "name": "w1_msa_1784527942_af1468d9_pre.meta.json",
+      "bytes": 187,
+      "sha256": "f69b735fd4c5443153b7707947be3be304d0f400c3041aa48ee41eaa7f0aeb04",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w1_msa_1784527942_af1468d9_pre.pth",
+      "name": "w1_msa_1784527942_af1468d9_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w2_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "5fd0e33a09aa2c450c13a2419b41cefbdfb6c04b1913a0f5fac860d030d64f8f",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w2_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w2_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "f06720b35f9e87eef9d36516f9ac4317b2e4307e5d48d1bf483dcc66fb9abb76",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_post.pth",
+      "name": "w2_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w2_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "707ff3f820bd0d8f8aac2461d752ff6ba3e2d32651776e31e3aa0323cc8aa5eb",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w2_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784551259_a03ee1cf_pre.meta.json",
+      "name": "w2_msa_1784551259_a03ee1cf_pre.meta.json",
+      "bytes": 187,
+      "sha256": "4b041bcebe46ed6b449682af2c9c8901aa4a12702012e1d597463b1a00190010",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w2_msa_1784551259_a03ee1cf_pre.pth",
+      "name": "w2_msa_1784551259_a03ee1cf_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w3_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "9b87b8b5098e8d99ff88818c04756073b64aae6c5aeed6e5672faf6dcf61bce5",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w3_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w3_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "d4ee894336bb29463700d006beadd771cf56dbde916a6214037f0f17839ac61a",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_post.pth",
+      "name": "w3_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w3_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "4b152bc56bdbf81e2496d09f2e30fefddd4719bdf5b13a594bc5c3e481ecb9d3",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w3_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w3_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w4_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "035442ad509c2fd7369915a7ebfc87ade2826dbc6d44611f4d0fe9d907a1869a",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w4_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w4_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "522689bb79acb04edddf4aea188381b0481eba46764c2593e794906f554f75d2",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_post.pth",
+      "name": "w4_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w4_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "bbc263db47caccd64c42af33a4f2c199d3b30dcf3a36c57090965bd8c20b0c04",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w4_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w4_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_mid.meta.json",
+      "name": "w5_msa_1784492852_5fa1236a_mid.meta.json",
+      "bytes": 187,
+      "sha256": "93af99c5038df5caa844ac94b9df22c41e91523bcf1baf1a580e8d4449abe8c4",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_mid.pth",
+      "name": "w5_msa_1784492852_5fa1236a_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_post.meta.json",
+      "name": "w5_msa_1784492852_5fa1236a_post.meta.json",
+      "bytes": 187,
+      "sha256": "c3923408f59085d43e2ec13c689262031d971d4565541c6ba16bd2d70ba18d49",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_post.pth",
+      "name": "w5_msa_1784492852_5fa1236a_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_pre.meta.json",
+      "name": "w5_msa_1784492852_5fa1236a_pre.meta.json",
+      "bytes": 187,
+      "sha256": "65680f2d5ad3456ef6d7d44d7a252977a74193431b88b72f9e2a22949f626e8d",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784492852_5fa1236a_pre.pth",
+      "name": "w5_msa_1784492852_5fa1236a_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_mid.meta.json",
+      "name": "w5_msa_1784527942_af1468d9_mid.meta.json",
+      "bytes": 187,
+      "sha256": "acbf003ed0be417c952150fa8149fb279451822e090415851e8ef9272496d98f",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_mid.pth",
+      "name": "w5_msa_1784527942_af1468d9_mid.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_post.meta.json",
+      "name": "w5_msa_1784527942_af1468d9_post.meta.json",
+      "bytes": 187,
+      "sha256": "86b3da7726c527df5fbde9b1e704e618fc3cb68e3367516084494a89697948ff",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_post.pth",
+      "name": "w5_msa_1784527942_af1468d9_post.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_pre.meta.json",
+      "name": "w5_msa_1784527942_af1468d9_pre.meta.json",
+      "bytes": 187,
+      "sha256": "40b77d70177d17b6368819ef16d773334101207a8497b28a9b7cd85b41dc9cef",
+      "skipped_body": false
+    },
+    {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/dexpbt_8gpu_ws/msa_snapshots/w5_msa_1784527942_af1468d9_pre.pth",
+      "name": "w5_msa_1784527942_af1468d9_pre.pth",
+      "bytes": 180443740,
+      "sha256": null,
+      "skipped_body": true
+    }
+  ]
+}

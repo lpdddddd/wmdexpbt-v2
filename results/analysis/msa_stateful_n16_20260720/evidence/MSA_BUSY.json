@@ -1,0 +1,11 @@
+{
+  "intervention_id": "msa_1784551259_a03ee1cf",
+  "phase": "PRE_EVAL",
+  "status": "RUNNING",
+  "due_workers": [
+    2,
+    3,
+    4
+  ],
+  "timestamp": 1784551259.262027
+}

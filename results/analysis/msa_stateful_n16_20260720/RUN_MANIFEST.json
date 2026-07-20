@@ -1,0 +1,45 @@
+{
+  "source_run": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431",
+  "code_commit_at_launch": "bf4d8b3",
+  "analysis_dir": "/root/autodl-tmp/wmdexpbt/results/analysis/msa_stateful_n16_20260720",
+  "copied_evidence": [
+    "ARM_CONFIG.json",
+    "EVAL_DEVICES.json",
+    "FIRST_TICK_VALIDATED.json",
+    "GUARD_FAILED",
+    "MSA_BUSY.json",
+    "MSA_SIDECAR_DIED.json",
+    "STATE_FIDELITY.json",
+    "STATE_FINGERPRINT.json",
+    "msa_cycles/",
+    "msa_snapshot_metas/"
+  ],
+  "holds_final_state": {
+    "MSA_HOLDS.json": {
+      "present": false,
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/MSA_HOLDS.json"
+    },
+    "READINESS_HOLDS.json": {
+      "present": false,
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/base_retention_msa_probe_msa_stateful_20260720_033431/READINESS_HOLDS.json"
+    }
+  },
+  "n_eval_raw": 672,
+  "eval_raw_bytes_total": 87965223,
+  "n_snapshots": 56,
+  "snapshot_bytes_total": 5052429956,
+  "cycles_completed": [
+    "msa_1784492852_5fa1236a",
+    "msa_1784527942_af1468d9"
+  ],
+  "cycle3_aborted": "msa_1784551259_a03ee1cf",
+  "guard_failed": {
+    "reason": "worker 2: observed frame 6120000000 exceeds target + one tick of slack (baseline 5080000000 + 480000000 + 80000000)",
+    "time": 1784551275.8267894
+  },
+  "not_committed": [
+    "msa_eval_raw/*.json (manifest only)",
+    "msa_snapshots/*.pth (meta JSON copied; pth sha skipped)",
+    "trainer checkpoints / policy_*/rl_games"
+  ]
+}

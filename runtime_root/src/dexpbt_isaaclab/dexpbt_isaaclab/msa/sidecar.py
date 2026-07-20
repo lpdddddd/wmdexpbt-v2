@@ -99,6 +99,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from dexpbt_isaaclab.msa.budget import load_reservation, write_no_new_cycle
 from dexpbt_isaaclab.msa.controller import (
     CommitTimeout,
     CycleFailure,
@@ -106,7 +107,11 @@ from dexpbt_isaaclab.msa.controller import (
     PROBE_PACKET_FRAMES,
     WorkerView,
 )
-from dexpbt_isaaclab.msa.decision import SeedEvalResult
+from dexpbt_isaaclab.msa.decision import (
+    PROMOTION_MODE_GLOBAL,
+    PROMOTION_MODE_SELECTIVE,
+    SeedEvalResult,
+)
 from dexpbt_isaaclab.msa.eval_bridge import (
     EvalRequest,
     FORMAL_NUM_SEEDS,
@@ -895,6 +900,9 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
                      python_exe: str,
                      packet_frames: int = PROBE_PACKET_FRAMES,
                      commit_max_wait_s: float = DEFAULT_COMMIT_MAX_WAIT_S,
+                     promotion_mode: str = PROMOTION_MODE_GLOBAL,
+                     population_worker_ids: Optional[list[int]] = None,
+                     cap_target_by_worker: Optional[dict[int, int]] = None,
                      ) -> tuple[MSAController, WorkerHolds]:
     manifest_id, seeds = build_seed_manifest(num_seeds)
     snap_dir = workspace / "msa_snapshots"
@@ -1069,7 +1077,12 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         """Maintain <run_dir>/MSA_BUSY.json: exists from before the first
         hold of a cycle until the cycle is DONE or its failure cleanup
         finished. The guard defers park/cap actions and the watchdog treats
-        a dead sidecar as fatal while it exists."""
+        a dead sidecar as fatal while it exists.
+
+        When a budget reservation exists for this run, its per-worker
+        ceilings are merged into the busy payload so the continuation
+        guard can enforce "never advance past the reserved ceiling while
+        busy" without itself parsing CYCLE_BUDGET_RESERVATION.json."""
         busy_path = run_dir / BUSY_FILE
         if info is None:
             try:
@@ -1077,7 +1090,13 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
             except FileNotFoundError:
                 pass
             return
-        _atomic_write_json(busy_path, dict(info))
+        payload = dict(info)
+        reservation = load_reservation(run_dir)
+        if reservation is not None:
+            payload["reserved_ceiling_by_worker"] = {
+                str(k): int(v)
+                for k, v in reservation.reserved_ceiling_by_worker.items()}
+        _atomic_write_json(busy_path, payload)
 
     ctl = MSAController(
         evaluate=evaluate, snapshot=snapshot,
@@ -1093,7 +1112,11 @@ def build_controller(workspace: Path, *, task: str, rho_threshold: float,
         refresh_view=refresh_view,
         set_busy=set_busy,
         packet_frames=packet_frames,
-        permuted_route=permuted_route)
+        permuted_route=permuted_route,
+        promotion_mode=promotion_mode,
+        population_worker_ids=population_worker_ids,
+        cap_target_by_worker=cap_target_by_worker,
+        run_dir=run_dir)
     return ctl, holds
 
 
@@ -1216,11 +1239,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workspace", required=True)
     ap.add_argument("--arm", required=True,
                     choices=["MSA", "MSA_PERMUTED_ROUTE",
-                             "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL"])
+                             "MSA_STATEFUL", "MSA_PERMUTED_STATEFUL",
+                             "MSA_SELECTIVE_STATEFUL"])
     ap.add_argument("--task", default="DexPBT-Regrasping-KukaAllegro-Direct-v0")
     ap.add_argument("--rho-threshold", type=float, default=None)
     ap.add_argument("--permuted-route", action="store_true")
     ap.add_argument("--num-policies", type=int, default=NUM_WORKERS)
+    ap.add_argument("--promotion-mode", default=PROMOTION_MODE_GLOBAL,
+                    choices=[PROMOTION_MODE_GLOBAL, PROMOTION_MODE_SELECTIVE],
+                    help="global_panel: single panel-wide promotion gate "
+                         "(bit-for-bit the original path); "
+                         "worker_local_selective: per-worker eligibility + "
+                         "budget-gated admission (MSA_SELECTIVE_STATEFUL)")
+    ap.add_argument("--population-size", type=int, default=NUM_WORKERS,
+                    help="population size for worker_local_selective's "
+                         "min-anchors accounting; defaults to the full "
+                         "6-worker panel")
     ap.add_argument("--num-seeds", type=int, default=SMOKE_NUM_SEEDS,
                     help=f"execution-smoke default {SMOKE_NUM_SEEDS} "
                          "(machinery validation only, NOT a method "
@@ -1347,29 +1381,59 @@ def main(argv: list[str] | None = None) -> int:
         smoke_marker = Path(args.hold_smoke_marker)
 
     permuted = args.permuted_route or args.arm == "MSA_PERMUTED_ROUTE"
+    population_worker_ids = list(range(int(args.population_size)))
+    cap_target_by_worker: Optional[dict[int, int]] = None
+    arm_config_path = run_dir / "ARM_CONFIG.json"
+    if arm_config_path.is_file():
+        # worker-local hard cap = baseline_tip_frame + CONTINUATION_CAP —
+        # the SAME matched cap the continuation guard enforces (imported
+        # here, not at module scope, to avoid the sidecar<->guard import
+        # cycle: continuation_guard imports marker helpers from sidecar).
+        from dexpbt_isaaclab.msa.continuation_guard import (
+            CONTINUATION_CAP_FRAMES,
+        )
+        arm_cfg = json.loads(arm_config_path.read_text())
+        resume_checkpoints = arm_cfg.get("resume_checkpoints") or {}
+        cap_target_by_worker = {
+            int(key.lstrip("p")): int(entry["frame"]) + CONTINUATION_CAP_FRAMES
+            for key, entry in resume_checkpoints.items()
+        }
     ctl, holds = build_controller(
         workspace, task=args.task, rho_threshold=args.rho_threshold,
         permuted_route=permuted, num_seeds=args.num_seeds,
         eval_num_envs=args.eval_num_envs, eval_devices=eval_devices,
         python_exe=sys.executable,
-        commit_max_wait_s=args.commit_max_wait_s)
+        commit_max_wait_s=args.commit_max_wait_s,
+        promotion_mode=args.promotion_mode,
+        population_worker_ids=population_worker_ids,
+        cap_target_by_worker=cap_target_by_worker)
 
     def _write_cycle_summary(result) -> None:
         out = workspace / "msa_cycles"
         out.mkdir(exist_ok=True)
+        payload = {
+            "intervention_id": result.intervention_id,
+            "due_workers": result.due_workers,
+            "tau_by_worker": result.tau_by_worker,
+            "tau_plus_by_worker": result.tau_plus_by_worker,
+            "l_mid_by_worker": result.l_mid_by_worker,
+            "panel_stat": result.panel_stat,
+            "retention_by_worker": result.retention_by_worker,
+            "promoted": result.promoted,
+            "first_blocking_gate": result.first_blocking_gate,
+            "resumed": result.resumed,
+            "promotion_mode": result.promotion_mode,
+        }
+        # optional worker_local_selective / budget fields: only present
+        # (non-None) when the cycle actually used that mode / gate.
+        for field_name in ("selected_for_promotion", "anchor_workers",
+                          "eligible_by_worker", "rejection_reason_by_worker",
+                          "budget_admission", "final_tol_by_worker"):
+            value = getattr(result, field_name, None)
+            if value is not None:
+                payload[field_name] = value
         (out / f"{result.intervention_id}.json").write_text(
-            json.dumps({
-                "intervention_id": result.intervention_id,
-                "due_workers": result.due_workers,
-                "tau_by_worker": result.tau_by_worker,
-                "tau_plus_by_worker": result.tau_plus_by_worker,
-                "l_mid_by_worker": result.l_mid_by_worker,
-                "panel_stat": result.panel_stat,
-                "retention_by_worker": result.retention_by_worker,
-                "promoted": result.promoted,
-                "first_blocking_gate": result.first_blocking_gate,
-                "resumed": result.resumed,
-            }, indent=2, default=str))
+            json.dumps(payload, indent=2, default=str))
 
     def _stop_arm_commit_timeout(err: CommitTimeout) -> None:
         # promotion is NEVER claimed here; the marker records every
@@ -1438,7 +1502,23 @@ def main(argv: list[str] | None = None) -> int:
                     due = ctl.due_workers(views)
                     if due:
                         result = ctl.run_cycle(views)
-                        _write_cycle_summary(result)
+                        if result.first_blocking_gate == "all_budget_ineligible":
+                            # NO busy marker was ever set (the controller
+                            # refuses admission before the first hold): this
+                            # is NOT a CycleFailure, just "wait for the guard
+                            # to park these workers at their cap". Record it
+                            # for observability and keep polling.
+                            write_no_new_cycle(run_dir, {
+                                "intervention_id": result.intervention_id,
+                                "reason": "all_budget_ineligible",
+                                "budget_admission": result.budget_admission,
+                            })
+                            print("[msa-sidecar] all due workers are "
+                                  "budget-ineligible for a new cycle "
+                                  f"({result.intervention_id}); idling for "
+                                  "the continuation guard to park them")
+                        else:
+                            _write_cycle_summary(result)
             except CycleFailure as err:
                 if isinstance(err.__cause__, CommitTimeout):
                     _stop_arm_commit_timeout(err.__cause__)

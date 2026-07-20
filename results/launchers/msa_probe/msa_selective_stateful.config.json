@@ -1,0 +1,154 @@
+{
+  "arm": "MSA_SELECTIVE_STATEFUL",
+  "profile": "base_retention_msa_probe",
+  "wm_strategy_profile": "cser_dexpbt_conservative",
+  "state_faithful": true,
+  "source_run": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631",
+  "resume_checkpoints": {
+    "p0": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",
+      "iteration": 160,
+      "frame": 5000000000,
+      "live_tolerance": 0.023112487509668322,
+      "lineage_id": "c91ec3ca-f19a-4016-86fb-4bd28d9eb2b5",
+      "sha256_head": "2211668e5c50e3064d2534bf9d4fc08dc7e960b7efacc109919fadbf035f8018"
+    },
+    "p1": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/001/000160.pth",
+      "iteration": 160,
+      "frame": 5000000000,
+      "live_tolerance": 0.020284112534534084,
+      "lineage_id": "5931b868-2ff2-4b87-b2a0-b20027f6701f",
+      "sha256_head": "36e40cd97b0cded6d30c50f4faad037b4135df312267da24991b2f52495fbc6b"
+    },
+    "p2": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/002/000161.pth",
+      "iteration": 161,
+      "frame": 5080000000,
+      "live_tolerance": 0.02548998759231097,
+      "lineage_id": "cff1c0dd-4a23-4f1a-bf6a-70e69f131329",
+      "sha256_head": "2cfe93ea406f3d4cebcf1cd059fb3537ac8852a58a48236070e4488a33b7b4f6"
+    },
+    "p3": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/003/000160.pth",
+      "iteration": 160,
+      "frame": 5000000000,
+      "live_tolerance": 0.023658390476202464,
+      "lineage_id": "c88240b9-db78-49ab-ac0b-a27fd9ece951",
+      "sha256_head": "aa6f2284ee5a373814d53c55e58a9e34ef0ca8b9e68245eeb92cefd748ef6fd0"
+    },
+    "p4": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth",
+      "iteration": 160,
+      "frame": 5000000000,
+      "live_tolerance": 0.019269906907807378,
+      "lineage_id": "03ff385c-49de-43fd-80cc-8814bb7d06d7",
+      "sha256_head": "c75cdfe6c6dc5f4afd152102f3b5750b4aa5f967bdc58dea6d285623ac24d975"
+    },
+    "p5": {
+      "path": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/005/000160.pth",
+      "iteration": 160,
+      "frame": 5000000000,
+      "live_tolerance": 0.02130811615915868,
+      "lineage_id": "14838080-94c0-4f8d-b9e9-7565cf0993b1",
+      "sha256_head": "86a1826102dc4b580bb959a2b5efe37d44f20e828f47f042074779194777ecc2"
+    }
+  },
+  "base_seed": 42,
+  "committed_tick_frames": 80000000,
+  "continuation_ticks_per_worker": 6,
+  "continuation_frames_per_worker": 480000000,
+  "cap_slack_frames": 80000000,
+  "budget_breakdown_ticks": {
+    "readiness_and_stall_reproduction": 1,
+    "msa_probe_cycle_common_plus_second": 2,
+    "post_cycle_same_tau_observation": 2,
+    "phase_quantization_slack": 1
+  },
+  "max_iterations": 48780,
+  "frame_ledger": {
+    "monotonic": true,
+    "probe_frames_charged": true,
+    "note": "probe packets train through the normal supervisor loop under forced tolerance; they consume the same 480M budget as ordinary continuation frames"
+  },
+  "original_launcher": "results/launchers/start_regrasping_cser_dexpbt_conservative_retention_strict_5b.sh",
+  "flag_diff_vs_base": [],
+  "msa": {
+    "tau_plus_rule": "max(0.010, 0.95 * tau[w]) per worker (heterogeneous, criterion-local)",
+    "exposure_window_frames": 100000000,
+    "packet_frames": 80000000,
+    "packet_note": "one committed PBT tick at the REAL stage-3 cadence (80M env frames; the base 20M pbt_interval is NOT the committed quantum); provenance stores OBSERVED committed frames",
+    "top_k_recipients": 3,
+    "permuted_route": false,
+    "permuted_route_seed": 777001,
+    "eval_num_seeds_smoke": 4,
+    "eval_num_seeds_pilot": 16,
+    "eval_num_seeds_formal": 256,
+    "eval_num_seeds_note": "N=4 execution smoke is the launcher default (machinery validation only, never a method conclusion); pilot N=16 must be set explicitly (MSA_NUM_SEEDS); formal N=256 is formal-only and not affordable on 2 eval GPUs without further optimization",
+    "eval_seed_manifest_id_pilot": "msa_seeds_310000_16_75e53d173fbafadc",
+    "eval_seed_first": 310001,
+    "eval_seed_last": 310016,
+    "eval_cells_per_cycle": {
+      "pre": 12,
+      "mid": 6,
+      "post": 9,
+      "total": 27
+    },
+    "eval_cost_estimates": [
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 4,
+        "devices": 2,
+        "estimated_process_launches": 108,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 5.4
+      },
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 16,
+        "devices": 2,
+        "estimated_process_launches": 432,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 21.6
+      },
+      {
+        "eval_cells": {
+          "pre": 12,
+          "mid": 6,
+          "post": 9,
+          "total": 27
+        },
+        "seeds": 256,
+        "devices": 2,
+        "estimated_process_launches": 6912,
+        "minutes_per_seed": 6.0,
+        "estimated_wall_time_hours": 345.6
+      }
+    ],
+    "eval_device_note": "sidecar --eval-devices is REQUIRED; the launcher pins ${MSA_EVAL_DEVICES:-cuda:4,cuda:5}: on this 6-GPU machine the eval devices are SHARED with trainers 4/5 (those trainers are SIGSTOPped during every eval barrier but keep their VRAM allocated); never the trainers' cuda:0; at most one Isaac eval process per device; actual devices recorded in EVAL_DEVICES.json",
+    "hold_smoke_note": "the formal sidecar requires the DISPOSABLE start_stateful_hold_smoke.sh certificate (HOLD_SMOKE_CERTIFICATE.json: git commit, task, profile, GPU model, driver must match); the in-arm run_hold_smoke.sh is execution-smoke only (it advances the released worker one extra committed tick past the matched boundary)",
+    "bootstrap": {
+      "seed": 20260719,
+      "repeats": 10000,
+      "quantile": 0.05,
+      "statistic": "criterion-local conditional panel median of per-worker L_mid"
+    },
+    "rho_threshold": 0.88,
+    "rho_rule": "p_post/p_pre at the worker's OWN tau; p_pre>=0.01 required; cross-tolerance historical peaks forbidden",
+    "numeric_gates": "unchanged from base-retention; only the cross-tolerance retention read is replaced by same-tau rho",
+    "promotion_mode": "worker_local_selective",
+    "max_promote_per_cycle": 3,
+    "min_population_anchors": 3,
+    "budget_admission_note": "each cycle refuses any due worker whose remaining worker-local frames (cap_target - latest_committed_frame) are below the worst-case cycle dose (msa.budget.worst_case_remaining_cycle_dose); a cycle with zero eligible due workers is never admitted (first_blocking_gate=all_budget_ineligible, no busy marker, no holds)"
+  }
+}

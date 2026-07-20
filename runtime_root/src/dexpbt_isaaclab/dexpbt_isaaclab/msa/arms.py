@@ -1,6 +1,6 @@
 """Continuation arm configs + launcher generation for base_retention_msa_probe.
 
-Four STATEFUL arms, all resuming from the SAME six 5B final checkpoints
+Five STATEFUL arms, all resuming from the SAME six 5B final checkpoints
 (resolved from the CCRS checkpoint manifest, never guessed) WITH the source
 run's full stall state (state_bootstrap: restored curriculum_control gate
 state, rebuilt observer memory, env clock resume), matched seeds, and a
@@ -14,10 +14,21 @@ at the REAL stage-3 cadence of 80M/tick):
                           everything else identical.
 - MSA_STATEFUL          : original numeric gates unchanged; the MSA probe
                           sidecar runs the tau_plus microdose on the SAME
-                          restored state.
+                          restored state, gated by the single panel-wide
+                          promotion decision (promotion_mode=global_panel).
 - MSA_PERMUTED_STATEFUL : MSA with the pre-registered permuted second-half
                           routing (negative control for exposure-only
                           gains).
+- MSA_SELECTIVE_STATEFUL: MSA with worker_local_selective promotion — each
+                          worker is admitted into a probe cycle only if it
+                          has enough remaining continuation budget to
+                          finish the worst-case cycle dose
+                          (msa.budget.admit_cycle_budget), and promotion is
+                          decided PER WORKER (msa.decision.
+                          decide_selective_promotion) instead of gating the
+                          whole panel on one shared statistic; the panel
+                          bootstrap statistic is still computed and
+                          recorded as a diagnostic only.
 
 Every arm launcher runs the state-faithful bootstrap BEFORE any worker
 starts and refuses to launch if the bootstrap or its fingerprint fails; the
@@ -42,7 +53,9 @@ from pathlib import Path
 from dexpbt_isaaclab.msa.decision import (
     BOOTSTRAP_REPEATS,
     BOOTSTRAP_SEED,
+    MIN_POPULATION_ANCHORS,
     PERMUTED_ROUTE_SEED,
+    PROMOTION_MODE_SELECTIVE,
     TOP_K_RECIPIENTS,
 )
 from dexpbt_isaaclab.msa.controller import PROBE_PACKET_FRAMES
@@ -61,8 +74,9 @@ from dexpbt_isaaclab.msa.provenance import EXPOSURE_WINDOW_FRAMES
 from dexpbt_isaaclab.msa.state_bootstrap import env_clock_from_snapshot
 
 ARM_NAMES = ("BASE_STATEFUL", "GATE_RELAX_STATEFUL", "MSA_STATEFUL",
-             "MSA_PERMUTED_STATEFUL")
-MSA_ARM_NAMES = ("MSA_STATEFUL", "MSA_PERMUTED_STATEFUL")
+             "MSA_PERMUTED_STATEFUL", "MSA_SELECTIVE_STATEFUL")
+MSA_ARM_NAMES = ("MSA_STATEFUL", "MSA_PERMUTED_STATEFUL",
+                 "MSA_SELECTIVE_STATEFUL")
 
 # Worker-local continuation budget at the REAL committed cadence.
 # 80M/tick (stage-3 SELECTION: base 20M pbt_interval x 4.0 multiplier —
@@ -268,6 +282,18 @@ def arm_config(arm: str, tips: list[TipCheckpoint], source_run: str,
                              "cross-tolerance retention read is replaced by "
                              "same-tau rho",
         }
+        if arm == "MSA_SELECTIVE_STATEFUL":
+            cfg["msa"]["promotion_mode"] = PROMOTION_MODE_SELECTIVE
+            cfg["msa"]["max_promote_per_cycle"] = TOP_K_RECIPIENTS
+            cfg["msa"]["min_population_anchors"] = MIN_POPULATION_ANCHORS
+            cfg["msa"]["budget_admission_note"] = (
+                "each cycle refuses any due worker whose remaining "
+                "worker-local frames (cap_target - latest_committed_frame) "
+                "are below the worst-case cycle dose "
+                "(msa.budget.worst_case_remaining_cycle_dose); a cycle "
+                "with zero eligible due workers is never admitted "
+                "(first_blocking_gate=all_budget_ineligible, no busy "
+                "marker, no holds)")
     return cfg
 
 
@@ -476,7 +502,7 @@ nohup python -u -m dexpbt_isaaclab.msa.sidecar \\
   --hold-smoke-certificate "$MSA_HOLD_SMOKE_CERT_ACTUAL" \\
   --wm-profile "{profile}" \\
   --commit-max-wait-s "${{MSA_COMMIT_MAX_WAIT_S:-3600}}" \\
-  {permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
+  {promotion_mode_flag}{permuted_flag}>>"$RUN_DIR/msa_sidecar.log" 2>&1 &
 echo $! > "$RUN_DIR/msa_sidecar.pid"
 # NOTE: the external hold watchdog is started once for ALL stateful arms
 # in the main launcher body (above), so it already covers this sidecar's
@@ -753,6 +779,9 @@ def write_arm_launchers(out_dir: Path, manifest_csv: Path,
                 arm=arm, rho=MSA_RHO_THRESHOLD,
                 profile=wm_profile,
                 cert_default=cert_default,
+                promotion_mode_flag=(
+                    "--promotion-mode worker_local_selective \\\n  "
+                    if arm == "MSA_SELECTIVE_STATEFUL" else ""),
                 permuted_flag=("--permuted-route "
                                if arm == "MSA_PERMUTED_STATEFUL" else ""))
         script = _LAUNCHER_TEMPLATE.format(

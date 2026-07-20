@@ -1,0 +1,4 @@
+{
+  "reason": "worker 2: observed frame 6120000000 exceeds target + one tick of slack (baseline 5080000000 + 480000000 + 80000000)",
+  "time": 1784551275.8267894
+}

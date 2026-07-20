@@ -1,0 +1,6938 @@
+{
+  "eval_raw_schema_sample_keys": [
+    "actual_num_episodes",
+    "analysis_protocol_version",
+    "checkpoint_frame",
+    "checkpoint_hash",
+    "checkpoint_iteration",
+    "checkpoint_path",
+    "config_hash",
+    "deterministic",
+    "dropped_rate",
+    "evaluation_mode",
+    "evaluator_source_sha256",
+    "fixed_tolerance",
+    "fixed_tolerance_cm",
+    "git_dirty",
+    "git_sha",
+    "max_consecutive_successes",
+    "max_steps",
+    "max_steps_reached",
+    "metric_protocol_version",
+    "missing_env_ids",
+    "normalized_nsucc",
+    "normalized_nsucc_ci95_hi",
+    "normalized_nsucc_ci95_lo",
+    "nsucc_mean",
+    "nsucc_mean_ci95_hi",
+    "nsucc_mean_ci95_lo",
+    "nsucc_std",
+    "num_envs",
+    "num_episodes",
+    "num_success_any",
+    "per_env_reset_fingerprint",
+    "requested_num_episodes",
+    "reset_fingerprint",
+    "reset_protocol_version",
+    "reset_seed",
+    "run_id",
+    "sample_ids",
+    "samples",
+    "schema_version",
+    "status",
+    "steps_used",
+    "stop_reason",
+    "success_any_ci95_hi",
+    "success_any_ci95_lo",
+    "success_any_rate",
+    "terminal_error_mean",
+    "terminal_error_median",
+    "terminal_error_q10",
+    "terminal_error_q25",
+    "terminal_error_q50",
+    "terminal_error_q75",
+    "terminal_error_q90",
+    "terminal_error_valid",
+    "terminal_snapshot_hook_installed",
+    "unit_key",
+    "worker_id"
+  ],
+  "n_eval_raw_files": 672,
+  "cycles": [
+    {
+      "intervention_id": "msa_1784492852_5fa1236a",
+      "panel_stat": {
+        "statistic": "panel_median_L_mid",
+        "lower_quantile": -0.07104492187500003,
+        "quantile": 0.05,
+        "n_boot": 10000,
+        "prng_seed": 20260719,
+        "n_workers": 6,
+        "note": "criterion-local conditional panel statistic: each worker's L_mid is measured at its OWN tau_plus; the panel median conditions on this checkpoint panel and is NOT a population CI over independent seeds"
+      },
+      "first_blocking_gate": "panel_lower_quantile",
+      "promoted": false,
+      "workers": {
+        "0": {
+          "n_files_near_tau": 80,
+          "n_files_near_tau_plus": 32,
+          "tau": 0.0231124875097,
+          "tau_plus": 0.0219568631342,
+          "L_mid": -0.29560302734375005,
+          "retention": {
+            "tau": 0.0231124875097,
+            "p_pre": 0.73922119140625,
+            "p_post": 0.49945800781249994,
+            "rho": 0.6756543421900028,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "1": {
+          "n_files_near_tau": 64,
+          "n_files_near_tau_plus": 80,
+          "tau": 0.0202841125345,
+          "tau_plus": 0.0192699069078,
+          "L_mid": -0.07398681640624971,
+          "retention": {
+            "tau": 0.0202841125345,
+            "p_pre": 0.8095629882812502,
+            "p_post": 0.815908203125,
+            "rho": 1.007837827242104,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "2": {
+          "n_files_near_tau": 32,
+          "n_files_near_tau_plus": 48,
+          "tau": 0.0254899875923,
+          "tau_plus": 0.0242154882127,
+          "L_mid": 0.03146484375000014,
+          "retention": {
+            "tau": 0.0254899875923,
+            "p_pre": 0.8055517578125,
+            "p_post": 0.74494384765625,
+            "rho": 0.9247622395849119,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "3": {
+          "n_files_near_tau": 32,
+          "n_files_near_tau_plus": 48,
+          "tau": 0.0236583904762,
+          "tau_plus": 0.0224754709524,
+          "L_mid": 0.2869873046874999,
+          "retention": {
+            "tau": 0.0236583904762,
+            "p_pre": 0.5276293945312499,
+            "p_post": 0.8110815429687499,
+            "rho": 1.5372182660318254,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "4": {
+          "n_files_near_tau": 32,
+          "n_files_near_tau_plus": 48,
+          "tau": 0.0192699069078,
+          "tau_plus": 0.0183064115624,
+          "L_mid": -0.05621337890624989,
+          "retention": {
+            "tau": 0.0192699069078,
+            "p_pre": 0.7434765624999999,
+            "p_post": 0.7635888671875,
+            "rho": 1.027051699679504,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "5": {
+          "n_files_near_tau": 32,
+          "n_files_near_tau_plus": 64,
+          "tau": 0.0213081161592,
+          "tau_plus": 0.0202427103512,
+          "L_mid": -0.47427978515625,
+          "retention": {
+            "tau": 0.0213081161592,
+            "p_pre": 0.6956982421874999,
+            "p_post": 0.2818847656249999,
+            "rho": 0.4051825181254781,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        }
+      }
+    },
+    {
+      "intervention_id": "msa_1784527942_af1468d9",
+      "panel_stat": {
+        "statistic": "panel_median_L_mid",
+        "lower_quantile": 0.15985839843750005,
+        "quantile": 0.05,
+        "n_boot": 10000,
+        "prng_seed": 20260719,
+        "n_workers": 3,
+        "note": "criterion-local conditional panel statistic: each worker's L_mid is measured at its OWN tau_plus; the panel median conditions on this checkpoint panel and is NOT a population CI over independent seeds"
+      },
+      "first_blocking_gate": "same_tau_retention_w5",
+      "promoted": false,
+      "workers": {
+        "0": {
+          "n_files_near_tau": 32,
+          "n_files_near_tau_plus": 80,
+          "tau": 0.0243289342207,
+          "tau_plus": 0.0231124875097,
+          "L_mid": 0.17192382812499996,
+          "retention": {
+            "tau": 0.0243289342207,
+            "p_pre": 0.5474023437500001,
+            "p_post": 0.69025146484375,
+            "rho": 1.2609581831805043,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "1": {
+          "n_files_near_tau": 64,
+          "n_files_near_tau_plus": 80,
+          "tau": 0.0202841125345,
+          "tau_plus": 0.0192699069078,
+          "L_mid": 0.16992431640625016,
+          "retention": {
+            "tau": 0.0202841125345,
+            "p_pre": 0.5769580078124998,
+            "p_post": 0.7872875976562501,
+            "rho": 1.3645492167466429,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        },
+        "5": {
+          "n_files_near_tau": 64,
+          "n_files_near_tau_plus": 48,
+          "tau": 0.0202427103512,
+          "tau_plus": 0.0192305748336,
+          "L_mid": 0.06812988281249999,
+          "retention": {
+            "tau": 0.0202427103512,
+            "p_pre": 0.55044189453125,
+            "p_post": 0.41035888671875,
+            "rho": 0.7455080923086476,
+            "retention_unavailable": false,
+            "reason": ""
+          }
+        }
+      }
+    }
+  ],
+  "raw_file_index": [
+    {
+      "file": "w03_it000000_tol0.0225_seed310013_policy_only_94dee178d6b07ff0.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784500484.810285,
+      "bytes": 130935
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310015_policy_only_96bc2e0cb9861e8e.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784532252.2796252,
+      "bytes": 130951
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310011_policy_only_71a3a9a77a3a3094.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784503595.0887787,
+      "bytes": 130970
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310014_policy_only_02fb4c7ab1494829.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784521997.554886,
+      "bytes": 130959
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310015_policy_only_9f12755ea9af3b51.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784546572.5416813,
+      "bytes": 131100
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310002_policy_only_ddf9ee33f6739e75.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784512609.1968956,
+      "bytes": 130701
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310001_policy_only_ae924c3535bf3266.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784502982.876478,
+      "bytes": 130982
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310014_policy_only_b213bb1a87173104.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784497395.036504,
+      "bytes": 130920
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310013_policy_only_52d5b887813facbb.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784495436.6307385,
+      "bytes": 131041
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310007_policy_only_b144a4f2a4a34a38.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784532852.77542,
+      "bytes": 130957
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310003_policy_only_fb5f2bd6260bf782.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784532547.7835474,
+      "bytes": 131006
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310011_policy_only_cc22ac0f927d81ae.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784545290.3602674,
+      "bytes": 131046
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310010_policy_only_07147e93296949d3.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784495198.404585,
+      "bytes": 131032
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310003_policy_only_1e82cbcc631e6106.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784523527.4695933,
+      "bytes": 130968
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310015_policy_only_5abf0484344c405f.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784516979.0353577,
+      "bytes": 130630
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310007_policy_only_05284a1c97fd54a1.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784547152.0151248,
+      "bytes": 130910
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310011_policy_only_d18898c045f03fbb.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784534354.881635,
+      "bytes": 131092
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310004_policy_only_0136912798ff0d2f.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784517221.6698742,
+      "bytes": 131007
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310005_policy_only_b952e3235ef83c41.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784522536.7683864,
+      "bytes": 130914
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310011_policy_only_15ecf194e69d3caa.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784512186.8352993,
+      "bytes": 130921
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310003_policy_only_9afb8d4535a67ea9.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784500895.605732,
+      "bytes": 130833
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310016_policy_only_f2e34d2c3c2482c0.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784499554.6618178,
+      "bytes": 130862
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310005_policy_only_283b8412569770e1.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784517321.405663,
+      "bytes": 130994
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310006_policy_only_04c45e8448b58444.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784518310.2874622,
+      "bytes": 130967
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310002_policy_only_2b9a1ab3b73002f8.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784536930.3924294,
+      "bytes": 130661
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310014_policy_only_54cf1ff95eb0f3a9.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784499432.405436,
+      "bytes": 130828
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310014_policy_only_6b7ed7279887e1a2.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784493613.2771811,
+      "bytes": 130902
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310004_policy_only_9d32a8692e3bcfc3.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784495791.3554304,
+      "bytes": 131054
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310012_policy_only_e4412c5e64689cdc.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784495313.7094939,
+      "bytes": 131073
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310010_policy_only_5c89288005f5285e.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784509910.2506785,
+      "bytes": 131038
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310006_policy_only_db3432974ad6313f.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784522542.9244862,
+      "bytes": 130876
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310004_policy_only_c704a2ba52401945.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784522403.590192,
+      "bytes": 130952
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310011_policy_only_ae13f16fdcbb1bdc.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784511060.6132438,
+      "bytes": 130911
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310005_policy_only_c8449a488a0f83c1.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784494946.3918064,
+      "bytes": 131003
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310003_policy_only_8b0c22be313317c0.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784503106.058669,
+      "bytes": 130954
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310002_policy_only_585b8799cef019eb.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784546698.8919008,
+      "bytes": 130920
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310009_policy_only_9393d7519d471f09.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784499179.9699507,
+      "bytes": 130879
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310001_policy_only_9c7f40ffea66db76.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784508398.6855867,
+      "bytes": 130899
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310011_policy_only_f3e9178ad9b44033.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784496269.9711993,
+      "bytes": 131053
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310016_policy_only_784e8fb36eb7961a.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784538727.7251635,
+      "bytes": 131039
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310015_policy_only_2f82e2b7c8ad107d.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784512473.633848,
+      "bytes": 130941
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310011_policy_only_056f5615f5d703b2.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784533167.4753127,
+      "bytes": 130974
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310005_policy_only_37d25c3394ded205.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784538229.529397,
+      "bytes": 131032
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310009_policy_only_d7ecfccaa97f7b1e.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784518552.1978123,
+      "bytes": 130988
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310006_policy_only_380cc23d3735914c.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784502156.0786119,
+      "bytes": 130866
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310014_policy_only_1a1607ed05ca99e8.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784523101.8742,
+      "bytes": 130919
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310006_policy_only_50a377dd7a40ce4a.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784519358.77286,
+      "bytes": 130953
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310004_policy_only_85135cf7f553617c.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784529257.7255514,
+      "bytes": 130612
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310015_policy_only_fb0f2ec7f012acc6.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784543473.4045742,
+      "bytes": 130792
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310014_policy_only_6f878c244e61ffcf.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784519868.6272786,
+      "bytes": 130974
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310016_policy_only_ed62ca3351c50edc.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784494594.563034,
+      "bytes": 130861
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310010_policy_only_d3e0aa216238cd36.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784522818.2208328,
+      "bytes": 130861
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310009_policy_only_207a07f77c37327e.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784545164.0151176,
+      "bytes": 131050
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310007_policy_only_72de5fd66990a3bf.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784519477.5546076,
+      "bytes": 131013
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310007_policy_only_fd6c6d9676634267.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784510806.587733,
+      "bytes": 130870
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310014_policy_only_1fb17cebef230964.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784547441.1433876,
+      "bytes": 130919
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310011_policy_only_1ac898c303c37b40.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784502554.383194,
+      "bytes": 130856
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310007_policy_only_668f9a05b5e79d17.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784518429.2466044,
+      "bytes": 131038
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310016_policy_only_56e746190166e913.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784533286.2003007,
+      "bytes": 130983
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310005_policy_only_6b1b5daec2ded0c9.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784508647.2866762,
+      "bytes": 130861
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310001_policy_only_794e20f279a39df5.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784529152.1357644,
+      "bytes": 130625
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310001_policy_only_339a843744a67724.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784503968.459126,
+      "bytes": 130999
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310007_policy_only_553ebb64f1056f1c.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784523806.7531385,
+      "bytes": 130923
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310015_policy_only_528f49d0a1e9c053.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784519991.7030911,
+      "bytes": 131026
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310002_policy_only_fd66f894b18e7a56.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784524504.0996945,
+      "bytes": 130914
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310001_policy_only_7eef82f38a0c27cb.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784530249.5331488,
+      "bytes": 130943
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310009_policy_only_583ab8565cf81311.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784523948.8733456,
+      "bytes": 130877
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310001_policy_only_ef9200c7ba2c221b.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784521177.080501,
+      "bytes": 130960
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310006_policy_only_8258a137418d5ebb.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784548101.142489,
+      "bytes": 130900
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310007_policy_only_ff0a235b7a9fa9d4.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784509770.2934945,
+      "bytes": 131078
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310004_policy_only_108993e6960d8784.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784531402.63772,
+      "bytes": 130875
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310003_policy_only_eca1474b9387573a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784537078.0023253,
+      "bytes": 130746
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310016_policy_only_aff8134a706903ce.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784529956.1999118,
+      "bytes": 130554
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310005_policy_only_2d9bc984690d25c6.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784545941.1235619,
+      "bytes": 131062
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310009_policy_only_e8bdc0bc79769e5b.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784512043.2399457,
+      "bytes": 130953
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310009_policy_only_0d03d3a7265ad5bc.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784498160.1841285,
+      "bytes": 130947
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310015_policy_only_e9086f978011f9ae.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784518953.4444747,
+      "bytes": 131034
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310015_policy_only_574272c619b0a7eb.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784521008.0928893,
+      "bytes": 130954
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310011_policy_only_56ad30f7749cc6ab.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784519732.359886,
+      "bytes": 131016
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310006_policy_only_eae02940752f131f.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784533864.557806,
+      "bytes": 130901
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310009_policy_only_5e810749d7ea857e.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784504468.4589908,
+      "bytes": 130983
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310008_policy_only_36139c90f63c1351.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784533998.8654742,
+      "bytes": 130987
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310010_policy_only_e64932a61a7b9850.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784513138.0438101,
+      "bytes": 130696
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310010_policy_only_e7b464aae698be07.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784503476.449172,
+      "bytes": 130986
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310016_policy_only_98471f8c2ac855ab.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784512469.29375,
+      "bytes": 131004
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310011_policy_only_222a0db4adbd4324.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784539720.118053,
+      "bytes": 131060
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310011_policy_only_083d45490958dd23.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784546324.0128758,
+      "bytes": 131056
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310006_policy_only_fe89a5624d902e69.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784511754.8369703,
+      "bytes": 130897
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310011_policy_only_8e07a56593b2531a.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784521812.943071,
+      "bytes": 130958
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310014_policy_only_39925428afcaa197.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784511191.773501,
+      "bytes": 130848
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310005_policy_only_8b5d764238e6a3f3.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784493175.2311103,
+      "bytes": 130781
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310004_policy_only_025f0c11fda1a93c.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784528172.480253,
+      "bytes": 130608
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310011_policy_only_73561417b4f11036.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784522954.4296916,
+      "bytes": 130892
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310007_policy_only_baad19022621651d.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784517438.7778285,
+      "bytes": 131038
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310015_policy_only_b6b030308ba89fae.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784495557.2481787,
+      "bytes": 131062
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310003_policy_only_7c4fadc8b846d43f.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784510551.1587408,
+      "bytes": 130920
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310004_policy_only_a41ea7ef7017fd10.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784503108.9108949,
+      "bytes": 130951
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310013_policy_only_211bd167d6b90a25.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784532120.8617952,
+      "bytes": 130861
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310016_policy_only_722cc5ec2148fe4d.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784501729.4426947,
+      "bytes": 130885
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310008_policy_only_dc9869b126fe8246.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784496033.5472267,
+      "bytes": 131015
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310002_policy_only_a97a6115625abe2c.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784510426.276951,
+      "bytes": 130892
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310012_policy_only_db23a8c5efabbc64.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784508042.6911185,
+      "bytes": 130641
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310013_policy_only_3d88606670eb9979.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784520886.222183,
+      "bytes": 130944
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310005_policy_only_1172f64be770f54a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784543870.6620557,
+      "bytes": 130787
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310004_policy_only_e44b6729c253361a.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784500893.4815328,
+      "bytes": 130865
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310010_policy_only_487ebbb8f3f11cbb.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784548349.4205518,
+      "bytes": 130969
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310003_policy_only_8bfa9fed6ae3c51f.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784496766.8238845,
+      "bytes": 130946
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310011_policy_only_05caf7783d3cd0fa.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784494376.9456296,
+      "bytes": 130880
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310002_policy_only_565addac7e42ba76.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784547846.7504783,
+      "bytes": 130940
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310001_policy_only_7edb2dce67f6158d.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784511465.9934642,
+      "bytes": 130990
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310016_policy_only_f497a2344397d026.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784498538.241857,
+      "bytes": 130932
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310004_policy_only_ca2f1e2c3c7e19f8.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784496773.0361788,
+      "bytes": 130925
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310006_policy_only_ce6afcb7ef5a92b6.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784498927.0211403,
+      "bytes": 130850
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310003_policy_only_84638f13ceb3b2d6.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784493068.3994153,
+      "bytes": 130822
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310009_policy_only_c23763c3d2a7e168.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784522815.4007893,
+      "bytes": 130959
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310015_policy_only_a04de533e981c678.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784509253.6561215,
+      "bytes": 130877
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310016_policy_only_bdd4179980a30c3c.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784508267.6417606,
+      "bytes": 130672
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310015_policy_only_25799ec0ec734bdf.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784499573.7939062,
+      "bytes": 130865
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310008_policy_only_78f3fb6446bfb8e9.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784519483.4625146,
+      "bytes": 130966
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310001_policy_only_953230525eac819f.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784547868.2260358,
+      "bytes": 130967
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310009_policy_only_a86d438c288d2570.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784537473.6483688,
+      "bytes": 130775
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310006_policy_only_f3a406f3013843f5.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784530465.368333,
+      "bytes": 130929
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310010_policy_only_7d2a54845d6a61e9.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784496153.9812248,
+      "bytes": 131029
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310006_policy_only_c803c70722483804.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784495913.4693015,
+      "bytes": 131035
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310001_policy_only_141efefbc3a308c1.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784524488.5676076,
+      "bytes": 130978
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310006_policy_only_92b99e2167cc911a.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784494953.9637992,
+      "bytes": 131038
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310015_policy_only_7178c9ef5c8d48a4.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784525365.3864615,
+      "bytes": 130984
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310011_policy_only_7041748660f7c1cd.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784508042.2631059,
+      "bytes": 130713
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310003_policy_only_3d62114a75e8c699.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784530379.0071099,
+      "bytes": 130832
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310007_policy_only_ccd2c26fffc82e72.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784495069.2679446,
+      "bytes": 131028
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310015_policy_only_bf07d13cc8a0900b.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784513525.0567622,
+      "bytes": 130712
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310014_policy_only_efbf0292a6eddc4e.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784531978.7437313,
+      "bytes": 130918
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310004_policy_only_4d17212e20951402.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784510552.7947648,
+      "bytes": 130970
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310010_policy_only_91287ff8fda6c86e.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784539467.0498123,
+      "bytes": 131032
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310004_policy_only_210fabf8e763cf77.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784538073.2476063,
+      "bytes": 131040
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310001_policy_only_6c7acd9a379b5a0a.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784544652.6744685,
+      "bytes": 131075
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310010_policy_only_6928eac5c2dbd5d6.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784517559.1738367,
+      "bytes": 131004
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310007_policy_only_0ed8a76569309370.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784496030.2391727,
+      "bytes": 130994
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310013_policy_only_32c27a0385f7f087.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784546448.1873622,
+      "bytes": 131059
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310006_policy_only_2c465cfcadc406b1.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784512876.2953637,
+      "bytes": 130672
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310013_policy_only_b82ae0cba674cefb.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784525242.3453028,
+      "bytes": 130928
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310016_policy_only_3ec8269072c3fa0d.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784547567.5467541,
+      "bytes": 130928
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310008_policy_only_b1552271e0fee27b.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784524887.0260432,
+      "bytes": 130892
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310013_policy_only_c51ab51f7928d6ae.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784494488.8576744,
+      "bytes": 130861
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310012_policy_only_7408bf8cf97e2df3.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784500343.193205,
+      "bytes": 130842
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310006_policy_only_d61a0f7ea126cceb.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784529370.6067672,
+      "bytes": 130589
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310012_policy_only_289ddeeb1edf0c99.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784501449.148752,
+      "bytes": 130893
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310003_policy_only_a56ddc3200793d7e.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784538107.231074,
+      "bytes": 131008
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310014_policy_only_c3f2dbb2a11e3fb7.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784546327.048939,
+      "bytes": 131057
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310007_policy_only_4d3d54975b81cacb.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784494165.8696556,
+      "bytes": 130899
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310011_policy_only_893683a7f9755bd2.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784504591.149198,
+      "bytes": 130978
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310013_policy_only_842d7bf200089894.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784516858.3692002,
+      "bytes": 130501
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310006_policy_only_8451d1a68ab97652.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784538183.749984,
+      "bytes": 131050
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310015_policy_only_3b6fb1bb22b1e41f.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784538851.6525104,
+      "bytes": 131067
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310010_policy_only_4b0b9a9f4e872729.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784534127.0773869,
+      "bytes": 131003
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310015_policy_only_db57cbbbbb59e21f.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784501732.850851,
+      "bytes": 130907
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310013_policy_only_1fa708f99945f036.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784533320.267569,
+      "bytes": 131014
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310010_policy_only_eaa4e9656c829f88.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784521743.9655263,
+      "bytes": 130985
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310013_policy_only_0b45dc2ceaf80568.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784510176.0696263,
+      "bytes": 131028
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310014_policy_only_b3c493b98430d9f0.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784538619.9818285,
+      "bytes": 131054
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310016_policy_only_e32cb788227c625c.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784509263.5071073,
+      "bytes": 130882
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310010_policy_only_552e2d7d8910d6c4.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784493400.0665054,
+      "bytes": 130807
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310016_policy_only_649365db40524d21.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784525391.5379462,
+      "bytes": 130941
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310005_policy_only_d1f8ad6b8b9f629e.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784512872.6133406,
+      "bytes": 130721
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310005_policy_only_e4e352e9fcae050e.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784501031.037427,
+      "bytes": 130839
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310002_policy_only_aab5c435a5d02070.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784542558.6253355,
+      "bytes": 130750
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310009_policy_only_168fe095d28a221b.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784524990.1139479,
+      "bytes": 130978
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310003_policy_only_5f1d17452dc03f44.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784509520.2883477,
+      "bytes": 131071
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310015_policy_only_8b0128b634bd7f06.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784533465.2930703,
+      "bytes": 131020
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310003_policy_only_3149703cad93e482.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784524617.4643521,
+      "bytes": 130966
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310010_policy_only_3042372666d08a41.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784531747.160103,
+      "bytes": 130865
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310010_policy_only_4fd57446f3f2ab73.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784504468.8070097,
+      "bytes": 131002
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310002_policy_only_6ea28086cd7d2507.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784543585.3772662,
+      "bytes": 130755
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310012_policy_only_5369f6931befbec9.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784516743.156012,
+      "bytes": 130587
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310014_policy_only_4664a00598ccb215.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784513400.1531186,
+      "bytes": 130692
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310005_policy_only_d32f2752b0a1b53f.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784507695.1605597,
+      "bytes": 130676
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310003_policy_only_448106b710ea66a8.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784499837.0197272,
+      "bytes": 130876
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310014_policy_only_e896b7a35f3c65f8.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784528749.799079,
+      "bytes": 130627
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310003_policy_only_c40e1868c3ee143c.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784543739.5824885,
+      "bytes": 130790
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310012_policy_only_bfee97f3c01aabd2.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784519740.5598354,
+      "bytes": 130971
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310013_policy_only_7dbbfc7086a8904b.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784529980.6124017,
+      "bytes": 130603
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310011_policy_only_34e418ce0a8051be.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784548601.2877936,
+      "bytes": 130923
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310014_policy_only_4f889277d43f5cfd.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784534384.8056974,
+      "bytes": 131014
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310002_policy_only_cba31d0b991c755c.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784503970.8152616,
+      "bytes": 130993
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310013_policy_only_a19722c6b2bae08c.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784503718.0683653,
+      "bytes": 130987
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310002_policy_only_ebe73dcf035ee165.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784497654.6009142,
+      "bytes": 130902
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310012_policy_only_f55b9e6faea016ae.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784524087.817745,
+      "bytes": 130937
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310007_policy_only_5da69b783c758c6b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784528489.8195155,
+      "bytes": 130588
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310006_policy_only_925a5e20ab6a59f3.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784546948.9039965,
+      "bytes": 130917
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310003_policy_only_77162dfef1a8ca06.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784502007.6587238,
+      "bytes": 130846
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310016_policy_only_002581167ffc0291.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784495553.8281355,
+      "bytes": 131037
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310011_policy_only_f9357e4e5beab5f4.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784531989.635893,
+      "bytes": 130913
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310003_policy_only_500197b4e674725a.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784528213.42014,
+      "bytes": 130674
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310013_policy_only_158ced18f7935769.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784517777.788603,
+      "bytes": 131026
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310005_policy_only_a17c6c20060aed03.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784547009.6009464,
+      "bytes": 130876
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310009_policy_only_8831312f38b40335.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784502412.686322,
+      "bytes": 130903
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310009_policy_only_e8310fde2bb5c798.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784539579.9099257,
+      "bytes": 131041
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310008_policy_only_3c3d61ba11bc1fbb.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784531634.6661782,
+      "bytes": 130920
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310008_policy_only_a46ddd004c0658a7.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784503356.5131187,
+      "bytes": 130920
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310014_policy_only_3ed62b9150c97fec.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784494486.7617366,
+      "bytes": 130851
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310005_policy_only_7b43dcf593609314.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784533910.74966,
+      "bytes": 130950
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310007_policy_only_694dc6689506f5fa.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784524865.3859022,
+      "bytes": 131042
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310005_policy_only_0a686628cdf98d16.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784504216.4291344,
+      "bytes": 130986
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310002_policy_only_e0de1f8fcf97a53f.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784502987.7408981,
+      "bytes": 130959
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310012_policy_only_73154a7fb05f382d.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784543121.2413661,
+      "bytes": 130769
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310015_policy_only_6fd062229ef78a56.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784497517.0845325,
+      "bytes": 130958
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310012_policy_only_ed8766ccc5cb694f.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784528633.1312613,
+      "bytes": 130586
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310003_policy_only_cb2d440351712a58.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784512739.7274914,
+      "bytes": 130676
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310014_policy_only_4d84b4303848baae.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784503718.5363936,
+      "bytes": 131022
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310009_policy_only_a3d77c3614e34456.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784531850.4577694,
+      "bytes": 130903
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310006_policy_only_812d0920582bbc93.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784545886.6499467,
+      "bytes": 131051
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310005_policy_only_2e4eea6adb1c18a1.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784548156.5539217,
+      "bytes": 130923
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310008_policy_only_1e55bd64c1d5168d.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784501171.0878005,
+      "bytes": 130872
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310004_policy_only_ef0b8ccde9277d02.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784537040.9658554,
+      "bytes": 130705
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310010_policy_only_9f3849d9f0f58a8e.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784500218.2756982,
+      "bytes": 130895
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310016_policy_only_4df3244d5a6574ca.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784520004.879088,
+      "bytes": 130984
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310002_policy_only_e2e48239a431fae9.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784545667.8023539,
+      "bytes": 131048
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310006_policy_only_81d307f5b8ddd71e.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784521472.4625578,
+      "bytes": 130915
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310003_policy_only_3fb8e6162e136d51.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784497775.7646673,
+      "bytes": 130963
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310015_policy_only_26edf470770bbf80.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784502846.1519709,
+      "bytes": 130915
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310004_policy_only_3c86ad3e8a2c68b0.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784504096.8064349,
+      "bytes": 131007
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310009_policy_only_661d65220cc60230.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784496152.8972065,
+      "bytes": 131048
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310003_policy_only_c7bab0ba6b7dfef5.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784498799.180278,
+      "bytes": 130860
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310013_policy_only_72db31d07ec5cfe7.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784548745.1797168,
+      "bytes": 130922
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310008_policy_only_3498a55dd6982b89.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784543928.599429,
+      "bytes": 130725
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310005_policy_only_a12e7bb18695897b.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784520386.3987596,
+      "bytes": 130955
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310006_policy_only_278120aa703dfb60.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784510683.014266,
+      "bytes": 130902
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310006_policy_only_0c021a4fc0f8c91b.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784503230.2761414,
+      "bytes": 130950
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310006_policy_only_4367fd90ab1849e8.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784496894.0936446,
+      "bytes": 130940
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310016_policy_only_dec9bf0b544da567.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784534510.4824867,
+      "bytes": 131055
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310007_policy_only_f4670dbde520a3ca.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784503356.5851238,
+      "bytes": 130967
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310006_policy_only_cebc1ae614b37f32.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784539219.0990582,
+      "bytes": 131064
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310013_policy_only_a03df4d0205f55fc.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784547575.2304506,
+      "bytes": 130942
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310010_policy_only_0c71306c8f8b4d9f.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784525012.280998,
+      "bytes": 130962
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310006_policy_only_bb0c4bd7202ba0e8.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784531518.4680405,
+      "bytes": 130899
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310005_policy_only_a96a30ff42eb8521.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784542833.1812735,
+      "bytes": 130723
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310007_policy_only_fe6bfebfd681b61a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784537344.2954466,
+      "bytes": 130781
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310013_policy_only_6759c9af5fba034b.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784502709.0297902,
+      "bytes": 130871
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310011_policy_only_b1cae43968b9f612.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784497259.423829,
+      "bytes": 130944
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310005_policy_only_0428a5f7a676dc49.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784496887.3733537,
+      "bytes": 130908
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310013_policy_only_8648c0c7e8a6c1f2.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784521936.3736668,
+      "bytes": 130991
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310009_policy_only_ba252c78dea20c90.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784494270.2787714,
+      "bytes": 130832
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310015_policy_only_c080a4991f33b941.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784545557.817679,
+      "bytes": 131078
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310004_policy_only_472cd86c666e47f4.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784519221.0325582,
+      "bytes": 131040
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310003_policy_only_c34d65fbbea14e47.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784495793.2714589,
+      "bytes": 131041
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310007_policy_only_28e5dc2c305063b6.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784546068.463009,
+      "bytes": 130996
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310015_policy_only_ad22126e395526fe.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784548887.788558,
+      "bytes": 130980
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310013_policy_only_07b7c4ed7f017078.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784545429.0653217,
+      "bytes": 131041
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310008_policy_only_e68af87eb585589a.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784545998.2011597,
+      "bytes": 131062
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310016_policy_only_3cba6c51107f248d.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784548723.9757156,
+      "bytes": 130981
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310009_policy_only_9fc5b8e7a9211e23.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784520633.4080749,
+      "bytes": 130960
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310010_policy_only_16468a330c1ca4c4.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784546106.383959,
+      "bytes": 131016
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310012_policy_only_0e8d6844fc6293f7.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784534256.8294752,
+      "bytes": 130975
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310001_policy_only_ecd0da26759be059.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784537980.7085168,
+      "bytes": 131031
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310011_policy_only_a5fff8287fe5519b.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784513265.558114,
+      "bytes": 130694
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310003_policy_only_af603b4f1be9320e.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784508523.769217,
+      "bytes": 130876
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310013_policy_only_ef59019364fe8d28.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784497390.0203352,
+      "bytes": 130952
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310012_policy_only_997cb5e494b05ae6.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784512188.471337,
+      "bytes": 130950
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310005_policy_only_45fcc617cff8ec48.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784521428.717265,
+      "bytes": 131005
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310014_policy_only_ba8c5ea09055706a.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784501588.7079895,
+      "bytes": 130889
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310005_policy_only_2193bfe24021a5c1.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784516388.5003827,
+      "bytes": 130648
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310012_policy_only_094b4f589d3ab43c.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784533025.2415626,
+      "bytes": 130939
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310012_policy_only_3412e9703fcc74c4.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784546219.1906102,
+      "bytes": 131019
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310007_policy_only_efb8b9ff74441f7d.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784502275.4411366,
+      "bytes": 130895
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310004_policy_only_61c80fc7df5e5e5e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784523522.6616142,
+      "bytes": 130951
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310004_policy_only_65781e4ce116bc7f.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784521319.5297678,
+      "bytes": 130965
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310009_policy_only_3083f444396d632d.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784510930.0085995,
+      "bytes": 130925
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310014_policy_only_4f382f7c9c23004f.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784525264.860727,
+      "bytes": 130981
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310002_policy_only_d733fce8fa1353e2.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784492969.5558593,
+      "bytes": 130896
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310014_policy_only_1a52cb3cdecd896f.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784518807.8883898,
+      "bytes": 130984
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310002_policy_only_e6c0134cfbc8c996.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784521192.3291092,
+      "bytes": 130996
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310014_policy_only_50305bc294112afa.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784545291.720278,
+      "bytes": 131086
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310013_policy_only_bee4be12e8f740fd.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784538729.181155,
+      "bytes": 130975
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310016_policy_only_72e485fcc1acd8b7.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784510284.9710228,
+      "bytes": 131077
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310002_policy_only_2260fd25b089c202.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784493832.1158106,
+      "bytes": 130899
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310005_policy_only_15c063cb80420d9e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784502141.3294084,
+      "bytes": 130881
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310014_policy_only_c7c51ff2e0e49580.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784529836.9973357,
+      "bytes": 130561
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310010_policy_only_d86a08f5ac300c49.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784502435.5111725,
+      "bytes": 130866
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310005_policy_only_a9120c2daeba68f9.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784497903.968553,
+      "bytes": 130917
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310015_policy_only_661c33628bc96d00.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784498533.1007345,
+      "bytes": 130922
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310006_policy_only_4f7b3d53ac563909.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784537155.1752942,
+      "bytes": 130712
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310016_policy_only_602d19ee114b9886.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784511320.11736,
+      "bytes": 130931
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310009_policy_only_750320f7fb06cdbd.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784508884.2147057,
+      "bytes": 130894
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310016_policy_only_8775d1e86ab36730.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784532094.9254258,
+      "bytes": 130915
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310014_policy_only_4d87ff461a2d17a4.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784500471.2279983,
+      "bytes": 130898
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310002_policy_only_397812ba987c5fc6.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784520137.145944,
+      "bytes": 130948
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310014_policy_only_7844f4ce4f52326b.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784502726.1076617,
+      "bytes": 130861
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310013_policy_only_90a6ccd226d9eac7.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784508161.018626,
+      "bytes": 130644
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310001_policy_only_6fcfd01e5b6039da.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784495670.9336936,
+      "bytes": 131049
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310010_policy_only_8dad4881cbb4f2c9.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784547192.4477322,
+      "bytes": 130874
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310011_policy_only_a5dcec41305e4b2a.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784495316.6455204,
+      "bytes": 131040
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310016_policy_only_4cc9ece64c31ca9f.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784524362.6469362,
+      "bytes": 130885
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310008_policy_only_3193491f4bb17711.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784521615.3584256,
+      "bytes": 130954
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310013_policy_only_24f3fb1d03a21401.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784513392.7091558,
+      "bytes": 130674
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310001_policy_only_1dbfd0391973dc62.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784501866.7568002,
+      "bytes": 130904
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310013_policy_only_4494625ee075c332.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784543346.9455063,
+      "bytes": 130685
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310009_policy_only_3339fb3d1d0e613f.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784500222.767751,
+      "bytes": 130879
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310009_policy_only_742bcf29f4adc117.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784548451.728129,
+      "bytes": 130942
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310009_policy_only_f56b51d7db4c303c.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784507924.1235662,
+      "bytes": 130661
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310002_policy_only_0879c8e7ea7036a5.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784501873.0210702,
+      "bytes": 130910
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310015_policy_only_2f61ab8dfd81574b.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784508274.0139472,
+      "bytes": 130671
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310014_policy_only_e95c852fe9ad9704.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784530924.5327275,
+      "bytes": 130884
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310008_policy_only_dbae91abad33b5a3.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784520538.7475255,
+      "bytes": 130897
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310004_policy_only_d44c44acaf775e74.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784508529.1493728,
+      "bytes": 130837
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310009_policy_only_a7d08c5a876361d5.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784497134.291277,
+      "bytes": 130894
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310005_policy_only_48de68a1ec854bc7.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784519352.413003,
+      "bytes": 131000
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310006_policy_only_db9a13b79fd6ee6b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784528293.0439377,
+      "bytes": 130573
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310006_policy_only_6b589ffe9ddb3c38.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784508657.9059708,
+      "bytes": 130864
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310008_policy_only_d28a1896ca052f8b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784528409.0636768,
+      "bytes": 130579
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310009_policy_only_ec2215e74cddf2e7.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784533006.9493365,
+      "bytes": 130939
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310008_policy_only_aa24a8ad2832f668.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784522679.3946664,
+      "bytes": 130913
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310003_policy_only_7c052644f94bd6bc.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784519224.6764429,
+      "bytes": 130993
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310004_policy_only_c7a4dc248dbe83b2.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784493076.0436842,
+      "bytes": 130850
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310006_policy_only_b22846798e99802e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784523661.7332044,
+      "bytes": 130902
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310004_policy_only_8292c4242cd86a55.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784547976.308128,
+      "bytes": 130944
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310004_policy_only_fb7c2d5ec533da18.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784493945.171174,
+      "bytes": 130822
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310001_policy_only_3bb70133c916f963.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784498669.6969023,
+      "bytes": 130911
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310007_policy_only_ac58b86e0631ff58.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784521552.3567822,
+      "bytes": 130986
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310014_policy_only_cb76dfe58f593a3f.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784533159.7872183,
+      "bytes": 131030
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310009_policy_only_ef1ee7020479a776.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784509902.0106003,
+      "bytes": 131049
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310010_policy_only_2295f8df0c4db153.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784498161.0321534,
+      "bytes": 130954
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310014_policy_only_16f8697353e3c0f8.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784504721.7182899,
+      "bytes": 130971
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310008_policy_only_4e1c056634571aa3.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784516503.239277,
+      "bytes": 130620
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310016_policy_only_fe51bfbbab688b17.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784531041.798065,
+      "bytes": 130927
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310012_policy_only_41cab46ffad11d75.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784509018.386706,
+      "bytes": 130850
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310013_policy_only_70e9b71e77485348.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784539864.1094148,
+      "bytes": 131100
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310005_policy_only_354b2505ff2c7b2d.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784544908.8129523,
+      "bytes": 131101
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310001_policy_only_d0ee045422d5207a.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784539004.0758352,
+      "bytes": 131063
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310012_policy_only_07a559fd6cc42c8b.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784547317.0455792,
+      "bytes": 130893
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310014_policy_only_166836b896dd1bbd.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784508156.8945043,
+      "bytes": 130664
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310009_policy_only_976cfd32e7d00541.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784493393.766304,
+      "bytes": 130798
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310007_policy_only_09a6f15cdcd0a506.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784498033.8764207,
+      "bytes": 130981
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310007_policy_only_f4848c326ad8e673.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784508767.267698,
+      "bytes": 130801
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310003_policy_only_a624bfb2b4b19adb.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784522397.4820898,
+      "bytes": 130932
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310004_policy_only_e4a50216dfac33c7.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784544746.7234273,
+      "bytes": 131035
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310008_policy_only_dbe42d0f930ba4a8.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784537268.4364822,
+      "bytes": 130731
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310005_policy_only_cb618055350490c2.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784495916.5373497,
+      "bytes": 130999
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310016_policy_only_7afbee8934802384.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784545405.1611426,
+      "bytes": 131054
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310003_policy_only_267df3a43fec78df.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784544782.5117767,
+      "bytes": 131075
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310012_policy_only_6ed38360804046a6.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784502581.366674,
+      "bytes": 130927
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310005_policy_only_fb37ae8805e52cc7.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784499962.3049,
+      "bytes": 130865
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310013_policy_only_b4acecd4ce73812f.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784523099.154253,
+      "bytes": 130923
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310011_policy_only_d7e1540fef1e05ec.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784518702.5816936,
+      "bytes": 131015
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310009_policy_only_7dddf63851a6a575.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784495193.1605504,
+      "bytes": 130985
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310016_policy_only_3cfea4f688948d38.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784521052.2150457,
+      "bytes": 130963
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310004_policy_only_75084bb8936aab3a.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784532515.903134,
+      "bytes": 130959
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310002_policy_only_1431aa9642fbd71a.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784509404.8363996,
+      "bytes": 131119
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310001_policy_only_d8524f3a5ae97f12.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784523384.2384663,
+      "bytes": 130963
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310008_policy_only_39dbc5d1e31bd7e0.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784497017.3627586,
+      "bytes": 130954
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310012_policy_only_dcad123c7ac4461c.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784496279.9833717,
+      "bytes": 131059
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310014_policy_only_f5f7e386faf9cbd9.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784509138.536355,
+      "bytes": 130874
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310016_policy_only_c0e7fb89c7d5387f.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784493720.4844515,
+      "bytes": 130850
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310002_policy_only_c564258f527b2a38.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784518048.6203647,
+      "bytes": 130996
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310010_policy_only_80979470359a9cfa.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784530700.7514093,
+      "bytes": 130879
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310001_policy_only_f539fba64e750bf9.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784497647.3166857,
+      "bytes": 130971
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310006_policy_only_81fa70eb05c0f76e.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784517332.7740793,
+      "bytes": 130998
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310016_policy_only_330cba1113a13e53.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784496517.2346115,
+      "bytes": 131058
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310015_policy_only_88da13239eb07f71.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784529020.3547165,
+      "bytes": 130646
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310010_policy_only_a41cd302d67ac24b.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784512045.331995,
+      "bytes": 130893
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310001_policy_only_91cc19d74e5d4737.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784520135.4179409,
+      "bytes": 130961
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310001_policy_only_912568888eb21bf4.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784528077.9005394,
+      "bytes": 130600
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310015_policy_only_69f2e1579d6105bf.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784496509.9661748,
+      "bytes": 131057
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310001_policy_only_cca504fe075f8bda.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784494713.6930828,
+      "bytes": 131029
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310003_policy_only_7eb742dba06b81d0.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784507577.5128584,
+      "bytes": 130666
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310012_policy_only_1433ff34a5ca2d27.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784498282.615684,
+      "bytes": 130899
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310013_policy_only_f2dca6455d0bd09d.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784511189.1734197,
+      "bytes": 130935
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310008_policy_only_1085cb4d07206ea3.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784530584.6379328,
+      "bytes": 130894
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310007_policy_only_c4413e05443042cd.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784539435.5525131,
+      "bytes": 131006
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310007_policy_only_45ceed14c4df3c01.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784531716.4995909,
+      "bytes": 130927
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310010_policy_only_d50564080dc06e65.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784520670.860305,
+      "bytes": 130976
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310014_policy_only_45b288c3f7f35c23.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784512331.0866134,
+      "bytes": 130938
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310008_policy_only_d55246319ea11bc9.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784499048.2471893,
+      "bytes": 130814
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310001_policy_only_a9d8b33d811c45b2.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784531307.5116398,
+      "bytes": 130950
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310010_policy_only_8e1cc1fd8f30dd04.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784508899.3701692,
+      "bytes": 130868
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310012_policy_only_088b2b38a6cd586b.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784521867.800249,
+      "bytes": 130914
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310005_policy_only_566201e60304cd4b.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784494058.4025114,
+      "bytes": 130871
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310002_policy_only_637e0bf743ef17a4.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784523382.5584798,
+      "bytes": 130910
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310008_policy_only_deed03d8cd72591c.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784511899.2965121,
+      "bytes": 130968
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310010_policy_only_1e3132cb8f2e66d8.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784518560.0140152,
+      "bytes": 130948
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310005_policy_only_d4fac3ca0d136747.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784537213.7040205,
+      "bytes": 130748
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310003_policy_only_951d4815518f5f6b.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784529287.7110262,
+      "bytes": 130647
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310013_policy_only_9e257fdabf151363.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784496394.1467316,
+      "bytes": 131040
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310012_policy_only_48569c6109bfc3bb.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784544146.711737,
+      "bytes": 130740
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310003_policy_only_05156df089b7e8ab.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784531442.4265413,
+      "bytes": 130932
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310001_policy_only_07a15d237e19476a.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784499701.9906652,
+      "bytes": 130873
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310006_policy_only_12d6f675ac90aef1.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784543813.484584,
+      "bytes": 130729
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310012_policy_only_ce9d8449be9a0354.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784525135.6924245,
+      "bytes": 130983
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310005_policy_only_9972e0bf6e36fec3.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784498919.537291,
+      "bytes": 130925
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310006_policy_only_47fdf512b7952d96.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784516381.5882287,
+      "bytes": 130534
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310009_policy_only_6e68278aeec3f8a7.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784503476.005143,
+      "bytes": 130940
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310007_policy_only_a7d8dd57c1b17163.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784516508.4727736,
+      "bytes": 130572
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310009_policy_only_5b216bcffd5c19d3.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784547296.1852725,
+      "bytes": 130934
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310008_policy_only_6f6c9049709c347d.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784504343.8761783,
+      "bytes": 130943
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310004_policy_only_ed69e533a9b647d2.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784545777.558407,
+      "bytes": 131041
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310006_policy_only_90f075852461f5a0.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784532641.0447462,
+      "bytes": 130954
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310010_policy_only_53d45692f2e2eaee.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784529600.7310662,
+      "bytes": 130682
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310009_policy_only_bc032cf70b00c704.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784513131.9679127,
+      "bytes": 130686
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310007_policy_only_a054cb9b25dfab41.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784544002.3770254,
+      "bytes": 130709
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310011_policy_only_a0650f2e903b8eb6.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784529843.5214853,
+      "bytes": 130676
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310011_policy_only_707b17fe723d1f06.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784517667.949274,
+      "bytes": 131019
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310008_policy_only_ed032eaf2e055568.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784532769.2103715,
+      "bytes": 130970
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310004_policy_only_db593935c1cc4c50.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784497777.2847137,
+      "bytes": 130833
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310013_policy_only_601dd0661ee04a97.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784531039.9780445,
+      "bytes": 130864
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310004_policy_only_d80423206b8d5383.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784533728.6904657,
+      "bytes": 130987
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310004_policy_only_9729d83241f10b4f.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784543700.1092691,
+      "bytes": 130739
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310001_policy_only_a9c38d36419254ff.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784493833.8678632,
+      "bytes": 130801
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310011_policy_only_d3951cf5ea179a1c.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784543216.1654196,
+      "bytes": 130714
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310015_policy_only_acaeea45d9295beb.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784500612.9936817,
+      "bytes": 130936
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310001_policy_only_97d2379a8630eca8.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784496639.1694794,
+      "bytes": 130968
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310002_policy_only_2811635e535fa47c.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784499703.114673,
+      "bytes": 130963
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310003_policy_only_65f07fb85bd609b9.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784521307.4413543,
+      "bytes": 130940
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310007_policy_only_83ef9961ced89255.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784504338.2718704,
+      "bytes": 130964
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310012_policy_only_c162349720bd2cd4.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784520794.0331056,
+      "bytes": 131006
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310012_policy_only_dad9f974586ba0eb.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784538511.7426102,
+      "bytes": 131032
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310015_policy_only_63fdb4265ae53a2b.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784511321.4813998,
+      "bytes": 130974
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310016_policy_only_0bbb6e0e0b9e1ab7.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784502863.0495963,
+      "bytes": 130864
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310016_policy_only_ad3a02822c4a5a3b.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784523241.7839513,
+      "bytes": 130899
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310002_policy_only_587bf5909280bcb2.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784496647.0218947,
+      "bytes": 130943
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310009_policy_only_348f2bc968e12542.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784534206.0014222,
+      "bytes": 131000
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310009_policy_only_8812196ef0ad6fb1.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784543085.7653487,
+      "bytes": 130738
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310002_policy_only_41792534c7f0b467.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784519090.2814586,
+      "bytes": 130981
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310003_policy_only_626b805b8d17d807.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784546863.4906335,
+      "bytes": 130885
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310002_policy_only_ad58b4be96019086.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784507460.65309,
+      "bytes": 130707
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310001_policy_only_0a6c861300bfdd6e.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784542573.205327,
+      "bytes": 130722
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310007_policy_only_347ee7ec7648458f.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784548303.3408043,
+      "bytes": 130921
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310015_policy_only_7ca5040d85909634.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784522066.584216,
+      "bytes": 130979
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310010_policy_only_d1b29fd20b10d938.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784516620.0173597,
+      "bytes": 130534
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310001_policy_only_595587ab42b27bad.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784533612.7633603,
+      "bytes": 131013
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310003_policy_only_707d314f8850bf0b.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784511616.593462,
+      "bytes": 130930
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310008_policy_only_9317165229ff2dae.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784493293.8910687,
+      "bytes": 130821
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310005_policy_only_3e215d83942b5c52.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784530513.204986,
+      "bytes": 130917
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310007_policy_only_0b6920851311f41a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784493290.4149544,
+      "bytes": 130874
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310015_policy_only_54b9835e47fb01ba.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784517892.1359465,
+      "bytes": 131043
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310010_policy_only_dfa25303138bad38.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784545077.56641,
+      "bytes": 131024
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310016_policy_only_86a69aef45f469d9.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784518929.7739244,
+      "bytes": 130955
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310011_policy_only_46323dfac2ed32c1.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784524091.5777578,
+      "bytes": 130876
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310007_policy_only_2eb5839f8f00d094.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784529561.6778378,
+      "bytes": 130634
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310004_policy_only_503800cba93115c7.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784546822.3859653,
+      "bytes": 130929
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310016_policy_only_7535a4f122020b88.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784516987.2437508,
+      "bytes": 130574
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310005_policy_only_050ed95e8d9532a9.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784539291.7868302,
+      "bytes": 131050
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310010_policy_only_8c8c29787f03b0bd.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784544038.6617548,
+      "bytes": 130754
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310009_policy_only_571f89f12f63abbb.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784517549.5335243,
+      "bytes": 130982
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310012_policy_only_be9ded240a13014d.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784539592.6063406,
+      "bytes": 131051
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310014_policy_only_7abdd069e948a038.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784537603.722796,
+      "bytes": 130771
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310013_policy_only_f40611f91f0b0a77.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784501587.3599224,
+      "bytes": 130865
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310004_policy_only_88d08632f8c9973b.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784498795.4323895,
+      "bytes": 130884
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310006_policy_only_8293183e8bff9beb.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784544854.8044598,
+      "bytes": 131009
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310013_policy_only_a3eb093b27921bc7.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784504718.938636,
+      "bytes": 130978
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310003_policy_only_46bd5f639bd56cd9.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784539149.603291,
+      "bytes": 131057
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310002_policy_only_a94acd8b1a1c4804.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784529138.9869723,
+      "bytes": 130593
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310011_policy_only_e050bdde7387a2f6.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784510034.7199636,
+      "bytes": 131073
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310002_policy_only_7b4e7ecd34ec7b90.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784498666.109055,
+      "bytes": 130875
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310002_policy_only_60d13a85eb6fc889.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784511464.2814176,
+      "bytes": 130928
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310006_policy_only_4fc8513584e87596.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784542786.8612714,
+      "bytes": 130762
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310015_policy_only_de35985dffbc1e45.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784544523.6090395,
+      "bytes": 130797
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310006_policy_only_fca952faac194d55.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784524760.5292308,
+      "bytes": 130923
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310014_policy_only_f6852cd09c45252f.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784524229.494304,
+      "bytes": 130927
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310005_policy_only_58ccb6b03c590e51.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784529421.8168561,
+      "bytes": 130639
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310016_policy_only_f064cc5a21f0dc48.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784528863.7469175,
+      "bytes": 130615
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310014_policy_only_7e95446f9c98cfd1.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784498412.9971335,
+      "bytes": 130978
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310008_policy_only_bc9500ab92f35360.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784498031.3443458,
+      "bytes": 130973
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310004_policy_only_48b23fe71b34832e.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784507579.1169093,
+      "bytes": 130689
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310006_policy_only_8724164f47ee7ead.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784493185.4114554,
+      "bytes": 130856
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310010_policy_only_2362afa80cc289d4.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784507927.57167,
+      "bytes": 130617
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310004_policy_only_ce658202b4d33ae7.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784499831.231677,
+      "bytes": 130912
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310008_policy_only_06d8f8d9e76b53a0.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784507810.4441154,
+      "bytes": 130614
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310002_policy_only_63beb7d9657af36c.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784544633.9422698,
+      "bytes": 131063
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310011_policy_only_076ab1a2ec510872.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784530909.324551,
+      "bytes": 130911
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310010_policy_only_36bcab1bd2615dc8.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784523948.105344,
+      "bytes": 130956
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310014_policy_only_bb88179238c4d7e9.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784520920.724203,
+      "bytes": 130961
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310010_policy_only_aa94f0d6f841f8cf.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784497138.067418,
+      "bytes": 130919
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310004_policy_only_9e335939858a09a0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784516261.3295252,
+      "bytes": 130623
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310002_policy_only_60eb6cdcc56a08c1.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784530232.8528833,
+      "bytes": 130896
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310014_policy_only_6cb65743a69d1022.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784516859.5932665,
+      "bytes": 130563
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310015_policy_only_d253a3fc29bb76a5.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784530114.4188979,
+      "bytes": 130670
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310015_policy_only_43f9952c6fe1ee50.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784494597.3629766,
+      "bytes": 130882
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310002_policy_only_55ef488c99fd2ad7.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784494714.5370724,
+      "bytes": 131074
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310001_policy_only_5db55385c19187c3.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784545683.6229727,
+      "bytes": 131079
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310009_policy_only_a32cfed37c3d569a.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784519606.600925,
+      "bytes": 131011
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310006_policy_only_992ffad9ff1cddd0.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784520404.7948432,
+      "bytes": 130918
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310016_policy_only_8288e9dcff566abf.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784497522.5167084,
+      "bytes": 130971
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310013_policy_only_434165ceb8c89cc0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784544389.1193743,
+      "bytes": 130739
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310009_policy_only_803de6918f11ea64.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784544133.471508,
+      "bytes": 130703
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310005_policy_only_957ef791637e7de3.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784510679.534102,
+      "bytes": 130902
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310002_policy_only_ae473a340451f384.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784531286.307151,
+      "bytes": 130896
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310013_policy_only_51e09e6d936dc100.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784498410.3306801,
+      "bytes": 130934
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310008_policy_only_b4bf84dc828c204a.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784513005.8185692,
+      "bytes": 130690
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310004_policy_only_16a753663ec1d6d1.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784509533.7523694,
+      "bytes": 131081
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310004_policy_only_bc5bcee2d51adb6b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784542670.205287,
+      "bytes": 130789
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310007_policy_only_26d4c0a262db4c77.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784507807.4840248,
+      "bytes": 130654
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310007_policy_only_35cb3d1b9b438ecc.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784534058.0134096,
+      "bytes": 130987
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310007_policy_only_69ecbdbc79c8b50a.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784538355.1919985,
+      "bytes": 131032
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310016_policy_only_d82e90f153cd3072.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784517924.256867,
+      "bytes": 131019
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310012_policy_only_38bc221c7124042c.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784513268.8620808,
+      "bytes": 130731
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310012_policy_only_b94729405ea4dffa.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784545184.2632802,
+      "bytes": 131082
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310015_policy_only_7ab0f395a071505b.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784534655.3749526,
+      "bytes": 130989
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310008_policy_only_9a93b0c0fb81122f.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784510810.583899,
+      "bytes": 130887
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310014_policy_only_3f60fca3549d7843.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784510165.7494988,
+      "bytes": 131006
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310013_policy_only_72e081899db1d64d.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784512331.6586266,
+      "bytes": 130992
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310004_policy_only_223ab54a21675dcd.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784494833.982995,
+      "bytes": 131046
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310009_policy_only_6e2f8e0813d4129a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784529695.7218058,
+      "bytes": 130665
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310003_policy_only_9fbeab11820c1c8d.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784517209.713402,
+      "bytes": 130986
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310001_policy_only_100d78ce4f769bd0.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784512610.9649353,
+      "bytes": 130726
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310006_policy_only_b737781aec71cc46.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784494056.406453,
+      "bytes": 130849
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310016_policy_only_7ed792058d0c77d0.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784543347.0855064,
+      "bytes": 130742
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310001_policy_only_7fb5992637bb24ea.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784519091.3134136,
+      "bytes": 130985
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310002_policy_only_5d06556717b3b3ed.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784500757.3355818,
+      "bytes": 130858
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310016_policy_only_b126b6c0d0ef174e.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784546442.943261,
+      "bytes": 131047
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310008_policy_only_e2f456abd59be001.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784494165.33364,
+      "bytes": 130793
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310015_policy_only_e73b9397f39c71cd.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784540009.7801328,
+      "bytes": 131092
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310012_policy_only_30cee457b458170b.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784503598.629001,
+      "bytes": 130960
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310003_policy_only_baea14748714fee7.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784548011.9316044,
+      "bytes": 130941
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310009_policy_only_7fac739a46ada1a8.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784521679.9160213,
+      "bytes": 130979
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310009_policy_only_215881273d66e43f.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784516623.1294272,
+      "bytes": 130564
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310009_policy_only_49a46ea83cc64599.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784546197.1301105,
+      "bytes": 131069
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310005_policy_only_d134316156597924.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784503232.816328,
+      "bytes": 130996
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310005_policy_only_017fecf6a13f45df.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784531581.3412182,
+      "bytes": 130921
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310006_policy_only_61bdaa079708af32.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784501035.109751,
+      "bytes": 130803
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310002_policy_only_b897a16602ef4c2d.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784517104.265049,
+      "bytes": 130987
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310016_policy_only_ed113a31ff788bca.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784504852.308333,
+      "bytes": 130969
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310012_policy_only_014ec699882873e2.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784497268.5281506,
+      "bytes": 130938
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310003_policy_only_fcf2ddb7e88a6b5e.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784520256.9902554,
+      "bytes": 130956
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310002_policy_only_ef7c2b57628fe293.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784532387.7534509,
+      "bytes": 130988
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310004_policy_only_db5b34c43fb62f9e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784502016.966622,
+      "bytes": 130865
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310001_policy_only_265a1ee1f82caf0d.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784543609.846182,
+      "bytes": 130788
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310014_policy_only_40b3b6fa6bffe484.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784544258.3375318,
+      "bytes": 130782
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310007_policy_only_ea43872161585483.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784511902.7045944,
+      "bytes": 130913
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310013_policy_only_77bf73521f1aad6e.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784499449.6894693,
+      "bytes": 130871
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310004_policy_only_212581cc3ac4a0ca.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784512739.0475264,
+      "bytes": 130672
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310004_policy_only_248768195ca0e339.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784520269.114296,
+      "bytes": 130979
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310002_policy_only_7c17f49e93a5fdc0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784516142.5587971,
+      "bytes": 130575
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310004_policy_only_f919661ae9a1b538.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784524631.5564363,
+      "bytes": 130949
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310009_policy_only_8496a218c05235ea.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784530779.3883722,
+      "bytes": 130913
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310008_policy_only_49520724be8960f2.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784548226.7653232,
+      "bytes": 130926
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310012_policy_only_f7165c3969e350d4.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784529720.4744678,
+      "bytes": 130618
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310004_policy_only_efe54fa9f0a870b3.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784539096.9634783,
+      "bytes": 131048
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310016_policy_only_0170bae0cb88db66.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784539847.969075,
+      "bytes": 131092
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310001_policy_only_879275719fa6e4d9.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784522262.2397733,
+      "bytes": 130986
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310001_policy_only_84dcb7b0cb5738d3.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784516147.8589203,
+      "bytes": 130600
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310005_policy_only_b484ef5bc621dd62.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784528351.1958022,
+      "bytes": 130663
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310010_policy_only_29ad66ba78a79e4b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784543010.7013166,
+      "bytes": 130755
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310010_policy_only_f35a445d4a0df21b.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784528521.2314563,
+      "bytes": 130583
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310012_policy_only_1bde96d2c5c3282a.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784494379.5415225,
+      "bytes": 130819
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310011_policy_only_ffe533f04cb44d49.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784499309.8574302,
+      "bytes": 130872
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310008_policy_only_d008b7c64678bc9c.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784523803.1571364,
+      "bytes": 130873
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310011_policy_only_dd82748f5afcbcad.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784547434.2352874,
+      "bytes": 130920
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310012_policy_only_4fc19f4e5c96c49f.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784530813.434065,
+      "bytes": 130818
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310011_policy_only_751f38c69eecb9c0.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784509006.247003,
+      "bytes": 130859
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310015_policy_only_5f8049f824e44031.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784510296.5751767,
+      "bytes": 131131
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310002_policy_only_5ad7e4739c70d011.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784528059.6845992,
+      "bytes": 130599
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310012_policy_only_d6647196d04be646.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784548471.5640666,
+      "bytes": 130918
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310002_policy_only_d36527c530a05fb0.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784522268.6038845,
+      "bytes": 130908
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310001_policy_only_88ac81c2eb9223fa.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784500755.8514156,
+      "bytes": 130932
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310011_policy_only_d41116dd6f9eb46b.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784500353.1133277,
+      "bytes": 130851
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310008_policy_only_1025b3b1e780cdd4.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784509787.5776231,
+      "bytes": 131078
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310010_policy_only_17399aaf482664a5.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784519610.7128825,
+      "bytes": 130987
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310003_policy_only_18829d04d835a092.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784545810.2795153,
+      "bytes": 131064
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310008_policy_only_d647a501e6d8d260.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784502293.2858183,
+      "bytes": 130938
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310011_policy_only_fa6d24a5d0436337.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784538605.1459284,
+      "bytes": 131034
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310002_policy_only_d51bdd6c4f1f415d.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784537960.1649141,
+      "bytes": 131070
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310013_policy_only_1831e505db4725ef.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784518826.6928697,
+      "bytes": 131001
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310007_policy_only_0a6ad766b4d50f13.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784530647.886746,
+      "bytes": 130864
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310008_policy_only_f34f139daa160d19.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784538292.7926567,
+      "bytes": 131008
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310002_policy_only_c72c85864f8bd929.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784508396.4135206,
+      "bytes": 130851
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310002_policy_only_59f13ba169c73e9a.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784533600.4674764,
+      "bytes": 131047
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310006_policy_only_50d898d545e4e461.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784507697.508633,
+      "bytes": 130573
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310001_policy_only_a4db835f001f6777.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784510423.908918,
+      "bytes": 130942
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310012_policy_only_ddde60add37e7a4d.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784510038.9560106,
+      "bytes": 131081
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310011_policy_only_2e247424333f9aae.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784544261.265576,
+      "bytes": 130793
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310006_policy_only_e3e713e8311a2294.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784499955.088828,
+      "bytes": 130878
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310004_policy_only_bf0cfd4407f589d5.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784511607.0812154,
+      "bytes": 130978
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310012_policy_only_bad44bed793be05c.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784511063.2413328,
+      "bytes": 130904
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310009_policy_only_bb914ee790eadb72.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784528622.395279,
+      "bytes": 130550
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310011_policy_only_584853d85f095adf.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784528757.5390675,
+      "bytes": 130679
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310001_policy_only_2c2062bb0978c72a.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784517098.7568114,
+      "bytes": 131016
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310013_policy_only_2e45f6f40b5e4f75.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784534507.766479,
+      "bytes": 131028
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310016_policy_only_673bee30f026d954.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784544370.5551276,
+      "bytes": 130735
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310015_policy_only_1fade33575b30e75.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784537850.6872978,
+      "bytes": 130778
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310014_policy_only_1c1503404a087a98.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784548595.8998008,
+      "bytes": 130910
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310015_policy_only_61f2ee763263ab86.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784547719.9375997,
+      "bytes": 130992
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310012_policy_only_b6ec63317c359a40.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784517686.0658321,
+      "bytes": 131050
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310015_policy_only_bffa0daf1ddf3977.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784531171.488321,
+      "bytes": 130909
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310003_policy_only_f159148228ae79d9.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784533761.434272,
+      "bytes": 131022
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310010_policy_only_8dedd3dc2edd4751.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784494272.1346688,
+      "bytes": 130850
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310013_policy_only_360ead574d3a10ad.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784524227.6942961,
+      "bytes": 130908
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310007_policy_only_48f5b90a16659a96.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784499051.623147,
+      "bytes": 130821
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310005_policy_only_273139f1ec2d3444.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784532701.5255158,
+      "bytes": 130964
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310004_policy_only_1d5fb4762b97b9a5.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784530345.9506247,
+      "bytes": 130878
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310001_policy_only_ba69f9d418c6085c.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784507461.6611228,
+      "bytes": 130613
+    },
+    {
+      "file": "w00_it000000_tol0.0220_seed310003_policy_only_b1abc10802338dbc.json",
+      "worker_id": 0,
+      "tol": 0.022,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784493949.663307,
+      "bytes": 130829
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310010_policy_only_3251cc464660c1bf.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784499176.3179746,
+      "bytes": 130833
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310003_policy_only_1c20128f73d261fc.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784518177.659902,
+      "bytes": 131017
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310016_policy_only_93962e849203a4c2.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784513532.5567555,
+      "bytes": 130699
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310015_policy_only_b86eabe9db8af675.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784493710.4881485,
+      "bytes": 130870
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310008_policy_only_9f65862ceffaccd8.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784508782.4389584,
+      "bytes": 130841
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310016_policy_only_9c7730566d44ec2a.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784522125.4413166,
+      "bytes": 130981
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310008_policy_only_89d89704d7ea77ea.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784500092.8782706,
+      "bytes": 130867
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310003_policy_only_39e9bcb3d375e544.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784542703.0212793,
+      "bytes": 130760
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310012_policy_only_3cb4a72ec8fdfb27.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784522962.241472,
+      "bytes": 130889
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310010_policy_only_2ac1990cb0a368b0.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784538402.195545,
+      "bytes": 130970
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310012_policy_only_f85d1b487b770b31.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784537493.2754383,
+      "bytes": 130729
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310009_policy_only_05d6f6b66af34b7b.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784501304.536438,
+      "bytes": 130891
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310015_policy_only_b51b9b19bb24c9c8.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784504850.8604646,
+      "bytes": 131027
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310015_policy_only_204e21dd86a88a7c.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784503843.9798849,
+      "bytes": 130993
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310012_policy_only_bedeb9913e580dd1.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784518685.5772567,
+      "bytes": 130953
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310005_policy_only_6581093de9ca2086.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784509644.1407328,
+      "bytes": 131062
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310003_policy_only_bea798d61f847617.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784516266.9776535,
+      "bytes": 130610
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310011_policy_only_dd90f302e1e76a9f.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784537601.978862,
+      "bytes": 130767
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310011_policy_only_498745b2c850762e.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784498280.947636,
+      "bytes": 130907
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310003_policy_only_25d912283880d708.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784494826.5147767,
+      "bytes": 131091
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310016_policy_only_f7455bdff3c4b6e4.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784500597.5075314,
+      "bytes": 130861
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310001_policy_only_cfbc6c26dc1c6a22.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784509393.8004289,
+      "bytes": 131060
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310014_policy_only_de603e77c81b96ab.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784496395.8188462,
+      "bytes": 131002
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310010_policy_only_ce48006ef31896f4.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784532900.292013,
+      "bytes": 130948
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310013_policy_only_c0766e26e2b5c0a0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784537726.7506356,
+      "bytes": 130740
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310008_policy_only_d680a667acc3c4bb.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784539344.2283115,
+      "bytes": 130996
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310006_policy_only_2e8080deaff26d2b.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784509662.5088224,
+      "bytes": 131109
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310012_policy_only_a2c366817bc62bd8.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784499303.9814413,
+      "bytes": 130908
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310012_policy_only_09c4874e1ee5790a.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784531860.7099302,
+      "bytes": 130895
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310010_policy_only_fb6029f2b8b233af.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784510936.1248276,
+      "bytes": 130867
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310011_policy_only_17ddac1894948057.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784525110.5732646,
+      "bytes": 131015
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310006_policy_only_c2a6e0920a3ceab0.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784497905.3565948,
+      "bytes": 130940
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310016_policy_only_1c5e3adbd7072e1a.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784503840.9037037,
+      "bytes": 130976
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310013_policy_only_574a7766004a3102.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784528890.4948816,
+      "bytes": 130563
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310013_policy_only_b3e5419feeef01a8.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784493606.4969726,
+      "bytes": 130855
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310007_policy_only_ce8fc0890f5749b3.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784501169.1996703,
+      "bytes": 130864
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310005_policy_only_732c279aa2d6fa21.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784518307.5513895,
+      "bytes": 131008
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310001_policy_only_04bae08c6eca7c45.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784532398.909599,
+      "bytes": 130990
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310008_policy_only_8e083dd72e0bab79.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784517447.7141345,
+      "bytes": 130977
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310001_policy_only_80bcdf1bd066d453.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784518048.312356,
+      "bytes": 130988
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310010_policy_only_da6e0fbeb000dd27.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784537382.813155,
+      "bytes": 130764
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310011_policy_only_6dc374a2a65fbe1d.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784501446.1645896,
+      "bytes": 130885
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310002_policy_only_903ee6df7b142f32.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784538975.0239546,
+      "bytes": 131124
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310010_policy_only_081a2d5cbaa6d366.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310010,
+      "mean_success": NaN,
+      "mtime": 1784501309.1807206,
+      "bytes": 130808
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310014_policy_only_a6ebd3d8e4d54561.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784517794.6131022,
+      "bytes": 130986
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310007_policy_only_5494596656346065.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784497006.4983237,
+      "bytes": 130953
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310001_policy_only_e175a883bf78b4a3.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784492961.1035483,
+      "bytes": 130841
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310016_policy_only_75e6f3650bc20075.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310016,
+      "mean_success": NaN,
+      "mtime": 1784537715.6149743,
+      "bytes": 130753
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310003_policy_only_95e5440f5ddfe725.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310003,
+      "mean_success": NaN,
+      "mtime": 1784504093.8902705,
+      "bytes": 130963
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310014_policy_only_a38312922da416d0.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784495430.5626714,
+      "bytes": 131001
+    },
+    {
+      "file": "w03_it000000_tol0.0225_seed310007_policy_only_e7419154e1fa25d4.json",
+      "worker_id": 3,
+      "tol": 0.0225,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784500095.5302997,
+      "bytes": 130898
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310007_policy_only_3138d0ceeb734abb.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784512994.8828516,
+      "bytes": 130654
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310005_policy_only_6a4c2664819ab76e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784511758.5650632,
+      "bytes": 130900
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310013_policy_only_c40bede9932d3ebc.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784509128.664511,
+      "bytes": 130796
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310004_policy_only_1910c92752005de6.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310004,
+      "mean_success": NaN,
+      "mtime": 1784518180.675984,
+      "bytes": 130963
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310007_policy_only_178d0f1980bf9de2.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784545036.8580685,
+      "bytes": 131030
+    },
+    {
+      "file": "w02_it000000_tol0.0255_seed310008_policy_only_a5fe53544f2a8d63.json",
+      "worker_id": 2,
+      "tol": 0.0255,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784518436.9988077,
+      "bytes": 130992
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310002_policy_only_1fd481ec5f7ef7f9.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310002,
+      "mean_success": NaN,
+      "mtime": 1784495673.5137296,
+      "bytes": 131059
+    },
+    {
+      "file": "w02_it000000_tol0.0242_seed310013_policy_only_93b7cb55609f9097.json",
+      "worker_id": 2,
+      "tol": 0.0242,
+      "seed": 310013,
+      "mean_success": NaN,
+      "mtime": 1784519861.2153,
+      "bytes": 131027
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310014_policy_only_0270a59ed7a69400.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784543231.669429,
+      "bytes": 130725
+    },
+    {
+      "file": "w05_it000000_tol0.0192_seed310014_policy_only_05dad56fd28a13a5.json",
+      "worker_id": 5,
+      "tol": 0.0192,
+      "seed": 310014,
+      "mean_success": NaN,
+      "mtime": 1784539720.962075,
+      "bytes": 131054
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310008_policy_only_cc41774b94508206.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784495081.939987,
+      "bytes": 131060
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310008_policy_only_6e9c87df0757c843.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784547071.6619039,
+      "bytes": 130944
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310011_policy_only_a8709ab63c76fda0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784493498.6376245,
+      "bytes": 130864
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310008_policy_only_88123340c48eebe8.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784542901.349284,
+      "bytes": 130699
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310012_policy_only_d1345741812b4eaf.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784504590.9812262,
+      "bytes": 130940
+    },
+    {
+      "file": "w01_it000000_tol0.0193_seed310009_policy_only_fee399c8325acf78.json",
+      "worker_id": 1,
+      "tol": 0.0193,
+      "seed": 310009,
+      "mean_success": NaN,
+      "mtime": 1784538479.5788684,
+      "bytes": 131013
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310001_policy_only_0d732583aecf3860.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784536951.1406996,
+      "bytes": 130757
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310007_policy_only_883a15f0c4917637.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784520506.8713522,
+      "bytes": 130931
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310007_policy_only_56ce9400cc09df64.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784522674.174584,
+      "bytes": 130886
+    },
+    {
+      "file": "w05_it000000_tol0.0213_seed310005_policy_only_32ee191ee9bc7469.json",
+      "worker_id": 5,
+      "tol": 0.0213,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784524738.9730954,
+      "bytes": 130963
+    },
+    {
+      "file": "w04_it000000_tol0.0193_seed310015_policy_only_7afea1ccd296250e.json",
+      "worker_id": 4,
+      "tol": 0.0193,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784523237.088013,
+      "bytes": 130849
+    },
+    {
+      "file": "w00_it000000_tol0.0243_seed310007_policy_only_6461b797b7138b7e.json",
+      "worker_id": 0,
+      "tol": 0.0243,
+      "seed": 310007,
+      "mean_success": NaN,
+      "mtime": 1784542959.6852992,
+      "bytes": 130782
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310015_policy_only_f06f62ac8e61eca6.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310015,
+      "mean_success": NaN,
+      "mtime": 1784524365.922953,
+      "bytes": 130908
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310001_policy_only_50fadafe271d3894.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310001,
+      "mean_success": NaN,
+      "mtime": 1784546718.864241,
+      "bytes": 130898
+    },
+    {
+      "file": "w04_it000000_tol0.0183_seed310005_policy_only_b2b23ca71ca5a10e.json",
+      "worker_id": 4,
+      "tol": 0.0183,
+      "seed": 310005,
+      "mean_success": NaN,
+      "mtime": 1784523667.149196,
+      "bytes": 130963
+    },
+    {
+      "file": "w03_it000000_tol0.0237_seed310011_policy_only_130ecd60dec0a77c.json",
+      "worker_id": 3,
+      "tol": 0.0237,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784520758.3568673,
+      "bytes": 130927
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310011_policy_only_81bc1d422c1fd05e.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310011,
+      "mean_success": NaN,
+      "mtime": 1784516738.4279108,
+      "bytes": 130571
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310008_policy_only_e17a38d21978c7e0.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784529486.583285,
+      "bytes": 130598
+    },
+    {
+      "file": "w00_it000000_tol0.0231_seed310012_policy_only_897eaa97f980127a.json",
+      "worker_id": 0,
+      "tol": 0.0231,
+      "seed": 310012,
+      "mean_success": NaN,
+      "mtime": 1784493507.953916,
+      "bytes": 130843
+    },
+    {
+      "file": "w05_it000000_tol0.0202_seed310006_policy_only_9353c5041c61c020.json",
+      "worker_id": 5,
+      "tol": 0.0202,
+      "seed": 310006,
+      "mean_success": NaN,
+      "mtime": 1784504220.1373405,
+      "bytes": 130902
+    },
+    {
+      "file": "w01_it000000_tol0.0203_seed310008_policy_only_438fb8d6fee90673.json",
+      "worker_id": 1,
+      "tol": 0.0203,
+      "seed": 310008,
+      "mean_success": NaN,
+      "mtime": 1784544962.1294253,
+      "bytes": 131076
+    }
+  ],
+  "paired_bootstrap_replay": [
+    {
+      "intervention_id": "msa_1784492852_5fa1236a",
+      "global_panel": {
+        "promoted": false,
+        "first_blocking_gate": "panel_lower_quantile",
+        "panel_lq_cycle": -0.07104492187500003,
+        "panel_lq_recomputed": -0.07104492187500003
+      },
+      "worker_local_selective": {
+        "eligible": [
+          2,
+          3
+        ],
+        "selected_for_promotion": [
+          3,
+          2
+        ],
+        "anchor_workers": [
+          0,
+          1,
+          4,
+          5
+        ],
+        "rejection_reason_by_worker": {
+          "0": [
+            "L_mid_lower_quantile<=0",
+            "same_tau_retention"
+          ],
+          "1": [
+            "L_mid_lower_quantile<=0"
+          ],
+          "2": [],
+          "3": [],
+          "4": [
+            "L_mid_lower_quantile<=0"
+          ],
+          "5": [
+            "L_mid_lower_quantile<=0",
+            "same_tau_retention"
+          ]
+        }
+      },
+      "workers": {
+        "0": {
+          "tau": 0.0231124875097,
+          "tau_plus": 0.0219568631342,
+          "frames": {
+            "pre": 5080000000,
+            "mid": 5160000000,
+            "post": 5240000000
+          },
+          "L_mid_cycle": -0.29560302734375005,
+          "L_mid_ci": {
+            "point": -0.29560302734375005,
+            "lower_quantile": -0.30260742187499995,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.73922119140625,
+          "p_post": 0.49945800781249994,
+          "rho": 0.6756543421900028,
+          "rho_cycle": 0.6756543421900028,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": false,
+          "selective_rejection_reasons": [
+            "L_mid_lower_quantile<=0",
+            "same_tau_retention"
+          ],
+          "paired_diffs": [
+            -0.2691015625,
+            -0.2754687499999999,
+            -0.28386718750000006,
+            -0.2893749999999998,
+            -0.28445312500000003,
+            -0.308046875,
+            -0.3366796874999999,
+            -0.2844140625000003,
+            -0.2883593750000001,
+            -0.279140625,
+            -0.3042187499999999,
+            -0.3083984375,
+            -0.3012500000000001,
+            -0.30601562499999985,
+            -0.3095703124999998,
+            -0.30128906250000004
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "1": {
+          "tau": 0.0202841125345,
+          "tau_plus": 0.0192699069078,
+          "frames": {
+            "pre": 5080000000,
+            "mid": 5160000000,
+            "post": 5240000000
+          },
+          "L_mid_cycle": -0.07398681640624971,
+          "L_mid_ci": {
+            "point": -0.07398681640625004,
+            "lower_quantile": -0.08177734375000001,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.8095629882812502,
+          "p_post": 0.815908203125,
+          "rho": 1.007837827242104,
+          "rho_cycle": 1.007837827242104,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": false,
+          "selective_rejection_reasons": [
+            "L_mid_lower_quantile<=0"
+          ],
+          "paired_diffs": [
+            -0.04996093750000019,
+            -0.08398437500000011,
+            -0.060507812499999925,
+            -0.07042968750000012,
+            -0.05609374999999983,
+            -0.08250000000000002,
+            -0.06011718750000006,
+            -0.04214843749999997,
+            -0.046992187500000226,
+            -0.08285156250000014,
+            -0.09355468750000007,
+            -0.10949218750000012,
+            -0.09093749999999967,
+            -0.0817968750000001,
+            -0.09859375000000004,
+            -0.07382812500000002
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "2": {
+          "tau": 0.0254899875923,
+          "tau_plus": 0.0242154882127,
+          "frames": {
+            "pre": 5160000000,
+            "mid": 5240000000,
+            "post": 5320000000
+          },
+          "L_mid_cycle": 0.03146484375000014,
+          "L_mid_ci": {
+            "point": 0.03146484375000003,
+            "lower_quantile": 0.024187011718749964,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.8055517578125,
+          "p_post": 0.74494384765625,
+          "rho": 0.9247622395849119,
+          "rho_cycle": 0.9247622395849119,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": true,
+          "selective_rejection_reasons": [],
+          "paired_diffs": [
+            0.024257812499999698,
+            0.04054687500000009,
+            0.012656250000000036,
+            0.06894531250000013,
+            0.03511718750000015,
+            0.046914062500000187,
+            0.03421874999999985,
+            0.02757812500000001,
+            0.02171875000000001,
+            0.0028906250000000355,
+            0.04718749999999994,
+            0.05605468750000031,
+            0.023554687499999893,
+            -0.0029296875,
+            0.029101562500000067,
+            0.03562500000000002
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "3": {
+          "tau": 0.0236583904762,
+          "tau_plus": 0.0224754709524,
+          "frames": {
+            "pre": 5080000000,
+            "mid": 5160000000,
+            "post": 5240000000
+          },
+          "L_mid_cycle": 0.2869873046874999,
+          "L_mid_ci": {
+            "point": 0.2869873046875,
+            "lower_quantile": 0.275791015625,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.5276293945312499,
+          "p_post": 0.8110815429687499,
+          "rho": 1.5372182660318254,
+          "rho_cycle": 1.5372182660318254,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": true,
+          "selective_rejection_reasons": [],
+          "paired_diffs": [
+            0.30570312499999996,
+            0.22945312499999976,
+            0.2844531249999998,
+            0.3415625000000001,
+            0.2921874999999998,
+            0.28765625,
+            0.308671875,
+            0.2684765624999999,
+            0.29050781249999985,
+            0.24343749999999997,
+            0.2992187500000002,
+            0.3085156249999999,
+            0.28738281250000025,
+            0.3099609375,
+            0.26171875,
+            0.2728906250000001
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "4": {
+          "tau": 0.0192699069078,
+          "tau_plus": 0.0183064115624,
+          "frames": {
+            "pre": 5080000000,
+            "mid": 5160000000,
+            "post": 5240000000
+          },
+          "L_mid_cycle": -0.05621337890624989,
+          "L_mid_ci": {
+            "point": -0.05621337890624997,
+            "lower_quantile": -0.0648803710937499,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.7434765624999999,
+          "p_post": 0.7635888671875,
+          "rho": 1.027051699679504,
+          "rho_cycle": 1.027051699679504,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": false,
+          "selective_rejection_reasons": [
+            "L_mid_lower_quantile<=0"
+          ],
+          "paired_diffs": [
+            -0.05167968749999985,
+            -0.07648437500000005,
+            -0.06917968749999992,
+            -0.04972656249999996,
+            -0.06683593749999983,
+            -0.07257812499999972,
+            -0.0946093750000001,
+            -0.07070312500000009,
+            -0.0580078125000002,
+            -0.047812500000000036,
+            -0.041562499999999725,
+            -0.05488281249999982,
+            -0.03609375000000037,
+            -0.07304687499999973,
+            -0.04570312500000007,
+            0.009492187499999916
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "5": {
+          "tau": 0.0213081161592,
+          "tau_plus": 0.0202427103512,
+          "frames": {
+            "pre": 5080000000,
+            "mid": 5160000000,
+            "post": 5240000000
+          },
+          "L_mid_cycle": -0.47427978515625,
+          "L_mid_ci": {
+            "point": -0.47427978515625,
+            "lower_quantile": -0.4844506835937501,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.6956982421874999,
+          "p_post": 0.2818847656249999,
+          "rho": 0.4051825181254781,
+          "rho_cycle": 0.4051825181254781,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": false,
+          "selective_rejection_reasons": [
+            "L_mid_lower_quantile<=0",
+            "same_tau_retention"
+          ],
+          "paired_diffs": [
+            -0.5018359374999999,
+            -0.4758593750000001,
+            -0.4736328125000001,
+            -0.48089843750000005,
+            -0.44292968750000006,
+            -0.43390624999999977,
+            -0.5096093750000001,
+            -0.46894531250000016,
+            -0.4843750000000001,
+            -0.48640625000000015,
+            -0.4386328125000002,
+            -0.4492187500000001,
+            -0.49140624999999993,
+            -0.47160156250000007,
+            -0.5211328125000002,
+            -0.45808593750000004
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        }
+      }
+    },
+    {
+      "intervention_id": "msa_1784527942_af1468d9",
+      "global_panel": {
+        "promoted": false,
+        "first_blocking_gate": "same_tau_retention_w5",
+        "panel_lq_cycle": 0.15985839843750005,
+        "panel_lq_recomputed": 0.15985839843750005
+      },
+      "worker_local_selective": {
+        "eligible": [
+          0,
+          1
+        ],
+        "selected_for_promotion": [
+          0,
+          1
+        ],
+        "anchor_workers": [
+          2,
+          3,
+          4,
+          5
+        ],
+        "rejection_reason_by_worker": {
+          "0": [],
+          "1": [],
+          "5": [
+            "same_tau_retention"
+          ]
+        }
+      },
+      "workers": {
+        "0": {
+          "tau": 0.0243289342207,
+          "tau_plus": 0.0231124875097,
+          "frames": {
+            "pre": 5320000000,
+            "mid": 5400000000,
+            "post": 5480000000
+          },
+          "L_mid_cycle": 0.17192382812499996,
+          "L_mid_ci": {
+            "point": 0.171923828125,
+            "lower_quantile": 0.16211914062500002,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.5474023437500001,
+          "p_post": 0.69025146484375,
+          "rho": 1.2609581831805043,
+          "rho_cycle": 1.2609581831805043,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": true,
+          "selective_rejection_reasons": [],
+          "paired_diffs": [
+            0.1812499999999999,
+            0.15726562499999985,
+            0.17066406249999988,
+            0.17890625000000004,
+            0.14000000000000024,
+            0.1479687500000002,
+            0.1908984374999998,
+            0.1812109375000004,
+            0.1513671874999999,
+            0.17121093749999994,
+            0.15031250000000007,
+            0.15105468750000006,
+            0.15183593750000013,
+            0.21632812499999998,
+            0.17300781250000008,
+            0.2374999999999997
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "1": {
+          "tau": 0.0202841125345,
+          "tau_plus": 0.0192699069078,
+          "frames": {
+            "pre": 5320000000,
+            "mid": 5400000000,
+            "post": 5480000000
+          },
+          "L_mid_cycle": 0.16992431640625016,
+          "L_mid_ci": {
+            "point": 0.16992431640625005,
+            "lower_quantile": 0.16105712890624996,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.5769580078124998,
+          "p_post": 0.7872875976562501,
+          "rho": 1.3645492167466429,
+          "rho_cycle": 1.3645492167466429,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": true,
+          "selective_rejection_reasons": [],
+          "paired_diffs": [
+            0.12972656250000003,
+            0.18140625,
+            0.18566406250000023,
+            0.20984375,
+            0.1557812500000001,
+            0.1623437499999999,
+            0.15605468750000007,
+            0.1689453124999999,
+            0.14601562500000032,
+            0.14285156249999997,
+            0.16199218749999988,
+            0.17671875000000037,
+            0.21359375000000014,
+            0.18378906249999993,
+            0.16093749999999984,
+            0.1831250000000001
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        },
+        "5": {
+          "tau": 0.0202427103512,
+          "tau_plus": 0.0192305748336,
+          "frames": {
+            "pre": 5320000000,
+            "mid": 5400000000,
+            "post": 5480000000
+          },
+          "L_mid_cycle": 0.06812988281249999,
+          "L_mid_ci": {
+            "point": 0.06812988281249993,
+            "lower_quantile": 0.0589208984374999,
+            "quantile": 0.05,
+            "n_boot": 10000,
+            "prng_seed": 20260719,
+            "n_seeds": 16
+          },
+          "p_pre": 0.55044189453125,
+          "p_post": 0.41035888671875,
+          "rho": 0.7455080923086476,
+          "rho_cycle": 0.7455080923086476,
+          "n_paired_L_mid": 16,
+          "n_paired_retention": 16,
+          "selective_eligible": false,
+          "selective_rejection_reasons": [
+            "same_tau_retention"
+          ],
+          "paired_diffs": [
+            0.0618749999999999,
+            0.09878906250000019,
+            0.08695312500000008,
+            0.06312499999999999,
+            0.06355468749999998,
+            0.04242187499999961,
+            0.08144531249999998,
+            0.07269531250000005,
+            0.04972656249999985,
+            0.08675781249999981,
+            0.046601562499999805,
+            0.040585937499999836,
+            0.0639453124999999,
+            0.0946484374999998,
+            0.1090234375000001,
+            0.027929687500000022
+          ],
+          "paired_seeds": [
+            310001,
+            310002,
+            310003,
+            310004,
+            310005,
+            310006,
+            310007,
+            310008,
+            310009,
+            310010,
+            310011,
+            310012,
+            310013,
+            310014,
+            310015,
+            310016
+          ]
+        }
+      }
+    }
+  ],
+  "metric": "normalized_nsucc",
+  "bootstrap": {
+    "seed": 20260719,
+    "repeats": 10000,
+    "quantile": 0.05
+  },
+  "note": "Paired via snapshot meta frames; success=normalized_nsucc"
+}
