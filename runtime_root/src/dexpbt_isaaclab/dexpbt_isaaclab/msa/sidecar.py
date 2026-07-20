@@ -1428,7 +1428,9 @@ def main(argv: list[str] | None = None) -> int:
         # (non-None) when the cycle actually used that mode / gate.
         for field_name in ("selected_for_promotion", "anchor_workers",
                           "eligible_by_worker", "rejection_reason_by_worker",
-                          "budget_admission", "final_tol_by_worker"):
+                          "budget_admission", "final_tol_by_worker",
+                          "final_committed_frame_by_worker",
+                          "observed_cycle_dose_by_worker"):
             value = getattr(result, field_name, None)
             if value is not None:
                 payload[field_name] = value
@@ -1503,11 +1505,9 @@ def main(argv: list[str] | None = None) -> int:
                     if due:
                         result = ctl.run_cycle(views)
                         if result.first_blocking_gate == "all_budget_ineligible":
-                            # NO busy marker was ever set (the controller
-                            # refuses admission before the first hold): this
-                            # is NOT a CycleFailure, just "wait for the guard
-                            # to park these workers at their cap". Record it
-                            # for observability and keep polling.
+                            # Admission held raw-due then released everyone;
+                            # no PRE_EVAL / MSA_BUSY / pin. Record for the
+                            # guard to park these workers at their cap.
                             write_no_new_cycle(run_dir, {
                                 "intervention_id": result.intervention_id,
                                 "reason": "all_budget_ineligible",

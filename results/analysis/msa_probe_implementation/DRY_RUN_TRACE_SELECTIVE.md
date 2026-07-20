@@ -63,7 +63,7 @@
 ## Worker-local selective promotion
 
 - selected_for_promotion (pinned to tau_plus permanently): [1, 3, 0]
-- anchor_workers (kept at tau[w] this cycle so >= min_population_anchors stay unpromoted): [2, 4, 5]
+- anchor_workers (NOT selected this cycle — not a permanent cohort): [2, 4, 5]
 
 | worker | eligible | rejection_reason | final_tol |
 |---|---|---|---|

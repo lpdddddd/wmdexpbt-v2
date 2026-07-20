@@ -112,11 +112,26 @@ holds/pins.
 
 - `global_panel` (default, MSA_STATEFUL): panel L_mid lower quantile >0
   AND every due worker ρ≥threshold → **all** due workers commit τ⁺.
+  Decision rule unchanged; if this arm shares budget orchestration, do
+  not claim the entire run is bit-for-bit identical.
 - `worker_local_selective` (MSA_SELECTIVE_STATEFUL): per-worker L_mid CI
-  + ρ gates; top-3 eligible commit τ⁺; others stay at τ; ≥3 population
-  anchors. Panel statistic recorded as diagnostic only.
+  + ρ gates; top-3 eligible commit τ⁺; others stay at τ. `anchor_workers`
+  = population members not selected **this cycle** (not a permanent
+  cohort). Panel statistic recorded as diagnostic only. With 480M cap,
+  80M readiness, and 400M worst-case reserve this is a one-step selective
+  causal pilot (at most one new cycle) — not an iterative 0.02→0.01 path.
 
 ## Cycle budget admission
 
-Before PRE_EVAL: `remaining >= 2*(packet+tick)+tick`. Failure → no
-MSA_BUSY, `MSA_NO_NEW_CYCLE.json`, guard proceeds to ARM_COMPLETE.
+Admission barrier **before** PRE_EVAL / MSA_BUSY / snapshot / pin:
+1. hold raw-due workers (reuse MSA_HOLDS / watchdog);
+2. refresh committed metas;
+3. admit on frozen frames (`remaining >= 2*(packet+tick)+tick` = 400M).
+
+Ineligible workers are released immediately. All-ineligible → release all
+holds, clear `CYCLE_BUDGET_RESERVATION.json`, write `MSA_NO_NEW_CYCLE.json`,
+no PRE_EVAL/BUSY. Eligible stay frozen; frozen frames become
+`start_frames`. After commit acks, `observed_cycle_dose =
+final_committed_frame - frozen_start` (includes confirmation tick) and
+fails closed vs reserved ceiling / dose / cap. Mid-cycle resume reuses
+the same reservation (never re-admits).

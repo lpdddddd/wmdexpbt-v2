@@ -74,9 +74,14 @@ class TestBudgetDoseFormula(unittest.TestCase):
 
 
 class TestBudgetControllerIntegration(unittest.TestCase):
+    TIP = 5_000_000_000
+    CAP = 480_000_000
+    TICK = 80_000_000
+    RESERVE = 400_000_000
+
     def test_insufficient_budget_skips_pre_eval_and_busy(self):
-        tip = 5_080_000_000
-        caps = {w: tip + 480_000_000 for w in range(6)}
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
         from dexpbt_isaaclab.msa.controller import WorkerView
         with tempfile.TemporaryDirectory() as td:
             run_dir = Path(td)
@@ -98,7 +103,13 @@ class TestBudgetControllerIntegration(unittest.TestCase):
                              "all_budget_ineligible")
             self.assertFalse(result.promoted)
             self.assertIsNone(world.busy)
-            self.assertTrue((run_dir / RESERVATION_MARKER).exists())
+            self.assertFalse((run_dir / RESERVATION_MARKER).exists())
+            self.assertTrue((run_dir / NO_NEW_CYCLE_MARKER).exists())
+            self.assertEqual(world.held, set())
+            self.assertEqual(ctl.machine.phase.value, "NORMAL")
+            self.assertFalse(world.snapshots)
+            self.assertFalse(world.eval_calls)
+            self.assertFalse(world.pin_log)
 
     def test_no_new_cycle_marker_helper(self):
         with tempfile.TemporaryDirectory() as td:
@@ -108,6 +119,221 @@ class TestBudgetControllerIntegration(unittest.TestCase):
             self.assertTrue((run_dir / NO_NEW_CYCLE_MARKER).exists())
             body = json.loads((run_dir / NO_NEW_CYCLE_MARKER).read_text())
             self.assertEqual(body["reason"], "all_budget_ineligible")
+
+
+class TestFrozenAdmissionBarrier(unittest.TestCase):
+    """Admission must use post-hold frozen frames, not stale due-detection."""
+
+    TIP = 5_000_000_000
+    CAP = 480_000_000
+    TICK = 80_000_000
+
+    def _views_at(self, world, frame: int):
+        from dexpbt_isaaclab.msa.controller import WorkerView
+        return [
+            WorkerView(worker_id=i, lineage_id=f"lin_{i}",
+                       active_tau=world.taus[i], frame=frame,
+                       source_checkpoint_id=f"ws/{i:03d}/000160.pth")
+            for i in range(6)
+        ]
+
+    def test_admission_uses_post_hold_frame_when_tick_slips(self):
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        stale = tip + self.TICK          # remaining == 400M if used
+        live = tip + 2 * self.TICK       # remaining == 320M after hold
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, _ = dr.make_world(
+                cap_target_by_worker=caps, run_dir=run_dir)
+            for i in range(6):
+                world.frame[i] = live
+            result = ctl.run_cycle(self._views_at(world, stale))
+            self.assertEqual(result.first_blocking_gate,
+                             "all_budget_ineligible")
+            rem = result.budget_admission["remaining_at_admission"]
+            for w in range(6):
+                self.assertEqual(int(rem[str(w)]),
+                                 self.CAP - 2 * self.TICK)
+            self.assertFalse((run_dir / RESERVATION_MARKER).exists())
+            self.assertTrue((run_dir / NO_NEW_CYCLE_MARKER).exists())
+            self.assertIsNone(world.busy)
+            self.assertEqual(world.held, set())
+
+    def test_exact_400m_remaining_becomes_ineligible_after_slip(self):
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        # stale view: exactly 400M remaining → would admit on stale frame
+        stale = tip + self.TICK
+        # hold refresh: +80M slipped → 320M remaining → refuse
+        live = tip + 2 * self.TICK
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, _ = dr.make_world(
+                cap_target_by_worker=caps, run_dir=run_dir)
+            for i in range(6):
+                world.frame[i] = live
+            # prove stale frame alone would be eligible
+            from dexpbt_isaaclab.msa.budget import admit_cycle_budget
+            stale_adm = admit_cycle_budget(
+                intervention_id="stale",
+                due_workers=list(range(6)),
+                latest_frame_by_worker={w: stale for w in range(6)},
+                cap_target_by_worker=caps)
+            self.assertEqual(stale_adm.budget_eligible_workers,
+                             list(range(6)))
+            result = ctl.run_cycle(self._views_at(world, stale))
+            self.assertEqual(result.first_blocking_gate,
+                             "all_budget_ineligible")
+            self.assertEqual(
+                result.budget_admission["budget_eligible_workers"], [])
+
+    def test_all_ineligible_leaves_no_cycle_artifacts(self):
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=caps, run_dir=run_dir)
+            for i in range(6):
+                world.frame[i] = tip + 450_000_000
+            views2 = self._views_at(world, world.frame[0])
+            result = ctl.run_cycle(views2)
+            self.assertEqual(result.first_blocking_gate,
+                             "all_budget_ineligible")
+            self.assertIsNone(world.busy)
+            self.assertEqual(world.held, set())
+            self.assertFalse((run_dir / RESERVATION_MARKER).exists())
+            self.assertTrue((run_dir / NO_NEW_CYCLE_MARKER).exists())
+            self.assertFalse(world.snapshots)
+            self.assertFalse(world.eval_calls)
+            self.assertFalse(world.pin_log)
+            self.assertEqual(ctl.machine.history, [])
+            # hold then release happened (admission barrier), never PRE_EVAL
+            hold_ops = [op for op, _ in world.hold_log]
+            self.assertIn("hold", hold_ops)
+            self.assertIn("release", hold_ops)
+
+
+class TestFullCycleDose(unittest.TestCase):
+    TIP = 5_000_000_000
+    CAP = 480_000_000
+    TICK = 80_000_000
+
+    def test_observed_cycle_dose_includes_commit_tick(self):
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=caps, run_dir=run_dir)
+            result = ctl.run_cycle(views)
+            self.assertNotEqual(result.first_blocking_gate,
+                                "all_budget_ineligible")
+            cycle = world.state_store[0]["msa_cycle"]
+            for w in result.due_workers:
+                start = int(cycle["start_frames"][str(w)])
+                final = int(result.final_committed_frame_by_worker[w])
+                dose = int(result.observed_cycle_dose_by_worker[w])
+                self.assertEqual(dose, final - start)
+                self.assertEqual(
+                    int(cycle["final_committed_frame_by_worker"][str(w)]),
+                    final)
+                self.assertEqual(
+                    int(cycle["observed_cycle_dose_by_worker"][str(w)]), dose)
+                # probe packets (2 ticks) + commit confirmation (1 tick)
+                self.assertEqual(dose, 3 * self.TICK)
+                self.assertGreater(dose, 2 * self.TICK)
+
+    def test_final_frame_over_reserved_ceiling_fails_closed(self):
+        from dexpbt_isaaclab.msa.controller import CycleFailure
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=caps, run_dir=run_dir)
+            real = world.commit_tolerance
+
+            def overshoot(wid, tol):
+                real(wid, tol)
+                # after a normal ~240M dose, ceiling is tip+400M; push past it
+                world.frame[wid] += 200_000_000
+
+            world.commit_tolerance = overshoot
+            ctl._commit = overshoot
+            with self.assertRaises(CycleFailure) as ctx:
+                ctl.run_cycle(views)
+            self.assertIn("reserved ceiling", str(ctx.exception))
+            self.assertIsNone(world.busy)
+            self.assertEqual(world.held, set())
+            self.assertFalse((run_dir / RESERVATION_MARKER).exists())
+
+    def test_committing_resume_records_full_final_frame_dose(self):
+        tip = self.TIP
+        caps = {w: tip + self.CAP for w in range(6)}
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            world, ctl, views = dr.make_world(
+                cap_target_by_worker=caps,
+                run_dir=run_dir,
+                crash_commit_workers={2},
+                crash_hard=True,
+            )
+            with self.assertRaises(dr.HardKill):
+                ctl.run_cycle(views)
+            cycle = world.state_store[0]["msa_cycle"]
+            self.assertEqual(cycle["status"], "COMMITTING")
+            start_frames = {int(k): int(v)
+                            for k, v in cycle["start_frames"].items()}
+            world.crash_hard = False
+            world.crash_commit_workers = set()
+            world2, ctl2, views2 = dr.make_world(
+                world=world, cap_target_by_worker=caps, run_dir=run_dir)
+            pending = ctl2.pending_cycle(list(range(6)))
+            result = ctl2.run_cycle(views2, resume_cycle=pending)
+            self.assertTrue(result.resumed)
+            self.assertIsNotNone(result.final_committed_frame_by_worker)
+            self.assertIsNotNone(result.observed_cycle_dose_by_worker)
+            done = world.state_store[0]["msa_cycle"]
+            self.assertEqual(done["status"], "DONE")
+            for w in result.due_workers:
+                final = int(result.final_committed_frame_by_worker[w])
+                dose = int(result.observed_cycle_dose_by_worker[w])
+                self.assertEqual(dose, final - start_frames[w])
+                self.assertEqual(dose, 3 * self.TICK)
+                self.assertEqual(
+                    int(done["final_committed_frame_by_worker"][str(w)]),
+                    final)
+
+
+class TestGlobalPanelDecisionUnchanged(unittest.TestCase):
+    def test_global_panel_decision_replay_unchanged(self):
+        path = ANALYSIS / "SELECTIVE_REPLAY.json"
+        if not path.is_file():
+            raise unittest.SkipTest(f"missing {path}")
+        replay = json.loads(path.read_text())
+        for rid, gate, promote in (
+            ("5fa1236a", "panel_lower_quantile", False),
+            ("af1468d9", "same_tau_retention_w5", False),
+        ):
+            c = next(r for r in replay if r["intervention_id"].endswith(rid))
+            paired = {int(w): info["paired_diffs"]
+                      for w, info in c["workers"].items()}
+            retention = {}
+            for w, info in c["workers"].items():
+                wi = int(w)
+                retention[wi] = RetentionResult(
+                    tau=info["tau"], p_pre=info["p_pre"],
+                    p_post=info["p_post"], rho=info["rho"],
+                    retention_unavailable=(info["p_pre"] is None
+                                           or info["p_pre"] < 0.01))
+            panel = panel_bootstrap_lower_quantile(paired)
+            glob = decide_promotion(panel, retention, 0.88)
+            self.assertEqual(glob.promote, promote)
+            self.assertEqual(glob.first_blocking_gate, gate)
+            self.assertEqual(c["global_panel"]["promoted"], promote)
+            self.assertEqual(c["global_panel"]["first_blocking_gate"], gate)
 
 
 class TestSelectiveDecisionUnit(unittest.TestCase):

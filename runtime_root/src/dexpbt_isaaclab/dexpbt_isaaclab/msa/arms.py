@@ -287,13 +287,17 @@ def arm_config(arm: str, tips: list[TipCheckpoint], source_run: str,
             cfg["msa"]["max_promote_per_cycle"] = TOP_K_RECIPIENTS
             cfg["msa"]["min_population_anchors"] = MIN_POPULATION_ANCHORS
             cfg["msa"]["budget_admission_note"] = (
-                "each cycle refuses any due worker whose remaining "
-                "worker-local frames (cap_target - latest_committed_frame) "
+                "admission holds raw-due workers first, refreshes committed "
+                "metas, then refuses any due worker whose remaining "
+                "worker-local frames (cap_target - frozen_committed_frame) "
                 "are below the worst-case cycle dose "
-                "(msa.budget.worst_case_remaining_cycle_dose); a cycle "
-                "with zero eligible due workers is never admitted "
-                "(first_blocking_gate=all_budget_ineligible, no busy "
-                "marker, no holds)")
+                "(msa.budget.worst_case_remaining_cycle_dose=400M with "
+                "packet=tick=80M; readiness already consumed 80M of the "
+                "480M cap → at most one new selective cycle). A cycle with "
+                "zero eligible due workers releases holds, clears "
+                "CYCLE_BUDGET_RESERVATION.json, writes MSA_NO_NEW_CYCLE.json "
+                "(first_blocking_gate=all_budget_ineligible), and never "
+                "enters PRE_EVAL / MSA_BUSY / snapshot / pin")
     return cfg
 
 

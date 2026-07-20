@@ -468,11 +468,13 @@ class TestHeterogeneousDryRunCycle(unittest.TestCase):
             plus = self.world.trained_frames_at_tol.get((w, "tau_plus"), 0)
             base = self.world.trained_frames_at_tol.get((w, "tau"), 0)
             if w in recipients:
-                self.assertEqual(plus, 2 * TICK)   # common + second
+                # common + second + durable commit confirmation tick
+                self.assertEqual(plus, 3 * TICK)
                 self.assertEqual(base, 0)
             else:
-                self.assertEqual(plus, TICK)       # common only
-                # ran in parallel at their OWN tau during the second packet
+                # common at tau_plus; second packet at tau; commit at tau_plus
+                # (global promote pins everyone before COMMITTING)
+                self.assertEqual(plus, 2 * TICK)
                 self.assertEqual(base, TICK)
 
     def test_non_recipient_repinned_to_own_tau_after_mid(self):
@@ -486,11 +488,11 @@ class TestHeterogeneousDryRunCycle(unittest.TestCase):
                 # revert pin right after routing (before the second packet)
                 self.assertIn(tau, pins[1:])
 
-    # frames are OBSERVED committed ticks, ledger includes probe frames
+    # frames are OBSERVED committed ticks, ledger includes probe + commit
     def test_observed_frames_and_ledger(self):
         recipients = set(self.result.routing.recipients)
         for w in range(6):
-            expect = 2 * TICK   # everyone advanced during both packets
+            expect = 3 * TICK   # both packets + commit confirmation tick
             self.assertEqual(self.world.trained_frames[w], expect)
             self.assertEqual(self.world.frame[w], 5_000_000_000 + expect)
         # provenance tau_plus segments account exactly for the probe dose
@@ -657,9 +659,9 @@ class TestRestartResume(unittest.TestCase):
         self.assertEqual(result.intervention_id,
                          pending["intervention_id"])
         # the common packet was NOT re-trained: only the second packet's
-        # tick was added on top
+        # tick plus the commit confirmation tick were added on top
         for w in range(6):
-            self.assertEqual(world.trained_frames[w], 2 * TICK)
+            self.assertEqual(world.trained_frames[w], 3 * TICK)
         # exactly one common_probe segment per worker in provenance
         for w in range(6):
             prov = ctl2.load_provenance(w)
@@ -1181,7 +1183,7 @@ class TestArmConfigs(unittest.TestCase):
             self.skipTest("arm configs not generated in this checkout")
         cfgs = {p.stem.replace(".config", ""): json.loads(p.read_text())
                 for p in LAUNCHER_DIR.glob("*.config.json")}
-        self.assertEqual(len(cfgs), 4)
+        self.assertEqual(len(cfgs), 5)
         seeds = {c["base_seed"] for c in cfgs.values()}
         self.assertEqual(len(seeds), 1)          # matched seeds
         resumes = {json.dumps(c["resume_checkpoints"], sort_keys=True)
@@ -1196,8 +1198,12 @@ class TestArmConfigs(unittest.TestCase):
         self.assertTrue(
             cfgs["msa_permuted_stateful"]["msa"]["permuted_route"])
         self.assertFalse(cfgs["msa_stateful"]["msa"]["permuted_route"])
+        self.assertEqual(
+            cfgs["msa_selective_stateful"]["msa"]["promotion_mode"],
+            "worker_local_selective")
         # one committed tick at the REAL 80M stage-3 cadence everywhere
-        for name in ("msa_stateful", "msa_permuted_stateful"):
+        for name in ("msa_stateful", "msa_permuted_stateful",
+                     "msa_selective_stateful"):
             self.assertEqual(cfgs[name]["msa"]["packet_frames"], 80_000_000)
             self.assertEqual(cfgs[name]["msa"]["eval_num_seeds_pilot"],
                              PILOT_NUM_SEEDS)
@@ -1206,6 +1212,8 @@ class TestArmConfigs(unittest.TestCase):
                   "eval_num_seeds_pilot", "eval_seed_manifest_id_pilot"):
             self.assertEqual(cfgs["msa_stateful"]["msa"][k],
                              cfgs["msa_permuted_stateful"]["msa"][k])
+            self.assertEqual(cfgs["msa_stateful"]["msa"][k],
+                             cfgs["msa_selective_stateful"]["msa"][k])
         # state-faithful metadata on every arm
         for c in cfgs.values():
             self.assertTrue(c["state_faithful"])
@@ -1595,7 +1603,7 @@ class TestHoldRaceStartFrames(unittest.TestCase):
             seg["segment_end_frame"] - seg["segment_start_frame"], TICK)
         # the stale tick is accounted at tau, never tau_plus
         recipients = set(result.routing.recipients)
-        want_plus = 2 * TICK if 2 in recipients else TICK
+        want_plus = 3 * TICK if 2 in recipients else 2 * TICK
         self.assertEqual(
             world.trained_frames_at_tol.get((2, "tau_plus"), 0), want_plus)
         # persisted start_frames match the post-hold read
@@ -2123,11 +2131,19 @@ class TestCommittingPhase(unittest.TestCase):
         self.assertEqual(pending["status"], "COMMITTING")
         result = ctl2.run_cycle(views2, resume_cycle=pending)
         self.assertTrue(result.resumed)
-        # commits ONLY: no re-eval, no re-training
+        # commits ONLY: no re-eval, no probe re-training. The durable
+        # commit confirmation tick advances the ledger (one TICK each).
         self.assertEqual(len(world.eval_calls), evals_before)
-        self.assertEqual(world.trained_frames, trained_before)
+        for w in range(6):
+            self.assertEqual(world.trained_frames[w],
+                             trained_before.get(w, 0) + TICK)
         self.assertEqual(sorted(w for w, _ in world.commit_log),
                          list(range(6)))
+        self.assertIsNotNone(result.final_committed_frame_by_worker)
+        self.assertIsNotNone(result.observed_cycle_dose_by_worker)
+        for w in range(6):
+            self.assertEqual(result.observed_cycle_dose_by_worker[w],
+                             3 * TICK)
         cycle = world.state_store[0]["msa_cycle"]
         self.assertEqual(cycle["status"], "DONE")
         self.assertEqual(cycle["commit_acks_by_worker"],

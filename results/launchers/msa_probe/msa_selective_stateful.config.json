@@ -149,6 +149,6 @@
     "promotion_mode": "worker_local_selective",
     "max_promote_per_cycle": 3,
     "min_population_anchors": 3,
-    "budget_admission_note": "each cycle refuses any due worker whose remaining worker-local frames (cap_target - latest_committed_frame) are below the worst-case cycle dose (msa.budget.worst_case_remaining_cycle_dose); a cycle with zero eligible due workers is never admitted (first_blocking_gate=all_budget_ineligible, no busy marker, no holds)"
+    "budget_admission_note": "admission holds raw-due first, refreshes committed metas, then refuses any due worker whose remaining frames (cap_target - frozen_committed_frame) are below worst-case cycle dose 400M (packet=tick=80M; readiness already used 80M of the 480M cap → at most one new selective cycle). All-ineligible: release holds, clear CYCLE_BUDGET_RESERVATION.json, write MSA_NO_NEW_CYCLE.json (first_blocking_gate=all_budget_ineligible); never PRE_EVAL/MSA_BUSY/snapshot/pin"
   }
 }

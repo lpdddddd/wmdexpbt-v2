@@ -45,9 +45,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from dexpbt_isaaclab.msa.budget import (
+    CycleBudgetAdmission,
     admit_cycle_budget,
     clear_reservation,
     load_reservation,
+    write_no_new_cycle,
     write_reservation,
 )
 from dexpbt_isaaclab.msa.decision import (
@@ -132,9 +134,11 @@ SnapshotFn = Callable[[int, str], tuple[str, int]]
 RefreshFn = Callable[[int], "WorkerView"]
 # set_busy(info|None): maintain the MSA_BUSY.json coordination marker (the
 # continuation guard defers park/cap actions and the watchdog treats a dead
-# sidecar as fatal while it exists). Called with a dict BEFORE the first
-# hold, refreshed at every phase persist, and with None only after the
-# cycle is fully DONE or the failure cleanup completed.
+# sidecar as fatal while it exists). Called with a dict at the first
+# PRE_EVAL persist (AFTER the budget admission hold barrier when gated),
+# refreshed at every phase persist, and with None only after the cycle is
+# fully DONE or the failure cleanup completed. Admission-only holds that
+# never enter PRE_EVAL never set busy.
 SetBusyFn = Callable[[Optional[dict]], None]
 # pin_tolerance(worker_id, tol): set msa_forced_success_tolerance (locked).
 PinFn = Callable[[int, float], None]
@@ -179,6 +183,8 @@ class ProbeCycleResult:
     rejection_reason_by_worker: Optional[dict[int, str]] = None
     budget_admission: Optional[dict] = None
     final_tol_by_worker: Optional[dict[int, float]] = None
+    final_committed_frame_by_worker: Optional[dict[int, int]] = None
+    observed_cycle_dose_by_worker: Optional[dict[int, int]] = None
 
 
 class CycleFailure(RuntimeError):
@@ -224,9 +230,10 @@ class MSAController:
                                       if population_worker_ids is not None
                                       else None)
         # worker -> hard frame ceiling for this population (baseline_tip +
-        # CONTINUATION_CAP); when set, a FRESH cycle is gated by
-        # admit_cycle_budget BEFORE PRE_EVAL so a worker can never be
-        # admitted into a probe cycle it cannot finish inside its cap.
+        # CONTINUATION_CAP); when set, a FRESH cycle opens an admission
+        # barrier (hold raw-due FIRST, refresh committed metas, THEN
+        # admit_cycle_budget on the frozen frames) so a tick that lands
+        # between due-detection and the hold cannot inflate remaining.
         self.cap_target_by_worker = (dict(cap_target_by_worker)
                                      if cap_target_by_worker is not None
                                      else None)
@@ -245,6 +252,54 @@ class MSAController:
         self._set_busy = set_busy or (lambda info: None)
         self.machine = MSAProbeStateMachine()
 
+    def _finalize_cycle_dose(
+        self,
+        due: list[int],
+        start_frames: dict[int, int],
+        cycle: dict,
+        admission: Optional[CycleBudgetAdmission],
+    ) -> tuple[dict[int, int], dict[int, int]]:
+        """Refresh committed metas after all commit acks; record the FULL
+        cycle dose (probe packets + commit confirmation tick).
+
+        Fail-closed if any worker exceeded its reserved ceiling, reserved
+        dose, or hard cap_target.
+        """
+        adm = (admission.to_dict() if admission is not None
+               else (cycle.get("budget_admission") or {}))
+        ceilings = {int(k): int(v)
+                    for k, v in (adm.get("reserved_ceiling_by_worker")
+                                 or {}).items()}
+        reserved = {int(k): int(v)
+                    for k, v in (adm.get("reserved_frames_by_worker")
+                                 or {}).items()}
+        caps = {int(k): int(v)
+                for k, v in (adm.get("cap_target_by_worker") or {}).items()}
+        finals: dict[int, int] = {}
+        doses: dict[int, int] = {}
+        for w in due:
+            fv = self._refresh_view(w)
+            finals[w] = int(fv.frame)
+            doses[w] = finals[w] - int(start_frames[w])
+        cycle["final_committed_frame_by_worker"] = {
+            str(w): finals[w] for w in due}
+        cycle["observed_cycle_dose_by_worker"] = {
+            str(w): doses[w] for w in due}
+        for w in due:
+            if w in ceilings and finals[w] > ceilings[w]:
+                raise RuntimeError(
+                    f"worker {w}: final committed frame {finals[w]} exceeds "
+                    f"reserved ceiling {ceilings[w]}")
+            if w in reserved and doses[w] > reserved[w]:
+                raise RuntimeError(
+                    f"worker {w}: observed cycle dose {doses[w]} exceeds "
+                    f"reserved frames {reserved[w]}")
+            if w in caps and finals[w] > caps[w]:
+                raise RuntimeError(
+                    f"worker {w}: final committed frame {finals[w]} exceeds "
+                    f"cap_target {caps[w]}")
+        return finals, doses
+
     # -- persisted state helpers ---------------------------------------------
     def load_provenance(self, worker_id: int) -> Optional[MSAProvenance]:
         prov, _, _ = self._load_state(worker_id)
@@ -257,7 +312,8 @@ class MSAController:
         for w in worker_ids:
             self._save_state(w, provs[w].to_dict(), machine_dict, dict(cycle))
         # keep the coordination marker in step with the persisted phase; it
-        # exists from BEFORE the first hold until DONE / cleanup complete.
+        # exists from the first PRE_EVAL persist until DONE / cleanup
+        # complete (budget admission may hold workers earlier without busy).
         self._set_busy({
             "intervention_id": str(cycle.get("intervention_id", "")),
             "phase": self.machine.phase.value,
@@ -368,6 +424,19 @@ class MSAController:
             # were released by the watchdog); commit only the un-acked.
             todo = [w for w in due if not acks[str(w)]]
             self._commit_all(todo, final_tol, cycle, provs)
+            start_frames = {int(k): int(v)
+                            for k, v in cycle.get("start_frames", {}).items()}
+            admission = None
+            if self.run_dir is not None:
+                existing = load_reservation(self.run_dir)
+                if (existing is not None
+                        and str(existing.intervention_id) == intervention_id):
+                    admission = existing
+            elif cycle.get("budget_admission"):
+                admission = CycleBudgetAdmission.from_dict(
+                    cycle["budget_admission"])
+            finals, doses = self._finalize_cycle_dose(
+                due, start_frames, cycle, admission)
             cycle["status"] = "DONE"
             m.transition(MSAPhase.NORMAL, "committing resumed")
             self._persist(due, provs, cycle)
@@ -391,7 +460,9 @@ class MSAController:
                 promotion_mode=str(cycle.get("promotion_mode",
                                              PROMOTION_MODE_GLOBAL)),
                 final_tol_by_worker=dict(final_tol),
-                budget_admission=cycle.get("budget_admission"))
+                budget_admission=cycle.get("budget_admission"),
+                final_committed_frame_by_worker=dict(finals),
+                observed_cycle_dose_by_worker=dict(doses))
         except Exception as err:
             # promotion is NOT claimed; un-acked workers revert to their
             # own tau via a synchronous pin (never a second bounded wait
@@ -430,6 +501,7 @@ class MSAController:
             return self._resume_committing(resume_cycle)
 
         admission = None
+        already_held_from_admission = False
         if resume_cycle is not None:
             intervention_id = str(resume_cycle["intervention_id"])
             due = [int(w) for w in resume_cycle["due_workers"]]
@@ -463,39 +535,77 @@ class MSAController:
             tau = {w: float(canonical_tau(by_id[w].active_tau)) for w in due}
             tau_plus = {w: float(canonical_tau(tau_plus_of(tau[w])))
                         for w in due}
-            # start_frames are set AFTER the PRE_EVAL hold from the freshly
-            # re-read committed metas (a worker may commit one more tick
-            # between due detection and the hold; that tick was trained at
-            # tau and must NOT be counted as tau_plus exposure).
-            start_frames = {}
+            # Without budget gating, start_frames are set AFTER the PRE_EVAL
+            # hold. With gating, the admission barrier freezes them first.
+            start_frames: dict[int, int] = {}
             resumed = False
 
-            # -- BUDGET ADMISSION: refuse workers who cannot finish the
-            # worst-case cycle dose inside their hard cap. Runs BEFORE any
-            # hold / persist / busy marker so an all-ineligible cycle
-            # leaves the panel completely untouched. -----------------------
+            # -- BUDGET ADMISSION BARRIER ------------------------------------
+            # Hold raw due workers FIRST (reuse WorkerHolds / MSA_HOLDS),
+            # refresh committed metas, THEN admit on the frozen frames so a
+            # tick between due-detection and hold cannot stale the ceiling.
+            # PRE_EVAL / MSA_BUSY / snapshot / pin happen only for eligible.
             if self.cap_target_by_worker is not None:
-                latest_frame_by_worker = {w: int(by_id[w].frame) for w in due}
-                admission = admit_cycle_budget(
-                    intervention_id=intervention_id,
-                    due_workers=due,
-                    latest_frame_by_worker=latest_frame_by_worker,
-                    cap_target_by_worker=self.cap_target_by_worker,
-                    packet_frames=self.packet_frames)
-                if self.run_dir is not None:
-                    write_reservation(self.run_dir, admission)
-                due = list(admission.budget_eligible_workers)
-                if not due:
-                    return ProbeCycleResult(
-                        intervention_id=intervention_id, due_workers=[],
-                        routing=None, l_mid_by_worker={}, panel_stat=None,
-                        retention_by_worker={}, promoted=False,
-                        first_blocking_gate="all_budget_ineligible",
-                        budget_admission=admission.to_dict())
-                tau = {w: float(canonical_tau(by_id[w].active_tau))
-                       for w in due}
-                tau_plus = {w: float(canonical_tau(tau_plus_of(tau[w])))
+                raw_due = list(due)
+                admission_held: list[int] = []
+                try:
+                    self._hold(raw_due)
+                    admission_held = list(raw_due)
+                    frozen_frames = {
+                        w: int(self._refresh_view(w).frame) for w in raw_due}
+                    admission = admit_cycle_budget(
+                        intervention_id=intervention_id,
+                        due_workers=raw_due,
+                        latest_frame_by_worker=frozen_frames,
+                        cap_target_by_worker=self.cap_target_by_worker,
+                        packet_frames=self.packet_frames)
+                    ineligible = list(admission.budget_ineligible_workers)
+                    if ineligible:
+                        self._release(ineligible)
+                        inelig_set = set(ineligible)
+                        admission_held = [w for w in admission_held
+                                          if w not in inelig_set]
+                    due = list(admission.budget_eligible_workers)
+                    if not due:
+                        if admission_held:
+                            self._release(admission_held)
+                            admission_held = []
+                        if self.run_dir is not None:
+                            clear_reservation(self.run_dir)
+                            write_no_new_cycle(self.run_dir, {
+                                "intervention_id": intervention_id,
+                                "reason": "all_budget_ineligible",
+                                "budget_admission": admission.to_dict(),
+                            })
+                        return ProbeCycleResult(
+                            intervention_id=intervention_id, due_workers=[],
+                            routing=None, l_mid_by_worker={}, panel_stat=None,
+                            retention_by_worker={}, promoted=False,
+                            first_blocking_gate="all_budget_ineligible",
+                            budget_admission=admission.to_dict())
+                    # eligible stay frozen; frozen refresh = cycle start
+                    for w in due:
+                        start_frames[w] = frozen_frames[w]
+                    already_held_from_admission = True
+                    if self.run_dir is not None:
+                        write_reservation(self.run_dir, admission)
+                    tau = {w: float(canonical_tau(by_id[w].active_tau))
                            for w in due}
+                    tau_plus = {w: float(canonical_tau(tau_plus_of(tau[w])))
+                               for w in due}
+                except Exception:
+                    # fail-closed: no pin / MSA_BUSY / reservation leftovers
+                    try:
+                        if admission_held:
+                            self._release(admission_held)
+                    except Exception:
+                        pass
+                    if self.run_dir is not None:
+                        try:
+                            clear_reservation(self.run_dir)
+                        except Exception:
+                            pass
+                    raise
 
         cycle: dict = dict(resume_cycle or {})
         cycle.update({
@@ -511,6 +621,9 @@ class MSAController:
         if admission is not None and "budget_admission" not in cycle:
             cycle["budget_admission"] = admission.to_dict()
             cycle.setdefault("observed_cycle_dose_by_worker", {})
+            cycle.setdefault("final_committed_frame_by_worker", {})
+        if start_frames and "start_frames" not in cycle:
+            cycle["start_frames"] = {str(w): start_frames[w] for w in due}
 
         provs: dict[int, MSAProvenance] = {}
         records: dict[int, InterventionRecord] = {}
@@ -534,7 +647,7 @@ class MSAController:
                 for e in provs[w].exposures
             )
 
-        held: set[int] = set()
+        held: set[int] = set(due) if already_held_from_admission else set()
 
         def _hold(ids: list[int]) -> None:
             self._hold(ids)
@@ -561,14 +674,20 @@ class MSAController:
         m = self.machine
         promoted_committed = False
         try:
-            # -- PRE_EVAL: barrier-hold FIRST, then re-read committed metas ----
+            # -- PRE_EVAL: barrier-hold FIRST (unless already frozen by the
+            # budget admission barrier), then re-read committed metas ------
             m.transition(MSAPhase.PRE_EVAL, intervention_id)
             m.intervention_id = intervention_id
             self._persist(due, provs, cycle)
-            _hold(due)
+            if already_held_from_admission:
+                # same exact hold from admission: do NOT release/re-freeze
+                held.update(due)
+            else:
+                _hold(due)
             # the packet start is the POST-hold committed frame: a tick that
             # committed between due detection and the hold ran at tau and is
-            # excluded from the tau_plus exposure accounting.
+            # excluded from the tau_plus exposure accounting. When budget
+            # admission already froze start_frames, validate equality.
             fresh = _refresh_held(due)
             for w in due:
                 fv = fresh[w]
@@ -604,6 +723,12 @@ class MSAController:
                             f"worker {w}: committed frame {fv.frame} < "
                             f"persisted start frame {start_frames[w]} "
                             "(ledger regressed)")
+                elif already_held_from_admission:
+                    if int(fv.frame) != int(start_frames[w]):
+                        raise RuntimeError(
+                            f"worker {w}: committed frame {fv.frame} != "
+                            f"admission-frozen start {start_frames[w]} "
+                            "(ledger moved while held)")
                 else:
                     start_frames[w] = int(fv.frame)
             cycle["start_frames"] = {str(w): start_frames[w] for w in due}
@@ -790,7 +915,10 @@ class MSAController:
                 cycle["selected_for_promotion"] = list(sel.selected_for_promotion)
                 cycle["anchor_workers"] = list(sel.anchor_workers)
             else:
-                # global_panel: BIT-FOR-BIT the original single-gate path.
+                # global_panel: same decision rule as the original single-gate
+                # path (panel + retention). Shared budget orchestration may
+                # still change run-level timing / admission, so do not claim
+                # the entire arm is bit-for-bit unchanged.
                 decision = decide_promotion(panel_stat, retention_by_worker,
                                             self.retention_threshold)
                 promote_any = decision.promote
@@ -841,14 +969,10 @@ class MSAController:
             m.transition(MSAPhase.NORMAL,
                          "promotion applied" if promote_any
                          else first_blocking_gate)
-            # best-effort dose bookkeeping: the last frame OBSERVED within
-            # the cycle (post second-probe hold) minus the packet start;
-            # the actual post-commit tick (if any) is not re-read here, so
-            # this is a lower bound on the true consumed dose.
-            if "budget_admission" in cycle:
-                cycle["observed_cycle_dose_by_worker"] = {
-                    str(w): int(post_frames[w]) - int(start_frames[w])
-                    for w in due}
+            # FULL cycle dose: refresh AFTER commit acks so the confirmation
+            # tick is included; fail-closed vs reserved ceiling / dose / cap.
+            finals, doses = self._finalize_cycle_dose(
+                due, start_frames, cycle, admission)
             self._persist(due, provs, cycle)
             self._set_busy(None)
             promoted_committed = promote_any
@@ -877,7 +1001,9 @@ class MSAController:
                                            if sel is not None else None),
                 budget_admission=(admission.to_dict()
                                   if admission is not None else None),
-                final_tol_by_worker=dict(final_tol))
+                final_tol_by_worker=dict(final_tol),
+                final_committed_frame_by_worker=dict(finals),
+                observed_cycle_dose_by_worker=dict(doses))
 
         except Exception as err:
             # -- crash cleanup: nobody may be left running at tau_plus ---------

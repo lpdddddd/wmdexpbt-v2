@@ -548,23 +548,33 @@ Fix (pure bootstrap plumbing, no algorithm change):
 Pilot evidence archived under `results/analysis/msa_stateful_n16_20260720/`
 (POSTMORTEM + compact tables; raw eval sha256-only).
 
-**Budget admission** (`msa/budget.py`): before PRE_EVAL / MSA_BUSY,
-`admit_cycle_budget` requires
-`remaining = cap_target - latest_committed >= worst_case_remaining_cycle_dose()`
+**Budget admission** (`msa/budget.py`): hold raw-due workers first,
+refresh committed metas, then `admit_cycle_budget` requires
+`remaining = cap_target - frozen_committed_frame >= worst_case_remaining_cycle_dose()`
 where
 `reserve = 2*(packet+tick) + tick` (= 400M when packet=tick=80M:
 COMMON_PROBE + quant, SECOND_PROBE + quant, COMMITTING confirm tick).
-Ineligible workers never enter the cycle; all-ineligible →
-`MSA_NO_NEW_CYCLE.json` (no GUARD_FAILED). Reservation persisted in
-`CYCLE_BUDGET_RESERVATION.json` and mirrored on the busy marker;
-guard fails closed only if a frame exceeds `reserved_ceiling`.
+Ineligible workers are released immediately and never enter PRE_EVAL /
+MSA_BUSY / snapshot / pin; all-ineligible → release all holds, clear
+`CYCLE_BUDGET_RESERVATION.json`, write `MSA_NO_NEW_CYCLE.json` (no
+GUARD_FAILED). Eligible workers stay frozen; frozen frames are
+`start_frames` and reservation ceilings. Observed cycle dose is
+`final_committed_frame - frozen_start` after commit acks (includes the
+confirmation tick) and fails closed vs reserved ceiling / dose / cap.
+
+Cap arithmetic: readiness consumes 80M of the 480M continuation cap, so
+worst-case 400M reserve means the current `MSA_SELECTIVE_STATEFUL` arm is
+a **one-step** selective causal pilot (at most one new cycle). It must
+not be described as already iterating from tol≈0.02 to 0.01.
 
 **Selective promotion** (`promotion_mode=worker_local_selective`):
 new arm `MSA_SELECTIVE_STATEFUL`. Eligible workers need p_pre≥0.01,
 worker L_mid lower quantile >0, ρ≥0.88; select top-3 by
-(-L_mid_lo, -ρ, worker_id) leaving ≥3 population anchors. Panel
-statistic is diagnostic only. `MSA_STATEFUL` stays `global_panel`
-bit-for-bit.
+(-L_mid_lo, -ρ, worker_id). `anchor_workers` are population members
+**not selected this cycle** (not a permanent cross-cycle cohort). Panel
+statistic is diagnostic only. `MSA_STATEFUL` keeps the **global_panel
+decision rule** unchanged; if that arm shares budget orchestration, do
+not claim the entire run is bit-for-bit identical.
 
 ## 6. Known limitations / open points before launch
 

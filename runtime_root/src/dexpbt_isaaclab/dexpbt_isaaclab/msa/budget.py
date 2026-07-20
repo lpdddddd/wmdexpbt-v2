@@ -1,9 +1,15 @@
-"""MSA cycle budget admission: worst-case dose reservation before PRE_EVAL.
+"""MSA cycle budget admission: worst-case dose reservation after a hold.
 
 A probe cycle must not open unless every admitted due worker has enough
 remaining continuation frames to finish the *worst-case* training dose
 implied by the controller's phase transitions. Expanding the +480M cap or
 blindly parking mid-cycle is forbidden; instead we refuse admission.
+
+Admission order (controller): hold raw-due workers first, refresh their
+committed metas, THEN classify eligibility on those frozen frames. A tick
+that lands between due-detection and the hold cannot stale the reservation
+ceiling. All-ineligible cycles release holds, clear any reservation file,
+write ``MSA_NO_NEW_CYCLE.json``, and never enter PRE_EVAL / MSA_BUSY.
 
 Dose derivation (see ``worst_case_remaining_cycle_dose``):
   COMMON_PROBE  — ``train_until(start + packet_frames)``; observed frame may
@@ -16,6 +22,11 @@ Dose derivation (see ``worst_case_remaining_cycle_dose``):
                   worker (any of them may be a top-k recipient).
   COMMITTING    — workers are released and ``commit_tolerance`` waits for
                   one committed tick that reports ``final_tol``.
+
+With the current profile (packet == tick == 80M) the worst-case reserve is
+400M. Combined with a 480M continuation cap and an 80M readiness tick, a
+fresh selective pilot can admit at most one new cycle (one-step selective
+causal pilot) — it cannot iterate from tol≈0.02 down to 0.01.
 
 Reservation is persisted (``CYCLE_BUDGET_RESERVATION.json`` + busy marker
 fields) so a sidecar restart never re-admits, double-reserves, or changes

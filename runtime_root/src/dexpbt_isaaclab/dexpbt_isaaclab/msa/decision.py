@@ -371,8 +371,10 @@ def decide_selective_promotion(
 
     Selection: eligible sorted by (-L_mid_lo, -rho, worker_id); take at most
     ``max_promote`` such that at least ``min_anchors`` population workers
-    remain unpromoted. Panel statistic is recorded as a diagnostic only —
-    it is NOT a veto.
+    remain unpromoted *this cycle*. ``anchor_workers`` are simply the
+    population members not selected in this cycle — not a permanent cohort
+    retained across cycles. Panel statistic is recorded as a diagnostic
+    only — it is NOT a veto.
     """
     l_mid_ci: dict[int, dict] = {}
     eligible: dict[int, bool] = {}

@@ -1,19 +1,9 @@
 # base_retention_msa_probe — Test Report
 
-Date: 2026-07-19, updated the same date for the pilot-integration fix pass
-("Fix MSA pilot integration and phase safety"), the pre-pilot safety patch
-("Harden MSA readiness holds and pilot budget"), the final orchestration
-blocker patch ("Close MSA smoke, commit, and cap races"), the
-state-faithful bootstrap pass ("Add state-faithful stall bootstrap for MSA
-arms"), the synchronization pass ("Make readiness a hold barrier with
-sidecar adoption"), the watchdog/preflight pass ("Close readiness
-watchdog and shared-GPU preflight gaps"), the final orchestration
-patch ("Bound coexistence eval and supervise guard lifetime") and the
-lineage propagation fix ("Propagate source lineage through stateful
-bootstrap", 2026-07-20).
-Environment: isaaclab311 python
-(CPU only; no Isaac import anywhere in the MSA package or its tests; no
-GPU used).
+Date: 2026-07-19, updated through 2026-07-20 for the budget-boundary fix
+("Anchor MSA budget admission at frozen frame"). Environment: isaaclab311
+python under `runtime_root/envs/isaaclab311` (CPU only; no Isaac import in
+the MSA package or its tests; no GPU used; no smoke / formal experiment).
 
 Three evidence tiers, kept separate on purpose:
 
@@ -25,15 +15,52 @@ Three evidence tiers, kept separate on purpose:
    holds and live commit-wait behavior remain GPU-unverified; see
    `LAUNCH_CHECKLIST.md`.
 
+## Frozen-frame budget boundary fix (2026-07-20)
+
+Exact commands (cwd =
+`runtime_root/src/dexpbt_isaaclab`, python =
+`runtime_root/envs/isaaclab311/bin/python`):
+
+```
+pytest -q tests/test_msa_probe.py                 # 143 passed
+pytest -q tests/test_state_bootstrap.py           # 37 passed
+pytest -q tests/test_msa_selective_budget.py      # 24 passed
+bash -n results/launchers/msa_probe/*.sh          # OK
+```
+
+Combined: **204 passed**. No GPU smoke / formal experiment.
+
+Budget-boundary coverage added in `tests/test_msa_selective_budget.py`:
+
+| # | required behavior | test(s) |
+|---|---|---|
+| 1 | admission uses post-hold frozen frame (not stale due-detection) | `TestFrozenAdmissionBarrier.test_admission_uses_post_hold_frame_when_tick_slips` |
+| 2 | exactly 400M remaining + 80M slip → ineligible | `test_exact_400m_remaining_becomes_ineligible_after_slip` |
+| 3 | all-ineligible: no PRE_EVAL/BUSY/snapshot/eval/pin; holds released; reservation cleared; MSA_NO_NEW_CYCLE present | `test_all_ineligible_leaves_no_cycle_artifacts`, `TestBudgetControllerIntegration.test_insufficient_budget_skips_pre_eval_and_busy` |
+| 4 | observed cycle dose includes commit confirmation tick | `TestFullCycleDose.test_observed_cycle_dose_includes_commit_tick` |
+| 5 | final frame over reserved ceiling fails closed | `test_final_frame_over_reserved_ceiling_fails_closed` |
+| 6 | COMMITTING resume records full final-frame dose | `test_committing_resume_records_full_final_frame_dose` |
+| 7 | global_panel decision replay unchanged | `TestGlobalPanelDecisionUnchanged.test_global_panel_decision_replay_unchanged`, `TestRealDataReplay.*` |
+
+Cap note documented: 480M continuation, readiness 80M, worst-case cycle
+reserve 400M → `MSA_SELECTIVE_STATEFUL` is a one-step selective causal
+pilot (at most one new cycle), not an iterative 0.02→0.01 path.
+`anchor_workers` = not selected this cycle (not a permanent cohort).
+`MSA_STATEFUL` keeps the global_panel **decision rule**; shared budget
+orchestration must not be claimed bit-for-bit run-identical.
+
 ## MSA suite: `tests/test_msa_probe.py` — 143/143 passed
-## Selective/budget suite: `tests/test_msa_selective_budget.py` — 17/17 passed
+## Selective/budget suite: `tests/test_msa_selective_budget.py` — 24/24 passed
+## Bootstrap suite: `tests/test_state_bootstrap.py` — 37/37 passed
+
+## Prior selective/budget suite (pre-boundary-fix): 17/17 passed
 
 Budget admission + worker-local selective promotion + Cycle 1/2 real-data
 replay (global reproduces false/false; selective promotes w3+w2 then
-w0+w1, rejects w5 on ρ). Full combined run: 197 passed.
+w0+w1, rejects w5 on ρ). Full combined run at that tip: 197 passed.
 
 ## MSA suite (prior): `tests/test_msa_probe.py` — 143/143 passed
-## Bootstrap suite: `tests/test_state_bootstrap.py` — 37/37 passed
+## Bootstrap suite (prior): `tests/test_state_bootstrap.py` — 37/37 passed
 
 Lineage propagation fix (2026-07-20): 5 new tests in
 `TestLineageResume` — `parse_lineage_resume_per_policy` valid/reject

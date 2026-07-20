@@ -67,7 +67,8 @@ class HardKill(BaseException):
 class FakeWorld:
     """Deterministic fake trainer/evaluator/state store.
 
-    - frames advance ONLY through train_until (tick-quantized, parallel);
+    - frames advance through train_until (tick-quantized, parallel) AND
+      through commit_tolerance (one confirmation tick, mirroring production);
     - held workers cannot advance (eval phase barrier);
     - pin/commit bookkeeping mirrors msa_forced_success_tolerance and the
       durable live tolerance + resume snapshot;
@@ -202,6 +203,10 @@ class FakeWorld:
         self.live_tolerance[worker_id] = float(tol)
         self.resume_snapshot_tolerance[worker_id] = float(tol)
         self.pinned_tolerance[worker_id] = 0.0     # pin cleared
+        # production commit waits for ONE live committed tick that reports
+        # the durable tolerance; advance the ledger so observed cycle dose
+        # includes the confirmation tick.
+        self._advance_one_tick(worker_id)
 
     # -- holds (phase barrier) --------------------------------------------------
     def hold_workers(self, worker_ids: list[int]) -> None:
@@ -421,8 +426,8 @@ def format_trace(world: FakeWorld, ctl: MSAController,
             "",
             "- selected_for_promotion (pinned to tau_plus permanently): "
             f"{result.selected_for_promotion}",
-            "- anchor_workers (kept at tau[w] this cycle so >= "
-            "min_population_anchors stay unpromoted): "
+            "- anchor_workers (NOT selected this cycle — not a permanent "
+            "cohort): "
             f"{result.anchor_workers}",
             "",
             "| worker | eligible | rejection_reason | final_tol |",
