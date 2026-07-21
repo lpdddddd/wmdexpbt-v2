@@ -61,9 +61,18 @@ This pilot admits at most one new MSA cycle under the 480M continuation
 cap after ~80M readiness. It does **not** claim iterative completion of
 0.02→0.01.
 
-## Cycle JSON paths
+## Archived result JSON (committed)
 
-- N=4: `.../20260721_002716/dexpbt_8gpu_ws/msa_cycles/msa_1784568017_a355115e.json`
-- N=16: `.../20260721_064933/dexpbt_8gpu_ws/msa_cycles/msa_1784591014_9ddc9843.json`
+`results/runs/` is gitignored (~28G/run with checkpoints). Terminal
+JSON was copied here for GitHub:
 
-Run directories themselves are not committed (checkpoints / logs).
+`results/analysis/msa_probe_implementation/selective_stateful_results_8863b64/`
+
+- `n4/` — `ARM_COMPLETE.json`, `FIRST_TICK_VALIDATED.json`,
+  `MSA_NO_NEW_CYCLE.json`, `STATE_FIDELITY.json`, cycle summary
+  `msa_cycles/msa_1784568017_a355115e.json`, …
+- `n16/` — same set, cycle `msa_cycles/msa_1784591014_9ddc9843.json`
+- `MANIFEST.json` — file list + sha16 + source run_dir paths
+
+Not archived: `*.pth` snapshots, `msa_eval_raw/`, trainer logs,
+workspace checkpoints.
