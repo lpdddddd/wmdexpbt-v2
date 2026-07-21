@@ -40,6 +40,7 @@ from dexpbt_isaaclab.pbt.pbt_curriculum_p1 import (
     post_shrink_consolidation_active,
     qualifies_best_stable_save,
     read_curriculum_control,
+    update_curriculum_control,
     write_curriculum_control,
     write_curriculum_control_preserving_msa,
     write_curriculum_resume_snapshot,
@@ -576,11 +577,16 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         recovery_restart_count_resume: int | None = None,
         last_recovery_frame_resume: int | None = None,
         last_profile_copy_frame_resume: int | None = None,
+        # MSA-aware fusion (2026-07-21): when True, mastery shrink is
+        # proposal-only and MSA is the sole tolerance committer.
+        msa_integrated_enabled: bool = False,
     ):
         super().__init__()
         self.policy_idx = policy_idx
         self.num_policies = num_policies
         self.mutable_params = dict(mutable_params)
+        self.msa_integrated_enabled = bool(msa_integrated_enabled)
+        self._msa_fusion_hook = None
         self.train_dir = Path(train_dir).resolve()
         ws_path = Path(workspace)
         if ws_path.is_absolute():
@@ -2636,6 +2642,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 pre_floor_peak.get("stable_ticks", 0)
             ),
             pre_floor_peak_guard_reason=str(pre_floor_peak.get("reason", "")),
+            # MSA fusion: when True, env treats mastery shrink as proposal-only.
+            msa_integrated_enabled=bool(
+                getattr(self, "msa_integrated_enabled", False)
+            ),
         )
 
     def _log_curriculum_control_scalars(
@@ -3136,6 +3146,21 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return False, (
                 f"nsucc_max<{self.min_nsucc_max_as_source}"
             )
+        # MSA fusion: PROBE / open-transaction policies cannot be donors.
+        if self.msa_integrated_enabled:
+            try:
+                from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
+                from dexpbt_isaaclab.msa.pbt_eligibility import can_be_exploit_source
+                from dexpbt_isaaclab.msa.worker_state import load_worker_state
+
+                wid = int(state.get("policy_idx", self.policy_idx))
+                st = load_worker_state(
+                    worker_state_path(self.workspace.parent, wid)
+                )
+                if st is not None and not can_be_exploit_source(st):
+                    return False, "msa_probe_or_transaction"
+            except Exception:
+                pass
         return True, "ok"
 
     def _is_eligible_as_source(
@@ -5655,6 +5680,140 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._best_floor_recovery_state = self._load_best_index(
                 self.best_floor_recovery_workspace
             )
+        # MSA-aware fusion hook (inert unless msa_integrated_enabled).
+        self._init_msa_fusion_hook()
+
+    def _init_msa_fusion_hook(self) -> None:
+        self._msa_fusion_hook = None
+        if not self.msa_integrated_enabled:
+            return
+        try:
+            from dexpbt_isaaclab.msa.fusion_config import fusion_config_from_mapping
+            from dexpbt_isaaclab.msa.fusion_hook import MSAFusionHook
+
+            raw = {
+                k: getattr(self, k)
+                for k in (
+                    "msa_integrated_enabled",
+                    "msa_build_threshold_cm",
+                    "msa_strict_threshold_cm",
+                    "msa_target_floor_cm",
+                    "msa_tighten_ratio",
+                    "msa_prefilter_eval_n",
+                    "msa_strict_eval_n",
+                    "msa_probe_budget_frames",
+                    "msa_cycle_interval_frames",
+                    "msa_hold_cooldown_frames",
+                    "msa_max_consecutive_failures",
+                    "msa_retention_min",
+                    "msa_bootstrap_samples",
+                    "msa_confidence_level",
+                    "msa_require_population_guard",
+                    "msa_min_anchor_workers",
+                    "msa_fail_closed",
+                    "msa_inprocess_hook_enable",
+                    "msa_fake_decision_injector_enable",
+                )
+                if hasattr(self, k)
+            }
+            raw["msa_integrated_enabled"] = True
+            cfg = fusion_config_from_mapping(raw)
+            run_dir = self.workspace.parent
+            self._msa_fusion_hook = MSAFusionHook(
+                run_dir, cfg, num_workers=self.num_policies
+            )
+            # Seed this worker's state from live tolerance if present.
+            ctrl = read_curriculum_control(
+                self._curriculum_control_dir / f"{self.policy_idx:03d}.json"
+            )
+            tol = 0.0
+            if ctrl is not None:
+                # Prefer forced / proposal / leave 0 for migrate from ckpt later.
+                tol = float(getattr(ctrl, "forced_success_tolerance", 0.0) or 0.0)
+            ckpt = str(self.curr_policy_workspace / "checkpoint.pth")
+            st = self._msa_fusion_hook.load_or_migrate(
+                self.policy_idx,
+                current_tolerance=tol if tol > 0 else 0.02,
+                anchor_checkpoint=ckpt,
+            )
+            print(
+                f"[msa-fusion] policy {self.policy_idx} mode={st.mode} "
+                f"tol={st.current_tolerance} stage={st.committed_stage}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[msa-fusion] hook init failed: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            self._msa_fusion_hook = None
+
+    def msa_blocks_pbt_mutation(self) -> bool:
+        """True when MSA cycle is busy or this worker is in PROBE."""
+        if not self.msa_integrated_enabled:
+            return False
+        try:
+            from dexpbt_isaaclab.msa.fusion_hook import is_msa_busy, worker_state_path
+            from dexpbt_isaaclab.msa.worker_state import MODE_PROBE, load_worker_state
+
+            run_dir = self.workspace.parent
+            if is_msa_busy(run_dir):
+                return True
+            st = load_worker_state(worker_state_path(run_dir, self.policy_idx))
+            if st is not None and (st.mode == MODE_PROBE or st.transaction_open):
+                return True
+        except Exception:
+            return bool(getattr(self, "msa_fail_closed", True))
+        return False
+
+    def _msa_fusion_after_steps(self, env_frames: int) -> None:
+        """Consume fusion decisions, update TB, mirror state into control."""
+        hook = getattr(self, "_msa_fusion_hook", None)
+        if hook is None or not self.msa_integrated_enabled:
+            return
+        from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
+        from dexpbt_isaaclab.msa.worker_state import load_worker_state
+
+        run_dir = hook.run_dir
+        path = worker_state_path(run_dir, self.policy_idx)
+        st = load_worker_state(path)
+        if st is None:
+            st = hook.load_or_migrate(
+                self.policy_idx,
+                current_tolerance=0.02,
+                anchor_checkpoint=str(self.curr_policy_workspace),
+            )
+        st = hook.tick_hold_exit(st, int(env_frames))
+        doc = hook.consume_sidecar_decision_file()
+        if doc is not None:
+            states = {self.policy_idx: st}
+            for wid in range(self.num_policies):
+                if wid == self.policy_idx:
+                    continue
+                peer = load_worker_state(worker_state_path(run_dir, wid))
+                if peer is not None:
+                    states[wid] = peer
+            states = hook.apply_sidecar_decision_doc(
+                doc,
+                states,
+                frame_by_worker={self.policy_idx: int(env_frames)},
+            )
+            st = states.get(self.policy_idx, st)
+        hook.save(st)
+        try:
+            ctrl_path = self._curriculum_control_dir / f"{self.policy_idx:03d}.json"
+
+            def _mirror(ctrl: CurriculumControlState) -> CurriculumControlState:
+                ctrl.msa_integrated_enabled = True
+                ctrl.msa_worker_state = st.to_dict()
+                return ctrl
+
+            update_curriculum_control(ctrl_path, _mirror)
+        except Exception:
+            pass
+        if self.writer is not None:
+            for k, v in hook.tensorboard_scalars(st).items():
+                self.writer.add_scalar(k, float(v), int(env_frames))
 
     def process_infos(self, infos, done_indices):
         super().process_infos(infos, done_indices)
@@ -5677,6 +5836,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             return
         raw_frames = pbt_raw_training_frame(self.algo)
         population_frame = pbt_population_frame(self.algo)
+
+        # MSA fusion: consume decisions / emit metrics every step (cheap).
+        try:
+            self._msa_fusion_after_steps(int(population_frame))
+        except Exception as exc:  # noqa: BLE001
+            if self.msa_integrated_enabled:
+                print(
+                    f"[msa-fusion] after_steps error: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
         # P0: policy0 consumes CF results every step (not only on PBT restart).
         if self._is_posterior_writer and self._enable_counterfactual:
@@ -6583,6 +6753,18 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         # last_restart_type to "none". The branches below set it to
         # self/cross/skipped before returning.
         self._last_restart_type = 0
+
+        # MSA fusion: block exploit/mutation while busy or this worker is PROBE.
+        if self.msa_blocks_pbt_mutation():
+            print(
+                f"Policy {self.policy_idx}: skip PBT mutation "
+                f"(MSA busy or PROBE)",
+                flush=True,
+            )
+            self._last_restart_type = 3  # skipped
+            if self.writer is not None:
+                self.writer.add_scalar("msa/pbt_blocked", 1.0, env_frames)
+            return
 
         print(
             f"Policy {self.policy_idx}: DexPBT tier={tier} rank={rank}/{n} "
@@ -8248,6 +8430,63 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         self._last_rollback_frame[self.policy_idx] = -10**18
         self._shrinks_since_rollback[self.policy_idx] = 0
         self._rollback_reason[self.policy_idx] = "restart_reset"
+
+        # MSA fusion PBT inheritance: clear recipient evidence; never inherit
+        # donor pass evidence / cycle / CIs. Rules live in pbt_eligibility.
+        if self.msa_integrated_enabled:
+            try:
+                from dexpbt_isaaclab.msa.fusion_config import fusion_config_from_mapping
+                from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
+                from dexpbt_isaaclab.msa.pbt_eligibility import recipient_after_pbt_copy
+                from dexpbt_isaaclab.msa.worker_state import (
+                    load_worker_state,
+                    save_worker_state,
+                    WorkerMSAState,
+                )
+
+                run_dir = self.workspace.parent
+                recip = load_worker_state(
+                    worker_state_path(run_dir, self.policy_idx)
+                ) or WorkerMSAState(worker_id=self.policy_idx)
+                donor = load_worker_state(
+                    worker_state_path(run_dir, int(source_policy))
+                ) or WorkerMSAState(worker_id=int(source_policy))
+                raw = {
+                    k: getattr(self, k)
+                    for k in (
+                        "msa_integrated_enabled",
+                        "msa_build_threshold_cm",
+                        "msa_strict_threshold_cm",
+                        "msa_target_floor_cm",
+                        "msa_tighten_ratio",
+                        "msa_retention_min",
+                        "msa_min_anchor_workers",
+                    )
+                    if hasattr(self, k)
+                }
+                raw["msa_integrated_enabled"] = True
+                cfg = fusion_config_from_mapping(raw)
+                # Live tol after copy follows source curriculum when present.
+                if source_curriculum and "success_tolerance" in source_curriculum:
+                    recip.current_tolerance = float(
+                        source_curriculum["success_tolerance"]
+                    )
+                recip = recipient_after_pbt_copy(recip, donor, cfg=cfg)
+                save_worker_state(
+                    worker_state_path(run_dir, self.policy_idx), recip
+                )
+                print(
+                    f"[msa-fusion] PBT copy evidence reset on policy "
+                    f"{self.policy_idx} from donor {source_policy}: "
+                    f"{recip.decision_reason}",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[msa-fusion] PBT evidence reset failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
         # ------------------------------------------------------------------
         # M7: posterior sampling MUST happen BEFORE train_args construction

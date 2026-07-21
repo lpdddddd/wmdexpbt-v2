@@ -1572,6 +1572,7 @@ parser.add_argument(
         "unified_elite_wm_pbt",
         "cser_dexpbt",
         "cser_dexpbt_conservative",
+        "msa_aware_cser_dexpbt_conservative",
     ],
     help="PBT-WM Strategy Zoo profile (expands to a full WM usage config). "
     "legacy = no expansion (existing launcher behaviour).",
@@ -7639,6 +7640,10 @@ def main():
             last_profile_copy_frame_resume=(
                 args_cli.last_profile_copy_frame_resume
             ),
+            # MSA-aware DexPBT fusion (profile-gated; default False).
+            msa_integrated_enabled=bool(
+                getattr(args_cli, "msa_integrated_enabled", False)
+            ),
             # PBT-WM Strategy Zoo v1.0
             wm_strategy_profile_name=str(args_cli.wm_strategy_profile),
             wm_strategy_profile_id=int(
@@ -7773,6 +7778,31 @@ def main():
             ),
             wm_calibration_enable=bool(args_cli.wm_calibration_enable),
         )
+        # Propagate MSA fusion knobs from profile expansion onto the observer
+        # so MSAFusionHook can build MSAFusionConfig without re-parsing CLI.
+        for _msa_key in (
+            "msa_build_threshold_cm",
+            "msa_strict_threshold_cm",
+            "msa_target_floor_cm",
+            "msa_tighten_ratio",
+            "msa_prefilter_eval_n",
+            "msa_strict_eval_n",
+            "msa_probe_budget_frames",
+            "msa_cycle_interval_frames",
+            "msa_hold_cooldown_frames",
+            "msa_max_consecutive_failures",
+            "msa_retention_min",
+            "msa_bootstrap_samples",
+            "msa_confidence_level",
+            "msa_require_population_guard",
+            "msa_min_anchor_workers",
+            "msa_fail_closed",
+            "msa_checkpoint_version",
+            "msa_inprocess_hook_enable",
+            "msa_fake_decision_injector_enable",
+        ):
+            if hasattr(args_cli, _msa_key):
+                setattr(observer, _msa_key, getattr(args_cli, _msa_key))
     else:
         observer = IsaacAlgoObserver()
 

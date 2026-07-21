@@ -287,6 +287,13 @@ class CurriculumControlState:
     msa_provenance: dict[str, Any] | None = None
     msa_state_machine: dict[str, Any] | None = None
     msa_cycle: dict[str, Any] | None = None
+    # MSA-aware DexPBT fusion (inert unless msa_integrated_enabled).
+    # When enabled, mastery shrink becomes a proposal only; MSA is the sole
+    # tolerance committer. Per-worker BUILD/PROBE/HOLD bookkeeping lives in
+    # msa_worker_state (and mirrored under <run_dir>/msa_worker_state/).
+    msa_integrated_enabled: bool = False
+    msa_tolerance_proposal: float = 0.0
+    msa_worker_state: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -373,6 +380,9 @@ MSA_CONTROL_FIELDS = (
     "msa_provenance",
     "msa_state_machine",
     "msa_cycle",
+    "msa_integrated_enabled",
+    "msa_tolerance_proposal",
+    "msa_worker_state",
 )
 
 
@@ -622,6 +632,37 @@ def apply_env_tolerance_curriculum(
         forced = max(forced, target_tolerance)
         if abs(forced - success_tolerance) > 1e-12:
             return forced, frames_since_restart
+
+    # Fusion profile: mastery / late-floor / adaptive shrink may only PROPOSE.
+    # Actual tolerance commits go through the MSA controller (pin / durable
+    # commit). Old profiles keep msa_integrated_enabled=False -> unchanged.
+    if bool(getattr(control, "msa_integrated_enabled", False)):
+        use_token = bool(pbt_single_shrink_per_window)
+        may_shrink = control.shrink_token if use_token else control.allow_shrink
+        if may_shrink and not control.collapse_freeze_active:
+            # Record a proposal at gamma*tol without applying it here.
+            from dexpbt_isaaclab.msa.fusion_config import DEFAULT_TIGHTEN_RATIO
+            from dexpbt_isaaclab.msa.provenance import TAU_FLOOR
+            proposal = max(TAU_FLOOR, float(success_tolerance) * float(
+                DEFAULT_TIGHTEN_RATIO))
+            proposal = min(proposal, initial_tolerance)
+            proposal = max(proposal, target_tolerance)
+            if abs(proposal - float(control.msa_tolerance_proposal or 0.0)) > 1e-12:
+                def _set_proposal(st: CurriculumControlState) -> CurriculumControlState:
+                    st.msa_tolerance_proposal = float(proposal)
+                    return st
+                try:
+                    update_curriculum_control(curriculum_control_path, _set_proposal)
+                except Exception:
+                    pass
+            if use_token and control.shrink_token:
+                mark_shrink_consumed(
+                    curriculum_control_path,
+                    frames_since_restart=frames_since_restart,
+                    consolidation_env_frames=int(post_shrink_consolidation_env_frames),
+                    num_envs=int(num_envs),
+                )
+        return float(success_tolerance), frames_since_restart
 
     use_token = bool(pbt_single_shrink_per_window)
     may_shrink = control.shrink_token if use_token else control.allow_shrink

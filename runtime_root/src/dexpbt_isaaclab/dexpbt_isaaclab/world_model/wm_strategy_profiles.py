@@ -43,6 +43,8 @@ PROFILE_IDS: dict[str, int] = {
     # expansion is authoritative: a launcher-level CLI override of a
     # profile-controlled flag would be silently reverted to the table value.
     "cser_dexpbt_conservative_gate_relax": 21,
+    # MSA-aware fused main-training profile (2026-07-21).
+    "msa_aware_cser_dexpbt_conservative": 22,
 }
 
 PROFILE_DESCRIPTIONS: dict[str, str] = {
@@ -102,6 +104,11 @@ PROFILE_DESCRIPTIONS: dict[str, str] = {
         "cser_dexpbt_conservative with late_floor_retention_min_retention "
         "relaxed 0.88 -> 0.75 (the existing hard minimum). No other change."
     ),
+    "msa_aware_cser_dexpbt_conservative": (
+        "CSER conservative + integrated MSA curriculum/retention controller "
+        "(BUILD/PROBE/HOLD). MSA is the sole tolerance committer; mastery "
+        "shrink is proposal-only. rho_min=0.88, gamma=0.95 (pilot-aligned)."
+    ),
 }
 
 PROFILE_FAMILY: dict[str, str] = {
@@ -125,6 +132,7 @@ PROFILE_FAMILY: dict[str, str] = {
     "cser_dexpbt": "unified",
     "cser_dexpbt_conservative": "unified",
     "cser_dexpbt_conservative_gate_relax": "unified",
+    "msa_aware_cser_dexpbt_conservative": "unified",
 }
 
 # Profile-copy source bonus weights (v1.3 elite-centered).
@@ -148,6 +156,7 @@ PROFILE_COPY_SOURCE_BONUS: dict[str, float] = {
     "cser_dexpbt": 1.0,
     "cser_dexpbt_conservative": 1.0,
     "cser_dexpbt_conservative_gate_relax": 1.0,
+    "msa_aware_cser_dexpbt_conservative": 1.0,
 }
 
 # Shared guard: no profile may turn on residual rollout apply in v1 zoo.
@@ -755,6 +764,32 @@ _CSER_DEXPBT_CONSERVATIVE_GATE_RELAX: dict[str, Any] = {
     "late_floor_retention_min_retention": 0.75,
 }
 
+# MSA-aware fused main training (inherits conservative retention metrics;
+# MSA becomes the sole tolerance committer via msa_integrated_enabled).
+_MSA_AWARE_CSER_DEXPBT_CONSERVATIVE: dict[str, Any] = {
+    **_CSER_DEXPBT_CONSERVATIVE,
+    "msa_integrated_enabled": True,
+    "msa_build_threshold_cm": 3.0,
+    "msa_strict_threshold_cm": 2.0,
+    "msa_target_floor_cm": 1.0,
+    "msa_tighten_ratio": 0.95,
+    "msa_prefilter_eval_n": 4,
+    "msa_strict_eval_n": 16,
+    "msa_probe_budget_frames": 80_000_000,
+    "msa_cycle_interval_frames": 100_000_000,
+    "msa_hold_cooldown_frames": 80_000_000,
+    "msa_max_consecutive_failures": 3,
+    "msa_retention_min": 0.88,
+    "msa_bootstrap_samples": 10_000,
+    "msa_confidence_level": 0.05,
+    "msa_require_population_guard": True,
+    "msa_min_anchor_workers": 1,
+    "msa_fail_closed": True,
+    "msa_checkpoint_version": "msa_fusion_v1",
+    "msa_inprocess_hook_enable": False,
+    "msa_fake_decision_injector_enable": False,
+}
+
 PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "legacy": {},
     "ppo_only": _PPO_ONLY,
@@ -776,6 +811,7 @@ PROFILE_TABLES: dict[str, dict[str, Any]] = {
     "cser_dexpbt": _CSER_DEXPBT,
     "cser_dexpbt_conservative": _CSER_DEXPBT_CONSERVATIVE,
     "cser_dexpbt_conservative_gate_relax": _CSER_DEXPBT_CONSERVATIVE_GATE_RELAX,
+    "msa_aware_cser_dexpbt_conservative": _MSA_AWARE_CSER_DEXPBT_CONSERVATIVE,
 }
 
 # Map CLI flag strings (without --) to argparse dest names for explicit detection.
