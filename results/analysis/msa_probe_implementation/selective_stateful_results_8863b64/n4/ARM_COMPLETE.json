@@ -1,0 +1,50 @@
+{
+  "reason": "all six workers reached their worker-local +480000000 continuation target",
+  "workers": [
+    {
+      "worker_id": 0,
+      "baseline_frame": 5000000000,
+      "target_frame": 5480000000,
+      "observed_frame": 5480000000,
+      "parked_at": 1784586578.6605103
+    },
+    {
+      "worker_id": 1,
+      "baseline_frame": 5000000000,
+      "target_frame": 5480000000,
+      "observed_frame": 5480000000,
+      "parked_at": 1784587600.401971
+    },
+    {
+      "worker_id": 2,
+      "baseline_frame": 5080000000,
+      "target_frame": 5560000000,
+      "observed_frame": 5560000000,
+      "parked_at": 1784587601.9440944
+    },
+    {
+      "worker_id": 3,
+      "baseline_frame": 5000000000,
+      "target_frame": 5480000000,
+      "observed_frame": 5480000000,
+      "parked_at": 1784586138.0678809
+    },
+    {
+      "worker_id": 4,
+      "baseline_frame": 5000000000,
+      "target_frame": 5480000000,
+      "observed_frame": 5480000000,
+      "parked_at": 1784587519.8352804
+    },
+    {
+      "worker_id": 5,
+      "baseline_frame": 5000000000,
+      "target_frame": 5480000000,
+      "observed_frame": 5480000000,
+      "parked_at": 1784587199.2568986
+    }
+  ],
+  "cap_frames": 480000000,
+  "committed_tick_frames": 80000000,
+  "time": 1784587622.5014143
+}

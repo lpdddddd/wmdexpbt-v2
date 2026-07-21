@@ -1,0 +1,96 @@
+{
+  "workers": [
+    {
+      "worker_id": 0,
+      "validated_frame": 5080000000,
+      "validated_tolerance": 0.023112487509668322,
+      "source_tolerance": 0.023112487509668322,
+      "lineage_id": "c91ec3ca-f19a-4016-86fb-4bd28d9eb2b5",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/000/000160.pth",
+        "sha256_head": "2211668e5c50e3064d2534bf9d4fc08dc7e960b7efacc109919fadbf035f8018",
+        "committed_prefix": "000251"
+      },
+      "stall_reproduced": true
+    },
+    {
+      "worker_id": 1,
+      "validated_frame": 5080000000,
+      "validated_tolerance": 0.020284112534534084,
+      "source_tolerance": 0.020284112534534084,
+      "lineage_id": "5931b868-2ff2-4b87-b2a0-b20027f6701f",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/001/000160.pth",
+        "sha256_head": "36e40cd97b0cded6d30c50f4faad037b4135df312267da24991b2f52495fbc6b",
+        "committed_prefix": "000251"
+      },
+      "stall_reproduced": true
+    },
+    {
+      "worker_id": 2,
+      "validated_frame": 5160000000,
+      "validated_tolerance": 0.02548998759231097,
+      "source_tolerance": 0.02548998759231097,
+      "lineage_id": "cff1c0dd-4a23-4f1a-bf6a-70e69f131329",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/002/000161.pth",
+        "sha256_head": "2cfe93ea406f3d4cebcf1cd059fb3537ac8852a58a48236070e4488a33b7b4f6",
+        "committed_prefix": "000255"
+      },
+      "stall_reproduced": true
+    },
+    {
+      "worker_id": 3,
+      "validated_frame": 5080000000,
+      "validated_tolerance": 0.023658390476202464,
+      "source_tolerance": 0.023658390476202464,
+      "lineage_id": "c88240b9-db78-49ab-ac0b-a27fd9ece951",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/003/000160.pth",
+        "sha256_head": "aa6f2284ee5a373814d53c55e58a9e34ef0ca8b9e68245eeb92cefd748ef6fd0",
+        "committed_prefix": "000251"
+      },
+      "stall_reproduced": true
+    },
+    {
+      "worker_id": 4,
+      "validated_frame": 5080000000,
+      "validated_tolerance": 0.019269906907807378,
+      "source_tolerance": 0.019269906907807378,
+      "lineage_id": "03ff385c-49de-43fd-80cc-8814bb7d06d7",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/004/000160.pth",
+        "sha256_head": "c75cdfe6c6dc5f4afd152102f3b5750b4aa5f967bdc58dea6d285623ac24d975",
+        "committed_prefix": "000251"
+      },
+      "stall_reproduced": true
+    },
+    {
+      "worker_id": 5,
+      "validated_frame": 5080000000,
+      "validated_tolerance": 0.02130811615915868,
+      "source_tolerance": 0.02130811615915868,
+      "lineage_id": "14838080-94c0-4f8d-b9e9-7565cf0993b1",
+      "checkpoint_identity": {
+        "resume_checkpoint": "/root/autodl-tmp/wmdexpbt/results/runs/regrasping_cser_dexpbt_conservative_retention_strict_5b_20260716_130631/dexpbt_8gpu_ws/005/000160.pth",
+        "sha256_head": "86a1826102dc4b580bb959a2b5efe37d44f20e828f47f042074779194777ecc2",
+        "committed_prefix": "000251"
+      },
+      "stall_reproduced": true
+    }
+  ],
+  "timestamp": 1784591014.3052895,
+  "num_workers": 6,
+  "stall_reproduction": {
+    "passed": true,
+    "min_reproduced": 4,
+    "reproduced_workers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "intervention_id": "msa_1784591014_9ddc9843",
+  "due_workers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "tau_by_worker": {
+    "0": 0.0231124875097,
+    "1": 0.0202841125345,
+    "2": 0.0254899875923,
+    "3": 0.0236583904762,
+    "4": 0.0192699069078,
+    "5": 0.0213081161592
+  },
+  "tau_plus_by_worker": {
+    "0": 0.0219568631342,
+    "1": 0.0192699069078,
+    "2": 0.0242154882127,
+    "3": 0.0224754709524,
+    "4": 0.0183064115624,
+    "5": 0.0202427103512
+  },
+  "l_mid_by_worker": {
+    "0": -0.04398681640625013,
+    "1": 0.0589233398437502,
+    "2": 0.016159667968749902,
+    "3": 0.34806396484375,
+    "4": 0.0025854492187500355,
+    "5": -0.5156176757812501
+  },
+  "panel_stat": {
+    "statistic": "panel_median_L_mid",
+    "lower_quantile": 0.0035168457031249795,
+    "quantile": 0.05,
+    "n_boot": 10000,
+    "prng_seed": 20260719,
+    "n_workers": 6,
+    "note": "criterion-local conditional panel statistic: each worker's L_mid is measured at its OWN tau_plus; the panel median conditions on this checkpoint panel and is NOT a population CI over independent seeds"
+  },
+  "retention_by_worker": {
+    "0": {
+      "tau": 0.0231124875097,
+      "p_pre": 0.73922119140625,
+      "p_post": 0.5629150390625,
+      "rho": 0.7614974321713427,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "1": {
+      "tau": 0.0202841125345,
+      "p_pre": 0.8095629882812502,
+      "p_post": 0.84128173828125,
+      "rho": 1.0391800890840386,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "2": {
+      "tau": 0.0254899875923,
+      "p_pre": 0.8055517578125,
+      "p_post": 0.85682861328125,
+      "rho": 1.0636543275729344,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "3": {
+      "tau": 0.0236583904762,
+      "p_pre": 0.5276293945312499,
+      "p_post": 0.8375317382812502,
+      "rho": 1.58734851955191,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "4": {
+      "tau": 0.0192699069078,
+      "p_pre": 0.7434765624999999,
+      "p_post": 0.77370361328125,
+      "rho": 1.040656360006305,
+      "retention_unavailable": false,
+      "reason": ""
+    },
+    "5": {
+      "tau": 0.0213081161592,
+      "p_pre": 0.6956982421874999,
+      "p_post": 0.37261474609374995,
+      "rho": 0.5355982285108682,
+      "retention_unavailable": false,
+      "reason": ""
+    }
+  },
+  "promoted": true,
+  "first_blocking_gate": "none",
+  "resumed": false,
+  "promotion_mode": "worker_local_selective",
+  "selected_for_promotion": [
+    3,
+    1,
+    2
+  ],
+  "anchor_workers": [
+    0,
+    4,
+    5
+  ],
+  "eligible_by_worker": {
+    "0": false,
+    "1": true,
+    "2": true,
+    "3": true,
+    "4": false,
+    "5": false
+  },
+  "rejection_reason_by_worker": {
+    "0": "L_mid_lower_quantile<=0",
+    "1": "",
+    "2": "",
+    "3": "",
+    "4": "L_mid_lower_quantile<=0",
+    "5": "L_mid_lower_quantile<=0"
+  },
+  "budget_admission": {
+    "intervention_id": "msa_1784591014_9ddc9843",
+    "packet_frames": 80000000,
+    "committed_tick_frames": 80000000,
+    "required_reserve": 400000000,
+    "cap_target_by_worker": {
+      "0": 5480000000,
+      "1": 5480000000,
+      "2": 5560000000,
+      "3": 5480000000,
+      "4": 5480000000,
+      "5": 5480000000
+    },
+    "remaining_at_admission": {
+      "0": 400000000,
+      "1": 400000000,
+      "2": 400000000,
+      "3": 400000000,
+      "4": 400000000,
+      "5": 400000000
+    },
+    "reserved_frames_by_worker": {
+      "0": 400000000,
+      "1": 400000000,
+      "2": 400000000,
+      "3": 400000000,
+      "4": 400000000,
+      "5": 400000000
+    },
+    "reserved_ceiling_by_worker": {
+      "0": 5480000000,
+      "1": 5480000000,
+      "2": 5560000000,
+      "3": 5480000000,
+      "4": 5480000000,
+      "5": 5480000000
+    },
+    "budget_eligible_workers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "budget_ineligible_workers": [],
+    "timestamp": 1784591014.7753253,
+    "dose_formula": "common=(packet+tick) + second=(packet+tick) + commit=tick; tick quantization reserved as one committed tick per train_until segment"
+  },
+  "final_tol_by_worker": {
+    "0": 0.0231124875097,
+    "1": 0.0192699069078,
+    "2": 0.0242154882127,
+    "3": 0.0224754709524,
+    "4": 0.0192699069078,
+    "5": 0.0213081161592
+  },
+  "final_committed_frame_by_worker": {
+    "0": 5240000000,
+    "1": 5240000000,
+    "2": 5320000000,
+    "3": 5240000000,
+    "4": 5240000000,
+    "5": 5240000000
+  },
+  "observed_cycle_dose_by_worker": {
+    "0": 160000000,
+    "1": 160000000,
+    "2": 160000000,
+    "3": 160000000,
+    "4": 160000000,
+    "5": 160000000
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "intervention_id": "msa_1784587612_5c4e745f",
+  "reason": "all_budget_ineligible",
+  "budget_admission": {
+    "intervention_id": "msa_1784587612_5c4e745f",
+    "packet_frames": 80000000,
+    "committed_tick_frames": 80000000,
+    "required_reserve": 400000000,
+    "cap_target_by_worker": {
+      "0": 5480000000,
+      "1": 5480000000,
+      "2": 5560000000,
+      "3": 5480000000,
+      "4": 5480000000,
+      "5": 5480000000
+    },
+    "remaining_at_admission": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0
+    },
+    "reserved_frames_by_worker": {
+      "0": 400000000,
+      "1": 400000000,
+      "2": 400000000,
+      "3": 400000000,
+      "4": 400000000,
+      "5": 400000000
+    },
+    "reserved_ceiling_by_worker": {
+      "0": 5880000000,
+      "1": 5880000000,
+      "2": 5960000000,
+      "3": 5880000000,
+      "4": 5880000000,
+      "5": 5880000000
+    },
+    "budget_eligible_workers": [],
+    "budget_ineligible_workers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "timestamp": 1784587612.7998183,
+    "dose_formula": "common=(packet+tick) + second=(packet+tick) + commit=tick; tick quantization reserved as one committed tick per train_until segment"
+  },
+  "timestamp": 1784587612.8037221
+}

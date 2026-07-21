@@ -1,0 +1,108 @@
+{
+  "code_commit_under_test": "8863b64901faa2673a36eea1252cd9ba3f4f41d1",
+  "note": "Archived small terminal JSON from gitignored results/runs/ (no checkpoints, no eval_raw, no logs).",
+  "n4_run_dir": "results/runs/base_retention_msa_probe_msa_selective_stateful_20260721_002716",
+  "n16_run_dir": "results/runs/base_retention_msa_probe_msa_selective_stateful_20260721_064933",
+  "files": [
+    {
+      "path": "n16/ARM_COMPLETE.json",
+      "bytes": 1277,
+      "sha256_16": "9ce367b97890021f"
+    },
+    {
+      "path": "n16/ARM_CONFIG.json",
+      "bytes": 7407,
+      "sha256_16": "435fec1e583bc138"
+    },
+    {
+      "path": "n16/EVAL_DEVICES.json",
+      "bytes": 300,
+      "sha256_16": "6a8f6b461f592e0f"
+    },
+    {
+      "path": "n16/FIRST_TICK_VALIDATED.json",
+      "bytes": 3853,
+      "sha256_16": "5124162e07cf25ba"
+    },
+    {
+      "path": "n16/MSA_NO_NEW_CYCLE.json",
+      "bytes": 1276,
+      "sha256_16": "53bb316f2c296184"
+    },
+    {
+      "path": "n16/RUN_DIR.txt",
+      "bytes": 103,
+      "sha256_16": "b753347fb87906e1"
+    },
+    {
+      "path": "n16/SOURCE_RUN_DIR.txt",
+      "bytes": 77,
+      "sha256_16": "fa909f8b9b408fb2"
+    },
+    {
+      "path": "n16/STATE_FIDELITY.json",
+      "bytes": 36182,
+      "sha256_16": "077cb5419b67332a"
+    },
+    {
+      "path": "n16/STATE_FINGERPRINT.json",
+      "bytes": 18678,
+      "sha256_16": "630621bbbeb4ecb4"
+    },
+    {
+      "path": "n16/msa_cycles/msa_1784591014_9ddc9843.json",
+      "bytes": 4618,
+      "sha256_16": "8e38a1e80a860dea"
+    },
+    {
+      "path": "n4/ARM_COMPLETE.json",
+      "bytes": 1277,
+      "sha256_16": "5bdeba9b39ef6d11"
+    },
+    {
+      "path": "n4/ARM_CONFIG.json",
+      "bytes": 7407,
+      "sha256_16": "435fec1e583bc138"
+    },
+    {
+      "path": "n4/EVAL_DEVICES.json",
+      "bytes": 300,
+      "sha256_16": "6a8f6b461f592e0f"
+    },
+    {
+      "path": "n4/FIRST_TICK_VALIDATED.json",
+      "bytes": 3853,
+      "sha256_16": "fcb12bbbc6d5d811"
+    },
+    {
+      "path": "n4/MSA_NO_NEW_CYCLE.json",
+      "bytes": 1276,
+      "sha256_16": "0db9c5e692244b33"
+    },
+    {
+      "path": "n4/RUN_DIR.txt",
+      "bytes": 103,
+      "sha256_16": "ddac795951407473"
+    },
+    {
+      "path": "n4/SOURCE_RUN_DIR.txt",
+      "bytes": 77,
+      "sha256_16": "2df550af0235892d"
+    },
+    {
+      "path": "n4/STATE_FIDELITY.json",
+      "bytes": 36182,
+      "sha256_16": "24af74aaaccc1569"
+    },
+    {
+      "path": "n4/STATE_FINGERPRINT.json",
+      "bytes": 18678,
+      "sha256_16": "5f0c77aa940d97dd"
+    },
+    {
+      "path": "n4/msa_cycles/msa_1784568017_a355115e.json",
+      "bytes": 4609,
+      "sha256_16": "8ec352cf65fc0aca"
+    }
+  ]
+}
