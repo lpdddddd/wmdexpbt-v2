@@ -1,0 +1,52 @@
+{
+  "ok": true,
+  "eval_coexistence_ok": true,
+  "task": "DexPBT-Regrasping-KukaAllegro-Direct-v0",
+  "wm_profile": "cser_dexpbt_conservative",
+  "hold_seconds": 60.0,
+  "worker_id": 0,
+  "eval_device": "cuda:4",
+  "eval_num_envs": 512,
+  "eval_timeout_s": 1800.0,
+  "eval_exit_code": 0,
+  "eval_error": "",
+  "eval_duration_s": 144.62,
+  "eval_timed_out": false,
+  "eval_log_path": "/root/autodl-tmp/wmdexpbt/results/runs/msa_hold_smoke_disposable_20260720_230351/cert_eval.log",
+  "eval_error_tail": "",
+  "eval_survivor_pids": [],
+  "gpu_memory_before_hold": 14771,
+  "gpu_memory_while_trainer_frozen": 14771,
+  "gpu_memory_during_eval": 17950,
+  "disposable_run_dir": "/root/autodl-tmp/wmdexpbt/results/runs/msa_hold_smoke_disposable_20260720_230351",
+  "timestamp": 1784559831.5788894,
+  "git_commit": "8863b64901faa2673a36eea1252cd9ba3f4f41d1",
+  "gpu": {
+    "index": "4",
+    "name": "NVIDIA GeForce RTX 5090",
+    "uuid": "GPU-38774a66-014c-f2b3-1c19-2b01b4710988",
+    "driver_version": "595.71.05",
+    "cuda_version": ""
+  },
+  "frame_before_hold": 5080000000,
+  "worker_tree": [
+    {
+      "pid": 375075,
+      "comm": "bash"
+    },
+    {
+      "pid": 375096,
+      "comm": "python"
+    },
+    {
+      "pid": 375097,
+      "comm": "bash"
+    },
+    {
+      "pid": 375098,
+      "comm": "tee"
+    }
+  ],
+  "frame_after_hold_window": 5080000000,
+  "next_committed_frame": 5160000000
+}
