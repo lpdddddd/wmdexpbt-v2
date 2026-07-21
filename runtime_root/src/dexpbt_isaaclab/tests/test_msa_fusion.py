@@ -302,6 +302,7 @@ class TestCurriculumProposalOnly(unittest.TestCase):
 
 class TestFakeInjectorGuard(unittest.TestCase):
     def test_env_guard(self):
+        os.environ.pop(ENV_GUARD, None)
         self.assertFalse(injector_allowed(True))
         os.environ[ENV_GUARD] = "1"
         try:

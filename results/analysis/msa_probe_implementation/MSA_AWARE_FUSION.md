@@ -54,19 +54,16 @@ Failure → restore anchor tolerance, `HOLD` + cooldown, fail-closed on errors.
 9. PBT restart → `recipient_after_pbt_copy` (evidence reset; no donor MSA pass inherit)
 
 Standalone MSA sidecar remains the production paired-eval + durable commit driver
-for pilot arms; fusion reuses its metrics/decision artifacts without a second evaluator.
+for pilot arms. Fusion reuses its cycle summary via `fusion_adapter.py`, which
+fans out **per-worker commands** under `msa_fusion_protocol/` (exactly-once claim;
+no shared `MSA_FUSION_DECISION.json` delete race). Trainers claim only their own
+command, apply ADVANCE/ROLLBACK with transactional probe anchors, and ack.
+Cycle complete requires all target acks.
 
-## PBT inheritance
-
-Centralized in `msa/pbt_eligibility.py`:
-
-- Donor: not PROBE; committed anchor; same/adjacent stage; min anchor workers
-- Recipient: clear evidence/cycle/CIs; keep worker_id; re-enter BUILD for revalidation
-
-## Checkpoint migration
-
-Missing MSA state → `BUILD`, register current ckpt as anchor, **no fake pass evidence**.
-Atomic JSON via temp + `os.replace`.
+Fake injector remains test-only (`MSA_FUSION_ALLOW_FAKE_DECISION=1`). Disposable
+integrated smoke may use `--fusion-fixture-once` + `MSA_FUSION_ALLOW_EVAL_FIXTURE=1`
+to feed episode-level evidence into the **real** `decide_selective_promotion`
+path; formal profiles cannot enable the fixture.
 
 ## Launch
 
@@ -77,6 +74,7 @@ source /root/autodl-tmp/wmdexpbt/runtime_root/scripts/env_dexpbt.sh
 # Use launch_8gpu_dexpbt.sh with:
 #   --profile-per-policy msa_aware_cser_dexpbt_conservative
 # and tip recover args as in results/launchers/msa_probe/
+# Plus continuation_guard + hold_watchdog + msa.sidecar (see stateful launchers).
 ```
 
 Old control (A):
@@ -90,15 +88,18 @@ Old control (A):
 ```bash
 PY=/root/autodl-tmp/wmdexpbt/runtime_root/envs/isaaclab311/bin/python
 cd /root/autodl-tmp/wmdexpbt/runtime_root/src/dexpbt_isaaclab
-$PY -m pytest tests/test_msa_fusion.py tests/test_msa_probe.py \
-  tests/test_msa_selective_budget.py tests/test_msa_state_bootstrap.py -q
+$PY -m pytest tests/test_msa_fusion.py tests/test_msa_fusion_production.py \
+  tests/test_msa_probe.py tests/test_msa_selective_budget.py \
+  tests/test_msa_state_bootstrap.py -q
 
-# Control-flow smoke (no GPU)
+# Control-flow smoke (no GPU; fake injector)
 MSA_FUSION_ALLOW_FAKE_DECISION=1 $PY -m dexpbt_isaaclab.msa.fusion_smoke --mode control
 
-# Disposable 6-GPU smoke (tears down; synthetic decisions)
-bash /root/autodl-tmp/wmdexpbt/results/launchers/msa_probe/run_msa_fusion_smoke.sh gpu --i-know-what-i-am-doing
+# Disposable 6-GPU integrated smoke (production sidecar fixture path)
+bash /root/autodl-tmp/wmdexpbt/results/launchers/msa_probe/run_msa_fusion_integrated_smoke.sh --i-know-what-i-am-doing
 ```
+
+See also: `FUSION_PRODUCTION_CLOSURE.md`.
 
 ## A/B/C experiments (future)
 

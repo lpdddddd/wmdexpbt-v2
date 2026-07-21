@@ -1387,11 +1387,122 @@ def main(argv: list[str] | None = None) -> int:
                          "no cycle, no eval")
     ap.add_argument("--hold-smoke-worker", type=int, default=0)
     ap.add_argument("--hold-smoke-seconds", type=float, default=60.0)
+    ap.add_argument(
+        "--fusion-ack-max-wait-s", type=float, default=600.0,
+        help="Max seconds to wait for fusion per-worker acks after a cycle.",
+    )
+    ap.add_argument(
+        "--fusion-fixture-once", action="store_true",
+        help="TEST ONLY: after readiness + MSA_BUSY, drive one fusion cycle "
+             "via eval fixture → real decide_selective_promotion → adapter. "
+             "Requires MSA_FUSION_ALLOW_EVAL_FIXTURE=1. Formal arms must not "
+             "use this flag.",
+    )
     args = ap.parse_args(argv)
 
     workspace = Path(args.workspace)
     run_dir = workspace.parent
     readiness_marker = Path(args.readiness_marker)
+
+    if args.fusion_fixture_once:
+        # Disposable integrated smoke path — never for formal arms.
+        from dexpbt_isaaclab.msa.eval_fixture import (
+            ENV_FIXTURE,
+            fixture_allowed,
+            publish_fixture_cycle,
+        )
+        from dexpbt_isaaclab.msa.fusion_adapter import try_complete_cycle
+        from dexpbt_isaaclab.msa.fusion_events import emit_event
+        from dexpbt_isaaclab.msa.fusion_transaction import load_transaction_record
+
+        if not fixture_allowed(True):
+            print(f"[msa-sidecar] fusion-fixture-once blocked: set "
+                  f"{ENV_FIXTURE}=1", flush=True)
+            return 2
+        emit_event(run_dir, "MSA_SIDECAR_STARTED", {
+            "mode": "fusion_fixture_once", "pid": os.getpid(),
+        })
+        print("[msa-sidecar] fusion-fixture-once: waiting for readiness",
+              flush=True)
+        deadline = time.monotonic() + 3600.0
+        while time.monotonic() < deadline:
+            if readiness_marker.is_file():
+                break
+            time.sleep(POLL_S)
+        else:
+            print("[msa-sidecar] readiness timeout", flush=True)
+            return 2
+        # Wait for MSA_BUSY written by orchestrator / controller.
+        busy_p = run_dir / BUSY_FILE
+        print("[msa-sidecar] waiting for MSA_BUSY", flush=True)
+        cycle_id = ""
+        due: list[int] = []
+        while time.monotonic() < deadline:
+            if busy_p.is_file():
+                try:
+                    busy = json.loads(busy_p.read_text())
+                except (OSError, json.JSONDecodeError):
+                    busy = {}
+                cycle_id = str(busy.get("intervention_id") or "")
+                due = [int(x) for x in (busy.get("due_workers") or [])]
+                if cycle_id and due:
+                    break
+            time.sleep(POLL_S)
+        else:
+            print("[msa-sidecar] MSA_BUSY timeout", flush=True)
+            return 2
+        emit_event(run_dir, "MSA_CYCLE_TRIGGERED", {
+            "cycle_id": cycle_id, "due_workers": due,
+            "source": "sidecar_fusion_fixture",
+        })
+        # Wait for probe anchors (trainers enter PROBE + save).
+        print(f"[msa-sidecar] waiting for probe anchors cycle={cycle_id} "
+              f"due={due}", flush=True)
+        while time.monotonic() < deadline:
+            ready = True
+            for w in due:
+                if load_transaction_record(run_dir, w, cycle_id) is None:
+                    ready = False
+                    break
+            if ready:
+                break
+            time.sleep(POLL_S)
+        else:
+            print("[msa-sidecar] probe anchor timeout", flush=True)
+            emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                "reason": "fixture_probe_anchor_timeout",
+                "cycle_id": cycle_id,
+            })
+            return 2
+        advance = [due[0]] if due else []
+        hold = [w for w in due if w not in advance]
+        if len(due) >= 2:
+            advance, hold = [due[0]], [due[1]]
+        pub = publish_fixture_cycle(
+            run_dir,
+            cycle_id=cycle_id,
+            advance_workers=advance,
+            hold_workers=hold,
+            cfg_flag=True,
+        )
+        print(f"[msa-sidecar] fixture published claimed={pub.get('claimed')}",
+              flush=True)
+        ack_deadline = time.monotonic() + float(args.fusion_ack_max_wait_s)
+        while time.monotonic() < ack_deadline:
+            if try_complete_cycle(run_dir, cycle_id, due):
+                print("[msa-sidecar] fusion fixture cycle complete", flush=True)
+                try:
+                    busy_p.unlink()
+                except FileNotFoundError:
+                    pass
+                return 0
+            time.sleep(POLL_S)
+        emit_event(run_dir, "MSA_FAIL_CLOSED", {
+            "reason": "fusion_fixture_ack_timeout",
+            "cycle_id": cycle_id,
+            "due_workers": due,
+        })
+        return 2
 
     if args.certificate_smoke:
         if not str(args.cert_out).strip():
@@ -1510,6 +1621,73 @@ def main(argv: list[str] | None = None) -> int:
                 payload[field_name] = value
         (out / f"{result.intervention_id}.json").write_text(
             json.dumps(payload, indent=2, default=str))
+        # Production fusion bridge: fan out per-worker commands for trainers.
+        # Never depends on fake_decision injector.
+        try:
+            from dexpbt_isaaclab.msa.fusion_adapter import (
+                sidecar_summary_to_commands,
+            )
+            summary_path = out / f"{result.intervention_id}.json"
+            # Enrich with anchor paths if trainers published them.
+            anchor_by_w: dict[int, str] = {}
+            fp_by_w: dict[int, str] = {}
+            for w in payload.get("due_workers") or []:
+                wid = int(w)
+                tip = (
+                    run_dir / "msa_probe_anchors" / f"{wid:03d}"
+                    / str(result.intervention_id) / "transaction.json"
+                )
+                if tip.is_file():
+                    try:
+                        rec = json.loads(tip.read_text())
+                        anchor_by_w[wid] = str(rec.get("anchor_pth", ""))
+                        fp_by_w[wid] = str(rec.get("fingerprint", ""))
+                    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                        pass
+            sidecar_summary_to_commands(
+                payload,
+                run_dir=run_dir,
+                source_path=str(summary_path),
+                anchor_checkpoint_by_worker=anchor_by_w,
+                fingerprint_by_worker=fp_by_w,
+            )
+            # Wait for trainer acks (production command/ack protocol).
+            from dexpbt_isaaclab.msa.fusion_adapter import try_complete_cycle
+            due_ids = [int(w) for w in (payload.get("due_workers") or [])]
+            ack_max = 600.0
+            try:
+                ack_max = float(getattr(args, "fusion_ack_max_wait_s", 600.0))
+            except Exception:
+                ack_max = 600.0
+            ack_deadline = time.monotonic() + ack_max
+            while due_ids and time.monotonic() < ack_deadline:
+                if try_complete_cycle(
+                    run_dir, str(result.intervention_id), due_ids,
+                ):
+                    print(f"[msa-sidecar] fusion acks complete for "
+                          f"{result.intervention_id}", flush=True)
+                    break
+                time.sleep(POLL_S)
+            else:
+                if due_ids:
+                    print(f"[msa-sidecar] fusion ack wait timed out for "
+                          f"{result.intervention_id}; marking fail-closed",
+                          flush=True)
+                    from dexpbt_isaaclab.msa.fusion_events import emit_event
+                    emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                        "reason": "fusion_ack_timeout",
+                        "cycle_id": result.intervention_id,
+                        "due_workers": due_ids,
+                    })
+        except Exception as exc:  # noqa: BLE001
+            print(f"[msa-sidecar] fusion adapter failed (fail-closed warn): "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            from dexpbt_isaaclab.msa.fusion_events import emit_event
+            emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                "reason": "fusion_adapter_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "cycle_id": result.intervention_id,
+            })
 
     def _stop_arm_commit_timeout(err: CommitTimeout) -> None:
         # promotion is NEVER claimed here; the marker records every

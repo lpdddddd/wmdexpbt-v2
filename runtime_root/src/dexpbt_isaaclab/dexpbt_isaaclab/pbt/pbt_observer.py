@@ -3148,20 +3148,114 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             )
         # MSA fusion: PROBE / open-transaction policies cannot be donors.
         if self.msa_integrated_enabled:
-            try:
-                from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
-                from dexpbt_isaaclab.msa.pbt_eligibility import can_be_exploit_source
-                from dexpbt_isaaclab.msa.worker_state import load_worker_state
-
-                wid = int(state.get("policy_idx", self.policy_idx))
-                st = load_worker_state(
-                    worker_state_path(self.workspace.parent, wid)
-                )
-                if st is not None and not can_be_exploit_source(st):
-                    return False, "msa_probe_or_transaction"
-            except Exception:
-                pass
+            ok_msa, reason_msa = self._msa_donor_gate(state)
+            if not ok_msa:
+                return False, reason_msa
         return True, "ok"
+
+    def _msa_donor_gate(
+        self, state: dict[str, Any] | None,
+    ) -> tuple[bool, str]:
+        """Authoritative MSA donor eligibility for real PBT source selection."""
+        if not self.msa_integrated_enabled:
+            return True, "msa_off"
+        if state is None:
+            return False, "msa_no_state"
+        try:
+            from dexpbt_isaaclab.msa.fusion_config import fusion_config_from_mapping
+            from dexpbt_isaaclab.msa.fusion_events import emit_event
+            from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
+            from dexpbt_isaaclab.msa.pbt_eligibility import (
+                can_be_exploit_source,
+                donor_eligible,
+            )
+            from dexpbt_isaaclab.msa.worker_state import (
+                WorkerMSAState,
+                load_worker_state,
+            )
+
+            wid = int(state.get("policy_idx", self.policy_idx))
+            run_dir = self.workspace.parent
+            donor = load_worker_state(worker_state_path(run_dir, wid))
+            if donor is None:
+                if getattr(self, "msa_fail_closed", True):
+                    emit_event(run_dir, "MSA_PBT_REJECTED", {
+                        "worker_id": wid, "reason": "donor_state_missing",
+                    })
+                    return False, "msa_donor_state_missing"
+                return True, "msa_state_missing_open"
+            if not can_be_exploit_source(donor):
+                emit_event(run_dir, "MSA_PBT_REJECTED", {
+                    "worker_id": wid, "reason": "donor_in_probe",
+                })
+                return False, "msa_probe_or_transaction"
+            # Population snapshot for min-anchor / stage checks.
+            pop: list[WorkerMSAState] = []
+            for i in range(self.num_policies):
+                peer = load_worker_state(worker_state_path(run_dir, i))
+                if peer is not None:
+                    pop.append(peer)
+            raw = {"msa_integrated_enabled": True}
+            for k in (
+                "msa_build_threshold_cm", "msa_strict_threshold_cm",
+                "msa_target_floor_cm", "msa_min_anchor_workers",
+            ):
+                if hasattr(self, k):
+                    raw[k] = getattr(self, k)
+            cfg = fusion_config_from_mapping(raw)
+            recip = load_worker_state(
+                worker_state_path(run_dir, self.policy_idx)
+            )
+            recip_stage = (
+                (recip.committed_stage if recip else None)
+                or cfg.stage_for_tolerance(
+                    float(recip.current_tolerance) if recip else 0.02
+                )
+            )
+            decision = donor_eligible(
+                donor,
+                recipient_stage=str(recip_stage),
+                population=pop or [donor],
+                cfg=cfg,
+            )
+            if not decision.eligible:
+                emit_event(run_dir, "MSA_PBT_REJECTED", {
+                    "worker_id": wid, "reason": decision.reason,
+                })
+                return False, f"msa_{decision.reason}"
+            return True, "ok"
+        except Exception as exc:  # noqa: BLE001
+            if getattr(self, "msa_fail_closed", True):
+                return False, f"msa_donor_gate_error:{type(exc).__name__}"
+            return True, "msa_donor_gate_error_open"
+
+    def _msa_recipient_gate(self) -> tuple[bool, str]:
+        """PROBE workers cannot be exploit targets."""
+        if not self.msa_integrated_enabled:
+            return True, "msa_off"
+        try:
+            from dexpbt_isaaclab.msa.fusion_events import emit_event
+            from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
+            from dexpbt_isaaclab.msa.pbt_eligibility import can_be_exploit_target
+            from dexpbt_isaaclab.msa.worker_state import load_worker_state
+
+            run_dir = self.workspace.parent
+            st = load_worker_state(worker_state_path(run_dir, self.policy_idx))
+            if st is None:
+                if getattr(self, "msa_fail_closed", True):
+                    return False, "msa_recipient_state_missing"
+                return True, "msa_recipient_missing_open"
+            if not can_be_exploit_target(st):
+                emit_event(run_dir, "MSA_PBT_REJECTED", {
+                    "worker_id": self.policy_idx,
+                    "reason": "recipient_in_probe",
+                })
+                return False, "msa_recipient_in_probe"
+            return True, "ok"
+        except Exception as exc:  # noqa: BLE001
+            if getattr(self, "msa_fail_closed", True):
+                return False, f"msa_recipient_gate_error:{type(exc).__name__}"
+            return True, "msa_recipient_gate_error_open"
 
     def _is_eligible_as_source(
         self, state: dict[str, Any] | None, env_frames: int
@@ -3198,6 +3292,10 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         nx = self._state_nsucc_max(state)
         if nx < self.relaxed_nsucc_max_as_source:
             return False, f"relaxed_nsucc_max<{self.relaxed_nsucc_max_as_source}"
+        if self.msa_integrated_enabled:
+            ok_msa, reason_msa = self._msa_donor_gate(state)
+            if not ok_msa:
+                return False, reason_msa
         return True, "ok"
 
     def _eligible_as_stable_source_with_reason(
@@ -5767,12 +5865,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         return False
 
     def _msa_fusion_after_steps(self, env_frames: int) -> None:
-        """Consume fusion decisions, update TB, mirror state into control."""
+        """Production fusion tick: PROBE anchors, per-worker commands, TB."""
         hook = getattr(self, "_msa_fusion_hook", None)
         if hook is None or not self.msa_integrated_enabled:
             return
-        from dexpbt_isaaclab.msa.fusion_hook import worker_state_path
-        from dexpbt_isaaclab.msa.worker_state import load_worker_state
+        from dexpbt_isaaclab.msa.fusion_events import emit_event
+        from dexpbt_isaaclab.msa.fusion_hook import is_msa_busy, read_busy, worker_state_path
+        from dexpbt_isaaclab.msa.fusion_protocol import list_pending_commands
+        from dexpbt_isaaclab.msa.worker_state import (
+            MODE_PROBE,
+            load_worker_state,
+        )
 
         run_dir = hook.run_dir
         path = worker_state_path(run_dir, self.policy_idx)
@@ -5784,21 +5887,57 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
                 anchor_checkpoint=str(self.curr_policy_workspace),
             )
         st = hook.tick_hold_exit(st, int(env_frames))
-        doc = hook.consume_sidecar_decision_file()
-        if doc is not None:
-            states = {self.policy_idx: st}
-            for wid in range(self.num_policies):
-                if wid == self.policy_idx:
-                    continue
-                peer = load_worker_state(worker_state_path(run_dir, wid))
-                if peer is not None:
-                    states[wid] = peer
-            states = hook.apply_sidecar_decision_doc(
-                doc,
-                states,
-                frame_by_worker={self.policy_idx: int(env_frames)},
+
+        # When MSA is busy, ensure this due worker has a verified probe anchor
+        # and is in PROBE mode before paired-eval / probe packet advances.
+        busy = read_busy(run_dir)
+        if busy is not None:
+            due = [int(x) for x in (busy.get("due_workers") or [])]
+            cycle_id = str(busy.get("intervention_id") or "")
+            already_acked = False
+            if cycle_id:
+                try:
+                    from dexpbt_isaaclab.msa.fusion_protocol import read_ack
+                    already_acked = read_ack(run_dir, self.policy_idx, cycle_id) is not None
+                except Exception:
+                    already_acked = False
+            if (
+                cycle_id
+                and int(self.policy_idx) in due
+                and st.mode != MODE_PROBE
+                and not already_acked
+            ):
+                st = self._msa_enter_probe_with_anchor(
+                    st, cycle_id=cycle_id, frame=int(env_frames),
+                )
+            elif cycle_id and st.mode == MODE_PROBE and st.cycle_id == cycle_id:
+                pass
+
+        # Legacy shared decision file (test-only / smoke): still supported
+        # but production uses per-worker commands.
+        if getattr(hook.cfg, "msa_fake_decision_injector_enable", False):
+            doc = hook.consume_sidecar_decision_file()
+            if doc is not None:
+                states = {self.policy_idx: st}
+                for wid in range(self.num_policies):
+                    if wid == self.policy_idx:
+                        continue
+                    peer = load_worker_state(worker_state_path(run_dir, wid))
+                    if peer is not None:
+                        states[wid] = peer
+                states = hook.apply_sidecar_decision_doc(
+                    doc,
+                    states,
+                    frame_by_worker={self.policy_idx: int(env_frames)},
+                )
+                st = states.get(self.policy_idx, st)
+
+        # Production: claim & apply own commands only.
+        for cycle_id in list_pending_commands(run_dir, self.policy_idx):
+            st = self._msa_apply_worker_command(
+                st, cycle_id=cycle_id, frame=int(env_frames),
             )
-            st = states.get(self.policy_idx, st)
+
         hook.save(st)
         try:
             ctrl_path = self._curriculum_control_dir / f"{self.policy_idx:03d}.json"
@@ -5814,6 +5953,362 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
         if self.writer is not None:
             for k, v in hook.tensorboard_scalars(st).items():
                 self.writer.add_scalar(k, float(v), int(env_frames))
+
+    def _msa_enter_probe_with_anchor(
+        self, st, *, cycle_id: str, frame: int,
+    ):
+        from dexpbt_isaaclab.msa.fusion_events import emit_event
+        from dexpbt_isaaclab.msa.fusion_transaction import (
+            load_transaction_record,
+            save_probe_anchor,
+        )
+        from dexpbt_isaaclab.msa.worker_state import MODE_PROBE
+
+        hook = self._msa_fusion_hook
+        run_dir = hook.run_dir
+        existing = load_transaction_record(run_dir, self.policy_idx, cycle_id)
+        if existing is None:
+            # Prefer live curriculum tolerance from latest meta.
+            tol = float(st.current_tolerance or st.anchor_tolerance or 0.02)
+            try:
+                own = self._save_workspace_checkpoint()
+                cur = (own or {}).get("curriculum") or {}
+                if cur.get("success_tolerance") is not None:
+                    tol = float(cur["success_tolerance"])
+            except Exception as exc:  # noqa: BLE001
+                emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                    "worker_id": self.policy_idx,
+                    "reason": "probe_anchor_save_precheck_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                if getattr(hook.cfg, "msa_fail_closed", True):
+                    raise
+            try:
+                rec = save_probe_anchor(
+                    run_dir,
+                    self.policy_idx,
+                    cycle_id,
+                    self.curr_policy_workspace,
+                    transaction_id=f"txn_{cycle_id}",
+                    tolerance=tol,
+                    frame=int(frame),
+                    config_hash=str(hook.cfg.config_hash()),
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                    "worker_id": self.policy_idx,
+                    "reason": "probe_anchor_save_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                raise
+            st.anchor_checkpoint = str(rec["anchor_pth"])
+            st.anchor_fingerprint = str(rec["fingerprint"])
+            st.anchor_tolerance = float(tol)
+            st.current_tolerance = float(tol)
+        else:
+            st.anchor_checkpoint = str(existing.get("anchor_pth", st.anchor_checkpoint))
+            st.anchor_fingerprint = str(existing.get("fingerprint", ""))
+            emit_event(run_dir, "MSA_TRANSACTION_RECOVERED", {
+                "worker_id": self.policy_idx, "cycle_id": cycle_id,
+            })
+        target = hook.cfg.probe_target(st.current_tolerance)
+        st = hook.start_probe(st, frame=frame, cycle_id=cycle_id)
+        st.pending_target_tolerance = float(target)
+        emit_event(run_dir, "MSA_PROBE_STARTED", {
+            "worker_id": self.policy_idx,
+            "cycle_id": cycle_id,
+            "mode": MODE_PROBE,
+            "tau": st.anchor_tolerance,
+            "tau_plus": st.pending_target_tolerance,
+            "frame": frame,
+        })
+        return st
+
+    def _msa_apply_worker_command(self, st, *, cycle_id: str, frame: int):
+        from dexpbt_isaaclab.msa.fusion_events import emit_event
+        from dexpbt_isaaclab.msa.fusion_protocol import (
+            WorkerAck,
+            claim_worker_command,
+            read_ack,
+            validate_command_for_worker,
+            write_worker_ack,
+        )
+        from dexpbt_isaaclab.msa.fusion_transaction import (
+            load_transaction_record,
+            restore_anchor_into_workspace,
+            save_committed_anchor,
+            verify_anchor_fingerprint,
+        )
+        from dexpbt_isaaclab.msa.worker_state import MODE_BUILD, MODE_HOLD, MODE_PROBE
+
+        hook = self._msa_fusion_hook
+        run_dir = hook.run_dir
+        # Already acked → exactly-once (idempotent).
+        prior = read_ack(run_dir, self.policy_idx, cycle_id)
+        if prior is not None:
+            return st
+        cmd = claim_worker_command(run_dir, self.policy_idx, cycle_id)
+        if cmd is None:
+            return st
+        emit_event(run_dir, "MSA_COMMAND_CLAIMED", {
+            "worker_id": self.policy_idx,
+            "cycle_id": cycle_id,
+            "action": cmd.action,
+        })
+        # Recovery: command re-delivered after ADVANCE/ROLLBACK already applied
+        # but before ack was durable — re-ack without re-mutating.
+        if (
+            cmd.action == "advance"
+            and st.mode == MODE_BUILD
+            and abs(float(st.current_tolerance) - float(cmd.target_tolerance)) < 1e-9
+            and int(st.advance_count) > 0
+        ):
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx, action_applied="advance",
+                ok=True, mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                fingerprint_after=st.anchor_fingerprint,
+                frame=int(frame), reason="idempotent_reack_advance",
+            ))
+            return st
+        if (
+            cmd.action in ("rollback", "hold")
+            and st.mode == MODE_HOLD
+            and int(st.rollback_count) > 0
+        ):
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx, action_applied="rollback",
+                ok=True, mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                fingerprint_after=st.anchor_fingerprint,
+                frame=int(frame), reason="idempotent_reack_rollback",
+            ))
+            return st
+        ok, why = validate_command_for_worker(
+            cmd,
+            worker_id=self.policy_idx,
+            current_mode=st.mode,
+            current_tolerance=float(st.current_tolerance),
+            cycle_id=str(st.cycle_id or ""),
+            transaction_id=f"txn_{st.cycle_id}" if st.cycle_id else "",
+        )
+        if not ok:
+            emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                "worker_id": self.policy_idx,
+                "cycle_id": cycle_id,
+                "reason": why,
+            })
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id,
+                transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx,
+                action_applied="reject",
+                ok=False,
+                mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                frame=int(frame),
+                reason=why,
+            ))
+            return st
+
+        if cmd.action == "advance":
+            if st.mode != MODE_PROBE:
+                write_worker_ack(run_dir, WorkerAck(
+                    cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                    worker_id=self.policy_idx, action_applied="reject",
+                    ok=False, mode_after=st.mode,
+                    tolerance_after=float(st.current_tolerance),
+                    frame=int(frame), reason="advance_requires_probe",
+                ))
+                return st
+            # Keep probe-trained weights; register new committed anchor.
+            try:
+                committed = save_committed_anchor(
+                    run_dir, self.policy_idx, cycle_id,
+                    self.curr_policy_workspace,
+                    tolerance=float(cmd.target_tolerance),
+                    frame=int(frame),
+                    config_hash=hook.cfg.config_hash(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                    "worker_id": self.policy_idx,
+                    "reason": "advance_anchor_save_failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                write_worker_ack(run_dir, WorkerAck(
+                    cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                    worker_id=self.policy_idx, action_applied="advance",
+                    ok=False, mode_after=st.mode,
+                    tolerance_after=float(st.current_tolerance),
+                    frame=int(frame), reason="advance_anchor_save_failed",
+                ))
+                return st
+            # Production sidecar already validated promote; commit directly.
+            from dexpbt_isaaclab.msa.worker_state import apply_advance
+            st = apply_advance(
+                st,
+                new_tol=float(cmd.target_tolerance),
+                frame=int(frame),
+                anchor_checkpoint=str(committed.get("anchor_pth", "")),
+                metrics=dict(cmd.metrics or {}),
+                reason=cmd.reason or "production_advance",
+                cfg=hook.cfg,
+            )
+            st.anchor_fingerprint = str(committed.get("fingerprint", ""))
+            st.anchor_checkpoint = str(committed.get("anchor_pth", ""))
+            emit_event(run_dir, "MSA_ADVANCE_COMMIT", {
+                "worker_id": self.policy_idx,
+                "cycle_id": cycle_id,
+                "new_tol": st.current_tolerance,
+                "fingerprint": st.anchor_fingerprint,
+            })
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx, action_applied="advance",
+                ok=True, mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                fingerprint_after=st.anchor_fingerprint,
+                frame=int(frame), reason=st.decision_reason,
+            ))
+            emit_event(run_dir, "MSA_WORKER_ACK", {
+                "worker_id": self.policy_idx, "cycle_id": cycle_id,
+                "action": "advance",
+            })
+            return st
+
+        # rollback / hold
+        emit_event(run_dir, "MSA_ROLLBACK_STARTED", {
+            "worker_id": self.policy_idx, "cycle_id": cycle_id,
+        })
+        rec = load_transaction_record(run_dir, self.policy_idx, cycle_id)
+        if rec is None and cmd.anchor_checkpoint:
+            rec = {
+                "anchor_pth": cmd.anchor_checkpoint,
+                "anchor_meta": str(Path(cmd.anchor_checkpoint).with_suffix(".json")),
+                "fingerprint": cmd.source_fingerprint,
+                "tolerance": float(cmd.anchor_tolerance),
+                "frame": int(frame),
+                "cycle_id": cycle_id,
+            }
+        if rec is None:
+            emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                "worker_id": self.policy_idx,
+                "reason": "rollback_missing_anchor",
+                "cycle_id": cycle_id,
+            })
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx, action_applied="rollback",
+                ok=False, mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                frame=int(frame), reason="rollback_missing_anchor",
+            ))
+            return st
+        ok_fp, detail = verify_anchor_fingerprint(rec)
+        if not ok_fp:
+            emit_event(run_dir, "MSA_FAIL_CLOSED", {
+                "worker_id": self.policy_idx,
+                "reason": "rollback_fingerprint_mismatch",
+                "detail": detail,
+            })
+            write_worker_ack(run_dir, WorkerAck(
+                cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+                worker_id=self.policy_idx, action_applied="rollback",
+                ok=False, mode_after=st.mode,
+                tolerance_after=float(st.current_tolerance),
+                frame=int(frame), reason="rollback_fingerprint_mismatch",
+            ))
+            return st
+        restored = restore_anchor_into_workspace(
+            rec, self.curr_policy_workspace,
+        )
+        st = hook.apply_decision_from_metrics(
+            st,
+            frame=int(frame),
+            l_lcb=float(cmd.metrics.get("l_lcb") or -1.0),
+            rho=float(cmd.metrics.get("rho") or 0.0),
+            rho_available=bool(cmd.metrics.get("rho_available", True)),
+            promote=False,
+            reason=cmd.reason or "production_rollback",
+            metrics=dict(cmd.metrics or {}),
+        )
+        st.current_tolerance = float(cmd.anchor_tolerance or rec.get("tolerance") or st.anchor_tolerance)
+        st.anchor_tolerance = float(st.current_tolerance)
+        st.anchor_checkpoint = str(restored["checkpoint"])
+        st.anchor_fingerprint = str(rec.get("fingerprint", ""))
+        emit_event(run_dir, "MSA_ROLLBACK_COMPLETE", {
+            "worker_id": self.policy_idx,
+            "cycle_id": cycle_id,
+            "checkpoint": restored["checkpoint"],
+            "tolerance": st.current_tolerance,
+        })
+        write_worker_ack(run_dir, WorkerAck(
+            cycle_id=cycle_id, transaction_id=cmd.transaction_id,
+            worker_id=self.policy_idx, action_applied="rollback",
+            ok=True, mode_after=st.mode,
+            tolerance_after=float(st.current_tolerance),
+            fingerprint_after=st.anchor_fingerprint,
+            frame=int(frame), reason=st.decision_reason,
+        ))
+        emit_event(run_dir, "MSA_WORKER_ACK", {
+            "worker_id": self.policy_idx, "cycle_id": cycle_id,
+            "action": "rollback",
+        })
+        # Request supervisor restart from restored anchor so optimizer /
+        # normalization / frame state actually reload.
+        self._msa_request_rollback_restart(restored, st, frame=int(frame))
+        return st
+
+    def _msa_request_rollback_restart(
+        self, restored: dict, st, *, frame: int,
+    ) -> None:
+        """Exit 42 with restart from restored MSA anchor checkpoint."""
+        try:
+            supervisor_run_dir = self.train_dir.parent
+            manifest_path = supervisor_run_dir / self.RESTART_MANIFEST
+            train_args = list(sys.argv[1:])
+            # Force checkpoint + tolerance resume to anchor.
+            filtered = []
+            for a in train_args:
+                if a.startswith("--checkpoint=") or a.startswith(
+                    "--success_tolerance_resume="
+                ):
+                    continue
+                filtered.append(a)
+            filtered.append(f"--checkpoint={restored['checkpoint']}")
+            filtered.append(
+                f"--success_tolerance_resume={float(st.current_tolerance)}"
+            )
+            manifest = {
+                "source_policy": int(self.policy_idx),
+                "tier": "msa_rollback",
+                "env_frames": int(frame),
+                "checkpoint": str(restored["checkpoint"]),
+                "train_args": filtered,
+                "msa_rollback": True,
+                "msa_anchor_fingerprint": st.anchor_fingerprint,
+                "policy_idx": int(self.policy_idx),
+            }
+            tmp = manifest_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(manifest))
+            tmp.replace(manifest_path)
+            print(
+                f"[msa-fusion] policy {self.policy_idx}: rollback restart "
+                f"from {restored['checkpoint']}",
+                flush=True,
+            )
+            raise SystemExit(self.RESTART_EXIT_CODE)
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[msa-fusion] rollback restart failed: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
     def process_infos(self, infos, done_indices):
         super().process_infos(infos, done_indices)
@@ -6764,6 +7259,17 @@ class DexPBTPbtAlgoObserver(IsaacAlgoObserver):
             self._last_restart_type = 3  # skipped
             if self.writer is not None:
                 self.writer.add_scalar("msa/pbt_blocked", 1.0, env_frames)
+            return
+        recip_ok, recip_reason = self._msa_recipient_gate()
+        if not recip_ok:
+            print(
+                f"Policy {self.policy_idx}: skip PBT exploit target "
+                f"({recip_reason})",
+                flush=True,
+            )
+            self._last_restart_type = 3
+            if self.writer is not None:
+                self.writer.add_scalar("msa/pbt_recipient_blocked", 1.0, env_frames)
             return
 
         print(
